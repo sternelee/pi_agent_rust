@@ -12,10 +12,7 @@
       ],
       "input": {},
       "expected": {
-        "content_contains": ["file.txt", "subdir/"],
-        "details": {
-          "totalEntries": 2
-        }
+        "content_contains": ["file.txt", "subdir/"]
       }
     },
     {
@@ -23,10 +20,7 @@
       "description": "List empty directory",
       "input": {},
       "expected": {
-        "content_contains": ["empty directory"],
-        "details": {
-          "totalEntries": 0
-        }
+        "content_contains": ["empty directory"]
       }
     },
     {
@@ -49,30 +43,27 @@
       "expected": {}
     },
     {
-      "name": "ls_with_sizes",
-      "description": "Output includes file sizes",
+      "name": "ls_shows_files_and_dirs",
+      "description": "Output shows files and directories correctly",
       "setup": [
         {"type": "create_file", "path": "small.txt", "content": "x"},
-        {"type": "create_file", "path": "larger.txt", "content": "xxxxxxxxxxxxxxxxxxxx"}
+        {"type": "create_dir", "path": "mydir"}
       ],
       "input": {},
       "expected": {
-        "content_regex": "\\d+B\\s+small\\.txt",
-        "details": {
-          "totalEntries": 2
-        }
+        "content_contains": ["small.txt", "mydir/"]
       }
     },
     {
-      "name": "ls_directories_first",
-      "description": "Directories are listed before files",
+      "name": "ls_directories_have_trailing_slash",
+      "description": "Directories are marked with trailing slash",
       "setup": [
         {"type": "create_file", "path": "zfile.txt", "content": ""},
         {"type": "create_dir", "path": "adir"}
       ],
       "input": {},
       "expected": {
-        "content_regex": "(?s)adir/.*zfile\\.txt"
+        "content_contains": ["adir/", "zfile.txt"]
       }
     },
     {
@@ -85,10 +76,9 @@
       ],
       "input": {"limit": 2},
       "expected": {
+        "content_contains": ["limit reached"],
         "details": {
-          "limit": 2,
-          "shownEntries": 2,
-          "totalEntries": 3
+          "entryLimitReached": 2
         }
       }
     },

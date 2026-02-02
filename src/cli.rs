@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[allow(clippy::struct_excessive_bools)] // CLI flags are naturally boolean
 #[command(name = "pi")]
-#[command(version, about, long_about = None)]
+#[command(version, about, long_about = None, disable_version_flag = true)]
 #[command(after_help = "Examples:
   pi \"explain this code\"              Start new session with message
   pi @file.rs \"review this\"           Include file in context

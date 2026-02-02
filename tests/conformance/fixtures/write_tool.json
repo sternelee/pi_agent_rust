@@ -11,8 +11,8 @@
         "content": "Hello, World!\nLine 2"
       },
       "expected": {
-        "content_contains": ["Wrote", "bytes"],
-        "details": {
+        "content_contains": ["Successfully wrote", "bytes", "newfile.txt"],
+        "details_exact": {
           "bytesWritten": 20,
           "lines": 2
         }
@@ -26,9 +26,10 @@
         "content": "content"
       },
       "expected": {
-        "content_contains": ["Wrote"],
-        "details": {
-          "bytesWritten": 7
+        "content_contains": ["Successfully wrote"],
+        "details_exact": {
+          "bytesWritten": 7,
+          "lines": 1
         }
       }
     },
@@ -43,9 +44,10 @@
         "content": "new content"
       },
       "expected": {
-        "content_contains": ["Wrote"],
-        "details": {
-          "bytesWritten": 11
+        "content_contains": ["Successfully wrote"],
+        "details_exact": {
+          "bytesWritten": 11,
+          "lines": 1
         }
       }
     },
@@ -57,7 +59,8 @@
         "content": ""
       },
       "expected": {
-        "details": {
+        "content_contains": ["Successfully wrote", "0 bytes"],
+        "details_exact": {
           "bytesWritten": 0,
           "lines": 0
         }
@@ -71,8 +74,8 @@
         "content": "Hello 世界\nこんにちは\n🎉 emoji"
       },
       "expected": {
-        "content_contains": ["Wrote"],
-        "details": {
+        "content_contains": ["Successfully wrote"],
+        "details_exact": {
           "lines": 3
         }
       }
@@ -85,8 +88,9 @@
         "content": "line1\nline2\n"
       },
       "expected": {
-        "details": {
-          "lines": 3
+        "content_contains": ["Successfully wrote"],
+        "details_exact": {
+          "lines": 2
         }
       }
     },
@@ -98,7 +102,7 @@
         "content": "Tab:\tNewline:\nBackslash:\\"
       },
       "expected": {
-        "content_contains": ["Wrote"]
+        "content_contains": ["Successfully wrote"]
       }
     }
   ]

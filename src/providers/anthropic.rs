@@ -139,6 +139,10 @@ impl Provider for AnthropicProvider {
             .header("X-API-Key", &api_key)
             .header("anthropic-version", ANTHROPIC_API_VERSION);
 
+        for (key, value) in &options.headers {
+            request = request.header(key, value);
+        }
+
         // Add cache control header if needed
         if options.cache_retention != CacheRetention::None {
             request = request.header("anthropic-beta", "prompt-caching-2024-07-31");

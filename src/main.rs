@@ -62,7 +62,7 @@ async fn run(cli: cli::Cli) -> Result<()> {
     // Run the appropriate mode
     match cli.mode.as_deref() {
         Some("rpc") => run_rpc_mode(session).await,
-        _ if cli.print => run_print_mode(session, &cli).await,
+        _ if cli.print => run_print_mode(session, &cli, &config).await,
         _ => run_interactive_mode(session).await,
     }
 }
@@ -94,7 +94,11 @@ async fn run_rpc_mode(_session: session::Session) -> Result<()> {
     Ok(())
 }
 
-async fn run_print_mode(_session: session::Session, cli: &cli::Cli) -> Result<()> {
+async fn run_print_mode(
+    _session: session::Session,
+    cli: &cli::Cli,
+    config: &config::Config,
+) -> Result<()> {
     // Get the input message
     let input = get_input_message(cli)?;
     if input.is_empty() {
@@ -117,7 +121,7 @@ async fn run_print_mode(_session: session::Session, cli: &cli::Cli) -> Result<()
     // Create tools
     let cwd = std::env::current_dir()?;
     let enabled_tools = cli.enabled_tools();
-    let tools = ToolRegistry::new(&enabled_tools, &cwd);
+    let tools = ToolRegistry::new(&enabled_tools, &cwd, Some(config));
 
     // Create agent config with API key
     let stream_options = pi::provider::StreamOptions {
@@ -138,7 +142,7 @@ async fn run_print_mode(_session: session::Session, cli: &cli::Cli) -> Result<()
     let is_tty = io::stdout().is_terminal();
 
     let result = agent
-        .run(&input, |event| {
+        .run(&input, move |event| {
             // Get stdout fresh each time to avoid holding lock across await
             let mut stdout = io::stdout();
             match event {

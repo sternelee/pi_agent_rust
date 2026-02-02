@@ -48,6 +48,10 @@ pub enum Error {
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 
+    /// SQLite errors
+    #[error("SQLite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+
     /// User aborted operation
     #[error("Operation aborted")]
     Aborted,

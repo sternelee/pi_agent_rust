@@ -20,13 +20,16 @@
 )]
 
 pub mod agent;
+pub mod auth;
 pub mod cli;
 pub mod config;
 pub mod error;
 pub mod model;
+pub mod models;
 pub mod provider;
 pub mod providers;
 pub mod session;
+pub mod session_index;
 pub mod sse;
 pub mod tools;
 pub mod tui;

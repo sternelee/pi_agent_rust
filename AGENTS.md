@@ -163,7 +163,7 @@ cargo test conformance
 
 ## Pi Agent — This Project
 
-**This is the project you're working on.** Pi is a high-performance AI coding agent CLI, a Rust port of pi-mono (TypeScript). It provides an interactive terminal interface for AI-assisted coding with streaming responses, tool execution, and session persistence.
+**This is the project you're working on.** Pi is a high-performance AI coding agent CLI, a Rust port of the Pi Agent TypeScript CLI. It provides an interactive terminal interface for AI-assisted coding with streaming responses, tool execution, and session persistence.
 
 ### Architecture
 

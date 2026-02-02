@@ -18,6 +18,8 @@ use crate::model::{
     ToolResultMessage, UserContent, UserMessage,
 };
 use crate::provider::{Context, Provider, StreamOptions, ToolDef};
+use crate::session::Session;
+use crate::session_index::SessionIndex;
 use crate::tools::ToolRegistry;
 use chrono::Utc;
 use futures::StreamExt;
@@ -79,6 +81,14 @@ pub enum AgentEvent {
         is_error: bool,
     },
 
+    /// Tool execution update (streaming output).
+    ToolUpdate {
+        name: String,
+        id: String,
+        content: Vec<ContentBlock>,
+        details: Option<serde_json::Value>,
+    },
+
     /// Assistant message completed.
     AssistantDone { message: AssistantMessage },
 
@@ -135,6 +145,11 @@ impl Agent {
         self.messages.push(message);
     }
 
+    /// Replace the message history.
+    pub fn replace_messages(&mut self, messages: Vec<Message>) {
+        self.messages = messages;
+    }
+
     /// Build tool definitions for the API.
     fn build_tool_defs(&self) -> Vec<ToolDef> {
         self.tools
@@ -163,7 +178,7 @@ impl Agent {
     pub async fn run(
         &mut self,
         user_input: impl Into<String>,
-        mut on_event: impl FnMut(AgentEvent),
+        on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
     ) -> Result<AssistantMessage> {
         // Add user message
         let user_message = UserMessage {
@@ -173,14 +188,14 @@ impl Agent {
         self.messages.push(Message::User(user_message));
 
         // Run the agent loop
-        self.run_loop(&mut on_event).await
+        self.run_loop(Arc::new(on_event)).await
     }
 
     /// Run the agent with structured content (text + images).
     pub async fn run_with_content(
         &mut self,
         content: Vec<ContentBlock>,
-        mut on_event: impl FnMut(AgentEvent),
+        on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
     ) -> Result<AssistantMessage> {
         // Add user message
         let user_message = UserMessage {
@@ -190,13 +205,13 @@ impl Agent {
         self.messages.push(Message::User(user_message));
 
         // Run the agent loop
-        self.run_loop(&mut on_event).await
+        self.run_loop(Arc::new(on_event)).await
     }
 
     /// The main agent loop.
     async fn run_loop(
         &mut self,
-        on_event: &mut impl FnMut(AgentEvent),
+        on_event: Arc<dyn Fn(AgentEvent) + Send + Sync>,
     ) -> Result<AssistantMessage> {
         let mut iterations = 0;
 
@@ -219,7 +234,7 @@ impl Agent {
                 .await?;
 
             // Process stream events
-            let assistant_message = self.process_stream(&mut stream, on_event).await?;
+            let assistant_message = self.process_stream(&mut stream, &on_event).await?;
 
             // Add assistant message to history
             self.messages
@@ -247,7 +262,7 @@ impl Agent {
                     id: tool_call.id.clone(),
                 });
 
-                let tool_result = self.execute_tool(tool_call).await;
+                let tool_result = self.execute_tool(tool_call, &on_event).await;
 
                 let is_error = tool_result.is_error;
                 on_event(AgentEvent::ToolExecuteEnd {
@@ -268,7 +283,7 @@ impl Agent {
     async fn process_stream(
         &self,
         stream: &mut std::pin::Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>,
-        on_event: &mut impl FnMut(AgentEvent),
+        on_event: &Arc<dyn Fn(AgentEvent) + Send + Sync>,
     ) -> Result<AssistantMessage> {
         let mut final_message: Option<AssistantMessage> = None;
 
@@ -314,7 +329,11 @@ impl Agent {
     }
 
     /// Execute a tool call.
-    async fn execute_tool(&self, tool_call: &ToolCall) -> ToolResultMessage {
+    async fn execute_tool(
+        &self,
+        tool_call: &ToolCall,
+        on_event: &Arc<dyn Fn(AgentEvent) + Send + Sync>,
+    ) -> ToolResultMessage {
         let timestamp = Utc::now().timestamp_millis();
 
         // Find the tool
@@ -333,8 +352,27 @@ impl Agent {
         };
 
         // Execute the tool
+        let tool_name = tool_call.name.clone();
+        let tool_id = tool_call.id.clone();
+        let on_event = Arc::clone(on_event);
+
+        let update_callback = {
+            move |update: crate::tools::ToolUpdate| {
+                on_event(AgentEvent::ToolUpdate {
+                    name: tool_name.clone(),
+                    id: tool_id.clone(),
+                    content: update.content,
+                    details: update.details,
+                });
+            }
+        };
+
         match tool
-            .execute(&tool_call.id, tool_call.arguments.clone(), None)
+            .execute(
+                &tool_call.id,
+                tool_call.arguments.clone(),
+                Some(Box::new(update_callback)),
+            )
             .await
         {
             Ok(output) => ToolResultMessage {
@@ -354,6 +392,70 @@ impl Agent {
                 timestamp,
             },
         }
+    }
+}
+
+// ============================================================================
+// Agent Session (Agent + Session persistence)
+// ============================================================================
+
+pub struct AgentSession {
+    pub agent: Agent,
+    pub session: Session,
+    session_index: Option<SessionIndex>,
+    save_enabled: bool,
+}
+
+impl AgentSession {
+    pub fn new(agent: Agent, session: Session, save_enabled: bool) -> Self {
+        let session_index = if save_enabled {
+            Some(SessionIndex::new())
+        } else {
+            None
+        };
+        Self {
+            agent,
+            session,
+            session_index,
+            save_enabled,
+        }
+    }
+
+    pub async fn run_text(
+        &mut self,
+        input: String,
+        on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
+    ) -> Result<AssistantMessage> {
+        let start_len = self.agent.messages().len();
+        let result = self.agent.run(input, on_event).await?;
+        self.persist_new_messages(start_len).await?;
+        Ok(result)
+    }
+
+    pub async fn run_with_content(
+        &mut self,
+        content: Vec<ContentBlock>,
+        on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
+    ) -> Result<AssistantMessage> {
+        let start_len = self.agent.messages().len();
+        let result = self.agent.run_with_content(content, on_event).await?;
+        self.persist_new_messages(start_len).await?;
+        Ok(result)
+    }
+
+    async fn persist_new_messages(&mut self, start_len: usize) -> Result<()> {
+        if !self.save_enabled {
+            return Ok(());
+        }
+        let new_messages = self.agent.messages()[start_len..].to_vec();
+        for message in new_messages {
+            self.session.append_model_message(message);
+        }
+        self.session.save().await?;
+        if let Some(index) = &self.session_index {
+            index.index_session(&self.session)?;
+        }
+        Ok(())
     }
 }
 

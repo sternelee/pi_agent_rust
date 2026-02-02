@@ -1,7 +1,7 @@
-# Feature Parity: pi_agent_rust vs pi-mono (TypeScript)
+# Feature Parity: pi_agent_rust vs Pi Agent (TypeScript)
 
 > **Purpose:** Authoritative single-source-of-truth for implementation status.
-> **Last Updated:** 2026-02-02
+> **Last Updated:** 2026-02-02 (fixtures verified)
 
 ## Status Legend
 
@@ -236,34 +236,36 @@
 
 ## Test Coverage Summary
 
-| Category | Unit Tests | Integration Tests | Fixture Tests | Total |
+| Category | Unit Tests | Integration Tests | Fixture Cases | Total |
 |----------|------------|-------------------|---------------|-------|
 | Core types | 4 | 0 | 0 | 4 |
 | Provider (Anthropic) | 2 | 0 | 0 | 2 |
-| Tools | 7 | 20 | 65+ | 92+ |
+| Tools | 7 | 20 | 61 | 88 |
 | Truncation | 3 | 0 | 9 | 12 |
 | Agent | 2 | 0 | 0 | 2 |
 | Session | 0 | 0 | 0 | 0 |
 | Conformance infra | 6 | 0 | 0 | 6 |
-| **Total** | **24** | **20** | **74+** | **118+** |
+| **Total** | **24** | **20** | **70** | **114** |
+
+**All 59 tests pass** (24 unit + 15 fixture wrappers + 20 integration)
 
 ---
 
 ## Conformance Testing Status
 
-| Component | Has Fixture Tests | Fixture File | Cases |
-|-----------|-------------------|--------------|-------|
-| read tool | ✅ Yes | `read_tool.json` | 10 |
-| write tool | ✅ Yes | `write_tool.json` | 7 |
-| edit tool | ✅ Yes | `edit_tool.json` | 8 |
-| bash tool | ✅ Yes | `bash_tool.json` | 12 |
-| grep tool | ✅ Yes | `grep_tool.json` | 12 |
-| find tool | ✅ Yes | `find_tool.json` | 6 |
-| ls tool | ✅ Yes | `ls_tool.json` | 8 |
-| truncation | ✅ Yes | `truncation.json` | 9 |
-| Session format | ❌ No | - | - |
-| Provider responses | ❌ No | - | - |
-| CLI flags | ❌ No | - | - |
+| Component | Has Fixture Tests | Fixture File | Cases | Status |
+|-----------|-------------------|--------------|-------|--------|
+| read tool | ✅ Yes | `read_tool.json` | 10 | ✅ All pass |
+| write tool | ✅ Yes | `write_tool.json` | 7 | ✅ All pass |
+| edit tool | ✅ Yes | `edit_tool.json` | 6 | ✅ All pass |
+| bash tool | ✅ Yes | `bash_tool.json` | 12 | ✅ All pass |
+| grep tool | ✅ Yes | `grep_tool.json` | 12 | ✅ All pass |
+| find tool | ✅ Yes | `find_tool.json` | 6 | ✅ All pass |
+| ls tool | ✅ Yes | `ls_tool.json` | 8 | ✅ All pass |
+| truncation | ✅ Yes | `truncation.json` | 9 | ✅ All pass |
+| Session format | ❌ No | - | - | - |
+| Provider responses | ❌ No | - | - | - |
+| CLI flags | ❌ No | - | - | - |
 
 ### Fixture Schema
 

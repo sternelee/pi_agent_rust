@@ -6,6 +6,7 @@
 use crate::model::{Message, StreamEvent, ThinkingLevel};
 use async_trait::async_trait;
 use futures::Stream;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::pin::Pin;
 
@@ -128,7 +129,8 @@ pub enum InputType {
 }
 
 /// Model pricing per million tokens.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelCost {
     pub input: f64,
     pub output: f64,
@@ -184,6 +186,25 @@ impl std::fmt::Display for Api {
             Self::GoogleGeminiCli => write!(f, "google-gemini-cli"),
             Self::GoogleVertex => write!(f, "google-vertex"),
             Self::Custom(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+impl std::str::FromStr for Api {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "anthropic-messages" => Ok(Self::AnthropicMessages),
+            "openai-completions" => Ok(Self::OpenAICompletions),
+            "openai-responses" => Ok(Self::OpenAIResponses),
+            "azure-openai-responses" => Ok(Self::AzureOpenAIResponses),
+            "bedrock-converse-stream" => Ok(Self::BedrockConverseStream),
+            "google-generative-ai" => Ok(Self::GoogleGenerativeAI),
+            "google-gemini-cli" => Ok(Self::GoogleGeminiCli),
+            "google-vertex" => Ok(Self::GoogleVertex),
+            other if !other.is_empty() => Ok(Self::Custom(other.to_string())),
+            _ => Err("API identifier cannot be empty".to_string()),
         }
     }
 }

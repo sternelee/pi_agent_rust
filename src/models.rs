@@ -1,7 +1,7 @@
 //! Model registry: built-in + models.json overrides.
 
 use crate::auth::AuthStorage;
-use crate::error::{Error, Result};
+use crate::error::Error;
 use crate::provider::{Api, InputType, Model, ModelCost};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -120,6 +120,9 @@ fn built_in_models(auth: &AuthStorage) -> Vec<ModelEntry> {
 
     let anthropic_key = auth.resolve_api_key("anthropic", None);
     for (id, name, reasoning) in [
+        ("claude-sonnet-4-5", "Claude Sonnet 4.5", true),
+        ("claude-opus-4-5", "Claude Opus 4.5", true),
+        ("claude-haiku-4-5", "Claude Haiku 4.5", false),
         ("claude-3-5-sonnet-20241022", "Claude Sonnet 3.5", true),
         ("claude-3-5-haiku-20241022", "Claude Haiku 3.5", false),
         ("claude-3-opus-20240229", "Claude Opus 3", true),
@@ -152,6 +155,7 @@ fn built_in_models(auth: &AuthStorage) -> Vec<ModelEntry> {
 
     let openai_key = auth.resolve_api_key("openai", None);
     for (id, name) in [
+        ("gpt-5.1-codex", "GPT-5.1 Codex"),
         ("gpt-4o", "GPT-4o"),
         ("gpt-4o-mini", "GPT-4o Mini"),
     ] {
@@ -159,10 +163,10 @@ fn built_in_models(auth: &AuthStorage) -> Vec<ModelEntry> {
             model: Model {
                 id: id.to_string(),
                 name: name.to_string(),
-                api: Api::OpenAICompletions.to_string(),
+                api: Api::OpenAIResponses.to_string(),
                 provider: "openai".to_string(),
                 base_url: "https://api.openai.com/v1".to_string(),
-                reasoning: false,
+                reasoning: true,
                 input: vec![InputType::Text, InputType::Image],
                 cost: ModelCost {
                     input: 0.0,
@@ -183,6 +187,8 @@ fn built_in_models(auth: &AuthStorage) -> Vec<ModelEntry> {
 
     let google_key = auth.resolve_api_key("google", None);
     for (id, name) in [
+        ("gemini-2.5-pro", "Gemini 2.5 Pro"),
+        ("gemini-2.5-flash", "Gemini 2.5 Flash"),
         ("gemini-1.5-pro", "Gemini 1.5 Pro"),
         ("gemini-1.5-flash", "Gemini 1.5 Flash"),
     ] {

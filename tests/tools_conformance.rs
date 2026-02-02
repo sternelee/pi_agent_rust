@@ -157,10 +157,10 @@ mod edit_tool {
         assert!(content.contains("Rust"));
         assert!(!content.contains("World"));
 
-        // Verify diff output
-        let diff = get_text_content(&result.content);
-        assert!(diff.contains("-Hello, World!"));
-        assert!(diff.contains("+Hello, Rust!"));
+        // Verify success message output
+        let text = get_text_content(&result.content);
+        assert!(text.contains("Successfully replaced"));
+        assert!(text.contains("test.txt"));
     }
 
     #[tokio::test]
@@ -279,10 +279,7 @@ mod grep_tool {
         let text = get_text_content(&result.content);
         assert!(text.contains("hello world"));
         assert!(text.contains("hello again"));
-
-        let details = result.details.unwrap();
-        assert_eq!(details["matchCount"], 2);
-        assert_eq!(details["filesWithMatches"], 1);
+        // Details are only present when limits/truncation occur
     }
 
     #[tokio::test]
@@ -301,8 +298,10 @@ mod grep_tool {
             .await
             .expect("should succeed");
 
-        let details = result.details.unwrap();
-        assert_eq!(details["matchCount"], 2);
+        let text = get_text_content(&result.content);
+        assert!(text.contains("Hello World"));
+        assert!(text.contains("HELLO WORLD"));
+        // Details are only present when limits/truncation occur
     }
 
     #[tokio::test]
@@ -349,9 +348,7 @@ mod find_tool {
         assert!(text.contains("file1.txt"));
         assert!(text.contains("file2.txt"));
         assert!(!text.contains("file.rs"));
-
-        let details = result.details.unwrap();
-        assert_eq!(details["count"], 2);
+        // Details are only present when limits/truncation occur
     }
 
     #[tokio::test]
@@ -394,9 +391,7 @@ mod ls_tool {
         let text = get_text_content(&result.content);
         assert!(text.contains("file.txt"));
         assert!(text.contains("subdir/"));
-
-        let details = result.details.unwrap();
-        assert_eq!(details["totalEntries"], 2);
+        // Details are only present when limits/truncation occur
     }
 
     #[tokio::test]

@@ -2,6 +2,7 @@
 //!
 //! Pi provides 7 built-in tools: read, bash, edit, write, grep, find, ls.
 
+use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::model::{ContentBlock, ImageContent, TextContent};
 use async_trait::async_trait;
@@ -39,7 +40,7 @@ pub trait Tool: Send + Sync {
         &self,
         tool_call_id: &str,
         input: serde_json::Value,
-        on_update: Option<Box<dyn Fn(ToolUpdate) + Send>>,
+        on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
     ) -> Result<ToolOutput>;
 }
 
@@ -68,17 +69,14 @@ pub const DEFAULT_MAX_BYTES: usize = 50 * 1024; // 50KB
 /// Maximum line length for grep results.
 pub const GREP_MAX_LINE_LENGTH: usize = 500;
 
-/// Default bash timeout in seconds.
-pub const DEFAULT_BASH_TIMEOUT: u64 = 120;
-
 /// Default grep result limit.
-pub const DEFAULT_GREP_LIMIT: usize = 1000;
+pub const DEFAULT_GREP_LIMIT: usize = 100;
 
 /// Default find result limit.
 pub const DEFAULT_FIND_LIMIT: usize = 1000;
 
 /// Default ls result limit.
-pub const DEFAULT_LS_LIMIT: usize = 1000;
+pub const DEFAULT_LS_LIMIT: usize = 500;
 
 /// Result of truncation operation.
 #[derive(Debug, Clone, Serialize)]
@@ -296,6 +294,11 @@ fn format_size(bytes: usize) -> String {
     }
 }
 
+fn js_string_length(s: &str) -> usize {
+    // Match JavaScript's String.length (UTF-16 code units), not UTF-8 bytes.
+    s.encode_utf16().count()
+}
+
 // ============================================================================
 // Path Utilities (port of pi-mono path-utils.ts)
 // ============================================================================
@@ -422,38 +425,117 @@ fn resolve_path(file_path: &str, cwd: &Path) -> PathBuf {
     resolve_to_cwd(file_path, cwd)
 }
 
-/// Check if a file is an image based on extension.
-fn is_image_file(path: &Path) -> bool {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    matches!(
-        ext.to_lowercase().as_str(),
-        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "ico" | "tiff" | "tif"
-    )
+fn detect_supported_image_mime_type_from_bytes(bytes: &[u8]) -> Option<&'static str> {
+    // Supported image types match the legacy tool: jpeg/png/gif/webp only.
+    if bytes.len() >= 8 && bytes.starts_with(b"\x89PNG\r\n\x1A\n") {
+        return Some("image/png");
+    }
+    if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
+        return Some("image/jpeg");
+    }
+    if bytes.len() >= 6 && (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
 }
 
-/// Get the MIME type for an image file based on extension.
-fn image_mime_type(path: &Path) -> &'static str {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    match ext.to_lowercase().as_str() {
-        "jpg" | "jpeg" => "image/jpeg",
-        "png" => "image/png",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "bmp" => "image/bmp",
-        "ico" => "image/x-icon",
-        "tiff" | "tif" => "image/tiff",
-        _ => "application/octet-stream",
+#[derive(Debug, Clone)]
+struct ResizedImage {
+    bytes: Vec<u8>,
+    mime_type: &'static str,
+    resized: bool,
+    width: Option<u32>,
+    height: Option<u32>,
+    original_width: Option<u32>,
+    original_height: Option<u32>,
+}
+
+impl ResizedImage {
+    fn original(bytes: Vec<u8>, mime_type: &'static str) -> Self {
+        Self {
+            bytes,
+            mime_type,
+            resized: false,
+            width: None,
+            height: None,
+            original_width: None,
+            original_height: None,
+        }
     }
 }
 
-/// Add line numbers to content (cat -n style).
-fn add_line_numbers(content: &str, start_line: usize) -> String {
-    content
-        .lines()
-        .enumerate()
-        .map(|(i, line)| format!("{}\t{}", start_line + i, line))
-        .collect::<Vec<_>>()
-        .join("\n")
+#[cfg(feature = "image-resize")]
+fn image_format_for_mime(mime: &str) -> Option<image::ImageFormat> {
+    match mime {
+        "image/jpeg" => Some(image::ImageFormat::Jpeg),
+        "image/png" => Some(image::ImageFormat::Png),
+        "image/gif" => Some(image::ImageFormat::Gif),
+        "image/webp" => Some(image::ImageFormat::WebP),
+        "image/bmp" => Some(image::ImageFormat::Bmp),
+        "image/x-icon" => Some(image::ImageFormat::Ico),
+        "image/tiff" => Some(image::ImageFormat::Tiff),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "image-resize")]
+fn resize_image_if_needed(bytes: &[u8], mime_type: &'static str) -> Result<ResizedImage> {
+    use image::GenericImageView;
+    use std::io::Cursor;
+
+    let img = match image::load_from_memory(bytes) {
+        Ok(img) => img,
+        Err(_) => return Ok(ResizedImage::original(bytes.to_vec(), mime_type)),
+    };
+    let (width, height) = img.dimensions();
+    let max_dim = width.max(height);
+    if max_dim <= 2000 {
+        return Ok(ResizedImage {
+            bytes: bytes.to_vec(),
+            mime_type,
+            resized: false,
+            width: Some(width),
+            height: Some(height),
+            original_width: Some(width),
+            original_height: Some(height),
+        });
+    }
+
+    let scale = 2000.0 / max_dim as f32;
+    let new_width = (width as f32 * scale).round() as u32;
+    let new_height = (height as f32 * scale).round() as u32;
+    let resized_img = img.resize(new_width, new_height, image::imageops::FilterType::Triangle);
+
+    let format = image_format_for_mime(mime_type);
+    let Some(format) = format else {
+        return Ok(ResizedImage::original(bytes.to_vec(), mime_type));
+    };
+
+    let mut out = Vec::new();
+    if resized_img
+        .write_to(&mut Cursor::new(&mut out), format)
+        .is_err()
+    {
+        return Ok(ResizedImage::original(bytes.to_vec(), mime_type));
+    }
+
+    Ok(ResizedImage {
+        bytes: out,
+        mime_type,
+        resized: true,
+        width: Some(new_width),
+        height: Some(new_height),
+        original_width: Some(width),
+        original_height: Some(height),
+    })
+}
+
+#[cfg(not(feature = "image-resize"))]
+fn resize_image_if_needed(bytes: &[u8], mime_type: &'static str) -> Result<ResizedImage> {
+    Ok(ResizedImage::original(bytes.to_vec(), mime_type))
 }
 
 // ============================================================================
@@ -467,13 +549,27 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     /// Create a new registry with the specified tools enabled.
-    pub fn new(enabled: &[&str], cwd: &Path) -> Self {
+    pub fn new(enabled: &[&str], cwd: &Path, config: Option<&Config>) -> Self {
         let mut tools: Vec<Box<dyn Tool>> = Vec::new();
+        let shell_path = config.and_then(|c| c.shell_path.clone());
+        let shell_command_prefix = config.and_then(|c| c.shell_command_prefix.clone());
+        let image_auto_resize = config.map_or(true, Config::image_auto_resize);
+        let block_images = config
+            .and_then(|c| c.images.as_ref().and_then(|i| i.block_images))
+            .unwrap_or(false);
 
         for name in enabled {
             match *name {
-                "read" => tools.push(Box::new(ReadTool::new(cwd))),
-                "bash" => tools.push(Box::new(BashTool::new(cwd))),
+                "read" => tools.push(Box::new(ReadTool::with_settings(
+                    cwd,
+                    image_auto_resize,
+                    block_images,
+                ))),
+                "bash" => tools.push(Box::new(BashTool::with_shell(
+                    cwd,
+                    shell_path.clone(),
+                    shell_command_prefix.clone(),
+                ))),
                 "edit" => tools.push(Box::new(EditTool::new(cwd))),
                 "write" => tools.push(Box::new(WriteTool::new(cwd))),
                 "grep" => tools.push(Box::new(GrepTool::new(cwd))),
@@ -509,18 +605,30 @@ impl ToolRegistry {
 #[serde(rename_all = "camelCase")]
 struct ReadInput {
     path: String,
-    offset: Option<usize>,
-    limit: Option<usize>,
+    offset: Option<i64>,
+    limit: Option<i64>,
 }
 
 pub struct ReadTool {
     cwd: PathBuf,
+    auto_resize: bool,
+    block_images: bool,
 }
 
 impl ReadTool {
     pub fn new(cwd: &Path) -> Self {
         Self {
             cwd: cwd.to_path_buf(),
+            auto_resize: true,
+            block_images: false,
+        }
+    }
+
+    pub fn with_settings(cwd: &Path, auto_resize: bool, block_images: bool) -> Self {
+        Self {
+            cwd: cwd.to_path_buf(),
+            auto_resize,
+            block_images,
         }
     }
 }
@@ -531,10 +639,10 @@ impl Tool for ReadTool {
         "read"
     }
     fn label(&self) -> &'static str {
-        "Read File"
+        "read"
     }
     fn description(&self) -> &'static str {
-        "Read file contents with optional line offset and limit"
+        "Read the contents of a file. Supports text files and images (jpg, png, gif, webp). Images are sent as attachments. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -543,104 +651,170 @@ impl Tool for ReadTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "File path (absolute, relative, or ~-prefixed)"
+                    "description": "Path to the file to read (relative or absolute)"
                 },
                 "offset": {
-                    "type": "integer",
-                    "description": "Line to start from (1-indexed, default: 1)",
-                    "minimum": 1
+                    "type": "number",
+                    "description": "Line number to start reading from (1-indexed)"
                 },
                 "limit": {
-                    "type": "integer",
-                    "description": "Maximum lines to read (default: 2000)",
-                    "minimum": 1
+                    "type": "number",
+                    "description": "Maximum number of lines to read"
                 }
             },
             "required": ["path"]
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn execute(
         &self,
         _tool_call_id: &str,
         input: serde_json::Value,
-        _on_update: Option<Box<dyn Fn(ToolUpdate) + Send>>,
+        _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
     ) -> Result<ToolOutput> {
         let input: ReadInput =
             serde_json::from_value(input).map_err(|e| Error::validation(e.to_string()))?;
 
-        let path = resolve_path(&input.path, &self.cwd);
-        let offset = input.offset.unwrap_or(1).max(1);
-        let limit = input.limit.unwrap_or(DEFAULT_MAX_LINES);
+        let path = resolve_read_path(&input.path, &self.cwd);
 
-        // Check if file exists
-        if !path.exists() {
-            return Err(Error::tool(
-                "read",
-                format!("File not found: {}", path.display()),
-            ));
-        }
+        let bytes = tokio::fs::read(&path)
+            .await
+            .map_err(|e| Error::tool("read", e.to_string()))?;
 
-        // Check if it's a directory
-        if path.is_dir() {
-            return Err(Error::tool(
-                "read",
-                format!("Path is a directory: {}", path.display()),
-            ));
-        }
+        if let Some(mime_type) = detect_supported_image_mime_type_from_bytes(&bytes) {
+            if self.block_images {
+                return Err(Error::tool(
+                    "read",
+                    "Images are blocked by configuration".to_string(),
+                ));
+            }
 
-        // Handle image files
-        if is_image_file(&path) {
-            let data = tokio::fs::read(&path)
-                .await
-                .map_err(|e| Error::tool("read", e.to_string()))?;
+            let resized = if self.auto_resize {
+                resize_image_if_needed(&bytes, mime_type)?
+            } else {
+                ResizedImage::original(bytes.clone(), mime_type)
+            };
+
             let base64_data =
-                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
-            let mime_type = image_mime_type(&path);
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &resized.bytes);
+
+            let mut note = format!("Read image file [{}]", resized.mime_type);
+            if resized.resized {
+                if let (Some(ow), Some(oh), Some(w), Some(h)) = (
+                    resized.original_width,
+                    resized.original_height,
+                    resized.width,
+                    resized.height,
+                ) {
+                    let scale = ow as f64 / w as f64;
+                    let _ = write!(
+                        note,
+                        "\n[Image: original {ow}x{oh}, displayed at {w}x{h}. Multiply coordinates by {:.2} to map to original image.]",
+                        scale
+                    );
+                }
+            }
 
             return Ok(ToolOutput {
-                content: vec![ContentBlock::Image(ImageContent {
-                    data: base64_data,
-                    mime_type: mime_type.to_string(),
-                })],
-                details: Some(serde_json::json!({
-                    "path": path.display().to_string(),
-                    "size": data.len(),
-                    "mimeType": mime_type,
-                })),
+                content: vec![
+                    ContentBlock::Text(TextContent::new(note)),
+                    ContentBlock::Image(ImageContent {
+                        data: base64_data,
+                        mime_type: resized.mime_type.to_string(),
+                    }),
+                ],
+                details: None,
             });
         }
 
-        // Read text file
-        let content = tokio::fs::read_to_string(&path)
-            .await
-            .map_err(|e| Error::tool("read", format!("Failed to read file: {e}")))?;
+        let text_content = String::from_utf8_lossy(&bytes).to_string();
+        let all_lines: Vec<&str> = text_content.split('\n').collect();
+        let total_file_lines = all_lines.len();
 
-        // Apply offset and limit
-        let lines: Vec<&str> = content.lines().collect();
-        let total_lines = lines.len();
-        let start_idx = (offset - 1).min(total_lines);
-        let end_idx = (start_idx + limit).min(total_lines);
-        let selected_lines: Vec<&str> = lines[start_idx..end_idx].to_vec();
-        let selected_content = selected_lines.join("\n");
+        let start_line: usize = match input.offset {
+            Some(n) if n > 0 => n.saturating_sub(1).try_into().unwrap_or_default(),
+            _ => 0,
+        };
+        let start_line_display = start_line.saturating_add(1);
 
-        // Apply truncation (by bytes)
-        let result = truncate_head(&selected_content, limit, DEFAULT_MAX_BYTES);
+        if start_line >= all_lines.len() {
+            let offset_display = input.offset.unwrap_or(0);
+            return Err(Error::tool(
+                "read",
+                format!(
+                    "Offset {offset_display} is beyond end of file ({total_file_lines} lines total)"
+                ),
+            ));
+        }
 
-        // Add line numbers
-        let numbered_content = add_line_numbers(&result.content, offset);
+        let (selected_content, user_limited_lines): (String, Option<usize>) = match input.limit {
+            Some(limit) => {
+                let limit_usize = if limit > 0 {
+                    usize::try_from(limit).unwrap_or(0)
+                } else {
+                    0
+                };
+                let end_line = start_line.saturating_add(limit_usize).min(all_lines.len());
+                (
+                    all_lines[start_line..end_line].join("\n"),
+                    Some(end_line.saturating_sub(start_line)),
+                )
+            }
+            None => (all_lines[start_line..].join("\n"), None),
+        };
+
+        let truncation = truncate_head(&selected_content, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
+
+        let mut output_text = truncation.content.clone();
+        let mut details: Option<serde_json::Value> = None;
+
+        if truncation.first_line_exceeds_limit {
+            let first_line = all_lines.get(start_line).copied().unwrap_or("");
+            let first_line_size = format_size(first_line.as_bytes().len());
+            output_text = format!(
+                "[Line {start_line_display} is {first_line_size}, exceeds {} limit. Use bash: sed -n '{start_line_display}p' {} | head -c {DEFAULT_MAX_BYTES}]",
+                format_size(DEFAULT_MAX_BYTES),
+                input.path
+            );
+            details = Some(serde_json::json!({ "truncation": truncation }));
+        } else if truncation.truncated {
+            let end_line_display = start_line_display
+                .saturating_add(truncation.output_lines)
+                .saturating_sub(1);
+            let next_offset = end_line_display.saturating_add(1);
+
+            if truncation.truncated_by == Some(TruncatedBy::Lines) {
+                let _ = write!(
+                    output_text,
+                    "\n\n[Showing lines {start_line_display}-{end_line_display} of {total_file_lines}. Use offset={next_offset} to continue.]"
+                );
+            } else {
+                let _ = write!(
+                    output_text,
+                    "\n\n[Showing lines {start_line_display}-{end_line_display} of {total_file_lines} ({} limit). Use offset={next_offset} to continue.]",
+                    format_size(DEFAULT_MAX_BYTES)
+                );
+            }
+
+            details = Some(serde_json::json!({ "truncation": truncation }));
+        } else if let Some(user_limited) = user_limited_lines {
+            if start_line.saturating_add(user_limited) < all_lines.len() {
+                let remaining =
+                    all_lines.len().saturating_sub(start_line.saturating_add(user_limited));
+                let next_offset = start_line
+                    .saturating_add(user_limited)
+                    .saturating_add(1);
+                let _ = write!(
+                    output_text,
+                    "\n\n[{remaining} more lines in file. Use offset={next_offset} to continue.]"
+                );
+            }
+        }
 
         Ok(ToolOutput {
-            content: vec![ContentBlock::Text(TextContent::new(numbered_content))],
-            details: Some(serde_json::json!({
-                "path": path.display().to_string(),
-                "totalLines": total_lines,
-                "offset": offset,
-                "limit": limit,
-                "outputLines": result.output_lines,
-                "truncated": result.truncated,
-                "truncatedBy": result.truncated_by,
-            })),
+            content: vec![ContentBlock::Text(TextContent::new(output_text))],
+            details,
         })
     }
 }
@@ -659,12 +833,28 @@ struct BashInput {
 
 pub struct BashTool {
     cwd: PathBuf,
+    shell_path: Option<String>,
+    command_prefix: Option<String>,
 }
 
 impl BashTool {
     pub fn new(cwd: &Path) -> Self {
         Self {
             cwd: cwd.to_path_buf(),
+            shell_path: None,
+            command_prefix: None,
+        }
+    }
+
+    pub fn with_shell(
+        cwd: &Path,
+        shell_path: Option<String>,
+        command_prefix: Option<String>,
+    ) -> Self {
+        Self {
+            cwd: cwd.to_path_buf(),
+            shell_path,
+            command_prefix,
         }
     }
 }
@@ -675,10 +865,10 @@ impl Tool for BashTool {
         "bash"
     }
     fn label(&self) -> &'static str {
-        "Bash"
+        "bash"
     }
     fn description(&self) -> &'static str {
-        "Execute bash commands"
+        "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -690,9 +880,8 @@ impl Tool for BashTool {
                     "description": "Bash command to execute"
                 },
                 "timeout": {
-                    "type": "integer",
-                    "description": "Timeout in seconds (default: 120)",
-                    "minimum": 1
+                    "type": "number",
+                    "description": "Timeout in seconds (optional, no default timeout)"
                 }
             },
             "required": ["command"]
@@ -704,65 +893,94 @@ impl Tool for BashTool {
         &self,
         _tool_call_id: &str,
         input: serde_json::Value,
-        on_update: Option<Box<dyn Fn(ToolUpdate) + Send>>,
+        on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
     ) -> Result<ToolOutput> {
         let input: BashInput =
             serde_json::from_value(input).map_err(|e| Error::validation(e.to_string()))?;
 
-        let timeout_secs = input.timeout.unwrap_or(DEFAULT_BASH_TIMEOUT);
+        let timeout_secs = input.timeout.filter(|t| *t > 0);
+        let command = if let Some(prefix) = self
+            .command_prefix
+            .as_ref()
+            .filter(|p| !p.trim().is_empty())
+        {
+            format!("{prefix}\n{}", input.command)
+        } else {
+            input.command.clone()
+        };
+
+        if !self.cwd.exists() {
+            return Err(Error::tool(
+                "bash",
+                format!(
+                    "Working directory does not exist: {}\nCannot execute bash commands.",
+                    self.cwd.display()
+                ),
+            ));
+        }
+
+        let shell = self.shell_path.as_deref().unwrap_or_else(|| {
+            if Path::new("/bin/bash").exists() {
+                "/bin/bash"
+            } else {
+                "sh"
+            }
+        });
 
         // Spawn the bash process
-        let mut child = Command::new("bash")
+        let mut child = Command::new(shell)
             .arg("-c")
-            .arg(&input.command)
+            .arg(&command)
             .current_dir(&self.cwd)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| Error::tool("bash", format!("Failed to spawn bash: {e}")))?;
+            .map_err(|e| Error::tool("bash", format!("Failed to spawn shell: {e}")))?;
 
-        let stdout = child.stdout.take().expect("stdout should be piped");
-        let stderr = child.stderr.take().expect("stderr should be piped");
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| Error::tool("bash", "Missing stdout".to_string()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| Error::tool("bash", "Missing stderr".to_string()))?;
 
-        let mut stdout_reader = BufReader::new(stdout).lines();
-        let mut stderr_reader = BufReader::new(stderr).lines();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        tokio::spawn(pump_stream(stdout, tx.clone()));
+        tokio::spawn(pump_stream(stderr, tx));
 
-        let mut output = String::new();
-        let mut rolling_output = String::new();
-        let mut exit_code: Option<i32> = None;
+        let mut total_bytes: usize = 0;
+        let mut temp_file_path: Option<PathBuf> = None;
+        let mut temp_file: Option<tokio::fs::File> = None;
+        let mut chunks: VecDeque<Vec<u8>> = VecDeque::new();
+        let mut chunks_bytes: usize = 0;
+        let max_chunks_bytes = DEFAULT_MAX_BYTES.saturating_mul(2);
+
         let mut timed_out = false;
+        let mut exit_code: Option<i32> = None;
+        let child_pid = child.id();
 
-        let timeout = tokio::time::Duration::from_secs(timeout_secs);
-        let start = tokio::time::Instant::now();
+        let timeout_sleep = timeout_secs.map(|t| tokio::time::sleep(tokio::time::Duration::from_secs(t)));
+        tokio::pin!(timeout_sleep);
 
         loop {
-            if start.elapsed() > timeout {
-                timed_out = true;
-                let _ = child.kill().await;
-                break;
-            }
-
             tokio::select! {
-                line = stdout_reader.next_line() => {
-                    if let Ok(Some(line)) = line {
-                        append_output(&mut output, &mut rolling_output, &line);
-                        if let Some(ref callback) = on_update {
-                            callback(ToolUpdate {
-                                content: vec![ContentBlock::Text(TextContent::new(rolling_output.clone()))],
-                                details: None,
-                            });
-                        }
-                    }
-                }
-                line = stderr_reader.next_line() => {
-                    if let Ok(Some(line)) = line {
-                        append_output(&mut output, &mut rolling_output, &line);
-                        if let Some(ref callback) = on_update {
-                            callback(ToolUpdate {
-                                content: vec![ContentBlock::Text(TextContent::new(rolling_output.clone()))],
-                                details: None,
-                            });
-                        }
+                maybe_chunk = rx.recv() => {
+                    if let Some(chunk) = maybe_chunk {
+                        process_bash_chunk(
+                            &chunk,
+                            &mut total_bytes,
+                            &mut temp_file_path,
+                            &mut temp_file,
+                            &mut chunks,
+                            &mut chunks_bytes,
+                            max_chunks_bytes,
+                            on_update.as_deref(),
+                        )
+                        .await?;
+                    } else {
+                        break;
                     }
                 }
                 status = child.wait() => {
@@ -771,81 +989,66 @@ impl Tool for BashTool {
                         .code();
                     break;
                 }
+                () = async {
+                    if let Some(sleep) = timeout_sleep.as_mut().as_pin_mut() {
+                        sleep.await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    timed_out = true;
+                    kill_process_tree(child_pid);
+                    let _ = child.wait().await;
+                    break;
+                }
             }
         }
 
-        Ok(build_bash_output(&output, exit_code, timed_out, timeout_secs))
-    }
-}
+        // Drain any remaining output.
+        while let Some(chunk) = rx.recv().await {
+            process_bash_chunk(
+                &chunk,
+                &mut total_bytes,
+                &mut temp_file_path,
+                &mut temp_file,
+                &mut chunks,
+                &mut chunks_bytes,
+                max_chunks_bytes,
+                None,
+            )
+            .await?;
+        }
 
-const BASH_ROLLING_BUFFER_BYTES: usize = 100 * 1024;
+        drop(temp_file);
 
-fn append_output(full: &mut String, rolling: &mut String, line: &str) {
-    if !full.is_empty() {
-        full.push('\n');
-    }
-    full.push_str(line);
+        let full_output = String::from_utf8_lossy(&concat_chunks(&chunks)).to_string();
 
-    if !rolling.is_empty() {
-        rolling.push('\n');
-    }
-    rolling.push_str(line);
+        if timed_out {
+            let mut output = full_output;
+            if !output.is_empty() {
+                output.push_str("\n\n");
+            }
+            let timeout_display = timeout_secs.unwrap_or(0);
+            output.push_str(&format!("Command timed out after {timeout_display} seconds"));
+            return Err(Error::tool("bash", output));
+        }
 
-    if rolling.len() > BASH_ROLLING_BUFFER_BYTES {
-        *rolling = truncate_string_to_bytes_from_end(rolling, BASH_ROLLING_BUFFER_BYTES);
-    }
-}
+        let truncation = truncate_tail(&full_output, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
+        let mut output_text = if truncation.content.is_empty() {
+            "(no output)".to_string()
+        } else {
+            truncation.content.clone()
+        };
 
-fn build_bash_output(
-    full_output: &str,
-    exit_code: Option<i32>,
-    timed_out: bool,
-    timeout_secs: u64,
-) -> ToolOutput {
-    let truncation = truncate_tail(full_output, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
-    let mut output_text = if truncation.content.is_empty() {
-        "(no output)".to_string()
-    } else {
-        truncation.content.clone()
-    };
-
-    let mut details = serde_json::Map::new();
-    details.insert(
-        "exitCode".to_string(),
-        exit_code.map_or(serde_json::Value::Null, |c| {
-            serde_json::Value::Number(c.into())
-        }),
-    );
-    details.insert(
-        "timedOut".to_string(),
-        serde_json::Value::Bool(timed_out),
-    );
-    details.insert(
-        "timeout".to_string(),
-        serde_json::Value::Number(timeout_secs.into()),
-    );
-    details.insert(
-        "totalLines".to_string(),
-        serde_json::Value::Number(truncation.total_lines.into()),
-    );
-    details.insert(
-        "outputLines".to_string(),
-        serde_json::Value::Number(truncation.output_lines.into()),
-    );
-    details.insert(
-        "truncated".to_string(),
-        serde_json::Value::Bool(truncation.truncated),
-    );
-
-    let is_error = timed_out || exit_code.is_some_and(|c| c != 0);
-    details.insert("isError".to_string(), serde_json::Value::Bool(is_error));
-
-    if truncation.truncated {
-        if let Ok(path) = write_full_output(full_output) {
-            details.insert(
-                "fullOutputPath".to_string(),
-                serde_json::Value::String(path.display().to_string()),
-            );
+        let mut details_map = serde_json::Map::new();
+        if truncation.truncated {
+            details_map.insert("truncation".to_string(), serde_json::to_value(&truncation)?);
+            if let Some(path) = temp_file_path.as_ref() {
+                details_map.insert(
+                    "fullOutputPath".to_string(),
+                    serde_json::Value::String(path.display().to_string()),
+                );
+            }
 
             let start_line = truncation
                 .total_lines
@@ -853,61 +1056,53 @@ fn build_bash_output(
                 .saturating_add(1);
             let end_line = truncation.total_lines;
 
+            let full_output_path = temp_file_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "undefined".to_string());
+
             if truncation.last_line_partial {
-                let last_line_bytes = full_output
-                    .split('\n')
-                    .next_back()
-                    .map_or(0, str::len);
+                let last_line = full_output.split('\n').next_back().unwrap_or("");
+                let last_line_size = format_size(last_line.as_bytes().len());
                 let _ = write!(
                     output_text,
-                    "\n\n[Showing last {} of line {end_line} (line is {}). Full output: {}]",
-                    format_size(truncation.output_bytes),
-                    format_size(last_line_bytes),
-                    path.display()
+                    "\n\n[Showing last {} of line {end_line} (line is {last_line_size}). Full output: {full_output_path}]",
+                    format_size(truncation.output_bytes)
                 );
             } else if truncation.truncated_by == Some(TruncatedBy::Lines) {
                 let _ = write!(
                     output_text,
-                    "\n\n[Showing lines {start_line}-{end_line} of {}. Full output: {}]",
-                    truncation.total_lines,
-                    path.display()
+                    "\n\n[Showing lines {start_line}-{end_line} of {}. Full output: {full_output_path}]",
+                    truncation.total_lines
                 );
             } else {
                 let _ = write!(
                     output_text,
-                    "\n\n[Showing lines {start_line}-{end_line} of {} ({} limit). Full output: {}]",
+                    "\n\n[Showing lines {start_line}-{end_line} of {} ({} limit). Full output: {full_output_path}]",
                     truncation.total_lines,
-                    format_size(DEFAULT_MAX_BYTES),
-                    path.display()
+                    format_size(DEFAULT_MAX_BYTES)
                 );
             }
         }
-    }
 
-    if timed_out {
-        let _ = write!(
-            output_text,
-            "\n\nCommand timed out after {timeout_secs} seconds"
-        );
-    } else if let Some(code) = exit_code {
-        if code != 0 {
-            let _ = write!(output_text, "\n\nCommand exited with code {code}");
+        if let Some(code) = exit_code {
+            if code != 0 {
+                let _ = write!(output_text, "\n\nCommand exited with code {code}");
+                return Err(Error::tool("bash", output_text));
+            }
         }
-    }
 
-    ToolOutput {
-        content: vec![ContentBlock::Text(TextContent::new(output_text))],
-        details: Some(serde_json::Value::Object(details)),
-    }
-}
+        let details = if details_map.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::Object(details_map))
+        };
 
-fn write_full_output(output: &str) -> Result<PathBuf> {
-    let mut file = tempfile::NamedTempFile::new().map_err(|e| Error::tool("bash", e.to_string()))?;
-    use std::io::Write;
-    file.write_all(output.as_bytes())
-        .map_err(|e| Error::tool("bash", e.to_string()))?;
-    let (_file, path) = file.keep().map_err(|e| Error::tool("bash", e.to_string()))?;
-    Ok(path)
+        Ok(ToolOutput {
+            content: vec![ContentBlock::Text(TextContent::new(output_text))],
+            details,
+        })
+    }
 }
 
 // ============================================================================
@@ -935,63 +1130,6 @@ impl EditTool {
     }
 }
 
-/// Compute a simple unified diff.
-fn compute_diff(old: &str, new: &str, path: &str) -> String {
-    let old_lines: Vec<&str> = old.lines().collect();
-    let new_lines: Vec<&str> = new.lines().collect();
-
-    let mut diff = format!("--- a/{path}\n+++ b/{path}\n");
-
-    // Simple line-by-line diff (not optimal, but works for small edits)
-    let mut i = 0;
-    let mut j = 0;
-
-    while i < old_lines.len() || j < new_lines.len() {
-        if i < old_lines.len() && j < new_lines.len() && old_lines[i] == new_lines[j] {
-            i += 1;
-            j += 1;
-        } else {
-            // Find the extent of the change
-            let old_start = i;
-            let new_start = j;
-
-            // Skip differing lines
-            while i < old_lines.len()
-                && (j >= new_lines.len() || old_lines[i] != *new_lines.get(j).unwrap_or(&""))
-            {
-                i += 1;
-            }
-            while j < new_lines.len()
-                && (i >= old_lines.len() || new_lines[j] != *old_lines.get(i).unwrap_or(&""))
-            {
-                j += 1;
-            }
-
-            // Output the hunk
-            let old_count = i - old_start;
-            let new_count = j - new_start;
-
-            let _ = writeln!(
-                diff,
-                "@@ -{},{} +{},{} @@",
-                old_start + 1,
-                old_count,
-                new_start + 1,
-                new_count
-            );
-
-            for line in &old_lines[old_start..i] {
-                let _ = writeln!(diff, "-{line}");
-            }
-            for line in &new_lines[new_start..j] {
-                let _ = writeln!(diff, "+{line}");
-            }
-        }
-    }
-
-    diff
-}
-
 fn strip_bom(s: &str) -> (String, bool) {
     if let Some(stripped) = s.strip_prefix('\u{FEFF}') {
         (stripped.to_string(), true)
@@ -1000,106 +1138,237 @@ fn strip_bom(s: &str) -> (String, bool) {
     }
 }
 
-fn detect_line_ending(s: &str) -> &str {
-    if s.contains("\r\n") {
+fn detect_line_ending(content: &str) -> &'static str {
+    let crlf_idx = content.find("\r\n");
+    let lf_idx = content.find('\n');
+    if lf_idx.is_none() {
+        return "\n";
+    }
+    let Some(crlf_idx) = crlf_idx else {
+        return "\n";
+    };
+    let lf_idx = lf_idx.unwrap_or(usize::MAX);
+    if crlf_idx < lf_idx {
         "\r\n"
     } else {
         "\n"
     }
 }
 
-fn line_offsets(lines: &[&str]) -> Vec<usize> {
-    let mut offsets = Vec::with_capacity(lines.len() + 1);
-    let mut pos = 0usize;
-    for line in lines {
-        offsets.push(pos);
-        pos += line.len() + 1; // +1 for '\n'
-    }
-    offsets.push(pos);
-    offsets
+fn normalize_to_lf(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-fn find_exact_match(content: &str, old_text: &str) -> Result<(usize, usize, usize)> {
-    let mut occurrences = 0;
-    let mut first_start = 0;
-    for (idx, _) in content.match_indices(old_text) {
-        occurrences += 1;
-        if occurrences == 1 {
-            first_start = idx;
+fn restore_line_endings(text: &str, ending: &str) -> String {
+    if ending == "\r\n" {
+        text.replace('\n', "\r\n")
+    } else {
+        text.to_string()
+    }
+}
+
+fn normalize_for_fuzzy_match_text(text: &str) -> String {
+    let trimmed = text
+        .split('\n')
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let s = normalize_unicode_spaces(&trimmed);
+    let s = normalize_quotes(&s);
+    normalize_dashes(&s)
+}
+
+#[derive(Debug, Clone)]
+struct FuzzyMatchResult {
+    found: bool,
+    index: usize,
+    match_length: usize,
+    content_for_replacement: String,
+}
+
+fn fuzzy_find_text(content: &str, old_text: &str) -> FuzzyMatchResult {
+    if let Some(index) = content.find(old_text) {
+        return FuzzyMatchResult {
+            found: true,
+            index,
+            match_length: old_text.len(),
+            content_for_replacement: content.to_string(),
+        };
+    }
+
+    let fuzzy_content = normalize_for_fuzzy_match_text(content);
+    let fuzzy_old_text = normalize_for_fuzzy_match_text(old_text);
+    if let Some(index) = fuzzy_content.find(&fuzzy_old_text) {
+        return FuzzyMatchResult {
+            found: true,
+            index,
+            match_length: fuzzy_old_text.len(),
+            content_for_replacement: fuzzy_content,
+        };
+    }
+
+    FuzzyMatchResult {
+        found: false,
+        index: 0,
+        match_length: 0,
+        content_for_replacement: content.to_string(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffTag {
+    Equal,
+    Added,
+    Removed,
+}
+
+#[derive(Debug, Clone)]
+struct DiffPart {
+    tag: DiffTag,
+    value: String,
+}
+
+fn diff_parts(old_content: &str, new_content: &str) -> Vec<DiffPart> {
+    use similar::ChangeTag;
+
+    let diff = similar::TextDiff::from_lines(old_content, new_content);
+
+    let mut parts: Vec<DiffPart> = Vec::new();
+    let mut current_tag: Option<DiffTag> = None;
+    let mut current_value = String::new();
+
+    for change in diff.iter_all_changes() {
+        let tag = match change.tag() {
+            ChangeTag::Equal => DiffTag::Equal,
+            ChangeTag::Insert => DiffTag::Added,
+            ChangeTag::Delete => DiffTag::Removed,
+        };
+
+        let mut line = change.value();
+        if let Some(stripped) = line.strip_suffix('\n') {
+            line = stripped;
+        }
+
+        if current_tag == Some(tag) {
+            if !current_value.is_empty() {
+                current_value.push('\n');
+            }
+            current_value.push_str(line);
+        } else {
+            if let Some(prev_tag) = current_tag {
+                parts.push(DiffPart {
+                    tag: prev_tag,
+                    value: current_value,
+                });
+            }
+            current_tag = Some(tag);
+            current_value = line.to_string();
         }
     }
 
-    if occurrences == 0 {
-        return Err(Error::tool(
-            "edit",
-            "Text not found in file. Make sure the oldText matches exactly, including whitespace."
-                .to_string(),
-        ));
-    }
-    if occurrences > 1 {
-        return Err(Error::tool(
-            "edit",
-            format!(
-                "Found {occurrences} occurrences of the text. Please provide more context to make the match unique."
-            ),
-        ));
+    if let Some(tag) = current_tag {
+        parts.push(DiffPart {
+            tag,
+            value: current_value,
+        });
     }
 
-    let start = first_start;
-    let end = first_start + old_text.len();
-    let first_line = content[..start].lines().count() + 1;
-    Ok((start, end, first_line))
+    parts
 }
 
-fn find_fuzzy_match(content: &str, old_text: &str) -> Result<(usize, usize, usize)> {
-    let content_lines: Vec<&str> = content.split('\n').collect();
-    let old_lines: Vec<&str> = old_text.split('\n').collect();
+fn generate_diff_string(old_content: &str, new_content: &str) -> (String, Option<usize>) {
+    let parts = diff_parts(old_content, new_content);
+    let mut output: Vec<String> = Vec::new();
 
-    if old_lines.is_empty() {
-        return Err(Error::tool(
-            "edit",
-            "Old text is empty".to_string(),
-        ));
-    }
+    let old_lines: Vec<&str> = old_content.split('\n').collect();
+    let new_lines: Vec<&str> = new_content.split('\n').collect();
+    let max_line_num = old_lines.len().max(new_lines.len()).max(1);
+    let line_num_width = max_line_num.to_string().len();
 
-    let normalized_content: Vec<String> = content_lines
-        .iter()
-        .map(|l| normalize_line_for_match(l))
-        .collect();
-    let normalized_old: Vec<String> = old_lines
-        .iter()
-        .map(|l| normalize_line_for_match(l))
-        .collect();
+    let mut old_line_num: usize = 1;
+    let mut new_line_num: usize = 1;
+    let mut last_was_change = false;
+    let mut first_changed_line: Option<usize> = None;
+    let context_lines: usize = 4;
 
-    let mut match_start: Option<usize> = None;
-    if content_lines.len() >= old_lines.len() {
-        for i in 0..=content_lines.len() - old_lines.len() {
-            if normalized_content[i..i + old_lines.len()] == normalized_old[..] {
-                if match_start.is_some() {
-                    return Err(Error::tool(
-                        "edit",
-                        "Multiple fuzzy matches found. Please provide more context to make the match unique."
-                            .to_string(),
-                    ));
+    for (i, part) in parts.iter().enumerate() {
+        let mut raw: Vec<&str> = part.value.split('\n').collect();
+        if raw.last().is_some_and(|l| l.is_empty()) {
+            raw.pop();
+        }
+
+        match part.tag {
+            DiffTag::Added | DiffTag::Removed => {
+                if first_changed_line.is_none() {
+                    first_changed_line = Some(new_line_num);
                 }
-                match_start = Some(i);
+
+                for line in raw {
+                    match part.tag {
+                        DiffTag::Added => {
+                            let line_num = format!("{:>width$}", new_line_num, width = line_num_width);
+                            output.push(format!("+{line_num} {line}"));
+                            new_line_num = new_line_num.saturating_add(1);
+                        }
+                        DiffTag::Removed => {
+                            let line_num = format!("{:>width$}", old_line_num, width = line_num_width);
+                            output.push(format!("-{line_num} {line}"));
+                            old_line_num = old_line_num.saturating_add(1);
+                        }
+                        DiffTag::Equal => {}
+                    }
+                }
+
+                last_was_change = true;
+            }
+            DiffTag::Equal => {
+                let next_part_is_change = i < parts.len().saturating_sub(1)
+                    && matches!(parts[i + 1].tag, DiffTag::Added | DiffTag::Removed);
+
+                if last_was_change || next_part_is_change {
+                    let mut lines_to_show: Vec<&str> = raw.clone();
+                    let mut skip_start: usize = 0;
+                    let mut skip_end: usize = 0;
+
+                    if !last_was_change {
+                        skip_start = raw.len().saturating_sub(context_lines);
+                        lines_to_show = raw[skip_start..].to_vec();
+                    }
+
+                    if !next_part_is_change && lines_to_show.len() > context_lines {
+                        skip_end = lines_to_show.len().saturating_sub(context_lines);
+                        lines_to_show = lines_to_show[..context_lines].to_vec();
+                    }
+
+                    if skip_start > 0 {
+                        output.push(format!(" {} ...", " ".repeat(line_num_width)));
+                        old_line_num = old_line_num.saturating_add(skip_start);
+                        new_line_num = new_line_num.saturating_add(skip_start);
+                    }
+
+                    for line in lines_to_show {
+                        let line_num = format!("{:>width$}", old_line_num, width = line_num_width);
+                        output.push(format!(" {line_num} {line}"));
+                        old_line_num = old_line_num.saturating_add(1);
+                        new_line_num = new_line_num.saturating_add(1);
+                    }
+
+                    if skip_end > 0 {
+                        output.push(format!(" {} ...", " ".repeat(line_num_width)));
+                        old_line_num = old_line_num.saturating_add(skip_end);
+                        new_line_num = new_line_num.saturating_add(skip_end);
+                    }
+                } else {
+                    old_line_num = old_line_num.saturating_add(raw.len());
+                    new_line_num = new_line_num.saturating_add(raw.len());
+                }
+
+                last_was_change = false;
             }
         }
     }
 
-    let Some(start_line) = match_start else {
-        return Err(Error::tool(
-            "edit",
-            "Text not found in file. Make sure the oldText matches exactly, including whitespace."
-                .to_string(),
-        ));
-    };
-
-    let offsets = line_offsets(&content_lines);
-    let start = offsets[start_line];
-    let end = offsets[start_line + old_lines.len()];
-    let first_line = start_line + 1;
-    Ok((start, end, first_line))
+    (output.join("\n"), first_changed_line)
 }
 
 #[async_trait]
@@ -1108,10 +1377,10 @@ impl Tool for EditTool {
         "edit"
     }
     fn label(&self) -> &'static str {
-        "Edit"
+        "edit"
     }
     fn description(&self) -> &'static str {
-        "Replace exact text in a file"
+        "Edit a file by replacing exact text. The oldText must match exactly (including whitespace). Use this for precise, surgical edits."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -1120,15 +1389,15 @@ impl Tool for EditTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "File path to edit"
+                    "description": "Path to the file to edit (relative or absolute)"
                 },
                 "oldText": {
                     "type": "string",
-                    "description": "Exact text to find and replace"
+                    "description": "Exact text to find and replace (must match exactly)"
                 },
                 "newText": {
                     "type": "string",
-                    "description": "Replacement text"
+                    "description": "New text to replace the old text with"
                 }
             },
             "required": ["path", "oldText", "newText"]
@@ -1139,92 +1408,121 @@ impl Tool for EditTool {
         &self,
         _tool_call_id: &str,
         input: serde_json::Value,
-        _on_update: Option<Box<dyn Fn(ToolUpdate) + Send>>,
+        _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
     ) -> Result<ToolOutput> {
         let input: EditInput =
             serde_json::from_value(input).map_err(|e| Error::validation(e.to_string()))?;
 
-        let path = resolve_path(&input.path, &self.cwd);
+        let absolute_path = resolve_path(&input.path, &self.cwd);
 
-        // Check if file exists
-        if !path.exists() {
-            return Err(Error::tool(
-                "edit",
-                format!("File not found: {}", path.display()),
-            ));
+        // Match legacy behavior: any access failure is reported as "File not found".
+        if tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&absolute_path)
+            .await
+            .is_err()
+        {
+            return Err(Error::tool("edit", format!("File not found: {}", input.path)));
         }
 
-        // Read the file as bytes to preserve BOM and line endings.
-        let raw = tokio::fs::read(&path)
+        // Read bytes and decode lossily as UTF-8 (Node Buffer.toString("utf-8") behavior).
+        let raw = tokio::fs::read(&absolute_path)
             .await
             .map_err(|e| Error::tool("edit", format!("Failed to read file: {e}")))?;
-        let text = String::from_utf8_lossy(&raw).to_string();
-        let (content_no_bom, had_bom) = strip_bom(&text);
-        let line_ending = detect_line_ending(&content_no_bom);
-        let content_lf = content_no_bom.replace("\r\n", "\n");
-        let old_lf = input.old_text.replace("\r\n", "\n");
-        let new_lf = input.new_text.replace("\r\n", "\n");
+        let raw_content = String::from_utf8_lossy(&raw).to_string();
 
-        if old_lf == new_lf {
+        // Strip BOM before matching (LLM won't include invisible BOM in oldText).
+        let (content_no_bom, had_bom) = strip_bom(&raw_content);
+
+        let original_ending = detect_line_ending(&content_no_bom);
+        let normalized_content = normalize_to_lf(&content_no_bom);
+        let normalized_old_text = normalize_to_lf(&input.old_text);
+        let normalized_new_text = normalize_to_lf(&input.new_text);
+
+        let match_result = fuzzy_find_text(&normalized_content, &normalized_old_text);
+        if !match_result.found {
             return Err(Error::tool(
                 "edit",
-                "oldText and newText are identical. No changes to apply.".to_string(),
+                format!(
+                    "Could not find the exact text in {}. The old text must match exactly including all whitespace and newlines.",
+                    input.path
+                ),
             ));
         }
 
-        // Try exact match first.
-        let match_result = find_exact_match(&content_lf, &old_lf)
-            .or_else(|_| find_fuzzy_match(&content_lf, &old_lf))?;
-
-        let (start, end, first_line) = match_result;
-
-        let mut new_content_lf = String::new();
-        new_content_lf.push_str(&content_lf[..start]);
-        new_content_lf.push_str(&new_lf);
-        new_content_lf.push_str(&content_lf[end..]);
-
-        // Compute diff (LF normalized)
-        let diff = compute_diff(&content_lf, &new_content_lf, &input.path);
-
-        // Write atomically using tempfile
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let temp_file = tempfile::NamedTempFile::new_in(parent)
-            .map_err(|e| Error::tool("edit", format!("Failed to create temp file: {e}")))?;
-
-        let mut output_content = if line_ending == "\r\n" {
-            new_content_lf.replace("\n", "\r\n")
+        // Count occurrences using fuzzy-normalized content (legacy behavior).
+        let fuzzy_content = normalize_for_fuzzy_match_text(&normalized_content);
+        let fuzzy_old_text = normalize_for_fuzzy_match_text(&normalized_old_text);
+        let occurrences = if fuzzy_old_text.is_empty() {
+            0
         } else {
-            new_content_lf.clone()
+            fuzzy_content.split(&fuzzy_old_text).count().saturating_sub(1)
         };
-        if had_bom {
-            output_content = format!("\u{FEFF}{output_content}");
+
+        if occurrences > 1 {
+            return Err(Error::tool(
+                "edit",
+                format!(
+                    "Found {occurrences} occurrences of the text in {}. The text must be unique. Please provide more context to make it unique.",
+                    input.path
+                ),
+            ));
         }
 
-        tokio::fs::write(temp_file.path(), &output_content)
+        // Perform replacement in the matched coordinate space (exact or fuzzy-normalized).
+        let base_content = match_result.content_for_replacement;
+        let idx = match_result.index;
+        let match_len = match_result.match_length;
+
+        let mut new_content = String::new();
+        new_content.push_str(&base_content[..idx]);
+        new_content.push_str(&normalized_new_text);
+        new_content.push_str(&base_content[idx + match_len..]);
+
+        if base_content == new_content {
+            return Err(Error::tool(
+                "edit",
+                format!(
+                    "No changes made to {}. The replacement produced identical content. This might indicate an issue with special characters or the text not existing as expected.",
+                    input.path
+                ),
+            ));
+        }
+
+        // Restore original line endings and re-add BOM if present.
+        let mut final_content = restore_line_endings(&new_content, original_ending);
+        if had_bom {
+            final_content = format!("\u{FEFF}{final_content}");
+        }
+
+        // Atomic write (safe improvement vs legacy, behavior-equivalent).
+        let parent = absolute_path.parent().unwrap_or_else(|| Path::new("."));
+        let temp_file = tempfile::NamedTempFile::new_in(parent)
+            .map_err(|e| Error::tool("edit", format!("Failed to create temp file: {e}")))?;
+        tokio::fs::write(temp_file.path(), &final_content)
             .await
             .map_err(|e| Error::tool("edit", format!("Failed to write temp file: {e}")))?;
-
-        // Persist (atomic rename)
         temp_file
-            .persist(&path)
+            .persist(&absolute_path)
             .map_err(|e| Error::tool("edit", format!("Failed to persist file: {e}")))?;
 
-        let summary = format!(
-            "Successfully replaced text in {}. Changed {} characters to {} characters.",
-            path.display(),
-            input.old_text.len(),
-            input.new_text.len()
-        );
+        let (diff, first_changed_line) = generate_diff_string(&base_content, &new_content);
+        let mut details = serde_json::Map::new();
+        details.insert("diff".to_string(), serde_json::Value::String(diff));
+        if let Some(line) = first_changed_line {
+            details.insert(
+                "firstChangedLine".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(line)),
+            );
+        }
 
         Ok(ToolOutput {
-            content: vec![ContentBlock::Text(TextContent::new(summary))],
-            details: Some(serde_json::json!({
-                "path": path.display().to_string(),
-                "oldLength": input.old_text.len(),
-                "newLength": input.new_text.len(),
-                "firstLine": first_line,
-                "diff": diff,
-            })),
+            content: vec![ContentBlock::Text(TextContent::new(format!(
+                "Successfully replaced text in {}.",
+                input.path
+            )))],
+            details: Some(serde_json::Value::Object(details)),
         })
     }
 }
@@ -1259,10 +1557,10 @@ impl Tool for WriteTool {
         "write"
     }
     fn label(&self) -> &'static str {
-        "Write"
+        "write"
     }
     fn description(&self) -> &'static str {
-        "Write content to a file"
+        "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -1271,7 +1569,7 @@ impl Tool for WriteTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "File path to write"
+                    "description": "Path to the file to write (relative or absolute)"
                 },
                 "content": {
                     "type": "string",
@@ -1286,7 +1584,7 @@ impl Tool for WriteTool {
         &self,
         _tool_call_id: &str,
         input: serde_json::Value,
-        _on_update: Option<Box<dyn Fn(ToolUpdate) + Send>>,
+        _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
     ) -> Result<ToolOutput> {
         let input: WriteInput =
             serde_json::from_value(input).map_err(|e| Error::validation(e.to_string()))?;
@@ -1300,7 +1598,7 @@ impl Tool for WriteTool {
                 .map_err(|e| Error::tool("write", format!("Failed to create directories: {e}")))?;
         }
 
-        let bytes_written = input.content.len();
+        let bytes_written = js_string_length(&input.content);
 
         // Write atomically using tempfile
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -1319,14 +1617,9 @@ impl Tool for WriteTool {
         Ok(ToolOutput {
             content: vec![ContentBlock::Text(TextContent::new(format!(
                 "Successfully wrote {} bytes to {}",
-                bytes_written,
-                path.display()
+                bytes_written, input.path
             )))],
-            details: Some(serde_json::json!({
-                "path": path.display().to_string(),
-                "bytesWritten": bytes_written,
-                "lines": input.content.lines().count(),
-            })),
+            details: None,
         })
     }
 }
@@ -1392,10 +1685,10 @@ impl Tool for GrepTool {
         "grep"
     }
     fn label(&self) -> &'static str {
-        "Grep"
+        "grep"
     }
     fn description(&self) -> &'static str {
-        "Search file contents using regex patterns"
+        "Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to 100 matches or 50KB (whichever is hit first). Long lines are truncated to 500 chars."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -1404,7 +1697,7 @@ impl Tool for GrepTool {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Regex pattern to search for"
+                    "description": "Search pattern (regex or literal string)"
                 },
                 "path": {
                     "type": "string",
@@ -1412,23 +1705,23 @@ impl Tool for GrepTool {
                 },
                 "glob": {
                     "type": "string",
-                    "description": "Glob pattern to filter files (e.g., '*.rs')"
+                    "description": "Filter files by glob pattern, e.g. '*.ts' or '**/*.spec.ts'"
                 },
                 "ignoreCase": {
                     "type": "boolean",
-                    "description": "Case-insensitive search"
+                    "description": "Case-insensitive search (default: false)"
                 },
                 "literal": {
                     "type": "boolean",
-                    "description": "Treat pattern as literal string, not regex"
+                    "description": "Treat pattern as literal string instead of regex (default: false)"
                 },
                 "context": {
-                    "type": "integer",
-                    "description": "Number of context lines before and after matches"
+                    "type": "number",
+                    "description": "Number of lines to show before and after each match (default: 0)"
                 },
                 "limit": {
-                    "type": "integer",
-                    "description": "Maximum number of matches to return"
+                    "type": "number",
+                    "description": "Maximum number of matches to return (default: 100)"
                 }
             },
             "required": ["pattern"]
@@ -1440,10 +1733,17 @@ impl Tool for GrepTool {
         &self,
         _tool_call_id: &str,
         input: serde_json::Value,
-        _on_update: Option<Box<dyn Fn(ToolUpdate) + Send>>,
+        _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
     ) -> Result<ToolOutput> {
         let input: GrepInput =
             serde_json::from_value(input).map_err(|e| Error::validation(e.to_string()))?;
+
+        if !rg_available() {
+            return Err(Error::tool(
+                "grep",
+                "ripgrep (rg) is not available and could not be downloaded".to_string(),
+            ));
+        }
 
         let search_dir = input.path.as_deref().unwrap_or(".");
         let search_path = resolve_path(search_dir, &self.cwd);
@@ -1693,10 +1993,10 @@ impl Tool for FindTool {
         "find"
     }
     fn label(&self) -> &'static str {
-        "Find"
+        "find"
     }
     fn description(&self) -> &'static str {
-        "Find files by glob pattern"
+        "Search for files by glob pattern. Returns matching file paths relative to the search directory. Respects .gitignore. Output is truncated to 1000 results or 50KB (whichever is hit first)."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -1705,14 +2005,14 @@ impl Tool for FindTool {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Glob pattern to match files (e.g., '**/*.rs', 'src/*.ts')"
+                    "description": "Glob pattern to match files, e.g. '*.ts', '**/*.json', or 'src/**/*.spec.ts'"
                 },
                 "path": {
                     "type": "string",
-                    "description": "Directory to search (default: current directory)"
+                    "description": "Directory to search in (default: current directory)"
                 },
                 "limit": {
-                    "type": "integer",
+                    "type": "number",
                     "description": "Maximum number of results (default: 1000)"
                 }
             },
@@ -1724,7 +2024,7 @@ impl Tool for FindTool {
         &self,
         _tool_call_id: &str,
         input: serde_json::Value,
-        _on_update: Option<Box<dyn Fn(ToolUpdate) + Send>>,
+        _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
     ) -> Result<ToolOutput> {
         let input: FindInput =
             serde_json::from_value(input).map_err(|e| Error::validation(e.to_string()))?;
@@ -1733,8 +2033,15 @@ impl Tool for FindTool {
         let search_path = resolve_path(search_dir, &self.cwd);
         let effective_limit = input.limit.unwrap_or(DEFAULT_FIND_LIMIT);
 
+        if !search_path.exists() {
+            return Err(Error::tool(
+                "find",
+                format!("Path not found: {}", search_path.display()),
+            ));
+        }
+
         let fd_cmd = find_fd_binary().ok_or_else(|| {
-            Error::tool("find", "fd is not available and could not be found in PATH".to_string())
+            Error::tool("find", "fd is not available and could not be downloaded".to_string())
         })?;
 
         // Build fd arguments
@@ -1815,7 +2122,6 @@ impl Tool for FindTool {
                 continue;
             }
 
-            let had_trailing_slash = line.ends_with('/') || line.ends_with('\\');
             let mut rel = if Path::new(line).is_absolute() && line.starts_with(&search_path_str) {
                 line[search_path_str.len()..]
                     .trim_start_matches(['/', '\\'])
@@ -1824,7 +2130,12 @@ impl Tool for FindTool {
                 line.to_string()
             };
 
-            if had_trailing_slash && !rel.ends_with('/') {
+            let full_path = if Path::new(line).is_absolute() {
+                PathBuf::from(line)
+            } else {
+                search_path.join(line)
+            };
+            if full_path.is_dir() && !rel.ends_with('/') {
                 rel.push('/');
             }
 
@@ -1911,10 +2222,10 @@ impl Tool for LsTool {
         "ls"
     }
     fn label(&self) -> &'static str {
-        "List"
+        "ls"
     }
     fn description(&self) -> &'static str {
-        "List directory contents"
+        "List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. Includes dotfiles. Output is truncated to 500 entries or 50KB (whichever is hit first)."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -1926,7 +2237,7 @@ impl Tool for LsTool {
                     "description": "Directory to list (default: current directory)"
                 },
                 "limit": {
-                    "type": "integer",
+                    "type": "number",
                     "description": "Maximum number of entries to return (default: 500)"
                 }
             }
@@ -1937,7 +2248,7 @@ impl Tool for LsTool {
         &self,
         _tool_call_id: &str,
         input: serde_json::Value,
-        _on_update: Option<Box<dyn Fn(ToolUpdate) + Send>>,
+        _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
     ) -> Result<ToolOutput> {
         let input: LsInput =
             serde_json::from_value(input).map_err(|e| Error::validation(e.to_string()))?;
@@ -1969,28 +2280,25 @@ impl Tool for LsTool {
             .await
             .map_err(|e| Error::tool("ls", format!("Cannot read directory: {e}")))?
         {
-            entries.push(entry.file_name().to_string_lossy().to_string());
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Ok(meta) = entry.metadata().await else {
+                continue;
+            };
+            entries.push((name, meta.is_dir()));
         }
 
         // Sort alphabetically (case-insensitive).
-        entries.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+        entries.sort_by(|(a, _), (b, _)| a.to_lowercase().cmp(&b.to_lowercase()));
 
         let mut results: Vec<String> = Vec::new();
         let mut entry_limit_reached = false;
 
-        for entry in entries {
+        for (entry, is_dir) in entries {
             if results.len() >= effective_limit {
                 entry_limit_reached = true;
                 break;
             }
-
-            let full_path = dir_path.join(&entry);
-            let Ok(meta) = tokio::fs::metadata(&full_path).await else {
-                // Skip entries we can't stat.
-                continue;
-            };
-
-            if meta.is_dir() {
+            if is_dir {
                 results.push(format!("{entry}/"));
             } else {
                 results.push(entry);
@@ -2049,6 +2357,15 @@ impl Tool for LsTool {
 // Helper functions
 // ============================================================================
 
+fn rg_available() -> bool {
+    std::process::Command::new("rg")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok()
+}
+
 async fn pump_stream<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
     mut reader: R,
     tx: mpsc::UnboundedSender<Vec<u8>>,
@@ -2082,12 +2399,13 @@ async fn process_bash_chunk(
     chunks: &mut VecDeque<Vec<u8>>,
     chunks_bytes: &mut usize,
     max_chunks_bytes: usize,
-    on_update: Option<&dyn Fn(ToolUpdate)>,
+    on_update: Option<&(dyn Fn(ToolUpdate) + Send + Sync)>,
 ) -> Result<()> {
     *total_bytes = total_bytes.saturating_add(chunk.len());
 
     if *total_bytes > DEFAULT_MAX_BYTES && temp_file.is_none() {
-        let id = Uuid::new_v4().simple().to_string();
+        let id_full = Uuid::new_v4().simple().to_string();
+        let id = &id_full[..16];
         let path = std::env::temp_dir().join(format!("pi-bash-{id}.log"));
         let mut file = tokio::fs::File::create(&path)
             .await
@@ -2289,11 +2607,24 @@ mod tests {
     }
 
     #[test]
-    fn test_is_image_file() {
-        assert!(is_image_file(Path::new("image.png")));
-        assert!(is_image_file(Path::new("photo.JPG")));
-        assert!(!is_image_file(Path::new("code.rs")));
-        assert!(!is_image_file(Path::new("no_extension")));
+    fn test_detect_supported_image_mime_type_from_bytes() {
+        assert_eq!(
+            detect_supported_image_mime_type_from_bytes(b"\x89PNG\r\n\x1A\n"),
+            Some("image/png")
+        );
+        assert_eq!(
+            detect_supported_image_mime_type_from_bytes(b"\xFF\xD8\xFF"),
+            Some("image/jpeg")
+        );
+        assert_eq!(
+            detect_supported_image_mime_type_from_bytes(b"GIF89a"),
+            Some("image/gif")
+        );
+        assert_eq!(
+            detect_supported_image_mime_type_from_bytes(b"RIFF1234WEBP"),
+            Some("image/webp")
+        );
+        assert_eq!(detect_supported_image_mime_type_from_bytes(b"not an image"), None);
     }
 
     #[test]
@@ -2306,12 +2637,9 @@ mod tests {
     }
 
     #[test]
-    fn test_add_line_numbers() {
-        let content = "first\nsecond\nthird";
-        let result = add_line_numbers(content, 10);
-        assert!(result.contains("10\tfirst"));
-        assert!(result.contains("11\tsecond"));
-        assert!(result.contains("12\tthird"));
+    fn test_js_string_length() {
+        assert_eq!(js_string_length("hello"), 5);
+        assert_eq!(js_string_length("😀"), 2);
     }
 
     #[test]

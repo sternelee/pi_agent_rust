@@ -51,6 +51,14 @@ pub struct Config {
 
     // Thinking Budgets
     pub thinking_budgets: Option<ThinkingBudgets>,
+
+    // Extensions/Skills/etc.
+    pub packages: Option<Vec<PackageSource>>,
+    pub extensions: Option<Vec<String>>,
+    pub skills: Option<Vec<String>>,
+    pub prompts: Option<Vec<String>>,
+    pub themes: Option<Vec<String>>,
+    pub enable_skill_commands: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -97,6 +105,19 @@ pub struct ThinkingBudgets {
     pub low: Option<u32>,
     pub medium: Option<u32>,
     pub high: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PackageSource {
+    String(String),
+    Detailed {
+        source: String,
+        #[serde(default)]
+        local: Option<bool>,
+        #[serde(default)]
+        kind: Option<String>,
+    },
 }
 
 impl Config {
@@ -208,6 +229,14 @@ impl Config {
 
             // Thinking Budgets
             thinking_budgets: other.thinking_budgets.or(base.thinking_budgets),
+
+            // Extensions/Skills/etc.
+            packages: other.packages.or(base.packages),
+            extensions: other.extensions.or(base.extensions),
+            skills: other.skills.or(base.skills),
+            prompts: other.prompts.or(base.prompts),
+            themes: other.themes.or(base.themes),
+            enable_skill_commands: other.enable_skill_commands.or(base.enable_skill_commands),
         }
     }
 
@@ -272,5 +301,9 @@ impl Config {
             "high" => budgets.and_then(|b| b.high).unwrap_or(16384),
             _ => 0,
         }
+    }
+
+    pub fn enable_skill_commands(&self) -> bool {
+        self.enable_skill_commands.unwrap_or(true)
     }
 }
