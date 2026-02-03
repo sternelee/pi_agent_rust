@@ -42,6 +42,7 @@ use crate::extensions::{
     EXTENSION_EVENT_TIMEOUT_MS, ExtensionEventName, ExtensionManager, ExtensionSession,
     ExtensionUiRequest, ExtensionUiResponse, extension_event_from_agent,
 };
+use crate::keybindings::{AppAction, KeyBinding, KeyBindings};
 use crate::model::{
     AssistantMessageEvent, ContentBlock, Message as ModelMessage, StopReason, ThinkingLevel, Usage,
     UserContent,
@@ -299,6 +300,12 @@ pub struct PiApp {
 
     // Extension system
     extensions: Option<ExtensionManager>,
+
+    // Keybindings for action dispatch
+    keybindings: crate::keybindings::KeyBindings,
+
+    // Track last Ctrl+C time for double-tap quit detection
+    last_ctrlc_time: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -443,7 +450,7 @@ impl PiApp {
         // Configure text area for input
         let mut input = TextArea::new();
         input.placeholder =
-            "Type your message... (Enter to send, Alt+Enter for multi-line, Esc to quit)"
+            "Type your message... (Enter to send, Alt+Enter for multi-line, Ctrl+C twice to quit)"
                 .to_string();
         input.show_line_numbers = false;
         input.prompt = "> ".to_string();
@@ -474,6 +481,16 @@ impl PiApp {
         let model_entry_shared = Arc::new(StdMutex::new(model_entry.clone()));
         let extension_streaming = Arc::new(AtomicBool::new(false));
         let extension_compacting = Arc::new(AtomicBool::new(false));
+
+        // Load keybindings from user config (with defaults as fallback)
+        let keybindings_result = KeyBindings::load_from_user_config();
+        if keybindings_result.has_warnings() {
+            tracing::warn!(
+                "Keybindings warnings: {}",
+                keybindings_result.format_warnings()
+            );
+        }
+        let keybindings = keybindings_result.bindings;
 
         let mut app = Self {
             input,
@@ -514,6 +531,8 @@ impl PiApp {
             abort_handle: None,
             pending_oauth: None,
             extensions,
+            keybindings,
+            last_ctrlc_time: None,
         };
 
         if let Some(manager) = app.extensions.clone() {
@@ -563,95 +582,29 @@ impl PiApp {
             return self.handle_pi_message(pi_msg.clone());
         }
 
-        // Handle keyboard input
+        // Handle keyboard input via keybindings layer
         if let Some(key) = msg.downcast_ref::<KeyMsg>() {
             // Clear status message on any key press
             self.status_message = None;
 
-            match key.key_type {
-                // Alt+Enter: Toggle multi-line mode or submit in multi-line mode
-                KeyType::Enter if key.alt => {
-                    if self.agent_state == AgentState::Idle {
-                        if self.input_mode == InputMode::MultiLine {
-                            // Submit in multi-line mode
-                            let value = self.input.value();
-                            if !value.trim().is_empty() {
-                                return self.submit_message(value.trim());
-                            }
-                        } else {
-                            // Switch to multi-line mode
-                            self.input_mode = InputMode::MultiLine;
-                            self.input.set_height(6);
-                            self.status_message =
-                                Some("Multi-line mode: Alt+Enter to submit".to_string());
-                        }
+            // Convert KeyMsg to KeyBinding and resolve action
+            if let Some(binding) = KeyBinding::from_bubbletea_key(key) {
+                let candidates = self.keybindings.matching_actions(&binding);
+                if let Some(action) = self.resolve_action(&candidates) {
+                    // Dispatch action based on current state
+                    if let Some(cmd) = self.handle_action(action, key) {
+                        return Some(cmd);
                     }
-                    return None;
-                }
-                // Enter: Submit in single-line mode, newline in multi-line mode
-                KeyType::Enter if self.agent_state == AgentState::Idle => {
-                    if self.input_mode == InputMode::SingleLine {
-                        let value = self.input.value();
-                        if !value.trim().is_empty() {
-                            return self.submit_message(value.trim());
-                        }
-                    }
-                    // In multi-line mode, let TextArea handle Enter (insert newline)
-                }
-                KeyType::CtrlC => {
-                    if self.agent_state != AgentState::Idle {
-                        if let Some(handle) = &self.abort_handle {
-                            handle.abort();
-                        }
-                        self.status_message = Some("Aborting request...".to_string());
+                    // Action was handled but returned None (no command needed)
+                    // Check if we should suppress forwarding to text area
+                    if self.should_consume_action(action) {
                         return None;
                     }
-                    return Some(quit());
                 }
-                KeyType::Esc if self.agent_state == AgentState::Idle => {
-                    if self.input_mode == InputMode::MultiLine {
-                        // Exit multi-line mode
-                        self.input_mode = InputMode::SingleLine;
-                        self.input.set_height(3);
-                        self.status_message = Some("Single-line mode".to_string());
-                        return None;
-                    }
-                    return Some(quit());
-                }
-                // History navigation with Ctrl+P/N (works in both modes)
-                KeyType::Runes if key.runes == ['p'] && self.agent_state == AgentState::Idle => {
-                    // Ctrl+P handled by TextArea as line_previous
-                }
-                KeyType::Runes if key.runes == ['n'] && self.agent_state == AgentState::Idle => {
-                    // Ctrl+N handled by TextArea as line_next
-                }
-                // Up arrow for history in single-line mode only
-                KeyType::Up
-                    if self.agent_state == AgentState::Idle
-                        && self.input_mode == InputMode::SingleLine =>
-                {
-                    self.navigate_history_back();
-                    return None;
-                }
-                // Down arrow for history in single-line mode only
-                KeyType::Down
-                    if self.agent_state == AgentState::Idle
-                        && self.input_mode == InputMode::SingleLine =>
-                {
-                    self.navigate_history_forward();
-                    return None;
-                }
-                // PageUp/PageDown for conversation viewport scrolling
-                KeyType::PgUp => {
-                    self.conversation_viewport.page_up();
-                    return None;
-                }
-                KeyType::PgDown => {
-                    self.conversation_viewport.page_down();
-                    return None;
-                }
-                _ => {}
             }
+
+            // Handle raw keys that don't map to actions but need special behavior
+            // (e.g., Enter in multi-line mode inserts newline via TextArea)
         }
 
         // Forward to appropriate component based on state
@@ -1582,6 +1535,326 @@ impl PiApp {
         }
     }
 
+    /// Open external editor with current input text.
+    ///
+    /// Uses $VISUAL if set, otherwise $EDITOR, otherwise "vi".
+    fn open_external_editor(&self) -> std::io::Result<String> {
+        use std::io::Write;
+
+        // Determine editor command
+        let editor = std::env::var("VISUAL")
+            .or_else(|_| std::env::var("EDITOR"))
+            .unwrap_or_else(|_| "vi".to_string());
+
+        // Create temp file with current editor content
+        let mut temp_file = tempfile::NamedTempFile::new()?;
+        let current_text = self.input.value();
+        temp_file.write_all(current_text.as_bytes())?;
+        temp_file.flush()?;
+
+        let temp_path = temp_file.path().to_path_buf();
+
+        // Spawn editor and wait for it to exit
+        let status = std::process::Command::new(&editor)
+            .arg(&temp_path)
+            .status()?;
+
+        if !status.success() {
+            return Err(std::io::Error::other(format!(
+                "Editor exited with status: {status}"
+            )));
+        }
+
+        // Read back the edited content
+        let new_text = std::fs::read_to_string(&temp_path)?;
+        Ok(new_text)
+    }
+
+    /// Format keyboard shortcuts for /hotkeys display.
+    ///
+    /// Groups actions by category and shows their key bindings.
+    fn format_hotkeys(&self) -> String {
+        use crate::keybindings::ActionCategory;
+        use std::fmt::Write;
+
+        let mut output = String::new();
+        let _ = writeln!(output, "Keyboard Shortcuts");
+        let _ = writeln!(output, "==================");
+        let _ = writeln!(output);
+        let _ = writeln!(
+            output,
+            "Config: {}",
+            KeyBindings::user_config_path().display()
+        );
+        let _ = writeln!(output);
+
+        for category in ActionCategory::all() {
+            let actions: Vec<_> = self.keybindings.iter_category(*category).collect();
+
+            // Skip empty categories
+            if actions.iter().all(|(_, bindings)| bindings.is_empty()) {
+                continue;
+            }
+
+            let _ = writeln!(output, "## {}", category.display_name());
+            let _ = writeln!(output);
+
+            for (action, bindings) in actions {
+                if bindings.is_empty() {
+                    continue;
+                }
+
+                // Format bindings as comma-separated list
+                let keys: Vec<_> = bindings
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect();
+                let keys_str = keys.join(", ");
+
+                let _ = writeln!(output, "  {:20} {}", keys_str, action.display_name());
+            }
+            let _ = writeln!(output);
+        }
+
+        output
+    }
+
+    fn resolve_action(&self, candidates: &[AppAction]) -> Option<AppAction> {
+        let &first = candidates.first()?;
+
+        // Some bindings are ambiguous and depend on UI state.
+        // Example: `ctrl+d` can mean "delete forward" while editing, but "exit" when the editor
+        // is empty (legacy behavior).
+        if candidates.contains(&AppAction::Exit)
+            && self.agent_state == AgentState::Idle
+            && self.input.value().is_empty()
+        {
+            return Some(AppAction::Exit);
+        }
+
+        Some(first)
+    }
+
+    /// Handle an action dispatched from the keybindings layer.
+    ///
+    /// Returns `Some(Cmd)` if a command should be executed,
+    /// `None` if the action was handled without a command.
+    #[allow(clippy::too_many_lines)]
+    fn handle_action(&mut self, action: AppAction, key: &KeyMsg) -> Option<Cmd> {
+        match action {
+            // =========================================================
+            // Application actions
+            // =========================================================
+            AppAction::Interrupt => {
+                // Escape: Abort if processing, otherwise context-dependent
+                if self.agent_state != AgentState::Idle {
+                    if let Some(handle) = &self.abort_handle {
+                        handle.abort();
+                    }
+                    self.status_message = Some("Aborting request...".to_string());
+                    return None;
+                }
+                // When idle, Escape exits multi-line mode (but does NOT quit)
+                if key.key_type == KeyType::Esc && self.input_mode == InputMode::MultiLine {
+                    self.input_mode = InputMode::SingleLine;
+                    self.input.set_height(3);
+                    self.status_message = Some("Single-line mode".to_string());
+                }
+                // Legacy behavior: Escape when idle does nothing (no quit)
+                None
+            }
+            AppAction::Clear | AppAction::Copy => {
+                // Ctrl+C: abort if processing, clear editor if has text, or quit on double-tap
+                // Note: Copy and Clear both bound to Ctrl+C - Copy takes precedence in lookup
+                // When selection is implemented, Copy should only trigger with active selection
+                if self.agent_state != AgentState::Idle {
+                    if let Some(handle) = &self.abort_handle {
+                        handle.abort();
+                    }
+                    self.status_message = Some("Aborting request...".to_string());
+                    return None;
+                }
+
+                // If editor has text, clear it
+                let editor_text = self.input.value();
+                if !editor_text.is_empty() {
+                    self.input.reset();
+                    self.last_ctrlc_time = Some(std::time::Instant::now());
+                    self.status_message = Some("Input cleared".to_string());
+                    return None;
+                }
+
+                // Editor is empty - check for double-tap to quit
+                let now = std::time::Instant::now();
+                if let Some(last_time) = self.last_ctrlc_time {
+                    // Double-tap within 500ms quits
+                    if now.duration_since(last_time) < std::time::Duration::from_millis(500) {
+                        return Some(quit());
+                    }
+                }
+                // Record this Ctrl+C and show hint
+                self.last_ctrlc_time = Some(now);
+                self.status_message = Some("Press Ctrl+C again to quit".to_string());
+                None
+            }
+            AppAction::Exit => {
+                // Ctrl+D: Exit only when editor is empty (legacy behavior)
+                if self.agent_state == AgentState::Idle && self.input.value().is_empty() {
+                    return Some(quit());
+                }
+                // Editor has text - don't consume, let TextArea handle as delete char forward
+                None
+            }
+            AppAction::Suspend => {
+                // Ctrl+Z: Suspend to background (Unix only)
+                #[cfg(unix)]
+                {
+                    use std::process::Command;
+                    // Send SIGTSTP to our process group
+                    let _ = Command::new("kill")
+                        .args(["-TSTP", &std::process::id().to_string()])
+                        .status();
+                    self.status_message = Some("Resumed from background".to_string());
+                }
+                #[cfg(not(unix))]
+                {
+                    self.status_message =
+                        Some("Suspend not supported on this platform".to_string());
+                }
+                None
+            }
+            AppAction::ExternalEditor => {
+                // Ctrl+G: Open external editor with current input
+                if self.agent_state != AgentState::Idle {
+                    self.status_message = Some("Cannot open editor while processing".to_string());
+                    return None;
+                }
+                match self.open_external_editor() {
+                    Ok(new_text) => {
+                        self.input.set_value(&new_text);
+                        self.status_message = Some("Editor content loaded".to_string());
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Editor error: {e}"));
+                    }
+                }
+                None
+            }
+
+            // =========================================================
+            // Text input actions
+            // =========================================================
+            AppAction::Submit => {
+                // Enter: Submit in single-line mode, forward to TextArea in multi-line
+                if self.agent_state == AgentState::Idle && self.input_mode == InputMode::SingleLine
+                {
+                    let value = self.input.value();
+                    if !value.trim().is_empty() {
+                        return self.submit_message(value.trim());
+                    }
+                }
+                // Don't consume - let TextArea handle Enter in multi-line mode
+                None
+            }
+            AppAction::FollowUp => {
+                // Alt+Enter: Toggle multi-line or submit in multi-line mode
+                if self.agent_state == AgentState::Idle {
+                    if self.input_mode == InputMode::MultiLine {
+                        let value = self.input.value();
+                        if !value.trim().is_empty() {
+                            return self.submit_message(value.trim());
+                        }
+                    } else {
+                        self.input_mode = InputMode::MultiLine;
+                        self.input.set_height(6);
+                        self.status_message =
+                            Some("Multi-line mode: Alt+Enter to submit".to_string());
+                    }
+                }
+                None
+            }
+
+            // =========================================================
+            // Cursor movement (history navigation in single-line mode)
+            // =========================================================
+            AppAction::CursorUp => {
+                if self.agent_state == AgentState::Idle && self.input_mode == InputMode::SingleLine
+                {
+                    self.navigate_history_back();
+                }
+                // In multi-line mode, let TextArea handle cursor movement
+                None
+            }
+            AppAction::CursorDown => {
+                if self.agent_state == AgentState::Idle && self.input_mode == InputMode::SingleLine
+                {
+                    self.navigate_history_forward();
+                }
+                None
+            }
+
+            // =========================================================
+            // Viewport scrolling
+            // =========================================================
+            AppAction::PageUp => {
+                self.conversation_viewport.page_up();
+                None
+            }
+            AppAction::PageDown => {
+                self.conversation_viewport.page_down();
+                None
+            }
+
+            // =========================================================
+            // Actions not yet implemented - let through to component
+            // =========================================================
+            _ => {
+                // Many actions (editor operations, model cycling, etc.) will be
+                // implemented in future PRs. For now, don't consume them.
+                None
+            }
+        }
+    }
+
+    /// Determine if an action should be consumed (not forwarded to TextArea).
+    ///
+    /// Some actions need to be consumed even when `handle_action` returns `None`,
+    /// to prevent the TextArea from also handling the key.
+    fn should_consume_action(&self, action: AppAction) -> bool {
+        match action {
+            // History navigation consumes in single-line mode
+            AppAction::CursorUp | AppAction::CursorDown => {
+                self.agent_state == AgentState::Idle && self.input_mode == InputMode::SingleLine
+            }
+
+            // Submit consumes in single-line mode (otherwise TextArea inserts a newline)
+            AppAction::Submit => {
+                self.agent_state == AgentState::Idle && self.input_mode == InputMode::SingleLine
+            }
+
+            // Exit (Ctrl+D) only consumed when editor is empty (otherwise deleteCharForward)
+            AppAction::Exit => {
+                self.agent_state == AgentState::Idle && self.input.value().is_empty()
+            }
+
+            // Viewport scrolling should always be consumed.
+            // FollowUp (Alt+Enter) should be consumed so TextArea doesn't insert text.
+            // Interrupt/Clear/Copy are always consumed.
+            // Suspend/ExternalEditor are always consumed.
+            AppAction::PageUp
+            | AppAction::PageDown
+            | AppAction::FollowUp
+            | AppAction::Interrupt
+            | AppAction::Clear
+            | AppAction::Copy
+            | AppAction::Suspend
+            | AppAction::ExternalEditor => true,
+
+            // Other actions pass through to TextArea
+            _ => false,
+        }
+    }
+
     /// Handle a slash command.
     #[allow(clippy::too_many_lines)]
     fn handle_slash_command(&mut self, cmd: SlashCommand, args: &str) -> Option<Cmd> {
@@ -2137,19 +2410,10 @@ impl PiApp {
                 }
             }
             SlashCommand::Hotkeys => {
-                let hotkeys = r"Keyboard Shortcuts:
-  Enter             - Submit input (single line)
-  Alt+Enter         - Submit input (multi-line mode)
-  Ctrl+C            - Cancel current operation / clear input
-  Escape            - Quit (when idle) / cancel (when busy)
-  ↑/↓ or Ctrl+P/N   - Navigate input history
-  PageUp/PageDown   - Scroll conversation history
-  Home/End          - Jump to start/end of conversation
-  Ctrl+L            - Clear screen
-  Tab               - (reserved for future autocomplete)";
+                let hotkeys = self.format_hotkeys();
                 self.messages.push(ConversationMessage {
                     role: MessageRole::System,
-                    content: hotkeys.to_string(),
+                    content: hotkeys,
                     thinking: None,
                 });
                 self.scroll_to_bottom();

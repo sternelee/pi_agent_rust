@@ -417,13 +417,18 @@ fn sample_usage(input: u64, output: u64) -> Usage {
 }
 
 #[test]
-fn tui_state_escape_quits_when_idle_single_line() {
-    let harness = TestHarness::new("tui_state_escape_quits_when_idle_single_line");
+fn tui_state_escape_does_nothing_when_idle_single_line() {
+    // Legacy behavior: Escape when idle (no overlay/autocomplete) does nothing
+    let harness = TestHarness::new("tui_state_escape_does_nothing_when_idle_single_line");
     let mut app = build_app(&harness, Vec::new());
     log_initial_state(&harness, &app);
 
     let step = press_esc(&harness, &mut app);
-    assert_cmd_is_quit(&harness, step);
+    // Should NOT quit, just do nothing
+    assert!(
+        step.cmd.is_none(),
+        "Escape when idle should not produce a command"
+    );
 }
 
 #[test]
@@ -439,11 +444,35 @@ fn tui_state_escape_exits_multiline_instead_of_quit() {
 }
 
 #[test]
-fn tui_state_ctrlc_quits_when_idle() {
-    let harness = TestHarness::new("tui_state_ctrlc_quits_when_idle");
+fn tui_state_ctrlc_clears_input_when_has_text() {
+    // Legacy behavior: Ctrl+C with text clears the editor
+    let harness = TestHarness::new("tui_state_ctrlc_clears_input_when_has_text");
     let mut app = build_app(&harness, Vec::new());
     log_initial_state(&harness, &app);
 
+    type_text(&harness, &mut app, "hello world");
+    let step = press_ctrlc(&harness, &mut app);
+    // Should clear input, not quit
+    assert!(
+        step.cmd.is_none(),
+        "Ctrl+C with text should clear, not quit"
+    );
+    assert_after_contains(&harness, &step, "Input cleared");
+}
+
+#[test]
+fn tui_state_ctrlc_double_tap_quits_when_idle() {
+    // Legacy behavior: Ctrl+C twice in quick succession quits
+    let harness = TestHarness::new("tui_state_ctrlc_double_tap_quits_when_idle");
+    let mut app = build_app(&harness, Vec::new());
+    log_initial_state(&harness, &app);
+
+    // First Ctrl+C shows hint
+    let step = press_ctrlc(&harness, &mut app);
+    assert!(step.cmd.is_none(), "First Ctrl+C should not quit");
+    assert_after_contains(&harness, &step, "Press Ctrl+C again to quit");
+
+    // Second Ctrl+C quits
     let step = press_ctrlc(&harness, &mut app);
     assert_cmd_is_quit(&harness, step);
 }
@@ -956,6 +985,22 @@ fn tui_state_slash_help_adds_help_text() {
     let step = press_enter(&harness, &mut app);
     assert_after_contains(&harness, &step, "Available commands:");
     assert_after_contains(&harness, &step, "/help, /h, /?");
+}
+
+#[test]
+fn tui_state_slash_hotkeys_shows_dynamic_keybindings() {
+    let harness = TestHarness::new("tui_state_slash_hotkeys_shows_dynamic_keybindings");
+    let mut app = build_app(&harness, Vec::new());
+    log_initial_state(&harness, &app);
+
+    type_text(&harness, &mut app, "/hotkeys");
+    let step = press_enter(&harness, &mut app);
+    // Check specific bindings are shown (viewport shows bottom of list)
+    // The Selection category should be visible with its bindings
+    assert_after_contains(&harness, &step, "enter");
+    assert_after_contains(&harness, &step, "escape");
+    // Check that action descriptions are shown
+    assert_after_contains(&harness, &step, "selection");
 }
 
 #[test]

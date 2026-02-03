@@ -45,7 +45,7 @@ impl KeyBindingsLoadResult {
     pub fn format_warnings(&self) -> String {
         self.warnings
             .iter()
-            .map(|w| w.to_string())
+            .map(std::string::ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -637,6 +637,151 @@ impl KeyBinding {
     pub fn ctrl_alt(key: impl Into<String>) -> Self {
         Self::new(key, KeyModifiers::CTRL_ALT)
     }
+
+    /// Convert a bubbletea KeyMsg to a KeyBinding for lookup.
+    ///
+    /// Returns `None` for paste events or multi-character input that
+    /// cannot map to a single key binding.
+    #[allow(clippy::too_many_lines)]
+    #[must_use]
+    pub fn from_bubbletea_key(key: &bubbletea::KeyMsg) -> Option<Self> {
+        use bubbletea::KeyType;
+
+        // Skip paste events - they're not keybindings
+        if key.paste {
+            return None;
+        }
+
+        let (key_name, mut modifiers) = match key.key_type {
+            // Control keys map to ctrl+letter
+            KeyType::Null => ("@", KeyModifiers::CTRL),
+            KeyType::CtrlA => ("a", KeyModifiers::CTRL),
+            KeyType::CtrlB => ("b", KeyModifiers::CTRL),
+            KeyType::CtrlC => ("c", KeyModifiers::CTRL),
+            KeyType::CtrlD => ("d", KeyModifiers::CTRL),
+            KeyType::CtrlE => ("e", KeyModifiers::CTRL),
+            KeyType::CtrlF => ("f", KeyModifiers::CTRL),
+            KeyType::CtrlG => ("g", KeyModifiers::CTRL),
+            KeyType::CtrlH => ("h", KeyModifiers::CTRL),
+            KeyType::Tab => ("tab", KeyModifiers::NONE),
+            KeyType::CtrlJ => ("j", KeyModifiers::CTRL),
+            KeyType::CtrlK => ("k", KeyModifiers::CTRL),
+            KeyType::CtrlL => ("l", KeyModifiers::CTRL),
+            KeyType::Enter => ("enter", KeyModifiers::NONE),
+            KeyType::CtrlN => ("n", KeyModifiers::CTRL),
+            KeyType::CtrlO => ("o", KeyModifiers::CTRL),
+            KeyType::CtrlP => ("p", KeyModifiers::CTRL),
+            KeyType::CtrlQ => ("q", KeyModifiers::CTRL),
+            KeyType::CtrlR => ("r", KeyModifiers::CTRL),
+            KeyType::CtrlS => ("s", KeyModifiers::CTRL),
+            KeyType::CtrlT => ("t", KeyModifiers::CTRL),
+            KeyType::CtrlU => ("u", KeyModifiers::CTRL),
+            KeyType::CtrlV => ("v", KeyModifiers::CTRL),
+            KeyType::CtrlW => ("w", KeyModifiers::CTRL),
+            KeyType::CtrlX => ("x", KeyModifiers::CTRL),
+            KeyType::CtrlY => ("y", KeyModifiers::CTRL),
+            KeyType::CtrlZ => ("z", KeyModifiers::CTRL),
+            KeyType::Esc => ("escape", KeyModifiers::NONE),
+            KeyType::CtrlBackslash => ("\\", KeyModifiers::CTRL),
+            KeyType::CtrlCloseBracket => ("]", KeyModifiers::CTRL),
+            KeyType::CtrlCaret => ("^", KeyModifiers::CTRL),
+            KeyType::CtrlUnderscore => ("-", KeyModifiers::CTRL), // ctrl+- maps to underscore
+            KeyType::Backspace => ("backspace", KeyModifiers::NONE),
+
+            // Arrow keys
+            KeyType::Up => ("up", KeyModifiers::NONE),
+            KeyType::Down => ("down", KeyModifiers::NONE),
+            KeyType::Left => ("left", KeyModifiers::NONE),
+            KeyType::Right => ("right", KeyModifiers::NONE),
+
+            // Shift variants
+            KeyType::ShiftTab => ("tab", KeyModifiers::SHIFT),
+            KeyType::ShiftUp => ("up", KeyModifiers::SHIFT),
+            KeyType::ShiftDown => ("down", KeyModifiers::SHIFT),
+            KeyType::ShiftLeft => ("left", KeyModifiers::SHIFT),
+            KeyType::ShiftRight => ("right", KeyModifiers::SHIFT),
+            KeyType::ShiftHome => ("home", KeyModifiers::SHIFT),
+            KeyType::ShiftEnd => ("end", KeyModifiers::SHIFT),
+
+            // Ctrl variants
+            KeyType::CtrlUp => ("up", KeyModifiers::CTRL),
+            KeyType::CtrlDown => ("down", KeyModifiers::CTRL),
+            KeyType::CtrlLeft => ("left", KeyModifiers::CTRL),
+            KeyType::CtrlRight => ("right", KeyModifiers::CTRL),
+            KeyType::CtrlHome => ("home", KeyModifiers::CTRL),
+            KeyType::CtrlEnd => ("end", KeyModifiers::CTRL),
+            KeyType::CtrlPgUp => ("pageup", KeyModifiers::CTRL),
+            KeyType::CtrlPgDown => ("pagedown", KeyModifiers::CTRL),
+
+            // Ctrl+Shift variants
+            KeyType::CtrlShiftUp => ("up", KeyModifiers::CTRL_SHIFT),
+            KeyType::CtrlShiftDown => ("down", KeyModifiers::CTRL_SHIFT),
+            KeyType::CtrlShiftLeft => ("left", KeyModifiers::CTRL_SHIFT),
+            KeyType::CtrlShiftRight => ("right", KeyModifiers::CTRL_SHIFT),
+            KeyType::CtrlShiftHome => ("home", KeyModifiers::CTRL_SHIFT),
+            KeyType::CtrlShiftEnd => ("end", KeyModifiers::CTRL_SHIFT),
+
+            // Navigation
+            KeyType::Home => ("home", KeyModifiers::NONE),
+            KeyType::End => ("end", KeyModifiers::NONE),
+            KeyType::PgUp => ("pageup", KeyModifiers::NONE),
+            KeyType::PgDown => ("pagedown", KeyModifiers::NONE),
+            KeyType::Delete => ("delete", KeyModifiers::NONE),
+            KeyType::Insert => ("insert", KeyModifiers::NONE),
+            KeyType::Space => ("space", KeyModifiers::NONE),
+
+            // Function keys
+            KeyType::F1 => ("f1", KeyModifiers::NONE),
+            KeyType::F2 => ("f2", KeyModifiers::NONE),
+            KeyType::F3 => ("f3", KeyModifiers::NONE),
+            KeyType::F4 => ("f4", KeyModifiers::NONE),
+            KeyType::F5 => ("f5", KeyModifiers::NONE),
+            KeyType::F6 => ("f6", KeyModifiers::NONE),
+            KeyType::F7 => ("f7", KeyModifiers::NONE),
+            KeyType::F8 => ("f8", KeyModifiers::NONE),
+            KeyType::F9 => ("f9", KeyModifiers::NONE),
+            KeyType::F10 => ("f10", KeyModifiers::NONE),
+            KeyType::F11 => ("f11", KeyModifiers::NONE),
+            KeyType::F12 => ("f12", KeyModifiers::NONE),
+            KeyType::F13 => ("f13", KeyModifiers::NONE),
+            KeyType::F14 => ("f14", KeyModifiers::NONE),
+            KeyType::F15 => ("f15", KeyModifiers::NONE),
+            KeyType::F16 => ("f16", KeyModifiers::NONE),
+            KeyType::F17 => ("f17", KeyModifiers::NONE),
+            KeyType::F18 => ("f18", KeyModifiers::NONE),
+            KeyType::F19 => ("f19", KeyModifiers::NONE),
+            KeyType::F20 => ("f20", KeyModifiers::NONE),
+
+            // Character input
+            KeyType::Runes => {
+                // Only handle single-character input
+                if key.runes.len() != 1 {
+                    return None;
+                }
+                let c = key.runes[0];
+                // Return a binding for the character
+                // Alt modifier is handled below
+                return Some(Self {
+                    key: c.to_lowercase().to_string(),
+                    modifiers: if key.alt {
+                        KeyModifiers::ALT
+                    } else {
+                        KeyModifiers::NONE
+                    },
+                });
+            }
+        };
+
+        // Apply alt modifier if set (for non-Runes keys)
+        if key.alt {
+            modifiers.alt = true;
+        }
+
+        Some(Self {
+            key: key_name.to_string(),
+            modifiers,
+        })
+    }
 }
 
 impl fmt::Display for KeyBinding {
@@ -718,10 +863,9 @@ fn normalize_key_name(key: &str) -> Option<String> {
         "escape" | "enter" | "tab" | "space" | "backspace" | "delete" | "insert" | "clear"
         | "home" | "end" | "pageup" | "pagedown" | "up" | "down" | "left" | "right" => &lower,
 
-        // Function keys
-        "f1" | "f2" | "f3" | "f4" | "f5" | "f6" | "f7" | "f8" | "f9" | "f10" | "f11" | "f12" => {
-            &lower
-        }
+        // Function keys (f1-f20 to match bubbletea KeyType coverage)
+        "f1" | "f2" | "f3" | "f4" | "f5" | "f6" | "f7" | "f8" | "f9" | "f10" | "f11" | "f12"
+        | "f13" | "f14" | "f15" | "f16" | "f17" | "f18" | "f19" | "f20" => &lower,
 
         // Single letters (a-z)
         s if s.len() == 1 && s.chars().next().is_some_and(|c| c.is_ascii_lowercase()) => &lower,
@@ -736,16 +880,6 @@ fn normalize_key_name(key: &str) -> Option<String> {
     };
 
     Some(canonical.to_string())
-}
-
-/// Check if a string is a valid modifier name, returns canonical form.
-fn is_modifier(s: &str) -> Option<&'static str> {
-    match s.to_lowercase().as_str() {
-        "ctrl" | "control" => Some("ctrl"),
-        "alt" => Some("alt"),
-        "shift" => Some("shift"),
-        _ => None,
-    }
 }
 
 /// Parse a key binding string into a KeyBinding.
@@ -1021,16 +1155,16 @@ impl KeyBindings {
         // Process each entry
         for (action_str, value) in raw {
             // Try to parse action ID
-            let action: AppAction = match serde_json::from_value(serde_json::json!(action_str)) {
-                Ok(a) => a,
-                Err(_) => {
+            let action: AppAction =
+                if let Ok(a) = serde_json::from_value(serde_json::json!(action_str)) {
+                    a
+                } else {
                     warnings.push(KeyBindingsWarning::UnknownAction {
                         action: action_str,
                         path: path.to_path_buf(),
                     });
                     continue;
-                }
-            };
+                };
 
             // Parse key bindings (can be string or array of strings)
             let key_strings: Vec<String> = match value {
@@ -1095,6 +1229,19 @@ impl KeyBindings {
     #[must_use]
     pub fn lookup(&self, binding: &KeyBinding) -> Option<AppAction> {
         self.reverse.get(binding).copied()
+    }
+
+    /// Return all actions bound to a key binding.
+    ///
+    /// Many bindings are context-dependent (e.g. `ctrl+d` can mean "delete forward" in the editor
+    /// but "exit" when the editor is empty). Callers should resolve collisions based on UI state.
+    #[must_use]
+    pub fn matching_actions(&self, binding: &KeyBinding) -> Vec<AppAction> {
+        AppAction::all()
+            .iter()
+            .copied()
+            .filter(|&action| self.get_bindings(action).contains(binding))
+            .collect()
     }
 
     /// Get all key bindings for an action.
@@ -1504,7 +1651,8 @@ mod tests {
 
     #[test]
     fn test_parse_function_keys() {
-        for i in 1..=12 {
+        // Test f1-f20 (matching bubbletea KeyType coverage)
+        for i in 1..=20 {
             let key = format!("f{i}");
             let binding: KeyBinding = key.parse().unwrap();
             assert_eq!(binding.key, key, "Failed to parse function key: {key}");
@@ -1991,5 +2139,179 @@ mod tests {
         assert!(msg.contains("badAction"));
         assert!(msg.contains("/test/keybindings.json"));
         assert!(msg.contains("ignored"));
+    }
+
+    // ============================================================================
+    // KeyMsg → KeyBinding Conversion (bd-gze)
+    // ============================================================================
+
+    #[test]
+    fn test_from_bubbletea_key_ctrl_keys() {
+        use bubbletea::{KeyMsg, KeyType};
+
+        // Test Ctrl+C
+        let key = KeyMsg::from_type(KeyType::CtrlC);
+        let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
+        assert_eq!(binding.key, "c");
+        assert!(binding.modifiers.ctrl);
+        assert!(!binding.modifiers.alt);
+
+        // Test Ctrl+P
+        let key = KeyMsg::from_type(KeyType::CtrlP);
+        let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
+        assert_eq!(binding.key, "p");
+        assert!(binding.modifiers.ctrl);
+    }
+
+    #[test]
+    fn test_from_bubbletea_key_special_keys() {
+        use bubbletea::{KeyMsg, KeyType};
+
+        // Enter
+        let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::Enter)).unwrap();
+        assert_eq!(binding.key, "enter");
+        assert_eq!(binding.modifiers, KeyModifiers::NONE);
+
+        // Escape
+        let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::Esc)).unwrap();
+        assert_eq!(binding.key, "escape");
+
+        // Tab
+        let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::Tab)).unwrap();
+        assert_eq!(binding.key, "tab");
+
+        // Backspace
+        let binding =
+            KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::Backspace)).unwrap();
+        assert_eq!(binding.key, "backspace");
+    }
+
+    #[test]
+    fn test_from_bubbletea_key_arrow_keys() {
+        use bubbletea::{KeyMsg, KeyType};
+
+        // Plain arrows
+        let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::Up)).unwrap();
+        assert_eq!(binding.key, "up");
+        assert_eq!(binding.modifiers, KeyModifiers::NONE);
+
+        // Shift+arrows
+        let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::ShiftUp)).unwrap();
+        assert_eq!(binding.key, "up");
+        assert!(binding.modifiers.shift);
+
+        // Ctrl+arrows
+        let binding =
+            KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::CtrlLeft)).unwrap();
+        assert_eq!(binding.key, "left");
+        assert!(binding.modifiers.ctrl);
+
+        // Ctrl+Shift+arrows
+        let binding =
+            KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::CtrlShiftDown)).unwrap();
+        assert_eq!(binding.key, "down");
+        assert!(binding.modifiers.ctrl);
+        assert!(binding.modifiers.shift);
+    }
+
+    #[test]
+    fn test_from_bubbletea_key_with_alt() {
+        use bubbletea::{KeyMsg, KeyType};
+
+        // Alt+arrow
+        let key = KeyMsg::from_type(KeyType::Up).with_alt();
+        let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
+        assert_eq!(binding.key, "up");
+        assert!(binding.modifiers.alt);
+        assert!(!binding.modifiers.ctrl);
+
+        // Alt+letter (via Runes)
+        let key = KeyMsg::from_char('f').with_alt();
+        let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
+        assert_eq!(binding.key, "f");
+        assert!(binding.modifiers.alt);
+    }
+
+    #[test]
+    fn test_from_bubbletea_key_runes() {
+        use bubbletea::KeyMsg;
+
+        // Single character
+        let key = KeyMsg::from_char('a');
+        let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
+        assert_eq!(binding.key, "a");
+        assert_eq!(binding.modifiers, KeyModifiers::NONE);
+
+        // Uppercase becomes lowercase
+        let key = KeyMsg::from_char('A');
+        let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
+        assert_eq!(binding.key, "a");
+    }
+
+    #[test]
+    fn test_from_bubbletea_key_multi_char_returns_none() {
+        use bubbletea::KeyMsg;
+
+        // Multi-character input (e.g., IME) cannot be a keybinding
+        let key = KeyMsg::from_runes(vec!['a', 'b']);
+        assert!(KeyBinding::from_bubbletea_key(&key).is_none());
+    }
+
+    #[test]
+    fn test_from_bubbletea_key_paste_returns_none() {
+        use bubbletea::KeyMsg;
+
+        // Paste events should not be keybindings
+        let key = KeyMsg::from_char('a').with_paste();
+        assert!(KeyBinding::from_bubbletea_key(&key).is_none());
+    }
+
+    #[test]
+    fn test_from_bubbletea_key_function_keys() {
+        use bubbletea::{KeyMsg, KeyType};
+
+        let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::F1)).unwrap();
+        assert_eq!(binding.key, "f1");
+
+        let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::F12)).unwrap();
+        assert_eq!(binding.key, "f12");
+    }
+
+    #[test]
+    fn test_from_bubbletea_key_navigation() {
+        use bubbletea::{KeyMsg, KeyType};
+
+        let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::Home)).unwrap();
+        assert_eq!(binding.key, "home");
+
+        let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::PgUp)).unwrap();
+        assert_eq!(binding.key, "pageup");
+
+        let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::Delete)).unwrap();
+        assert_eq!(binding.key, "delete");
+    }
+
+    #[test]
+    fn test_keybinding_lookup_via_conversion() {
+        use bubbletea::{KeyMsg, KeyType};
+
+        let bindings = KeyBindings::new();
+
+        // Ctrl+C should map to an action (Copy or Clear depending on context)
+        let key = KeyMsg::from_type(KeyType::CtrlC);
+        let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
+        assert!(bindings.lookup(&binding).is_some());
+
+        // PageUp should map to PageUp action
+        let key = KeyMsg::from_type(KeyType::PgUp);
+        let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
+        let action = bindings.lookup(&binding);
+        assert_eq!(action, Some(AppAction::PageUp));
+
+        // Enter should map to Submit
+        let key = KeyMsg::from_type(KeyType::Enter);
+        let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
+        let action = bindings.lookup(&binding);
+        assert_eq!(action, Some(AppAction::Submit));
     }
 }

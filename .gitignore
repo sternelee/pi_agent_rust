@@ -1,4 +1,5 @@
 /target/
+target-*/
 a.out
 rustc-ice-*.txt
 

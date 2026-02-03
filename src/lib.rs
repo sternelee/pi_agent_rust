@@ -22,6 +22,7 @@
 pub mod agent;
 pub mod app;
 pub mod auth;
+pub mod autocomplete;
 pub mod cli;
 pub mod compaction;
 pub mod config;

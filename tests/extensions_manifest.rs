@@ -267,10 +267,9 @@ fn parse_tool_result_error_flag_true() {
     })
     .to_string();
     let parsed = ExtensionMessage::parse_and_validate(&json).expect("parse");
-    if let pi::extensions::ExtensionBody::ToolResult(payload) = parsed.body {
-        assert!(payload.is_error);
-    } else {
-        panic!("expected ToolResult");
+    match parsed.body {
+        pi::extensions::ExtensionBody::ToolResult(payload) => assert!(payload.is_error),
+        _ => unreachable!("expected ToolResult"),
     }
 }
 
@@ -306,10 +305,9 @@ fn parse_slash_command_with_empty_args() {
     })
     .to_string();
     let parsed = ExtensionMessage::parse_and_validate(&json).expect("parse");
-    if let pi::extensions::ExtensionBody::SlashCommand(payload) = parsed.body {
-        assert!(payload.args.is_empty());
-    } else {
-        panic!("expected SlashCommand");
+    match parsed.body {
+        pi::extensions::ExtensionBody::SlashCommand(payload) => assert!(payload.args.is_empty()),
+        _ => unreachable!("expected SlashCommand"),
     }
 }
 
@@ -363,10 +361,9 @@ fn parse_event_hook_with_null_data() {
     })
     .to_string();
     let parsed = ExtensionMessage::parse_and_validate(&json).expect("parse");
-    if let pi::extensions::ExtensionBody::EventHook(payload) = parsed.body {
-        assert!(payload.data.is_none());
-    } else {
-        panic!("expected EventHook");
+    match parsed.body {
+        pi::extensions::ExtensionBody::EventHook(payload) => assert!(payload.data.is_none()),
+        _ => unreachable!("expected EventHook"),
     }
 }
 
@@ -410,15 +407,16 @@ fn parse_host_result_with_error_details() {
     })
     .to_string();
     let parsed = ExtensionMessage::parse_and_validate(&json).expect("parse");
-    if let pi::extensions::ExtensionBody::HostResult(payload) = parsed.body {
-        assert!(payload.is_error);
-        let error = payload.error.expect("error should be present");
-        assert!(matches!(
-            error.code,
-            pi::extensions::HostCallErrorCode::Denied
-        ));
-    } else {
-        panic!("expected HostResult");
+    match parsed.body {
+        pi::extensions::ExtensionBody::HostResult(payload) => {
+            assert!(payload.is_error);
+            let error = payload.error.expect("error should be present");
+            assert!(matches!(
+                error.code,
+                pi::extensions::HostCallErrorCode::Denied
+            ));
+        }
+        _ => unreachable!("expected HostResult"),
     }
 }
 
@@ -455,11 +453,12 @@ fn parse_error_message_with_details() {
     })
     .to_string();
     let parsed = ExtensionMessage::parse_and_validate(&json).expect("parse");
-    if let pi::extensions::ExtensionBody::Error(payload) = parsed.body {
-        assert_eq!(payload.code, "E_CONFIG");
-        assert!(payload.details.is_some());
-    } else {
-        panic!("expected Error");
+    match parsed.body {
+        pi::extensions::ExtensionBody::Error(payload) => {
+            assert_eq!(payload.code, "E_CONFIG");
+            assert!(payload.details.is_some());
+        }
+        _ => unreachable!("expected Error"),
     }
 }
 
@@ -495,12 +494,13 @@ fn parse_log_message_all_correlation_fields() {
     })
     .to_string();
     let parsed = ExtensionMessage::parse_and_validate(&json).expect("parse");
-    if let pi::extensions::ExtensionBody::Log(payload) = parsed.body {
-        assert!(matches!(payload.level, pi::extensions::LogLevel::Debug));
-        assert_eq!(payload.correlation.session_id.as_deref(), Some("sess-123"));
-        assert!(payload.source.is_some());
-    } else {
-        panic!("expected Log");
+    match parsed.body {
+        pi::extensions::ExtensionBody::Log(payload) => {
+            assert!(matches!(payload.level, pi::extensions::LogLevel::Debug));
+            assert_eq!(payload.correlation.session_id.as_deref(), Some("sess-123"));
+            assert!(payload.source.is_some());
+        }
+        _ => unreachable!("expected Log"),
     }
 }
 
