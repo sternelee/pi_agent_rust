@@ -11,6 +11,7 @@ cargo bench
 # Run specific benchmark
 cargo bench "truncation"
 cargo bench "sse_parsing"
+cargo bench "ext_policy"
 
 # Run with baseline comparison
 cargo bench -- --save-baseline main
@@ -88,15 +89,14 @@ sse_parsing/parse/1000  time:   [495.54 µs 495.96 µs 496.40 µs]
 
 ```
 benches/
-└── tools.rs          # Core operation benchmarks
-    ├── truncation    # Text truncation (head/tail)
-    └── sse_parsing   # SSE event parsing
-```
-
-Planned:
-```
-benches/
-└── extensions.rs     # Connector dispatch + event-loop overhead
+├── tools.rs          # Core operation benchmarks
+│   ├── truncation    # Text truncation (head/tail)
+│   └── sse_parsing   # SSE event parsing
+└── extensions.rs     # Connector dispatch + policy / protocol parsing
+    ├── ext_policy
+    ├── ext_required_capability
+    ├── ext_dispatch
+    └── ext_protocol
 ```
 
 ## Adding New Benchmarks
