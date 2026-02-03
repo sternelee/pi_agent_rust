@@ -82,7 +82,7 @@
 
 | Feature | Status | Location | Notes |
 |---------|--------|----------|-------|
-| SSE parsing (Anthropic) | ✅ | `anthropic.rs` | reqwest-eventsource |
+| SSE parsing (Anthropic) | ✅ | `anthropic.rs` | `reqwest` bytes stream + `src/sse.rs` |
 | SSE parser module | ✅ | `src/sse.rs` | Custom parser for asupersync migration |
 | Text delta streaming | ✅ | `anthropic.rs:339-352` | Real-time text |
 | Thinking delta streaming | ✅ | `anthropic.rs:354-367` | Extended thinking |

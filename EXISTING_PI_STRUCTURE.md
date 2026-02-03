@@ -1255,9 +1255,9 @@ Common options:
   - `isCompacting`: bool
   - `steeringMode`: `"all"|"one-at-a-time"`
   - `followUpMode`: `"all"|"one-at-a-time"`
-  - `sessionFile`: string | null
+  - `sessionFile`: string (omitted for in-memory sessions)
   - `sessionId`: string
-  - `sessionName`: string | null
+  - `sessionName`: string (omitted if not set)
   - `autoCompactionEnabled`: bool
   - `messageCount`: number
   - `pendingMessageCount`: number

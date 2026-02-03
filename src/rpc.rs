@@ -1557,19 +1557,22 @@ fn session_state(
         "followUpMode".to_string(),
         Value::String(snapshot.follow_up_mode.as_str().to_string()),
     );
-    if let Some(path) = session.session.path.as_ref() {
-        state.insert(
-            "sessionFile".to_string(),
-            Value::String(path.display().to_string()),
-        );
-    }
+    state.insert(
+        "sessionFile".to_string(),
+        session
+            .session
+            .path
+            .as_ref()
+            .map_or(Value::Null, |p| Value::String(p.display().to_string())),
+    );
     state.insert(
         "sessionId".to_string(),
         Value::String(session.session.header.id.clone()),
     );
-    if let Some(session_name) = session_name {
-        state.insert("sessionName".to_string(), Value::String(session_name));
-    }
+    state.insert(
+        "sessionName".to_string(),
+        session_name.map_or(Value::Null, Value::String),
+    );
     state.insert(
         "autoCompactionEnabled".to_string(),
         Value::Bool(snapshot.auto_compaction_enabled),
@@ -1624,9 +1627,13 @@ fn session_stats(session: &crate::session::Session) -> Value {
     let total_tokens = total_input + total_output + total_cache_read + total_cache_write;
 
     let mut data = serde_json::Map::new();
-    if let Some(path) = session.path.as_ref().map(|p| p.display().to_string()) {
-        data.insert("sessionFile".to_string(), Value::String(path));
-    }
+    data.insert(
+        "sessionFile".to_string(),
+        session
+            .path
+            .as_ref()
+            .map_or(Value::Null, |p| Value::String(p.display().to_string())),
+    );
     data.insert(
         "sessionId".to_string(),
         Value::String(session.header.id.clone()),

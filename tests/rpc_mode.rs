@@ -126,8 +126,10 @@ async fn rpc_get_state_and_prompt() {
     assert_eq!(get_state_response["command"], "get_state");
     assert_eq!(get_state_response["success"], true);
     let get_state_data = get_state_response["data"].as_object().unwrap();
-    assert!(get_state_data.get("sessionFile").is_none());
-    assert!(get_state_data.get("sessionName").is_none());
+    assert!(get_state_data.get("sessionFile").is_some());
+    assert!(get_state_response["data"]["sessionFile"].is_null());
+    assert!(get_state_data.get("sessionName").is_some());
+    assert!(get_state_response["data"]["sessionName"].is_null());
     assert!(get_state_data.get("model").is_some());
     assert!(get_state_response["data"]["model"].is_null());
 
@@ -184,7 +186,8 @@ async fn rpc_get_state_and_prompt() {
     assert_eq!(get_stats_response["command"], "get_session_stats");
     assert_eq!(get_stats_response["success"], true);
     let get_stats_data = get_stats_response["data"].as_object().unwrap();
-    assert!(get_stats_data.get("sessionFile").is_none());
+    assert!(get_stats_data.get("sessionFile").is_some());
+    assert!(get_stats_response["data"]["sessionFile"].is_null());
     assert_eq!(get_stats_response["data"]["userMessages"], 1);
     assert_eq!(get_stats_response["data"]["assistantMessages"], 1);
     assert_eq!(get_stats_response["data"]["toolCalls"], 0);
@@ -291,7 +294,8 @@ async fn rpc_session_stats_counts_tool_calls_and_results() {
     assert_eq!(stats_resp["command"], "get_session_stats");
     assert_eq!(stats_resp["success"], true);
     let stats_data = stats_resp["data"].as_object().unwrap();
-    assert!(stats_data.get("sessionFile").is_none());
+    assert!(stats_data.get("sessionFile").is_some());
+    assert!(stats_resp["data"]["sessionFile"].is_null());
     assert_eq!(stats_resp["data"]["userMessages"], 1);
     assert_eq!(stats_resp["data"]["assistantMessages"], 1);
     assert_eq!(stats_resp["data"]["toolCalls"], 1);
