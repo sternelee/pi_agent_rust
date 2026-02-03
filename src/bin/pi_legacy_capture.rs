@@ -250,7 +250,37 @@ fn reorder_path_for_system_node() -> Option<String> {
     Some(parts.join(":"))
 }
 
-fn spawn_pi_mono_rpc(pi_mono_root: &Path, extension_path: &str, no_env: bool) -> Result<Child> {
+fn ensure_models_json(agent_dir: &Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(agent_dir)
+        .with_context(|| format!("create agent dir {}", agent_dir.display()))?;
+
+    let path = agent_dir.join("models.json");
+    if path.is_file() {
+        return Ok(path);
+    }
+
+    let content = json!({
+        "providers": {
+            // Provide a dummy provider config so legacy pi-mono has at least one available model.
+            // The capture runner does not trigger any LLM calls for supported headless scenarios.
+            "openai": {
+                "baseUrl": "https://api.openai.com/v1",
+                "apiKey": "DUMMY"
+            }
+        }
+    });
+    let text = serde_json::to_string_pretty(&content)?;
+    std::fs::write(&path, format!("{text}\n"))
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(path)
+}
+
+fn spawn_pi_mono_rpc(
+    pi_mono_root: &Path,
+    extension_path: &str,
+    agent_dir: &Path,
+    no_env: bool,
+) -> Result<Child> {
     let pi_test = pi_mono_root.join("pi-test.sh");
     if !pi_test.is_file() {
         bail!("missing legacy runner: {}", pi_test.display());
@@ -275,6 +305,7 @@ fn spawn_pi_mono_rpc(pi_mono_root: &Path, extension_path: &str, no_env: bool) ->
     if let Some(path) = reorder_path_for_system_node() {
         cmd.env("PATH", path);
     }
+    cmd.env("PI_CODING_AGENT_DIR", agent_dir);
 
     let child = cmd.spawn().context("spawn pi-mono rpc")?;
     Ok(child)
@@ -498,7 +529,14 @@ fn main() -> Result<()> {
         }));
         writer.write_capture_log(&payload)?;
 
-        let mut child = spawn_pi_mono_rpc(&args.pi_mono_root, &item.source.path, args.no_env)?;
+        let agent_dir = scenario_dir.join("agent");
+        let models_json_path = ensure_models_json(&agent_dir)?;
+        let mut child = spawn_pi_mono_rpc(
+            &args.pi_mono_root,
+            &item.source.path,
+            &agent_dir,
+            args.no_env,
+        )?;
         let mut stdin = child.stdin.take().context("take child stdin")?;
         let stdout_pipe = child.stdout.take().context("take child stdout")?;
         let stderr_pipe = child.stderr.take().context("take child stderr")?;
@@ -574,6 +612,8 @@ fn main() -> Result<()> {
             "scenario_id": scenario.id.clone(),
             "started_at": started_at,
             "finished_at": finished_at,
+            "agent_dir": agent_dir.display().to_string(),
+            "models_json": models_json_path.display().to_string(),
             "pi_mono": {
                 "root": args.pi_mono_root.display().to_string(),
                 "head": legacy_head.clone(),
