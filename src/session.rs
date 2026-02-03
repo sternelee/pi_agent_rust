@@ -44,6 +44,23 @@ pub struct Session {
     pub session_dir: Option<PathBuf>,
 }
 
+/// Result of planning a `/fork` operation from a specific user message.
+///
+/// Mirrors legacy semantics:
+/// - The new session's leaf is the *parent* of the selected user message (or `None` if root),
+///   so the selected message can be re-submitted as a new branch without creating consecutive
+///   user messages.
+/// - The selected user message text is returned for editor pre-fill.
+#[derive(Debug, Clone)]
+pub struct ForkPlan {
+    /// Entries to copy into the new session file (path to the fork leaf, inclusive).
+    pub entries: Vec<SessionEntry>,
+    /// Leaf ID to set in the new session (parent of selected user entry).
+    pub leaf_id: Option<String>,
+    /// Text of the selected user message (for editor pre-fill).
+    pub selected_text: String,
+}
+
 impl Session {
     /// Create a new session from CLI args and config.
     pub async fn new(cli: &Cli, config: &Config) -> Result<Self> {
@@ -647,6 +664,51 @@ impl Session {
 
     pub fn set_branched_from(&mut self, path: Option<String>) {
         self.header.parent_session = path;
+    }
+
+    /// Plan a `/fork` from a user message entry ID.
+    ///
+    /// Returns the entries to copy into a new session (path to the parent of the selected
+    /// user message), the new leaf id, and the selected user message text for editor pre-fill.
+    pub fn plan_fork_from_user_message(&self, entry_id: &str) -> Result<ForkPlan> {
+        let entry = self
+            .get_entry(entry_id)
+            .ok_or_else(|| Error::session(format!("Fork target not found: {entry_id}")))?;
+
+        let SessionEntry::Message(message_entry) = entry else {
+            return Err(Error::session(format!(
+                "Fork target is not a message entry: {entry_id}"
+            )));
+        };
+
+        let SessionMessage::User { content, .. } = &message_entry.message else {
+            return Err(Error::session(format!(
+                "Fork target is not a user message: {entry_id}"
+            )));
+        };
+
+        let selected_text = user_content_to_text(content);
+        let leaf_id = message_entry.base.parent_id.clone();
+
+        let entries = if let Some(ref leaf_id) = leaf_id {
+            let path_ids = self.get_path_to_entry(leaf_id);
+            let mut entries = Vec::new();
+            for path_id in path_ids {
+                let entry = self.get_entry(&path_id).ok_or_else(|| {
+                    Error::session(format!("Failed to build fork: missing entry {path_id}"))
+                })?;
+                entries.push(entry.clone());
+            }
+            entries
+        } else {
+            Vec::new()
+        };
+
+        Ok(ForkPlan {
+            entries,
+            leaf_id,
+            selected_text,
+        })
     }
 
     fn next_entry_id(&self) -> String {
@@ -1574,6 +1636,39 @@ fn escape_html(input: &str) -> String {
         }
     }
     escaped
+}
+
+fn user_content_to_text(content: &UserContent) -> String {
+    match content {
+        UserContent::Text(text) => text.clone(),
+        UserContent::Blocks(blocks) => content_blocks_to_text(blocks),
+    }
+}
+
+fn content_blocks_to_text(blocks: &[ContentBlock]) -> String {
+    let mut output = String::new();
+    for block in blocks {
+        match block {
+            ContentBlock::Text(text_block) => push_line(&mut output, &text_block.text),
+            ContentBlock::Image(image) => {
+                push_line(&mut output, &format!("[image: {}]", image.mime_type));
+            }
+            ContentBlock::Thinking(thinking_block) => {
+                push_line(&mut output, &thinking_block.thinking);
+            }
+            ContentBlock::ToolCall(call) => {
+                push_line(&mut output, &format!("[tool call: {}]", call.name));
+            }
+        }
+    }
+    output
+}
+
+fn push_line(out: &mut String, line: &str) {
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(line);
 }
 
 fn entry_id_set(entries: &[SessionEntry]) -> HashSet<String> {

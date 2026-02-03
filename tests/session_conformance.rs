@@ -200,6 +200,74 @@ fn save_creates_path_under_override_dir() {
 }
 
 #[test]
+fn plan_fork_from_user_message_branches_from_parent_and_returns_selected_text() {
+    let mut session = Session::create();
+    let root_user = session.append_message(make_user_message("Hello"));
+    let root_assistant = session.append_message(make_assistant_message("Hi"));
+    let selected_user = session.append_message(make_user_message("Question"));
+    let _selected_assistant = session.append_message(make_assistant_message("Answer"));
+
+    let plan = session
+        .plan_fork_from_user_message(&selected_user)
+        .expect("plan fork");
+
+    assert_eq!(plan.selected_text, "Question");
+    assert_eq!(plan.leaf_id.as_deref(), Some(root_assistant.as_str()));
+
+    assert_eq!(plan.entries.len(), 2);
+    assert_eq!(
+        plan.entries[0].base_id().map(String::as_str),
+        Some(root_user.as_str())
+    );
+    assert_eq!(
+        plan.entries[1].base_id().map(String::as_str),
+        Some(root_assistant.as_str())
+    );
+
+    let pi::session::ForkPlan {
+        entries, leaf_id, ..
+    } = plan;
+    let mut forked = Session::create();
+    forked.entries = entries;
+    forked.leaf_id = leaf_id;
+
+    let appended = forked.append_message(make_user_message("Followup"));
+    let appended_entry = forked.get_entry(&appended).expect("appended entry");
+    assert_eq!(
+        appended_entry.base().parent_id.as_deref(),
+        Some(root_assistant.as_str())
+    );
+}
+
+#[test]
+fn plan_fork_from_root_user_message_creates_empty_session() {
+    let mut session = Session::create();
+    let root_user = session.append_message(make_user_message("Root"));
+    let _assistant = session.append_message(make_assistant_message("Hi"));
+
+    let plan = session
+        .plan_fork_from_user_message(&root_user)
+        .expect("plan fork");
+
+    assert_eq!(plan.selected_text, "Root");
+    assert!(plan.entries.is_empty());
+    assert!(plan.leaf_id.is_none());
+}
+
+#[test]
+fn plan_fork_from_non_user_message_errors() {
+    let mut session = Session::create();
+    let _root_user = session.append_message(make_user_message("Hello"));
+    let assistant_id = session.append_message(make_assistant_message("Hi"));
+
+    let err = session
+        .plan_fork_from_user_message(&assistant_id)
+        .expect_err("expected error");
+
+    assert!(matches!(err, Error::Session(_)), "unexpected error: {err}");
+}
+
+#[test]
 fn save_updates_session_index_for_override_dir() {
     run_async_test(async {
         let harness = TestHarness::new("save_updates_session_index_for_override_dir");

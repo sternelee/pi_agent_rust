@@ -153,7 +153,7 @@ impl SlashCommand {
   /hotkeys, /keys    - Show keyboard shortcuts
   /changelog         - Show changelog entries
   /tree              - Show session branch tree summary
-  /fork [id|index]   - Branch from a previous user message
+  /fork [id|index]   - Fork from a user message (default: last on current path)
   /compact [notes]   - Compact older context with optional instructions
   /reload            - Reload skills/prompts from disk
   /share             - Export to a temp HTML file and show path
@@ -4143,7 +4143,8 @@ impl PiApp {
                     return None;
                 }
 
-                let candidates = if let Ok(session_guard) = self.session.try_lock() {
+                let candidates = if let Ok(mut session_guard) = self.session.try_lock() {
+                    session_guard.ensure_entry_ids();
                     fork_candidates(&session_guard)
                 } else {
                     self.status_message = Some("Session busy; try again".to_string());
@@ -4154,7 +4155,7 @@ impl PiApp {
                     return None;
                 }
 
-                if args.is_empty() {
+                if args.eq_ignore_ascii_case("list") || args.eq_ignore_ascii_case("ls") {
                     let list = candidates
                         .iter()
                         .enumerate()
@@ -4170,7 +4171,9 @@ impl PiApp {
                     return None;
                 }
 
-                let selection = if let Ok(index) = args.parse::<usize>() {
+                let selection = if args.is_empty() {
+                    candidates.last().expect("candidates is non-empty").clone()
+                } else if let Ok(index) = args.parse::<usize>() {
                     if index == 0 || index > candidates.len() {
                         self.status_message =
                             Some(format!("Invalid index: {index} (1-{})", candidates.len()));
@@ -4237,7 +4240,7 @@ impl PiApp {
                         }
                     }
 
-                    let (entries, parent_path, session_dir) = {
+                    let (fork_plan, parent_path, session_dir) = {
                         let guard = match session.lock(&cx).await {
                             Ok(guard) => guard,
                             Err(err) => {
@@ -4247,25 +4250,26 @@ impl PiApp {
                                 return;
                             }
                         };
-                        let path_ids = guard.get_path_to_entry(&selection.id);
-                        let mut entries = Vec::new();
-                        for entry_id in path_ids {
-                            if let Some(entry) = guard.get_entry(&entry_id) {
-                                entries.push(entry.clone());
+                        let fork_plan = match guard.plan_fork_from_user_message(&selection.id) {
+                            Ok(plan) => plan,
+                            Err(err) => {
+                                let _ = event_tx.try_send(PiMsg::AgentError(format!(
+                                    "Failed to build fork: {err}"
+                                )));
+                                return;
                             }
-                        }
+                        };
                         let parent_path = guard.path.as_ref().map(|p| p.display().to_string());
                         let session_dir = guard.session_dir.clone();
                         drop(guard);
-                        (entries, parent_path, session_dir)
+                        (fork_plan, parent_path, session_dir)
                     };
 
-                    if entries.is_empty() {
-                        let _ = event_tx.try_send(PiMsg::AgentError(
-                            "Failed to build fork (no entries found)".to_string(),
-                        ));
-                        return;
-                    }
+                    let crate::session::ForkPlan {
+                        entries,
+                        leaf_id,
+                        selected_text,
+                    } = fork_plan;
 
                     let mut new_session = Session::create_with_dir(session_dir);
                     new_session.header.provider = Some(model_provider);
@@ -4275,7 +4279,7 @@ impl PiApp {
                         new_session.set_branched_from(Some(parent_path));
                     }
                     new_session.entries = entries;
-                    new_session.leaf_id = Some(selection.id.clone());
+                    new_session.leaf_id = leaf_id;
                     new_session.ensure_entry_ids();
                     let new_session_id = new_session.header.id.clone();
 
@@ -4330,6 +4334,8 @@ impl PiApp {
                         usage,
                         status: Some(format!("Forked new session from {}", selection.summary)),
                     });
+
+                    let _ = event_tx.try_send(PiMsg::SetEditorText(selected_text));
 
                     if let Some(manager) = extensions {
                         let _ = manager
