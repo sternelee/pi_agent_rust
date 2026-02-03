@@ -54,11 +54,10 @@ We only use **Cargo** in this project, NEVER any other package manager.
 
 | Crate | Purpose |
 |-------|---------|
-| `asupersync` | Structured concurrency async runtime (replacing tokio) |
+| `asupersync` | Structured concurrency async runtime |
 | `rich_rust` | Terminal UI rendering with markup syntax |
 | `serde` + `serde_json` | JSON serialization for API/session formats |
 | `clap` | CLI argument parsing with derive macros |
-| `reqwest` | HTTP client (interim, migrating to asupersync) |
 | `crossterm` | Low-level terminal control |
 | `thiserror` | Error type definitions |
 
@@ -219,7 +218,7 @@ CLI (clap) → Agent Loop → Provider (Anthropic/OpenAI) → Streaming Response
 This port uses two key libraries from sibling projects:
 
 1. **asupersync** (`../asupersync`) - Structured concurrency runtime
-   - Replaces tokio for async execution
+   - Async runtime (structured concurrency)
    - Provides HTTP client, TLS, SQLite
    - Enables deterministic testing with LabRuntime
    - Explicit capability context (Cx)
@@ -231,8 +230,7 @@ This port uses two key libraries from sibling projects:
    - Theme support
 
 **Current Status:**
-- asupersync added as dependency, SSE parser created
-- tokio retained for gradual migration
+- asupersync is the async runtime (HTTP/TLS/SQLite); SSE parser implemented
 - rich_rust added, TUI integration pending
 
 ### Performance Targets
