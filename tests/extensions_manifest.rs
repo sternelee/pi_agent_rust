@@ -189,6 +189,392 @@ fn policy_evaluate_covers_modes_and_deny_list() {
     assert_eq!(permissive_denied.reason, "deny_caps");
 }
 
+// ============================================================================
+// Individual Message Type Parsing Tests (bd-261)
+// ============================================================================
+
+#[test]
+fn parse_tool_call_message_ok() {
+    let json = json!({
+        "id": "msg-1",
+        "version": pi::extensions::PROTOCOL_VERSION,
+        "type": "tool_call",
+        "payload": {
+            "call_id": "call-1",
+            "name": "read",
+            "input": { "path": "README.md" }
+        }
+    })
+    .to_string();
+    let parsed = ExtensionMessage::parse_and_validate(&json).expect("parse");
+    assert!(matches!(
+        parsed.body,
+        pi::extensions::ExtensionBody::ToolCall(_)
+    ));
+}
+
+#[test]
+fn parse_tool_call_rejects_missing_call_id() {
+    let json = json!({
+        "id": "msg-1",
+        "version": pi::extensions::PROTOCOL_VERSION,
+        "type": "tool_call",
+        "payload": {
+            "name": "read",
+            "input": { "path": "README.md" }
+        }
+    })
+    .to_string();
+    let err = ExtensionMessage::parse_and_validate(&json).unwrap_err();
+    let message = err.to_string();
+    assert!(
+        message.contains("call_id") || message.contains("callId"),
+        "expected error about call_id, got: {message}"
+    );
+}
+
+#[test]
+fn parse_tool_result_message_ok() {
+    let json = json!({
+        "id": "msg-1",
+        "version": pi::extensions::PROTOCOL_VERSION,
+        "type": "tool_result",
+        "payload": {
+            "call_id": "call-1",
+            "output": { "content": "file contents" },
+            "is_error": false
+        }
+    })
+    .to_string();
+    let parsed = ExtensionMessage::parse_and_validate(&json).expect("parse");
+    assert!(matches!(
+        parsed.body,
+        pi::extensions::ExtensionBody::ToolResult(_)
+    ));
+}
+
+#[test]
+fn parse_tool_result_error_flag_true() {
+    let json = json!({
+        "id": "msg-1",
+        "version": pi::extensions::PROTOCOL_VERSION,
+        "type": "tool_result",
+        "payload": {
+            "call_id": "call-1",
+            "output": { "error": "file not found" },
+            "is_error": true
+        }
+    })
+    .to_string();
+    let parsed = ExtensionMessage::parse_and_validate(&json).expect("parse");
+    if let pi::extensions::ExtensionBody::ToolResult(payload) = parsed.body {
+        assert!(payload.is_error);
+    } else {
+        panic!("expected ToolResult");
+    }
+}
+
+#[test]
+fn parse_slash_command_message_ok() {
+    let json = json!({
+        "id": "msg-1",
+        "version": pi::extensions::PROTOCOL_VERSION,
+        "type": "slash_command",
+        "payload": {
+            "name": "/hello",
+            "args": ["world", "test"]
+        }
+    })
+    .to_string();
+    let parsed = ExtensionMessage::parse_and_validate(&json).expect("parse");
+    assert!(matches!(
+        parsed.body,
+        pi::extensions::ExtensionBody::SlashCommand(_)
+    ));
+}
+
+#[test]
+fn parse_slash_command_with_empty_args() {
+    let json = json!({
+        "id": "msg-1",
+        "version": pi::extensions::PROTOCOL_VERSION,
+        "type": "slash_command",
+        "payload": {
+            "name": "/help",
+            "args": []
+        }
+    })
+    .to_string();
+    let parsed = ExtensionMessage::parse_and_validate(&json).expect("parse");
+    if let pi::extensions::ExtensionBody::SlashCommand(payload) = parsed.body {
+        assert!(payload.args.is_empty());
+    } else {
+        panic!("expected SlashCommand");
+    }
+}
+
+#[test]
+fn parse_slash_result_message_ok() {
+    let json = json!({
+        "id": "msg-1",
+        "version": pi::extensions::PROTOCOL_VERSION,
+        "type": "slash_result",
+        "payload": {
+            "output": { "text": "command executed" },
+            "is_error": false
+        }
+    })
+    .to_string();
+    let parsed = ExtensionMessage::parse_and_validate(&json).expect("parse");
+    assert!(matches!(
+        parsed.body,
+        pi::extensions::ExtensionBody::SlashResult(_)
+    ));
+}
+
+#[test]
+fn parse_event_hook_message_ok() {
+    let json = json!({
+        "id": "msg-1",
+        "version": pi::extensions::PROTOCOL_VERSION,
+        "type": "event_hook",
+        "payload": {
+            "event": "agent_start",
+            "data": { "session_id": "sess-123" }
+        }
+    })
+    .to_string();
+    let parsed = ExtensionMessage::parse_and_validate(&json).expect("parse");
+    assert!(matches!(
+        parsed.body,
+        pi::extensions::ExtensionBody::EventHook(_)
+    ));
+}
+
+#[test]
+fn parse_event_hook_with_null_data() {
+    let json = json!({
+        "id": "msg-1",
+        "version": pi::extensions::PROTOCOL_VERSION,
+        "type": "event_hook",
+        "payload": {
+            "event": "agent_end"
+        }
+    })
+    .to_string();
+    let parsed = ExtensionMessage::parse_and_validate(&json).expect("parse");
+    if let pi::extensions::ExtensionBody::EventHook(payload) = parsed.body {
+        assert!(payload.data.is_none());
+    } else {
+        panic!("expected EventHook");
+    }
+}
+
+#[test]
+fn parse_host_result_message_ok() {
+    let json = json!({
+        "id": "msg-1",
+        "version": pi::extensions::PROTOCOL_VERSION,
+        "type": "host_result",
+        "payload": {
+            "call_id": "host-1",
+            "output": { "status": "success" },
+            "is_error": false
+        }
+    })
+    .to_string();
+    let parsed = ExtensionMessage::parse_and_validate(&json).expect("parse");
+    assert!(matches!(
+        parsed.body,
+        pi::extensions::ExtensionBody::HostResult(_)
+    ));
+}
+
+#[test]
+fn parse_host_result_with_error_details() {
+    let json = json!({
+        "id": "msg-1",
+        "version": pi::extensions::PROTOCOL_VERSION,
+        "type": "host_result",
+        "payload": {
+            "call_id": "host-1",
+            "output": {},
+            "is_error": true,
+            "error": {
+                "code": "denied",
+                "message": "capability not allowed",
+                "details": { "capability": "exec" },
+                "retryable": false
+            }
+        }
+    })
+    .to_string();
+    let parsed = ExtensionMessage::parse_and_validate(&json).expect("parse");
+    if let pi::extensions::ExtensionBody::HostResult(payload) = parsed.body {
+        assert!(payload.is_error);
+        let error = payload.error.expect("error should be present");
+        assert!(matches!(
+            error.code,
+            pi::extensions::HostCallErrorCode::Denied
+        ));
+    } else {
+        panic!("expected HostResult");
+    }
+}
+
+#[test]
+fn parse_error_message_ok() {
+    let json = json!({
+        "id": "msg-1",
+        "version": pi::extensions::PROTOCOL_VERSION,
+        "type": "error",
+        "payload": {
+            "code": "E_DEMO",
+            "message": "Something went wrong"
+        }
+    })
+    .to_string();
+    let parsed = ExtensionMessage::parse_and_validate(&json).expect("parse");
+    assert!(matches!(
+        parsed.body,
+        pi::extensions::ExtensionBody::Error(_)
+    ));
+}
+
+#[test]
+fn parse_error_message_with_details() {
+    let json = json!({
+        "id": "msg-1",
+        "version": pi::extensions::PROTOCOL_VERSION,
+        "type": "error",
+        "payload": {
+            "code": "E_CONFIG",
+            "message": "Invalid configuration",
+            "details": { "field": "api_version", "expected": "1.0" }
+        }
+    })
+    .to_string();
+    let parsed = ExtensionMessage::parse_and_validate(&json).expect("parse");
+    if let pi::extensions::ExtensionBody::Error(payload) = parsed.body {
+        assert_eq!(payload.code, "E_CONFIG");
+        assert!(payload.details.is_some());
+    } else {
+        panic!("expected Error");
+    }
+}
+
+#[test]
+fn parse_log_message_all_correlation_fields() {
+    let json = json!({
+        "id": "msg-1",
+        "version": pi::extensions::PROTOCOL_VERSION,
+        "type": "log",
+        "payload": {
+            "schema": "pi.ext.log.v1",
+            "ts": "2026-02-03T12:00:00.000Z",
+            "level": "debug",
+            "event": "tool_call.complete",
+            "message": "Tool call completed successfully",
+            "correlation": {
+                "extension_id": "ext.demo",
+                "scenario_id": "scn-001",
+                "session_id": "sess-123",
+                "run_id": "run-456",
+                "artifact_id": "art-789",
+                "tool_call_id": "call-1",
+                "trace_id": "trace-abc",
+                "span_id": "span-def"
+            },
+            "source": {
+                "component": "runtime",
+                "host": "localhost",
+                "pid": 12345
+            },
+            "data": { "duration_ms": 150 }
+        }
+    })
+    .to_string();
+    let parsed = ExtensionMessage::parse_and_validate(&json).expect("parse");
+    if let pi::extensions::ExtensionBody::Log(payload) = parsed.body {
+        assert!(matches!(payload.level, pi::extensions::LogLevel::Debug));
+        assert_eq!(payload.correlation.session_id.as_deref(), Some("sess-123"));
+        assert!(payload.source.is_some());
+    } else {
+        panic!("expected Log");
+    }
+}
+
+// ============================================================================
+// Unicode and Edge Case Tests (bd-261)
+// ============================================================================
+
+#[test]
+fn parse_message_with_unicode_content() {
+    let json = json!({
+        "id": "msg-unicode-😀",
+        "version": pi::extensions::PROTOCOL_VERSION,
+        "type": "tool_call",
+        "payload": {
+            "call_id": "call-中文",
+            "name": "read",
+            "input": { "path": "文件/שלום/مرحبا.txt" }
+        }
+    })
+    .to_string();
+    let parsed = ExtensionMessage::parse_and_validate(&json).expect("parse");
+    assert_eq!(parsed.id, "msg-unicode-😀");
+}
+
+#[test]
+fn parse_malformed_json_fails() {
+    let json = r#"{ "id": "msg-1", "version": "1.0", "#; // truncated
+    let err = ExtensionMessage::parse_and_validate(json).unwrap_err();
+    assert!(
+        matches!(err, Error::Json(_)),
+        "expected json error, got {err}"
+    );
+}
+
+#[test]
+fn parse_empty_json_object_fails() {
+    let json = "{}";
+    let err = ExtensionMessage::parse_and_validate(json).unwrap_err();
+    assert!(
+        matches!(err, Error::Json(_)),
+        "expected json error, got {err}"
+    );
+}
+
+#[test]
+fn parse_json_array_fails() {
+    let json = r#"[{"id": "msg-1"}]"#;
+    let err = ExtensionMessage::parse_and_validate(json).unwrap_err();
+    assert!(
+        matches!(err, Error::Json(_)),
+        "expected json error, got {err}"
+    );
+}
+
+#[test]
+fn parse_null_payload_fails() {
+    let json = json!({
+        "id": "msg-1",
+        "version": pi::extensions::PROTOCOL_VERSION,
+        "type": "register",
+        "payload": null
+    })
+    .to_string();
+    let err = ExtensionMessage::parse_and_validate(&json).unwrap_err();
+    assert!(
+        matches!(err, Error::Json(_)),
+        "expected json error, got {err}"
+    );
+}
+
+// ============================================================================
+// Host Call Capability Mapping Tests
+// ============================================================================
+
 #[test]
 fn required_capability_for_host_call_maps_tool_to_capability() {
     assert_eq!(

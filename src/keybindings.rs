@@ -15,8 +15,114 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
+
+// ============================================================================
+// Load Result (for user config loading with diagnostics)
+// ============================================================================
+
+/// Result of loading keybindings with diagnostics.
+#[derive(Debug)]
+pub struct KeyBindingsLoadResult {
+    /// The loaded keybindings (defaults if loading failed).
+    pub bindings: KeyBindings,
+    /// Path that was attempted to load.
+    pub path: PathBuf,
+    /// Warnings encountered during loading.
+    pub warnings: Vec<KeyBindingsWarning>,
+}
+
+impl KeyBindingsLoadResult {
+    /// Check if there were any warnings.
+    #[must_use]
+    pub fn has_warnings(&self) -> bool {
+        !self.warnings.is_empty()
+    }
+
+    /// Format warnings for display.
+    #[must_use]
+    pub fn format_warnings(&self) -> String {
+        self.warnings
+            .iter()
+            .map(|w| w.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// Warning types for keybindings loading.
+#[derive(Debug, Clone)]
+pub enum KeyBindingsWarning {
+    /// Could not read the config file.
+    ReadError { path: PathBuf, error: String },
+    /// Could not parse the config file as JSON.
+    ParseError { path: PathBuf, error: String },
+    /// Unknown action ID in config.
+    UnknownAction { action: String, path: PathBuf },
+    /// Invalid key string in config.
+    InvalidKey {
+        action: String,
+        key: String,
+        error: String,
+        path: PathBuf,
+    },
+    /// Invalid value type for key (not a string).
+    InvalidKeyValue {
+        action: String,
+        index: usize,
+        path: PathBuf,
+    },
+}
+
+impl fmt::Display for KeyBindingsWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ReadError { path, error } => {
+                write!(f, "Cannot read {}: {}", path.display(), error)
+            }
+            Self::ParseError { path, error } => {
+                write!(f, "Invalid JSON in {}: {}", path.display(), error)
+            }
+            Self::UnknownAction { action, path } => {
+                write!(
+                    f,
+                    "Unknown action '{}' in {} (ignored)",
+                    action,
+                    path.display()
+                )
+            }
+            Self::InvalidKey {
+                action,
+                key,
+                error,
+                path,
+            } => {
+                write!(
+                    f,
+                    "Invalid key '{}' for action '{}' in {}: {}",
+                    key,
+                    action,
+                    path.display(),
+                    error
+                )
+            }
+            Self::InvalidKeyValue {
+                action,
+                index,
+                path,
+            } => {
+                write!(
+                    f,
+                    "Invalid value type at index {} for action '{}' in {} (expected string)",
+                    index,
+                    action,
+                    path.display()
+                )
+            }
+        }
+    }
+}
 
 // ============================================================================
 // Action Categories (for /hotkeys display grouping)
@@ -569,6 +675,8 @@ pub enum KeyBindingParseError {
     MultipleKeys { binding: String },
     /// Duplicate modifier (e.g., "ctrl+ctrl+x").
     DuplicateModifier { modifier: String, binding: String },
+    /// Unknown modifier (e.g., "meta+enter").
+    UnknownModifier { modifier: String, binding: String },
     /// Unknown key name.
     UnknownKey { key: String, binding: String },
 }
@@ -581,6 +689,9 @@ impl fmt::Display for KeyBindingParseError {
             Self::MultipleKeys { binding } => write!(f, "Multiple keys in binding: {binding}"),
             Self::DuplicateModifier { modifier, binding } => {
                 write!(f, "Duplicate modifier '{modifier}' in binding: {binding}")
+            }
+            Self::UnknownModifier { modifier, binding } => {
+                write!(f, "Unknown modifier '{modifier}' in binding: {binding}")
             }
             Self::UnknownKey { key, binding } => {
                 write!(f, "Unknown key '{key}' in binding: {binding}")
@@ -616,9 +727,9 @@ fn normalize_key_name(key: &str) -> Option<String> {
         s if s.len() == 1 && s.chars().next().is_some_and(|c| c.is_ascii_lowercase()) => &lower,
 
         // Symbols (single characters that are valid keys)
-        "`" | "-" | "=" | "[" | "]" | "\\" | ";" | "'" | "," | "." | "/" | "!" | "@" | "#" | "$"
-        | "%" | "^" | "&" | "*" | "(" | ")" | "_" | "+" | "|" | "~" | "{" | "}" | ":" | "<"
-        | ">" | "?" | "\"" => &lower,
+        "`" | "-" | "=" | "[" | "]" | "\\" | ";" | "'" | "," | "." | "/" | "!" | "@" | "#"
+        | "$" | "%" | "^" | "&" | "*" | "(" | ")" | "_" | "+" | "|" | "~" | "{" | "}" | ":"
+        | "<" | ">" | "?" | "\"" => &lower,
 
         // Invalid key
         _ => return None,
@@ -654,78 +765,101 @@ fn is_modifier(s: &str) -> Option<&'static str> {
 /// - Duplicate modifiers
 /// - Unknown keys
 fn parse_key_binding(s: &str) -> Result<KeyBinding, KeyBindingParseError> {
-    let s = s.trim();
-    if s.is_empty() {
+    let binding = s.trim();
+    if binding.is_empty() {
         return Err(KeyBindingParseError::Empty);
     }
 
-    let parts: Vec<&str> = s.split('+').collect();
+    // Be forgiving about whitespace: "ctrl + a" is treated as "ctrl+a".
+    let compacted = binding
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>();
+    let normalized = compacted.to_lowercase();
+    let mut rest = normalized.as_str();
 
     let mut ctrl_seen = false;
     let mut alt_seen = false;
     let mut shift_seen = false;
-    let mut key: Option<String> = None;
 
-    for part in parts {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-
-        // Check if it's a modifier
-        if let Some(canonical_mod) = is_modifier(part) {
-            match canonical_mod {
-                "ctrl" => {
-                    if ctrl_seen {
-                        return Err(KeyBindingParseError::DuplicateModifier {
-                            modifier: "ctrl".to_string(),
-                            binding: s.to_string(),
-                        });
-                    }
-                    ctrl_seen = true;
-                }
-                "alt" => {
-                    if alt_seen {
-                        return Err(KeyBindingParseError::DuplicateModifier {
-                            modifier: "alt".to_string(),
-                            binding: s.to_string(),
-                        });
-                    }
-                    alt_seen = true;
-                }
-                "shift" => {
-                    if shift_seen {
-                        return Err(KeyBindingParseError::DuplicateModifier {
-                            modifier: "shift".to_string(),
-                            binding: s.to_string(),
-                        });
-                    }
-                    shift_seen = true;
-                }
-                _ => unreachable!(),
-            }
-        } else {
-            // It's a key
-            if key.is_some() {
-                return Err(KeyBindingParseError::MultipleKeys {
-                    binding: s.to_string(),
+    // Parse modifiers as a prefix chain so we can represent the '+' key itself (e.g. "ctrl++").
+    loop {
+        if let Some(after) = rest.strip_prefix("ctrl+") {
+            if ctrl_seen {
+                return Err(KeyBindingParseError::DuplicateModifier {
+                    modifier: "ctrl".to_string(),
+                    binding: binding.to_string(),
                 });
             }
-
-            // Normalize the key name
-            match normalize_key_name(part) {
-                Some(normalized) => key = Some(normalized),
-                None => {
-                    return Err(KeyBindingParseError::UnknownKey {
-                        key: part.to_string(),
-                        binding: s.to_string(),
-                    });
-                }
-            }
+            ctrl_seen = true;
+            rest = after;
+            continue;
         }
+        if let Some(after) = rest.strip_prefix("control+") {
+            if ctrl_seen {
+                return Err(KeyBindingParseError::DuplicateModifier {
+                    modifier: "ctrl".to_string(),
+                    binding: binding.to_string(),
+                });
+            }
+            ctrl_seen = true;
+            rest = after;
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix("alt+") {
+            if alt_seen {
+                return Err(KeyBindingParseError::DuplicateModifier {
+                    modifier: "alt".to_string(),
+                    binding: binding.to_string(),
+                });
+            }
+            alt_seen = true;
+            rest = after;
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix("shift+") {
+            if shift_seen {
+                return Err(KeyBindingParseError::DuplicateModifier {
+                    modifier: "shift".to_string(),
+                    binding: binding.to_string(),
+                });
+            }
+            shift_seen = true;
+            rest = after;
+            continue;
+        }
+        break;
     }
 
-    let key = key.ok_or(KeyBindingParseError::NoKey)?;
+    if rest.is_empty() {
+        return Err(KeyBindingParseError::NoKey);
+    }
+
+    // Allow "ctrl" / "ctrl+shift" to be treated as "only modifiers".
+    if matches!(rest, "ctrl" | "control" | "alt" | "shift") {
+        return Err(KeyBindingParseError::NoKey);
+    }
+
+    // After consuming known modifiers, any remaining '+' means either:
+    // - the '+' key itself (rest == "+")
+    // - multiple keys (e.g. "a+b") or an unknown modifier (e.g. "meta+enter")
+    if rest.contains('+') && rest != "+" {
+        let first = rest.split('+').next().unwrap_or("");
+        if first.is_empty() || normalize_key_name(first).is_some() {
+            return Err(KeyBindingParseError::MultipleKeys {
+                binding: binding.to_string(),
+            });
+        }
+        return Err(KeyBindingParseError::UnknownModifier {
+            modifier: first.to_string(),
+            binding: binding.to_string(),
+        });
+    }
+
+    let key = normalize_key_name(rest).ok_or_else(|| KeyBindingParseError::UnknownKey {
+        key: rest.to_string(),
+        binding: binding.to_string(),
+    })?;
 
     Ok(KeyBinding {
         key,
@@ -799,6 +933,164 @@ impl KeyBindings {
         Ok(Self { bindings, reverse })
     }
 
+    /// Get the default user keybindings path: `~/.pi/agent/keybindings.json`
+    #[must_use]
+    pub fn user_config_path() -> std::path::PathBuf {
+        crate::config::Config::global_dir()
+            .join("agent")
+            .join("keybindings.json")
+    }
+
+    /// Load keybindings from user config, returning defaults with diagnostics if loading fails.
+    ///
+    /// This method never fails - it always returns valid keybindings (defaults at minimum).
+    /// Warnings are collected in `KeyBindingsLoadResult` for display to the user.
+    ///
+    /// # User Config Format
+    ///
+    /// The config file is a JSON object mapping action IDs (camelCase) to key bindings:
+    ///
+    /// ```json
+    /// {
+    ///   "cursorUp": ["up", "ctrl+p"],
+    ///   "cursorDown": ["down", "ctrl+n"],
+    ///   "deleteWordBackward": ["ctrl+w", "alt+backspace"]
+    /// }
+    /// ```
+    #[must_use]
+    pub fn load_from_user_config() -> KeyBindingsLoadResult {
+        let path = Self::user_config_path();
+        Self::load_from_path_with_diagnostics(&path)
+    }
+
+    /// Load keybindings from a specific path with full diagnostics.
+    ///
+    /// Returns defaults with warnings if:
+    /// - File doesn't exist (no warning - this is normal)
+    /// - File is not valid JSON
+    /// - File contains unknown action IDs
+    /// - File contains invalid key strings
+    #[must_use]
+    pub fn load_from_path_with_diagnostics(path: &Path) -> KeyBindingsLoadResult {
+        let mut warnings = Vec::new();
+
+        // Check if file exists
+        if !path.exists() {
+            return KeyBindingsLoadResult {
+                bindings: Self::new(),
+                path: path.to_path_buf(),
+                warnings,
+            };
+        }
+
+        // Read file
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                warnings.push(KeyBindingsWarning::ReadError {
+                    path: path.to_path_buf(),
+                    error: e.to_string(),
+                });
+                return KeyBindingsLoadResult {
+                    bindings: Self::new(),
+                    path: path.to_path_buf(),
+                    warnings,
+                };
+            }
+        };
+
+        // Parse as loose JSON (object with string keys and string/array values)
+        let raw: HashMap<String, serde_json::Value> = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(e) => {
+                warnings.push(KeyBindingsWarning::ParseError {
+                    path: path.to_path_buf(),
+                    error: e.to_string(),
+                });
+                return KeyBindingsLoadResult {
+                    bindings: Self::new(),
+                    path: path.to_path_buf(),
+                    warnings,
+                };
+            }
+        };
+
+        // Start with defaults
+        let mut bindings = Self::default_bindings();
+
+        // Process each entry
+        for (action_str, value) in raw {
+            // Try to parse action ID
+            let action: AppAction = match serde_json::from_value(serde_json::json!(action_str)) {
+                Ok(a) => a,
+                Err(_) => {
+                    warnings.push(KeyBindingsWarning::UnknownAction {
+                        action: action_str,
+                        path: path.to_path_buf(),
+                    });
+                    continue;
+                }
+            };
+
+            // Parse key bindings (can be string or array of strings)
+            let key_strings: Vec<String> = match value {
+                serde_json::Value::String(s) => vec![s],
+                serde_json::Value::Array(arr) => {
+                    let mut keys = Vec::new();
+                    for (idx, v) in arr.into_iter().enumerate() {
+                        match v {
+                            serde_json::Value::String(s) => keys.push(s),
+                            _ => {
+                                warnings.push(KeyBindingsWarning::InvalidKeyValue {
+                                    action: action.to_string(),
+                                    index: idx,
+                                    path: path.to_path_buf(),
+                                });
+                            }
+                        }
+                    }
+                    keys
+                }
+                _ => {
+                    warnings.push(KeyBindingsWarning::InvalidKeyValue {
+                        action: action.to_string(),
+                        index: 0,
+                        path: path.to_path_buf(),
+                    });
+                    continue;
+                }
+            };
+
+            // Parse each key string
+            let mut parsed_keys = Vec::new();
+            for key_str in key_strings {
+                match key_str.parse::<KeyBinding>() {
+                    Ok(binding) => parsed_keys.push(binding),
+                    Err(e) => {
+                        warnings.push(KeyBindingsWarning::InvalidKey {
+                            action: action.to_string(),
+                            key: key_str,
+                            error: e.to_string(),
+                            path: path.to_path_buf(),
+                        });
+                    }
+                }
+            }
+
+            // Only override if we got at least one valid key
+            if !parsed_keys.is_empty() {
+                bindings.insert(action, parsed_keys);
+            }
+        }
+
+        let reverse = Self::build_reverse_map(&bindings);
+        KeyBindingsLoadResult {
+            bindings: Self { bindings, reverse },
+            path: path.to_path_buf(),
+            warnings,
+        }
+    }
+
     /// Look up the action for a key binding.
     #[must_use]
     pub fn lookup(&self, binding: &KeyBinding) -> Option<AppAction> {
@@ -832,9 +1124,15 @@ impl KeyBindings {
         bindings: &HashMap<AppAction, Vec<KeyBinding>>,
     ) -> HashMap<KeyBinding, AppAction> {
         let mut reverse = HashMap::new();
-        for (&action, keys) in bindings {
+        // Deterministic reverse map:
+        // - iterate actions in stable order (AppAction::all)
+        // - keep the first mapping for a given key (collisions are context-dependent)
+        for &action in AppAction::all() {
+            let Some(keys) = bindings.get(&action) else {
+                continue;
+            };
             for key in keys {
-                reverse.insert(key.clone(), action);
+                reverse.entry(key.clone()).or_insert(action);
             }
         }
         reverse
@@ -1066,8 +1364,7 @@ mod tests {
         let bindings = KeyBindings::new();
 
         // All actions should be iterable
-        let all_actions: Vec<_> = bindings.iter().collect();
-        assert!(!all_actions.is_empty());
+        assert!(bindings.iter().next().is_some());
 
         // Category iteration
         let cursor_actions: Vec<_> = bindings
@@ -1181,22 +1478,36 @@ mod tests {
     fn test_parse_all_special_keys() {
         // All special keys from the spec should parse
         let special_keys = [
-            "escape", "enter", "tab", "space", "backspace", "delete", "insert", "clear", "home",
-            "end", "pageup", "pagedown", "up", "down", "left", "right",
+            "escape",
+            "enter",
+            "tab",
+            "space",
+            "backspace",
+            "delete",
+            "insert",
+            "clear",
+            "home",
+            "end",
+            "pageup",
+            "pagedown",
+            "up",
+            "down",
+            "left",
+            "right",
         ];
 
         for key in special_keys {
             let binding: KeyBinding = key.parse().unwrap();
-            assert_eq!(binding.key, key, "Failed to parse special key: {}", key);
+            assert_eq!(binding.key, key, "Failed to parse special key: {key}");
         }
     }
 
     #[test]
     fn test_parse_function_keys() {
         for i in 1..=12 {
-            let key = format!("f{}", i);
+            let key = format!("f{i}");
             let binding: KeyBinding = key.parse().unwrap();
-            assert_eq!(binding.key, key, "Failed to parse function key: {}", key);
+            assert_eq!(binding.key, key, "Failed to parse function key: {key}");
         }
     }
 
@@ -1218,8 +1529,21 @@ mod tests {
 
         for sym in symbols {
             let binding: KeyBinding = sym.parse().unwrap();
-            assert_eq!(binding.key, sym, "Failed to parse symbol: {}", sym);
+            assert_eq!(binding.key, sym, "Failed to parse symbol: {sym}");
         }
+    }
+
+    #[test]
+    fn test_parse_plus_key_with_modifiers() {
+        let binding: KeyBinding = "ctrl++".parse().unwrap();
+        assert!(binding.modifiers.ctrl);
+        assert_eq!(binding.key, "+");
+        assert_eq!(binding.to_string(), "ctrl++");
+
+        let binding: KeyBinding = "ctrl + +".parse().unwrap();
+        assert!(binding.modifiers.ctrl);
+        assert_eq!(binding.key, "+");
+        assert_eq!(binding.to_string(), "ctrl++");
     }
 
     // ============================================================================
@@ -1363,6 +1687,21 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_parse_unknown_modifier() {
+        let result: Result<KeyBinding, _> = "meta+enter".parse();
+        assert!(matches!(
+            result,
+            Err(KeyBindingParseError::UnknownModifier { modifier, .. }) if modifier == "meta"
+        ));
+
+        let result: Result<KeyBinding, _> = "ctrl+meta+enter".parse();
+        assert!(matches!(
+            result,
+            Err(KeyBindingParseError::UnknownModifier { modifier, .. }) if modifier == "meta"
+        ));
+    }
+
     // ============================================================================
     // Key Parsing: Normalization Stability
     // ============================================================================
@@ -1454,7 +1793,7 @@ mod tests {
 
         for key in legacy_bindings {
             let result: Result<KeyBinding, _> = key.parse();
-            assert!(result.is_ok(), "Failed to parse legacy binding: {}", key);
+            assert!(result.is_ok(), "Failed to parse legacy binding: {key}");
         }
     }
 
@@ -1490,5 +1829,167 @@ mod tests {
             binding: "ctrl+xyz".to_string(),
         };
         assert!(err.to_string().contains("xyz"));
+
+        let err = KeyBindingParseError::UnknownModifier {
+            modifier: "meta".to_string(),
+            binding: "meta+enter".to_string(),
+        };
+        assert!(err.to_string().contains("meta"));
+        assert!(err.to_string().contains("meta+enter"));
+    }
+
+    // ============================================================================
+    // User Config Loading (bd-3qm)
+    // ============================================================================
+
+    #[test]
+    fn test_load_from_nonexistent_path_returns_defaults() {
+        let path = std::path::Path::new("/nonexistent/keybindings.json");
+        let result = KeyBindings::load_from_path_with_diagnostics(path);
+
+        // Should return defaults with no warnings (missing file is normal)
+        assert!(!result.has_warnings());
+        assert!(result.bindings.lookup(&KeyBinding::ctrl("a")).is_some());
+    }
+
+    #[test]
+    fn test_load_valid_override() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("keybindings.json");
+
+        std::fs::write(
+            &path,
+            r#"{
+                "cursorUp": ["up", "ctrl+p"],
+                "cursorDown": "down"
+            }"#,
+        )
+        .unwrap();
+
+        let result = KeyBindings::load_from_path_with_diagnostics(&path);
+
+        assert!(!result.has_warnings());
+
+        // Check overrides
+        let up_bindings = result.bindings.get_bindings(AppAction::CursorUp);
+        assert!(up_bindings.contains(&KeyBinding::plain("up")));
+        assert!(up_bindings.contains(&KeyBinding::ctrl("p")));
+
+        // Check single string value works
+        let down_bindings = result.bindings.get_bindings(AppAction::CursorDown);
+        assert!(down_bindings.contains(&KeyBinding::plain("down")));
+    }
+
+    #[test]
+    fn test_load_warns_on_unknown_action() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("keybindings.json");
+
+        std::fs::write(
+            &path,
+            r#"{
+                "cursorUp": ["up"],
+                "unknownAction": ["ctrl+x"],
+                "anotherBadAction": ["ctrl+y"]
+            }"#,
+        )
+        .unwrap();
+
+        let result = KeyBindings::load_from_path_with_diagnostics(&path);
+
+        // Should have 2 warnings for unknown actions
+        assert_eq!(result.warnings.len(), 2);
+        assert!(result.format_warnings().contains("unknownAction"));
+        assert!(result.format_warnings().contains("anotherBadAction"));
+
+        // Valid action should still work
+        let up_bindings = result.bindings.get_bindings(AppAction::CursorUp);
+        assert!(up_bindings.contains(&KeyBinding::plain("up")));
+    }
+
+    #[test]
+    fn test_load_warns_on_invalid_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("keybindings.json");
+
+        std::fs::write(
+            &path,
+            r#"{
+                "cursorUp": ["up", "invalidkey123", "ctrl+p"]
+            }"#,
+        )
+        .unwrap();
+
+        let result = KeyBindings::load_from_path_with_diagnostics(&path);
+
+        // Should have 1 warning for invalid key
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.format_warnings().contains("invalidkey123"));
+
+        // Valid keys should still be applied
+        let up_bindings = result.bindings.get_bindings(AppAction::CursorUp);
+        assert!(up_bindings.contains(&KeyBinding::plain("up")));
+        assert!(up_bindings.contains(&KeyBinding::ctrl("p")));
+        assert_eq!(up_bindings.len(), 2); // not 3
+    }
+
+    #[test]
+    fn test_load_warns_on_invalid_json() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("keybindings.json");
+
+        std::fs::write(&path, "{ not valid json }").unwrap();
+
+        let result = KeyBindings::load_from_path_with_diagnostics(&path);
+
+        // Should have 1 warning for parse error
+        assert_eq!(result.warnings.len(), 1);
+        assert!(matches!(
+            result.warnings[0],
+            KeyBindingsWarning::ParseError { .. }
+        ));
+
+        // Should return defaults
+        assert!(result.bindings.lookup(&KeyBinding::ctrl("a")).is_some());
+    }
+
+    #[test]
+    fn test_load_handles_invalid_value_type() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("keybindings.json");
+
+        std::fs::write(
+            &path,
+            r#"{
+                "cursorUp": 123,
+                "cursorDown": ["down"]
+            }"#,
+        )
+        .unwrap();
+
+        let result = KeyBindings::load_from_path_with_diagnostics(&path);
+
+        // Should have 1 warning for invalid value type
+        assert_eq!(result.warnings.len(), 1);
+        assert!(matches!(
+            result.warnings[0],
+            KeyBindingsWarning::InvalidKeyValue { .. }
+        ));
+
+        // Valid action should still work
+        let down_bindings = result.bindings.get_bindings(AppAction::CursorDown);
+        assert!(down_bindings.contains(&KeyBinding::plain("down")));
+    }
+
+    #[test]
+    fn test_warning_display_format() {
+        let warning = KeyBindingsWarning::UnknownAction {
+            action: "badAction".to_string(),
+            path: PathBuf::from("/test/keybindings.json"),
+        };
+        let msg = warning.to_string();
+        assert!(msg.contains("badAction"));
+        assert!(msg.contains("/test/keybindings.json"));
+        assert!(msg.contains("ignored"));
     }
 }

@@ -2026,9 +2026,56 @@ impl PiApp {
                 );
             }
             SlashCommand::New => {
-                self.status_message = Some(
-                    "New session: restart Pi without --continue flag to start fresh".to_string(),
+                if self.agent_state != AgentState::Idle {
+                    self.status_message =
+                        Some("Cannot start a new session while processing".to_string());
+                    return None;
+                }
+
+                let provider = self.model_entry.model.provider.clone();
+                let model_id = self.model_entry.model.id.clone();
+
+                let Ok(mut session_guard) = self.session.try_lock() else {
+                    self.status_message = Some("Session busy; try again".to_string());
+                    return None;
+                };
+                let session_dir = session_guard.session_dir.clone();
+                let thinking_level = session_guard
+                    .header
+                    .thinking_level
+                    .clone()
+                    .unwrap_or_else(|| "off".to_string());
+
+                let mut new_session = Session::create_with_dir(session_dir);
+                new_session.set_model_header(
+                    Some(provider.clone()),
+                    Some(model_id.clone()),
+                    Some(thinking_level.clone()),
                 );
+                new_session.append_model_change(provider, model_id);
+                new_session.append_thinking_level_change(thinking_level);
+
+                let messages_for_agent = new_session.to_messages_for_current_path();
+                let (messages, usage) = load_conversation_from_session(&new_session);
+                *session_guard = new_session;
+                drop(session_guard);
+
+                let Ok(mut agent_guard) = self.agent.try_lock() else {
+                    self.status_message = Some("Agent busy; try again".to_string());
+                    return None;
+                };
+                agent_guard.replace_messages(messages_for_agent);
+                drop(agent_guard);
+
+                self.pending_inputs.clear();
+                self.input.set_value("");
+                self.messages = messages;
+                self.total_usage = usage;
+                self.current_response.clear();
+                self.current_thinking.clear();
+                self.status_message = Some("Started new session".to_string());
+                self.scroll_to_bottom();
+                self.spawn_save_session();
             }
             SlashCommand::Copy => {
                 // Find the last assistant message

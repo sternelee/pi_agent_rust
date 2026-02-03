@@ -5,6 +5,7 @@
 //! asupersync for TLS + cancel-correctness.
 
 use crate::error::{Error, Result};
+use crate::vcr::{RecordedRequest, VcrRecorder};
 use asupersync::http::h1::ParsedUrl;
 use asupersync::http::h1::http_client::Scheme;
 use asupersync::io::ext::AsyncWriteExt;
@@ -12,8 +13,9 @@ use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::net::tcp::stream::TcpStream;
 use asupersync::tls::{TlsConnector, TlsConnectorBuilder};
 use futures::Stream;
+use futures::StreamExt;
 use futures::TryStreamExt;
-use futures::stream;
+use futures::stream::{self, BoxStream};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -26,6 +28,7 @@ const MAX_BUFFERED_BYTES: usize = 256 * 1024;
 pub struct Client {
     tls: std::result::Result<TlsConnector, String>,
     user_agent: String,
+    vcr: Option<VcrRecorder>,
 }
 
 impl Client {
@@ -39,6 +42,7 @@ impl Client {
         Self {
             tls,
             user_agent: DEFAULT_USER_AGENT.to_string(),
+            vcr: None,
         }
     }
 
@@ -48,6 +52,16 @@ impl Client {
 
     pub fn get(&self, url: &str) -> RequestBuilder<'_> {
         RequestBuilder::new(self, Method::Get, url)
+    }
+
+    #[must_use]
+    pub fn with_vcr(mut self, recorder: VcrRecorder) -> Self {
+        self.vcr = Some(recorder);
+        self
+    }
+
+    pub const fn vcr(&self) -> Option<&VcrRecorder> {
+        self.vcr.as_ref()
     }
 }
 
@@ -97,6 +111,13 @@ impl<'a> RequestBuilder<'a> {
         self
     }
 
+    /// Set raw body bytes.
+    #[must_use]
+    pub fn body(mut self, body: Vec<u8>) -> Self {
+        self.body = body;
+        self
+    }
+
     pub fn json<T: serde::Serialize>(mut self, payload: &T) -> Result<Self> {
         self.headers
             .push(("Content-Type".to_string(), "application/json".to_string()));
@@ -105,38 +126,113 @@ impl<'a> RequestBuilder<'a> {
     }
 
     pub async fn send(self) -> Result<Response> {
-        let parsed =
-            ParsedUrl::parse(&self.url).map_err(|e| Error::api(format!("Invalid URL: {e}")))?;
+        let RequestBuilder {
+            client,
+            method,
+            url,
+            headers,
+            body,
+        } = self;
 
-        let mut transport = connect_transport(&parsed, self.client).await?;
-
-        let request_bytes = build_request_bytes(
-            self.method,
-            &parsed,
-            &self.client.user_agent,
-            &self.headers,
-            &self.body,
-        );
-        transport.write_all(&request_bytes).await?;
-        if !self.body.is_empty() {
-            transport.write_all(&self.body).await?;
+        if let Some(recorder) = client.vcr() {
+            let recorded_request = build_recorded_request(method, &url, &headers, &body);
+            let recorded = recorder
+                .request_streaming_with(recorded_request, || async {
+                    let (status, response_headers, stream) =
+                        send_parts(client, method, &url, &headers, &body).await?;
+                    Ok((status, response_headers, stream))
+                })
+                .await?;
+            let crate::vcr::RecordedResponse {
+                status,
+                headers: response_headers,
+                body_chunks,
+            } = recorded;
+            let stream =
+                stream::iter(body_chunks.into_iter().map(|chunk| Ok(chunk.into_bytes()))).boxed();
+            return Ok(Response {
+                status,
+                headers: response_headers,
+                stream,
+            });
         }
-        transport.flush().await?;
 
-        let (status, headers, leftover) = Box::pin(read_response_head(&mut transport)).await?;
-        let body_kind = body_kind_from_headers(&headers);
-
-        let state = BodyStreamState::new(transport, body_kind, leftover);
-        let stream = stream::try_unfold(state, |mut state| async move {
-            let chunk = Box::pin(state.next_bytes()).await?;
-            Ok(chunk.map(|chunk| (chunk, state)))
-        });
+        let (status, response_headers, stream) =
+            send_parts(client, method, &url, &headers, &body).await?;
 
         Ok(Response {
             status,
-            headers,
-            stream: Box::pin(stream),
+            headers: response_headers,
+            stream,
         })
+    }
+}
+
+async fn send_parts(
+    client: &Client,
+    method: Method,
+    url: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> Result<(
+    u16,
+    Vec<(String, String)>,
+    BoxStream<'static, std::io::Result<Vec<u8>>>,
+)> {
+    let parsed = ParsedUrl::parse(url).map_err(|e| Error::api(format!("Invalid URL: {e}")))?;
+    let mut transport = connect_transport(&parsed, client).await?;
+
+    let request_bytes = build_request_bytes(method, &parsed, &client.user_agent, headers, body);
+    transport.write_all(&request_bytes).await?;
+    if !body.is_empty() {
+        transport.write_all(body).await?;
+    }
+    transport.flush().await?;
+
+    let (status, response_headers, leftover) = Box::pin(read_response_head(&mut transport)).await?;
+    let body_kind = body_kind_from_headers(&response_headers);
+
+    let state = BodyStreamState::new(transport, body_kind, leftover);
+    let stream = stream::try_unfold(state, |mut state| async move {
+        let chunk = Box::pin(state.next_bytes()).await?;
+        Ok(chunk.map(|chunk| (chunk, state)))
+    })
+    .boxed();
+
+    Ok((status, response_headers, stream))
+}
+
+fn build_recorded_request(
+    method: Method,
+    url: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> RecordedRequest {
+    let mut body_value = None;
+    let mut body_text = None;
+
+    if !body.is_empty() {
+        let is_json = headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("content-type")
+                && value.to_ascii_lowercase().contains("application/json")
+        });
+
+        if is_json {
+            match serde_json::from_slice::<serde_json::Value>(body) {
+                Ok(value) => body_value = Some(value),
+                Err(_) => body_text = Some(String::from_utf8_lossy(body).to_string()),
+            }
+        } else {
+            body_text = Some(String::from_utf8_lossy(body).to_string());
+        }
+    }
+
+    RecordedRequest {
+        method: method.as_str().to_string(),
+        url: url.to_string(),
+        headers: headers.to_vec(),
+        body: body_value,
+        body_text,
     }
 }
 

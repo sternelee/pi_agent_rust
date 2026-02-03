@@ -92,6 +92,207 @@ We precompile JS to bytecode (or WASM) and the runtime only contains:
 **Determinism:** With asupersync (LabRuntime) we can test extension async + time
 deterministically (no “real time” flakiness).
 
+### 1A.4 PiJS Runtime Contract (Normative)
+
+This section defines the **authoritative PiJS runtime contract** for running
+JS/TS extensions **without Node/Bun**, with a **deterministic, testable event
+loop** and an explicit, capability-gated hostcall surface.
+
+This contract is the reference for the JS runtime, scheduler, hostcall bridge,
+and test harness workstreams.
+
+#### 1A.4.1 Assumptions / Constraints
+
+- **Assume QuickJS has no WebAssembly**: any JS bundle expecting
+  `globalThis.WebAssembly` must use the PiWasm bridge (or Tier A WASM
+  components).
+- No ambient OS APIs: all side effects must flow through the connector
+  dispatcher (capability checks + structured audit logs).
+
+#### 1A.4.2 Definitions (Terms)
+
+- **Microtasks**: the QuickJS job queue (Promise reactions, `queueMicrotask`).
+- **Macrotasks**: host-driven tasks (timers, inbound extension events, hostcall
+  completions).
+- **Tick**: one deterministic scheduling step that runs **at most one**
+  macrotask plus a full microtask drain.
+- **Hostcall**: a side-effecting request from JS to the host, represented in
+  protocol terms as `host_call` / `host_result` (see §3.2).
+
+#### 1A.4.3 Module / Artifact Loader Contract
+
+##### Artifact inputs
+
+PiJS executes extension artifacts produced by `extc` (the compiler pipeline) from
+**pinned sources** (see `docs/extension-sample.json`).
+
+The compiled output MUST be:
+- deterministic (byte-for-byte stable under identical inputs)
+- ESM-resolvable inside PiJS
+- sourcemap-correct (runtime errors map to original TS/JS)
+
+##### Allowed specifiers and resolution
+
+The PiJS module resolver MUST:
+- resolve relative specifiers (`./` and `../`) within the artifact
+- resolve internal Pi-provided modules under a reserved namespace (recommended:
+  `pi:*`)
+- forbid network imports (`http:` / `https:`) and other ambient loaders
+
+Recommended canonicalization performed by `extc`: rewrite Node builtins to
+`pi:node/*` and inject any required polyfills deterministically.
+
+##### Initialization contract
+
+- The host loads the artifact entry module.
+- The entry module MUST export a **default function** that receives a host-
+  provided `pi` object (the Extension API surface).
+- Any thrown error during load/initialization MUST be mapped to an extension
+  error with sourcemapped location and emitted as structured log events.
+
+#### 1A.4.4 The `pi` API Contract (JS-facing)
+
+The `pi` object provided to extensions is the single ambient authority. It MUST
+be capability-gated internally.
+
+##### Registration surface (protocol-facing)
+
+At minimum (shape may follow the legacy API):
+- `pi.registerTool(spec)`
+- `pi.registerSlashCommand(spec)`
+- `pi.on(event_name, handler)` for lifecycle/tool-call hooks
+
+Semantics:
+- Registration MUST be idempotent per `(extension_id, name)`.
+- Invalid specs MUST fail fast with actionable errors.
+- Registration controls what the host advertises/dispatches for that extension.
+
+##### Connector surface (hostcall-facing)
+
+At minimum:
+- `pi.tool(name, input) -> Promise<ToolOutput>`
+- `pi.exec(cmd, args, options) -> Promise<{ stdout, stderr, exitCode }>`
+- `pi.http(request) -> Promise<response>`
+- `pi.session.*` accessors/mutations as defined by the protocol
+- `pi.ui.*` primitives (select/input/confirm/editor) that can be denied in
+  non-interactive mode
+- `pi.log(level, event, data)` for extension-authored logs
+
+Rules:
+- Every connector method maps to a `host_call` with a `call_id`, capability,
+  method, params, and timeout/cancel metadata (§3.2).
+- Every connector method MUST emit structured audit logs (see §3.1 / §3.4).
+- Errors MUST map onto the hostcall error taxonomy (§3.2): Denied/Timeout/IO/
+  InvalidRequest/Internal.
+
+##### Cancellation + timeouts
+
+- Any async connector call MAY accept an `AbortSignal`; cancellation MUST map to
+  hostcall cancel-token semantics.
+- Timeouts MUST be enforced in the dispatcher; JS receives a deterministic
+  Timeout error.
+
+#### 1A.4.5 PiJS Event Loop: Formal State Machine
+
+##### State
+
+Define the runtime state as:
+
+- `seq: u64` monotone counter (total-order tie-breaker)
+- `Q_micro`: the QuickJS job queue (internal to engine; host can drain)
+- `Q_macro`: FIFO queue of macrotasks, each tagged with an enqueue `seq`
+- `Q_timer`: min-heap of timers keyed by `(deadline_ms, seq)`
+- `clock`: a monotonic time source (injectable for tests)
+
+Each macrotask is one of:
+- `TimerFired(timer_id)`
+- `HostcallComplete(call_id, outcome)`
+- `InboundEvent(event_id, payload)` (tool_call, slash_command, lifecycle hook,
+  UI response, etc.)
+
+##### The `tick()` algorithm (normative)
+
+`tick(state)` MUST be deterministic given the current state and the set of newly
+arrived host completions.
+
+Algorithm:
+1) **Ingest host completions**: any completed hostcalls since the last tick are
+   enqueued into `Q_macro` with a deterministic order key.
+   - Recommended: assign each completion an enqueue `seq` in arrival order using
+     the monotone counter.
+2) **Move due timers**: while `Q_timer.min.deadline_ms <= clock.now_ms`, pop
+   timers and enqueue `TimerFired` into `Q_macro` (preserving `(deadline_ms,
+   seq)` order).
+3) **Run one macrotask**:
+   - If `Q_macro` is non-empty: pop the lowest `seq` macrotask and execute it.
+   - Else: idle (no-op).
+4) **Drain microtasks to fixpoint**: repeatedly drain the QuickJS job queue until
+   it is empty.
+5) Return updated state.
+
+##### Invariants (must hold)
+
+- **I1 (single macrotask):** at most one macrotask executes per tick.
+- **I2 (microtask fixpoint):** after any macrotask, microtasks are drained until
+  empty.
+- **I3 (stable timers):** timers with equal deadlines fire in increasing `seq`
+  order.
+- **I4 (no reentrancy):** hostcall completions do not synchronously re-enter JS;
+  they enqueue macrotasks.
+- **I5 (total order):** all externally observable scheduling is ordered by `seq`
+  (deterministic tie-break).
+
+##### Timers contract
+
+- `setTimeout(fn, ms)` enqueues a timer with
+  `(deadline_ms = clock.now_ms + ms, seq = next_seq())`.
+- `clearTimeout(id)` removes it if pending.
+- `setInterval` is optional unless required by the pinned sample; if implemented,
+  it MUST be specified in terms of repeated `setTimeout` with stable ordering.
+
+##### Hostcall completion contract
+
+- Each hostcall has a stable `call_id` and (recommended) an issuance `seq`.
+- Completion enqueuing MUST be deterministic:
+  - In production: order by completion arrival, then stabilize with the monotone
+    `seq`.
+  - In tests: completion order can be controlled by recorded fixtures /
+    deterministic runtime.
+
+#### 1A.4.6 Determinism Contract
+
+##### What we promise
+
+Given:
+- identical artifact bytes + shim versions
+- identical initial state
+- identical sequence of inbound events (tool calls, lifecycle events, UI
+  responses)
+- identical sequence of hostcall results (including their enqueue order)
+- identical clock behavior (or a deterministic clock)
+
+Then:
+- the sequence of executed macrotasks and the resulting observable outputs (tool
+  results, logs, UI prompts) are identical.
+
+##### Proof sketch (why)
+
+- The scheduler is a pure function of `(state, arrivals)` with a total-order
+  tie-breaker `seq`.
+- Timer ordering is deterministic via `(deadline_ms, seq)`.
+- Hostcall completion ordering is deterministic by construction (completion
+  enqueue `seq`).
+- Microtask draining to a fixpoint ensures no hidden interleavings.
+- Therefore, by induction over ticks, the entire execution trace is deterministic
+  under fixed inputs.
+
+#### 1A.4.7 Observability / Trace Contract
+
+- Every tick and every enqueue/dequeue event MAY be logged (debug-level) under
+  `pi.ext.log.v1` with `trace_id` / `span_id` and correlation ids.
+- Deterministic test runs MUST be able to compare traces for equality after the
+  normalization rules in §3.1.
+
 ---
 
 ## 2. Artifact Pipeline (Legacy → Optimized)

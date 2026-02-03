@@ -237,12 +237,12 @@ fn list_sessions_for_project(cwd: &Path, override_dir: Option<&Path>) -> Vec<Ses
         return Vec::new();
     }
 
-    let mut sessions = Vec::new();
-
+    let cwd_key = cwd.display().to_string();
     let index = SessionIndex::for_sessions_root(&base_dir);
-    let _ = index.reindex_all();
-    if let Ok(list) = index.list_sessions(Some(&cwd.display().to_string())) {
-        sessions = list;
+    let mut sessions = index.list_sessions(Some(&cwd_key)).unwrap_or_default();
+
+    if sessions.is_empty() && index.reindex_all().is_ok() {
+        sessions = index.list_sessions(Some(&cwd_key)).unwrap_or_default();
     }
 
     if sessions.is_empty() {

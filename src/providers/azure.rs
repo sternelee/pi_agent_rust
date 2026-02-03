@@ -63,6 +63,13 @@ impl AzureOpenAIProvider {
         self
     }
 
+    /// Create with a custom HTTP client (VCR, test harness, etc.).
+    #[must_use]
+    pub fn with_client(mut self, client: Client) -> Self {
+        self.client = client;
+        self
+    }
+
     /// Get the full endpoint URL.
     fn endpoint_url(&self) -> String {
         format!(
@@ -136,7 +143,7 @@ impl Provider for AzureOpenAIProvider {
         context: &Context,
         options: &StreamOptions,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
-        let api_key = options
+        let auth_value = options
             .api_key
             .clone()
             .or_else(|| std::env::var("AZURE_OPENAI_API_KEY").ok())
@@ -152,7 +159,7 @@ impl Provider for AzureOpenAIProvider {
             .post(&endpoint_url)
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
-            .header("api-key", &api_key); // Azure uses api-key header, not Authorization
+            .header("api-key", &auth_value); // Azure uses api-key header, not Authorization
 
         for (key, value) in &options.headers {
             request = request.header(key, value);
@@ -761,10 +768,7 @@ mod tests {
             let mut out = Vec::new();
 
             while let Some(item) = state.event_source.next().await {
-                let msg = match item {
-                    Ok(msg) => msg,
-                    Err(err) => panic!("SSE error: {err}"),
-                };
+                let msg = item.expect("SSE event");
                 if msg.data == "[DONE]" {
                     let reason = state.partial.stop_reason;
                     out.push(StreamEvent::Done {
@@ -773,10 +777,8 @@ mod tests {
                     });
                     break;
                 }
-                match state.process_event(&msg.data) {
-                    Ok(Some(event)) => out.push(event),
-                    Ok(None) => {}
-                    Err(err) => panic!("process_event error: {err}"),
+                if let Some(event) = state.process_event(&msg.data).expect("process_event") {
+                    out.push(event);
                 }
             }
 

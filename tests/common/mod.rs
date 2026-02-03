@@ -10,6 +10,7 @@ use std::future::Future;
 pub mod harness;
 pub mod logging;
 
+#[allow(unused_imports)]
 pub use harness::TestHarness;
 #[allow(unused_imports)]
 pub use harness::{MockHttpServer, TestEnv};

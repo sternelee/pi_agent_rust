@@ -52,6 +52,13 @@ impl GeminiProvider {
         self
     }
 
+    /// Create with a custom HTTP client (VCR, test harness, etc.).
+    #[must_use]
+    pub fn with_client(mut self, client: Client) -> Self {
+        self.client = client;
+        self
+    }
+
     /// Build the streaming URL.
     fn streaming_url(&self, api_key: &str) -> String {
         format!(
@@ -743,29 +750,24 @@ mod tests {
             let mut out = Vec::new();
 
             loop {
-                match state.event_source.next().await {
-                    Some(Ok(msg)) => {
-                        if msg.event == "ping" {
-                            continue;
-                        }
-                        match state.process_event(&msg.data) {
-                            Ok(Some(event)) => out.push(event),
-                            Ok(None) => {}
-                            Err(err) => panic!("process_event error: {err}"),
-                        }
+                let Some(item) = state.event_source.next().await else {
+                    if !state.finished {
+                        state.finished = true;
+                        state.finalize_content();
+                        out.push(StreamEvent::Done {
+                            reason: state.partial.stop_reason,
+                            message: state.partial.clone(),
+                        });
                     }
-                    Some(Err(err)) => panic!("SSE error: {err}"),
-                    None => {
-                        if !state.finished {
-                            state.finished = true;
-                            state.finalize_content();
-                            out.push(StreamEvent::Done {
-                                reason: state.partial.stop_reason,
-                                message: state.partial.clone(),
-                            });
-                        }
-                        break;
-                    }
+                    break;
+                };
+
+                let msg = item.expect("SSE event");
+                if msg.event == "ping" {
+                    continue;
+                }
+                if let Some(event) = state.process_event(&msg.data).expect("process_event") {
+                    out.push(event);
                 }
             }
 

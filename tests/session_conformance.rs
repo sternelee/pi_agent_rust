@@ -550,3 +550,302 @@ fn concurrent_saves_do_not_corrupt_session_file() {
         assert!(!loaded.entries.is_empty());
     });
 }
+
+// ============================================================================
+// Header Metadata Persistence Tests (bd-ah1)
+// ============================================================================
+
+#[test]
+fn save_preserves_header_provider_and_model() {
+    run_async_test(async {
+        let harness = TestHarness::new("save_preserves_header_provider_and_model");
+        let base_dir = harness.temp_path("sessions");
+        let mut session = Session::create_with_dir(Some(base_dir));
+
+        session.header.provider = Some("anthropic".to_string());
+        session.header.model_id = Some("claude-opus-4".to_string());
+        session.header.thinking_level = Some("high".to_string());
+        session.append_message(make_user_message("Hello"));
+
+        let loaded = save_and_reopen(&harness, &mut session).await;
+
+        harness.log().info(
+            "header",
+            format!(
+                "Provider: {:?}, Model: {:?}, Thinking: {:?}",
+                loaded.header.provider, loaded.header.model_id, loaded.header.thinking_level
+            ),
+        );
+
+        assert_eq!(
+            loaded.header.provider.as_deref(),
+            Some("anthropic"),
+            "Provider should be preserved"
+        );
+        assert_eq!(
+            loaded.header.model_id.as_deref(),
+            Some("claude-opus-4"),
+            "Model ID should be preserved"
+        );
+        assert_eq!(
+            loaded.header.thinking_level.as_deref(),
+            Some("high"),
+            "Thinking level should be preserved"
+        );
+    });
+}
+
+#[test]
+fn save_preserves_header_cwd() {
+    run_async_test(async {
+        let harness = TestHarness::new("save_preserves_header_cwd");
+        let base_dir = harness.temp_path("sessions");
+        let mut session = Session::create_with_dir(Some(base_dir));
+
+        let original_cwd = session.header.cwd.clone();
+        session.append_message(make_user_message("Hello"));
+
+        let loaded = save_and_reopen(&harness, &mut session).await;
+
+        harness
+            .log()
+            .info("header", format!("CWD: {}", loaded.header.cwd));
+
+        assert_eq!(
+            loaded.header.cwd, original_cwd,
+            "CWD should be preserved across save/reload"
+        );
+    });
+}
+
+// ============================================================================
+// Tool Message Persistence Tests (bd-ah1)
+// ============================================================================
+
+fn make_tool_result_message(
+    tool_call_id: &str,
+    tool_name: &str,
+    result_text: &str,
+    is_error: bool,
+) -> pi::session::SessionMessage {
+    pi::session::SessionMessage::ToolResult {
+        tool_call_id: tool_call_id.to_string(),
+        tool_name: tool_name.to_string(),
+        content: vec![ContentBlock::Text(TextContent::new(result_text))],
+        details: None,
+        is_error,
+        timestamp: Some(0),
+    }
+}
+
+fn make_assistant_with_tool_use(
+    tool_call_id: &str,
+    tool_name: &str,
+) -> pi::session::SessionMessage {
+    use pi::model::ToolCall;
+
+    pi::session::SessionMessage::Assistant {
+        message: AssistantMessage {
+            content: vec![ContentBlock::ToolCall(ToolCall {
+                id: tool_call_id.to_string(),
+                name: tool_name.to_string(),
+                arguments: serde_json::json!({"path": "/test/file"}),
+                thought_signature: None,
+            })],
+            api: "test".to_string(),
+            provider: "test".to_string(),
+            model: "test".to_string(),
+            usage: Usage::default(),
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+            timestamp: 0,
+        },
+    }
+}
+
+#[test]
+fn save_round_trips_tool_result_message() {
+    run_async_test(async {
+        let harness = TestHarness::new("save_round_trips_tool_result_message");
+        let base_dir = harness.temp_path("sessions");
+        let mut session = Session::create_with_dir(Some(base_dir));
+
+        session.append_message(make_user_message("Read /test/file"));
+        let tool_call_id = "tool_abc123";
+        session.append_message(make_assistant_with_tool_use(tool_call_id, "read_file"));
+        session.append_message(make_tool_result_message(
+            tool_call_id,
+            "read_file",
+            "file contents here",
+            false,
+        ));
+
+        let loaded = save_and_reopen(&harness, &mut session).await;
+
+        harness
+            .log()
+            .info("entries", format!("Entry count: {}", loaded.entries.len()));
+
+        assert_eq!(loaded.entries.len(), 3, "Should have 3 entries");
+
+        // Verify tool result entry
+        let tool_result_entry = &loaded.entries[2];
+        if let SessionEntry::Message(msg_entry) = tool_result_entry {
+            if let pi::session::SessionMessage::ToolResult {
+                tool_call_id: id,
+                tool_name: name,
+                is_error,
+                ..
+            } = &msg_entry.message
+            {
+                assert_eq!(id, "tool_abc123");
+                assert_eq!(name, "read_file");
+                assert!(!is_error);
+            } else {
+                let got = &msg_entry.message;
+                panic!("Expected ToolResult message, got {got:?}");
+            }
+        } else {
+            panic!("Expected Message entry, got {tool_result_entry:?}");
+        }
+    });
+}
+
+#[test]
+fn save_round_trips_tool_error_result() {
+    run_async_test(async {
+        let harness = TestHarness::new("save_round_trips_tool_error_result");
+        let base_dir = harness.temp_path("sessions");
+        let mut session = Session::create_with_dir(Some(base_dir));
+
+        session.append_message(make_user_message("Read /nonexistent"));
+        session.append_message(make_assistant_with_tool_use("tool_err1", "read_file"));
+        session.append_message(make_tool_result_message(
+            "tool_err1",
+            "read_file",
+            "File not found: /nonexistent",
+            true,
+        ));
+
+        let loaded = save_and_reopen(&harness, &mut session).await;
+
+        let tool_result_entry = &loaded.entries[2];
+        if let SessionEntry::Message(msg_entry) = tool_result_entry {
+            if let pi::session::SessionMessage::ToolResult { is_error, .. } = &msg_entry.message {
+                assert!(*is_error, "is_error flag should be preserved as true");
+            } else {
+                panic!("Expected ToolResult message");
+            }
+        } else {
+            panic!("Expected Message entry");
+        }
+    });
+}
+
+// ============================================================================
+// Unicode Content Persistence Tests (bd-ah1)
+// ============================================================================
+
+#[test]
+fn save_preserves_unicode_message_content() {
+    run_async_test(async {
+        let harness = TestHarness::new("save_preserves_unicode_message_content");
+        let base_dir = harness.temp_path("sessions");
+        let mut session = Session::create_with_dir(Some(base_dir));
+
+        let unicode_content = "Hello 你好 שלום مرحبا 🎉🚀💻";
+        session.append_message(make_user_message(unicode_content));
+
+        let loaded = save_and_reopen(&harness, &mut session).await;
+
+        let first_entry = &loaded.entries[0];
+        if let SessionEntry::Message(msg_entry) = first_entry {
+            if let pi::session::SessionMessage::User { content, .. } = &msg_entry.message {
+                let text = match content {
+                    UserContent::Text(t) => t.as_str(),
+                    UserContent::Blocks(_) => panic!("Expected Text content"),
+                };
+                assert_eq!(
+                    text, unicode_content,
+                    "Unicode content should be preserved exactly"
+                );
+            } else {
+                panic!("Expected User message");
+            }
+        } else {
+            panic!("Expected Message entry");
+        }
+    });
+}
+
+#[test]
+fn save_preserves_emoji_in_assistant_response() {
+    run_async_test(async {
+        let harness = TestHarness::new("save_preserves_emoji_in_assistant_response");
+        let base_dir = harness.temp_path("sessions");
+        let mut session = Session::create_with_dir(Some(base_dir));
+
+        let emoji_text = "Here's a rocket 🚀 and some stars ⭐✨!";
+        session.append_message(make_user_message("Send emojis"));
+        session.append_message(make_assistant_message(emoji_text));
+
+        let loaded = save_and_reopen(&harness, &mut session).await;
+
+        let assistant_entry = &loaded.entries[1];
+        if let SessionEntry::Message(msg_entry) = assistant_entry {
+            if let pi::session::SessionMessage::Assistant { message } = &msg_entry.message {
+                if let Some(ContentBlock::Text(text_block)) = message.content.first() {
+                    assert_eq!(
+                        text_block.text, emoji_text,
+                        "Emoji content should be preserved"
+                    );
+                } else {
+                    panic!("Expected Text content block");
+                }
+            } else {
+                panic!("Expected Assistant message");
+            }
+        } else {
+            panic!("Expected Message entry");
+        }
+    });
+}
+
+// ============================================================================
+// Timestamp Preservation Tests (bd-ah1)
+// ============================================================================
+
+#[test]
+fn save_preserves_message_timestamps() {
+    run_async_test(async {
+        let harness = TestHarness::new("save_preserves_message_timestamps");
+        let base_dir = harness.temp_path("sessions");
+        let mut session = Session::create_with_dir(Some(base_dir));
+
+        let timestamp = 1_706_918_401_000_i64;
+        session.append_message(pi::session::SessionMessage::User {
+            content: UserContent::Text("Hello".to_string()),
+            timestamp: Some(timestamp),
+        });
+
+        let loaded = save_and_reopen(&harness, &mut session).await;
+
+        let first_entry = &loaded.entries[0];
+        if let SessionEntry::Message(msg_entry) = first_entry {
+            if let pi::session::SessionMessage::User {
+                timestamp: ts_opt, ..
+            } = &msg_entry.message
+            {
+                assert_eq!(
+                    *ts_opt,
+                    Some(timestamp),
+                    "Message timestamp should be preserved"
+                );
+            } else {
+                panic!("Expected User message");
+            }
+        } else {
+            panic!("Expected Message entry");
+        }
+    });
+}

@@ -18,6 +18,9 @@ This document is the authoritative specification for the Rust port of pi-mono.
 8. [Authentication Storage](#8-authentication-storage)
 9. [CLI Commands and Flags](#9-cli-commands-and-flags)
 10. [Execution Flow](#10-execution-flow)
+11. [RPC Mode Protocol](#11-rpc-mode-protocol-json-over-stdio)
+12. [Extensions API](#12-extensions-api)
+13. [Resources System](#13-resources-system)
 
 ---
 
@@ -1469,6 +1472,378 @@ Common options:
 
 ---
 
+---
+
+## 12. Extensions API
+
+Extensions are Node.js modules that can register tools, commands, and event handlers. The Rust port implements a PiJS runtime (see `EXTENSIONS.md` for connector architecture).
+
+### 12.1 Extension Entry Point
+
+```typescript
+// Extension module exports activate function
+export async function activate(ctx: ExtensionContext): Promise<void>;
+```
+
+### 12.2 ExtensionContext
+
+```rust
+pub struct ExtensionContext {
+    // Registration
+    fn register_tool(name: &str, config: ToolConfig, handler: ToolHandler);
+    fn register_command(name: &str, config: CommandConfig, handler: CommandHandler);
+
+    // Event handlers
+    fn on_agent_start(handler: Fn(AgentStartEvent));
+    fn on_agent_end(handler: Fn(AgentEndEvent));
+    fn on_turn_start(handler: Fn(TurnStartEvent));
+    fn on_turn_end(handler: Fn(TurnEndEvent));
+    fn on_tool_execution_start(handler: Fn(ToolExecutionStartEvent));
+    fn on_tool_execution_end(handler: Fn(ToolExecutionEndEvent));
+    fn on_session_before_switch(handler: Fn(SessionEvent) -> bool);  // Return false to cancel
+    fn on_session_before_fork(handler: Fn(SessionEvent) -> bool);    // Return false to cancel
+    fn on_startup(handler: Fn(StartupEvent));
+
+    // UI access
+    ui: ExtensionUi,
+
+    // Session access
+    session: SessionAccess,
+
+    // Logging
+    log: Logger,
+}
+```
+
+### 12.3 Tool Registration
+
+```typescript
+interface ToolConfig {
+    label: string;                // Display name
+    description: string;          // For LLM context
+    parameters: JsonSchema;       // JSON Schema for validation
+}
+
+type ToolHandler = (args: ToolArgs, update?: UpdateCallback) => Promise<ToolResult>;
+
+interface ToolArgs {
+    toolCallId: string;
+    input: Record<string, unknown>;
+}
+
+interface ToolResult {
+    content: ContentBlock[];
+    details?: Record<string, unknown>;
+    isError?: boolean;
+}
+
+type UpdateCallback = (partial: ToolResult) => void;
+```
+
+### 12.4 Command Registration
+
+```typescript
+interface CommandConfig {
+    description?: string;         // Help text
+}
+
+type CommandHandler = (args: string) => Promise<string | void>;
+```
+
+Commands are invoked via `/command args` syntax. If handler returns a string, it's used as the user message.
+
+### 12.5 Extension UI Methods
+
+```typescript
+interface ExtensionUi {
+    // Dialogs (blocking, support cancellation)
+    select(options: SelectOptions): Promise<string | undefined>;
+    confirm(options: ConfirmOptions): Promise<boolean>;
+    input(options: InputOptions): Promise<string | undefined>;
+    editor(options: EditorOptions): Promise<string | undefined>;
+
+    // Non-blocking updates
+    notify(options: NotifyOptions): void;
+    setStatus(text: string): void;
+    setWidget(content: string): void;
+    setTitle(title: string): void;
+
+    // Editor interaction
+    setEditorText(text: string): void;
+    getEditorText(): string;  // Returns "" in RPC mode
+
+    // Custom component (interactive TUI only)
+    custom<T>(component: Component): Promise<T | undefined>;  // Returns undefined in RPC
+}
+
+interface SelectOptions {
+    title: string;
+    options: Array<{label: string; value: string}>;
+    placeholder?: string;
+    default?: string;
+    timeout?: number;  // ms, undefined = no timeout
+}
+
+interface ConfirmOptions {
+    title: string;
+    message: string;
+    default?: boolean;
+    timeout?: number;
+}
+
+interface InputOptions {
+    title: string;
+    placeholder?: string;
+    default?: string;
+    password?: boolean;
+    timeout?: number;
+}
+
+interface EditorOptions {
+    title: string;
+    language?: string;
+    default?: string;
+    readOnly?: boolean;
+    timeout?: number;
+}
+
+interface NotifyOptions {
+    title: string;
+    message: string;
+    level?: "info" | "warning" | "error";
+}
+```
+
+**Cancellation semantics:**
+- Dialog methods return `undefined` when user cancels (Esc key)
+- Timeout triggers cancellation
+- In RPC mode, `extension_ui_response` with `cancelled: true` indicates cancellation
+- `confirm()` returns `false` on cancel (not `undefined`)
+
+### 12.6 Session Access
+
+```typescript
+interface SessionAccess {
+    getMessages(): Message[];
+    getState(): SessionState;
+    getFile(): string | undefined;  // undefined for in-memory sessions
+}
+
+interface SessionState {
+    sessionId: string;
+    messageCount: number;
+    isStreaming: boolean;
+    model: Model | null;
+    thinkingLevel: ThinkingLevel;
+}
+```
+
+### 12.7 Extension Events
+
+```typescript
+interface AgentStartEvent {
+    sessionId: string;
+}
+
+interface AgentEndEvent {
+    sessionId: string;
+    messages: Message[];
+    error?: string;
+}
+
+interface TurnStartEvent {
+    sessionId: string;
+    turnIndex: number;
+}
+
+interface TurnEndEvent {
+    sessionId: string;
+    turnIndex: number;
+    message: AssistantMessage;
+    toolResults: ToolResultMessage[];
+}
+
+interface ToolExecutionStartEvent {
+    toolCallId: string;
+    toolName: string;
+    args: Record<string, unknown>;
+}
+
+interface ToolExecutionEndEvent {
+    toolCallId: string;
+    toolName: string;
+    result: ToolResult;
+    isError: boolean;
+}
+
+interface SessionEvent {
+    currentSession: string | undefined;
+    targetSession?: string;  // For switch
+    forkEntryId?: string;    // For fork
+}
+
+interface StartupEvent {
+    version: string;
+    sessionFile?: string;
+}
+```
+
+### 12.8 Extension Logging
+
+```typescript
+interface Logger {
+    debug(message: string, data?: Record<string, unknown>): void;
+    info(message: string, data?: Record<string, unknown>): void;
+    warn(message: string, data?: Record<string, unknown>): void;
+    error(message: string, data?: Record<string, unknown>): void;
+}
+```
+
+Logs are emitted as structured JSON (schema: `pi.ext.log.v1`).
+
+---
+
+## 13. Resources System
+
+Resources are discoverable user content: skills, prompt templates, and themes.
+
+### 13.1 Resource Discovery
+
+Resources are loaded from multiple locations in priority order:
+
+1. **Explicit CLI flags** (`--skill`, `--prompt-template`, `--theme`)
+2. **Settings arrays** (`skills`, `prompts`, `themes` in settings.json)
+3. **Installed packages** (via `packages` setting)
+
+### 13.2 Package Manifest
+
+```json
+{
+  "name": "@scope/package-name",
+  "pi": {
+    "extensions": ["./dist/extension.js"],
+    "skills": ["./skills/"],
+    "prompts": ["./prompts/"],
+    "themes": ["./themes/"]
+  }
+}
+```
+
+If `pi` field is absent, defaults apply:
+- `extensions`: `[]`
+- `skills`: `["./skills/"]` if directory exists
+- `prompts`: `["./prompts/"]` if directory exists
+- `themes`: `["./themes/"]` if directory exists
+
+### 13.3 Skills
+
+Skills are markdown files with YAML frontmatter defining agent capabilities.
+
+**File locations:**
+- Global: `~/.pi/agent/skills/*.md`
+- Project: `./.pi/skills/*.md`
+- Package: `<package>/skills/*.md`
+
+**Frontmatter schema:**
+
+```yaml
+---
+name: skill-name           # Required, kebab-case
+description: Brief desc    # Required, shown in skill list
+allowed_tools:             # Optional, restrict to specific tools
+  - read
+  - bash
+---
+```
+
+**Skill content:** Markdown body becomes the skill prompt.
+
+**Expansion:** `/skill:name args` expands to:
+```xml
+<skill name="skill-name" arguments="args">
+[skill markdown content]
+</skill>
+```
+
+**System prompt injection:** When `read` tool is enabled, active skills are appended:
+```xml
+<available_skills>
+<skill name="name1">description1</skill>
+<skill name="name2">description2</skill>
+</available_skills>
+```
+
+### 13.4 Prompt Templates
+
+Prompt templates are markdown files for reusable user prompts.
+
+**File locations:**
+- Global: `~/.pi/agent/prompts/*.md`
+- Project: `./.pi/prompts/*.md`
+- Package: `<package>/prompts/*.md`
+
+**Command format:** `/template-name arg1 arg2 ...`
+
+**Variable substitution:**
+| Variable | Meaning |
+|----------|---------|
+| `$1`, `$2`, ... | Positional arguments |
+| `$@` | All arguments joined by space |
+| `$ARGUMENTS` | Same as `$@` |
+| `${@:N}` | Arguments from position N onward |
+
+**Expansion result:** Becomes the user message (after variable substitution).
+
+### 13.5 Themes
+
+Themes are JSON files defining terminal color schemes.
+
+**File locations:**
+- Global: `~/.pi/agent/themes/*.json`
+- Project: `./.pi/themes/*.json`
+- Package: `<package>/themes/*.json`
+
+**Schema:**
+
+```json
+{
+  "name": "theme-name",
+  "colors": {
+    "text": "#ffffff",
+    "background": "#000000",
+    "primary": "#007acc",
+    "secondary": "#6c757d",
+    "success": "#28a745",
+    "warning": "#ffc107",
+    "error": "#dc3545",
+    "thinking": "#6c757d",
+    "tool": "#17a2b8"
+  }
+}
+```
+
+### 13.6 Package Sources
+
+Packages can be specified as:
+
+| Source Type | Format | Example |
+|-------------|--------|---------|
+| npm | `npm:<package>@<version>` | `npm:@pi/tools@1.0.0` |
+| git | `git:<url>#<ref>` | `git:github.com/user/repo#main` |
+| local | `path:<absolute-path>` | `path:/home/user/my-extension` |
+
+Settings field:
+```json
+{
+  "packages": [
+    "npm:@pi/tools@1.0.0",
+    "git:github.com/user/extension#v1.0"
+  ]
+}
+```
+
+---
+
 ## Summary
 
 This specification covers:
@@ -1481,5 +1856,7 @@ This specification covers:
 - **Auth:** Credential storage with OAuth refresh
 - **CLI:** Complete flag list with execution flow
 - **RPC:** JSON command protocol with events, types, and extension UI
+- **Extensions:** Full API surface with registration, events, UI, and cancellation semantics
+- **Resources:** Skills, prompts, and themes discovery and expansion
 
 **After reading this document, you should NOT need to consult the legacy TypeScript code.**

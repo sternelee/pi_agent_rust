@@ -259,41 +259,48 @@ glamour = { path = "../charmed_rust/crates/glamour" }
 - [ ] Remove `reqwest` from Cargo.toml
 - [ ] Update all async code to use asupersync
 
-### Phase 5: Additional Providers (2-3 days)
+### Phase 5: Additional Providers ✅ COMPLETE
 
-**5.1 OpenAI Provider**
-- [ ] `src/providers/openai.rs`
-- [ ] Chat completions API
-- [ ] Streaming support
-- [ ] Function calling (tools)
-- [ ] Conformance tests
+**5.1 OpenAI Provider** ✅
+- [x] `src/providers/openai.rs`
+- [x] Chat completions API
+- [x] Streaming support
+- [x] Function calling (tools)
+- [x] Unit tests
 
-**5.2 Google Gemini Provider**
-- [ ] `src/providers/google.rs`
-- [ ] Generative AI API
-- [ ] Streaming support
-- [ ] Tool calling
-- [ ] Conformance tests
+**5.2 Google Gemini Provider** ✅
+- [x] `src/providers/gemini.rs`
+- [x] Generative AI API
+- [x] Streaming support
+- [x] Tool calling
+- [x] Unit tests
 
-### Phase 6: Session Enhancements (2 days)
+**5.3 Azure OpenAI Provider** ✅
+- [x] `src/providers/azure.rs`
+- [x] Azure-specific endpoints
+- [x] Streaming support
+- [x] Tool calling
+- [x] Unit tests
+
+### Phase 6: Session Enhancements ✅ MOSTLY COMPLETE
 
 **6.1 SQLite Index**
-- [ ] `src/session/index.rs` - SQLite-based session index
-- [ ] Search by content, date, model
-- [ ] Fast session listing
-- [ ] Sync from JSONL source of truth
+- [ ] `src/session/index.rs` - SQLite-based session index (deferred)
+- [ ] Search by content, date, model (deferred)
+- [x] Fast session listing (via filesystem mtime sort)
+- [ ] Sync from JSONL source of truth (deferred)
 
-**6.2 Tree Navigation**
-- [ ] Branch creation
-- [ ] Branch switching
-- [ ] Visual tree display in TUI
-- [ ] Checkpoint/restore
+**6.2 Tree Navigation** ✅
+- [x] Branch creation (`create_branch_from`)
+- [x] Branch switching (`navigate_to`)
+- [x] Visual tree display in TUI (`/tree` command)
+- [x] Branch summary support
 
-**6.3 Session Picker UI**
-- [ ] List recent sessions
-- [ ] Search/filter
-- [ ] Preview content
-- [ ] Select and resume
+**6.3 Session Picker UI** ✅
+- [x] List recent sessions (`src/session_picker.rs`)
+- [x] Search/filter (by directory)
+- [x] Preview content (shows model, message count)
+- [x] Select and resume (`--resume` flag)
 
 ### Phase 7: Conformance Testing (2-3 days)
 
@@ -345,12 +352,12 @@ glamour = { path = "../charmed_rust/crates/glamour" }
 ### Phase 9: Polish & Documentation (1-2 days)
 
 **9.1 Error Messages**
-- [ ] User-friendly error formatting (rich_rust panels)
+- [x] User-friendly error formatting (rich_rust panels)
 - [ ] Actionable suggestions
 - [ ] Context-aware hints
 
 **9.2 Documentation**
-- [ ] Update README with new features
+- [x] README.md with architecture
 - [ ] API documentation (rustdoc)
 - [ ] Configuration reference
 - [ ] Troubleshooting guide
@@ -360,6 +367,43 @@ glamour = { path = "../charmed_rust/crates/glamour" }
 - [ ] CHANGELOG.md
 - [ ] Cross-compilation testing (Linux/macOS/Windows)
 - [ ] Binary distribution (GitHub Releases)
+
+### Phase 10: Extensions Runtime (NEW - Primary Remaining Work)
+
+**10.1 PiJS Runtime** (see `EXTENSIONS.md` for full spec)
+- [ ] QuickJS integration for JavaScript execution
+- [ ] Connector model implementation (`pi.tool()`, `pi.exec()`, `pi.http()`)
+- [ ] Deterministic event loop (`tick()` algorithm)
+- [ ] Hostcall ABI (`host_call`/`host_result`)
+
+**10.2 Extension API**
+- [ ] `registerTool()` - Extension tool registration
+- [ ] `registerCommand()` - Slash command registration
+- [ ] Event handlers (`onAgentStart`, `onToolExecutionEnd`, etc.)
+- [ ] Session event handlers with cancellation (`onSessionBeforeSwitch`, `onSessionBeforeFork`)
+
+**10.3 Extension UI**
+- [ ] Dialog methods (`select`, `confirm`, `input`, `editor`) with RPC integration
+- [ ] Fire-and-forget methods (`notify`, `setStatus`, `setWidget`)
+- [ ] Cancellation semantics (timeout, Esc key)
+
+**10.4 Extension Discovery & Loading**
+- [ ] Package manifest parsing (`package.json` `pi` field)
+- [ ] Extension path resolution (npm, git, local)
+- [ ] Hot reload support
+
+**10.5 Conformance Testing**
+- [ ] Extension API fixture suite
+- [ ] Hostcall dispatch benchmarks (p95 < 50μs)
+- [ ] Cold/warm start benchmarks
+
+### Phase 11: Themes Discovery (NEW)
+
+**11.1 Theme System**
+- [ ] Theme JSON schema validation
+- [ ] Theme discovery (global/project/package)
+- [ ] Theme application to rich_rust Console
+- [ ] Hot reload on file change
 
 ---
 
@@ -496,18 +540,20 @@ Each tool has a JSON fixture file with this structure:
 
 ## Part 5: Timeline Estimate
 
-| Phase | Duration | Dependencies |
-|-------|----------|--------------|
-| Phase 1: Fix Issues | 1-2 days | None |
-| Phase 2: Dependencies | 1 day | Phase 1 |
-| Phase 3: Interactive TUI | 3-5 days | Phase 2 |
-| Phase 4: HTTP Migration | 2-3 days | Phase 2 |
-| Phase 5: Providers | 2-3 days | Phase 4 |
-| Phase 6: Sessions | 2 days | Phase 3 |
-| Phase 7: Conformance | 2-3 days | Phases 1-6 |
-| Phase 8: Benchmarks | 1-2 days | Phase 7 |
-| Phase 9: Polish | 1-2 days | Phase 8 |
-| **Total** | **15-23 days** | |
+| Phase | Duration | Status | Dependencies |
+|-------|----------|--------|--------------|
+| Phase 1: Fix Issues | 1-2 days | ✅ Complete | None |
+| Phase 2: Dependencies | 1 day | ✅ Complete | Phase 1 |
+| Phase 3: Interactive TUI | 3-5 days | ✅ Complete | Phase 2 |
+| Phase 4: HTTP Migration | 2-3 days | 🔶 In Progress | Phase 2 |
+| Phase 5: Providers | 2-3 days | ✅ Complete | Phase 4 |
+| Phase 6: Sessions | 2 days | ✅ Mostly Complete | Phase 3 |
+| Phase 7: Conformance | 2-3 days | ✅ Complete (122 cases) | Phases 1-6 |
+| Phase 8: Benchmarks | 1-2 days | ✅ Complete | Phase 7 |
+| Phase 9: Polish | 1-2 days | 🔶 In Progress | Phase 8 |
+| **Phase 10: Extensions** | **3-5 days** | ❌ Not Started | Phase 4 |
+| **Phase 11: Themes** | **1-2 days** | ❌ Not Started | Phase 9 |
+| **Remaining** | **~5-8 days** | | |
 
 ---
 
@@ -592,8 +638,15 @@ FEATURE_PARITY.md        # Update as features complete
 
 ## Immediate Next Steps
 
-1. **Fix the 4 failing fixture tests** - detail field serialization
-2. **Add charmed_rust dependencies** to Cargo.toml
-3. **Create TUI module structure** with basic Model implementation
-4. **Implement multi-line editor** using bubbles TextInput
-5. **Run `cargo check`** to verify everything compiles
+1. ~~**Fix the failing fixture tests** - detail field serialization~~ ✅ Done
+2. ~~**Add charmed_rust dependencies** to Cargo.toml~~ ✅ Done
+3. ~~**Create TUI module structure** with basic Model implementation~~ ✅ Done
+4. ~~**Implement multi-line editor** using bubbles TextInput~~ ✅ Done
+5. ~~**Run `cargo check`** to verify everything compiles~~ ✅ Done
+
+**Current Priorities:**
+
+1. **Extensions runtime (Phase 10)** - PiJS connector model + QuickJS integration (bd-1ii)
+2. **Themes discovery (Phase 11)** - Theme loading + application (bd-3ev)
+3. **asupersync HTTP migration** - Replace remaining reqwest usage (Phase 4)
+4. **VCR test infrastructure** - Provider cassette recording/playback (bd-30u)

@@ -280,6 +280,7 @@ impl Session {
     ) -> Result<Self> {
         let base_dir = override_dir.map_or_else(Config::sessions_dir, PathBuf::from);
         let cwd = std::env::current_dir()?;
+        let cwd_display = cwd.display().to_string();
         let encoded_cwd = encode_cwd(&cwd);
         let project_session_dir = base_dir.join(&encoded_cwd);
 
@@ -287,7 +288,27 @@ impl Session {
             return Ok(Self::create_with_dir(Some(base_dir)));
         }
 
-        // Find the most recent session file
+        // Prefer the session index for fast lookup.
+        let index = SessionIndex::for_sessions_root(&base_dir);
+        let mut indexed_sessions = index.list_sessions(Some(&cwd_display)).ok();
+
+        if indexed_sessions
+            .as_ref()
+            .is_some_and(std::vec::Vec::is_empty)
+            && index.reindex_all().is_ok()
+        {
+            indexed_sessions = index.list_sessions(Some(&cwd_display)).ok();
+        }
+
+        if let Some(list) = indexed_sessions {
+            if let Some(meta) = list.first() {
+                let mut session = Self::open(&meta.path).await?;
+                session.session_dir = Some(base_dir);
+                return Ok(session);
+            }
+        }
+
+        // Fallback: scan the filesystem for the most recent session file.
         let mut entries: Vec<_> = std::fs::read_dir(&project_session_dir)?
             .filter_map(std::result::Result::ok)
             .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))

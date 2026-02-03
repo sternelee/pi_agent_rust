@@ -25,6 +25,7 @@
 | **Session Management** | 10 | 0 | 0 | 0 | 10 |
 | **CLI** | 10 | 0 | 0 | 0 | 10 |
 | **Resources & Customization** | 6 | 0 | 2 | 0 | 8 |
+| **Extensions Runtime** | 0 | 4 | 8 | 0 | 12 |
 | **TUI** | 18 | 0 | 0 | 2 | 20 |
 | **Configuration** | 2 | 0 | 0 | 0 | 2 |
 | **Authentication** | 6 | 1 | 1 | 0 | 8 |
@@ -186,8 +187,25 @@
 | Prompt template loader | ✅ | `src/resources.rs` | Unit | Global/project + explicit paths |
 | Prompt template expansion (`/name args`) | ✅ | `src/resources.rs`, `src/interactive.rs` | Unit | `$1`, `$@`, `$ARGUMENTS`, `${@:N}` |
 | Package resource discovery | ✅ | `src/resources.rs` | Unit | Reads `package.json` `pi` field or defaults |
-| Extension discovery/runtime | ❌ | `src/extensions.rs` | - | Protocol scaffold only (see `EXTENSIONS.md` for connector + event loop design) |
-| Themes discovery/hot reload | ❌ | - | - | Not yet implemented |
+| Themes discovery | ❌ | - | - | Not yet implemented (bd-3ev) |
+| Themes hot reload | ❌ | - | - | Blocked by themes discovery |
+
+## 6B. Extensions Runtime
+
+| Feature | Status | Rust Location | Tests | Notes |
+|---------|--------|---------------|-------|-------|
+| Extension discovery | 🔶 | `src/extensions.rs` | 2 | Protocol scaffold only |
+| PiJS runtime (QuickJS) | ❌ | - | - | See `EXTENSIONS.md` connector model (bd-1ii) |
+| registerTool API | ❌ | - | - | Blocked by PiJS runtime |
+| registerCommand API | ❌ | - | - | Blocked by PiJS runtime |
+| Event handlers (onXxx) | ❌ | - | - | Blocked by PiJS runtime |
+| ctx.ui dialogs (select/confirm/input/editor) | 🔶 | `src/rpc.rs` | - | RPC protocol exists; runtime missing |
+| ctx.ui updates (notify/setStatus/setWidget) | 🔶 | `src/rpc.rs` | - | RPC protocol exists; runtime missing |
+| ctx.session access | ❌ | - | - | Blocked by PiJS runtime |
+| Extension logging | ❌ | - | - | Blocked by PiJS runtime |
+| Hostcall ABI (host_call/host_result) | ❌ | - | - | See `EXTENSIONS.md` connector model |
+| Capability manifest + policy | 🔶 | `src/extensions.rs` | 2 | Parsing + policy eval implemented |
+| MCP server support (Tier C) | ❌ | - | - | Lower priority than PiJS |
 
 ---
 

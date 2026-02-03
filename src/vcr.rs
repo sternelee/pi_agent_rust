@@ -14,6 +14,8 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 use tracing::{debug, info, warn};
@@ -150,10 +152,12 @@ impl RecordedResponse {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct VcrRecorder {
     cassette_path: PathBuf,
     mode: VcrMode,
     test_name: String,
+    playback_cursor: Arc<AtomicUsize>,
 }
 
 impl VcrRecorder {
@@ -167,6 +171,7 @@ impl VcrRecorder {
             cassette_path,
             mode,
             test_name: test_name.to_string(),
+            playback_cursor: Arc::new(AtomicUsize::new(0)),
         };
         info!(
             mode = ?recorder.mode,
@@ -184,6 +189,7 @@ impl VcrRecorder {
             cassette_path,
             mode,
             test_name: test_name.to_string(),
+            playback_cursor: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -287,15 +293,22 @@ impl VcrRecorder {
             "VCR record: captured streaming response"
         );
 
-        let mut cassette = Cassette {
-            version: CASSETTE_VERSION.to_string(),
-            test_name: self.test_name.clone(),
-            recorded_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-            interactions: vec![Interaction {
-                request,
-                response: recorded.clone(),
-            }],
+        let mut cassette = if self.cassette_path.exists() {
+            load_cassette(&self.cassette_path)?
+        } else {
+            Cassette {
+                version: CASSETTE_VERSION.to_string(),
+                test_name: self.test_name.clone(),
+                recorded_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+                interactions: Vec::new(),
+            }
         };
+        cassette.test_name.clone_from(&self.test_name);
+        cassette.recorded_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        cassette.interactions.push(Interaction {
+            request,
+            response: recorded.clone(),
+        });
 
         let redaction = redact_cassette(&mut cassette);
         info!(
@@ -315,7 +328,10 @@ impl VcrRecorder {
 
     fn playback(&self, request: &RecordedRequest) -> Result<RecordedResponse> {
         let cassette = load_cassette(&self.cassette_path)?;
-        let Some(interaction) = find_interaction(&cassette, request) else {
+        let start_index = self.playback_cursor.load(Ordering::SeqCst);
+        let Some((matched_index, interaction)) =
+            find_interaction_from(&cassette, request, start_index)
+        else {
             let incoming_key = request_debug_key(request);
             let recorded_keys: Vec<String> = cassette
                 .interactions
@@ -330,6 +346,7 @@ impl VcrRecorder {
                 cassette_path = %self.cassette_path.display(),
                 request = %incoming_key,
                 recorded_count = recorded_keys.len(),
+                start_index,
                 "VCR playback: no matching interaction"
             );
 
@@ -354,6 +371,8 @@ impl VcrRecorder {
             request = %request_debug_key(request),
             "VCR playback: matched interaction"
         );
+        self.playback_cursor
+            .store(matched_index + 1, Ordering::SeqCst);
         Ok(interaction.response.clone())
     }
 }
@@ -409,14 +428,17 @@ fn save_cassette(path: &Path, cassette: &Cassette) -> Result<()> {
     Ok(())
 }
 
-fn find_interaction<'a>(
+fn find_interaction_from<'a>(
     cassette: &'a Cassette,
     request: &RecordedRequest,
-) -> Option<&'a Interaction> {
+    start: usize,
+) -> Option<(usize, &'a Interaction)> {
     cassette
         .interactions
         .iter()
-        .find(|interaction| request_matches(&interaction.request, request))
+        .enumerate()
+        .skip(start)
+        .find(|(_, interaction)| request_matches(&interaction.request, request))
 }
 
 fn request_debug_key(request: &RecordedRequest) -> String {

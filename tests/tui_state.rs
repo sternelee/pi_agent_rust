@@ -1003,6 +1003,32 @@ fn tui_state_slash_clear_clears_conversation_and_sets_status() {
 }
 
 #[test]
+fn tui_state_slash_new_resets_conversation_and_sets_status() {
+    let harness = TestHarness::new("tui_state_slash_new_resets_conversation_and_sets_status");
+    let mut app = build_app(&harness, Vec::new());
+    log_initial_state(&harness, &app);
+
+    apply_pi(
+        &harness,
+        &mut app,
+        "PiMsg::ConversationReset",
+        PiMsg::ConversationReset {
+            messages: vec![user_msg("hello"), assistant_msg("world")],
+            usage: sample_usage(12, 34),
+            status: Some("old".to_string()),
+        },
+    );
+
+    type_text(&harness, &mut app, "/new");
+    let step = press_enter(&harness, &mut app);
+    assert_after_contains(&harness, &step, "Started new session");
+    assert_after_not_contains(&harness, &step, "You: hello");
+    assert_after_not_contains(&harness, &step, "world");
+    assert_after_contains(&harness, &step, "Model set to dummy/dummy-model");
+    assert_after_contains(&harness, &step, "Thinking level: off");
+}
+
+#[test]
 fn tui_state_extension_ui_notify_adds_system_message() {
     let harness = TestHarness::new("tui_state_extension_ui_notify_adds_system_message");
     let mut app = build_app(&harness, Vec::new());
