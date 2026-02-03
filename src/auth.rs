@@ -213,8 +213,8 @@ pub struct OAuthStartInfo {
 pub fn start_anthropic_oauth() -> Result<OAuthStartInfo> {
     let (verifier, challenge) = generate_pkce();
 
-    let mut url =
-        reqwest::Url::parse(ANTHROPIC_OAUTH_AUTHORIZE_URL).map_err(|e| Error::auth(e.to_string()))?;
+    let mut url = reqwest::Url::parse(ANTHROPIC_OAUTH_AUTHORIZE_URL)
+        .map_err(|e| Error::auth(e.to_string()))?;
     url.query_pairs_mut()
         .append_pair("code", "true")
         .append_pair("client_id", ANTHROPIC_OAUTH_CLIENT_ID)
@@ -324,9 +324,7 @@ struct OAuthTokenResponse {
 }
 
 fn oauth_expires_at_ms(expires_in_seconds: i64) -> i64 {
-    chrono::Utc::now().timestamp_millis()
-        + expires_in_seconds.saturating_mul(1000)
-        - 5 * 60 * 1000
+    chrono::Utc::now().timestamp_millis() + expires_in_seconds.saturating_mul(1000) - 5 * 60 * 1000
 }
 
 fn generate_pkce() -> (String, String) {
@@ -337,9 +335,8 @@ fn generate_pkce() -> (String, String) {
     random[16..].copy_from_slice(uuid2.as_bytes());
 
     let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random);
-    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(
-        verifier.as_bytes(),
-    ));
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(sha2::Sha256::digest(verifier.as_bytes()));
     (verifier, challenge)
 }
 

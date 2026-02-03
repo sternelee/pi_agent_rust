@@ -82,7 +82,8 @@ async fn run(mut cli: cli::Cli) -> Result<()> {
             ResourceLoader::empty(config.enable_skill_commands())
         }
     };
-    let auth = AuthStorage::load(Config::auth_path())?;
+    let mut auth = AuthStorage::load(Config::auth_path())?;
+    auth.refresh_expired_oauth_tokens().await?;
     let models_path = default_models_path(&Config::global_dir());
     let model_registry = ModelRegistry::load(&auth, Some(models_path));
     if let Some(error) = model_registry.error() {

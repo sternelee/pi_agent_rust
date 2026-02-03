@@ -24,6 +24,7 @@
 | **Agent Runtime** | 7 | 0 | 0 | 0 | 7 |
 | **Session Management** | 10 | 0 | 0 | 0 | 10 |
 | **CLI** | 9 | 0 | 0 | 1 | 10 |
+| **Resources & Customization** | 6 | 0 | 2 | 0 | 8 |
 | **TUI** | 18 | 0 | 0 | 2 | 20 |
 | **Configuration** | 2 | 0 | 0 | 0 | 2 |
 | **Authentication** | 6 | 1 | 1 | 0 | 8 |
@@ -175,6 +176,21 @@
 
 ---
 
+## 6A. Resources & Customization
+
+| Feature | Status | Rust Location | Tests | Notes |
+|---------|--------|---------------|-------|-------|
+| Skills loader + validation | ✅ | `src/resources.rs` | Unit | Agent Skills frontmatter + diagnostics |
+| Skills prompt inclusion | ✅ | `src/main.rs` | Unit | Appends `<available_skills>` if `read` tool enabled |
+| Skill command expansion (`/skill:name`) | ✅ | `src/resources.rs`, `src/interactive.rs` | Unit | Expands to `<skill ...>` block |
+| Prompt template loader | ✅ | `src/resources.rs` | Unit | Global/project + explicit paths |
+| Prompt template expansion (`/name args`) | ✅ | `src/resources.rs`, `src/interactive.rs` | Unit | `$1`, `$@`, `$ARGUMENTS`, `${@:N}` |
+| Package resource discovery | ✅ | `src/resources.rs` | Unit | Reads `package.json` `pi` field or defaults |
+| Extension discovery/runtime | ❌ | `src/extensions.rs` | - | Protocol scaffold only |
+| Themes discovery/hot reload | ❌ | - | - | Not yet implemented |
+
+---
+
 ## 7. Configuration
 
 | Feature | Status | Rust Location | Tests | Notes |
@@ -222,6 +238,34 @@
 | Viewport scrolling | ✅ | `src/interactive.rs` | - | Viewport with scroll_to_bottom() |
 | Image display | ⬜ | - | - | Terminal dependent |
 | Autocomplete | ⬜ | - | - | Defer |
+
+### 8.3 Interactive Commands (Slash)
+
+| Command | Status | Rust Location | Notes |
+|---------|--------|---------------|-------|
+| `/help` | ✅ | `src/interactive.rs` | Help text |
+| `/clear` | ✅ | `src/interactive.rs` | Clears in-memory conversation view |
+| `/model` | ✅ | `src/interactive.rs` | Switch model/provider |
+| `/thinking` | ✅ | `src/interactive.rs` | Set thinking level |
+| `/history` | ✅ | `src/interactive.rs` | Show input history |
+| `/export` | ✅ | `src/interactive.rs` | Export session to HTML |
+| `/exit` / `/quit` | ✅ | `src/interactive.rs` | Exit Pi |
+| `/login` | ❌ | - | OAuth login (Anthropic/Codex/Copilot/etc.) |
+| `/logout` | ❌ | - | Remove OAuth credentials |
+| `/scoped-models` | ❌ | - | Enable/disable models for Ctrl+P cycling |
+| `/settings` | ❌ | - | TUI settings (theme/thinking/delivery) |
+| `/resume` | ❌ | - | Pick from previous sessions |
+| `/new` | ❌ | - | Start a new session |
+| `/name <name>` | ❌ | - | Set session display name |
+| `/session` | ❌ | - | Show session info (path/tokens/cost) |
+| `/tree` | ❌ | - | Jump to any point in the session |
+| `/fork` | ❌ | - | Create new session from current branch |
+| `/compact [prompt]` | ❌ | - | Manual compaction |
+| `/copy` | ❌ | - | Copy last assistant message |
+| `/share` | ❌ | - | Share session (gist) |
+| `/reload` | ❌ | - | Reload extensions/skills/prompts/context |
+| `/hotkeys` | ❌ | - | Show keybindings |
+| `/changelog` | ❌ | - | Display version history |
 
 ---
 
@@ -325,10 +369,10 @@ Fixtures are JSON files in `tests/conformance/fixtures/` with this structure:
 
 | Metric | Target | Current | Status |
 |--------|--------|---------|--------|
-| Startup time | <100ms | 11.2ms (`pi --version`) | ✅ |
-| Binary size (release) | <20MB | 7.6MB | ✅ |
-| TUI framerate | 60fps | N/A | ❌ |
-| Memory (idle) | <50MB | Not measured | ❌ |
+| Startup time | <100ms | 13ms (`pi --version`) | ✅ |
+| Binary size (release) | <20MB | 8.3MB | ✅ |
+| TUI framerate | 60fps | N/A | ⬜ Deferred |
+| Memory (idle) | <50MB | Not measured | ⬜ Deferred |
 
 ---
 

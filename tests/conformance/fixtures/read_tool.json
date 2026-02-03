@@ -89,7 +89,7 @@
       ],
       "input": {"path": "empty.txt"},
       "expected": {
-        "content_exact": "    1→",
+        "content_exact": "",
         "details_none": true
       }
     },

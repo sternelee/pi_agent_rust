@@ -38,8 +38,9 @@ Location: `src/*.rs` inline `#[cfg(test)]` modules
 - Path resolution
 - Provider message conversion
 - Package manager source parsing/identity + settings updates
+- Skills loader + prompt template expansion
 
-**Count:** 32+ tests
+**Count:** 35+ tests
 
 ### 2. Conformance Tests (Fixture-Based)
 

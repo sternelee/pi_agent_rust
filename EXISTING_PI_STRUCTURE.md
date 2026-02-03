@@ -952,6 +952,77 @@ pub enum AuthCredential {
 4. Environment variable (provider-specific)
 5. Fallback resolver (custom providers)
 
+### 8.5 OAuth: Anthropic (Claude Pro/Max)
+
+This port supports **Anthropic OAuth** as an alternative to API keys. Credentials are stored in `auth.json` under the provider key `"anthropic"` with `type: "oauth"`.
+
+#### 8.5.1 PKCE
+
+The login flow uses PKCE (RFC 7636):
+- `verifier`: 32 random bytes, Base64URL (no padding)
+- `challenge`: Base64URL(SHA256(verifier))
+
+#### 8.5.2 Authorization URL
+
+- `client_id`: `9d1c250a-e61b-44d9-88ed-5944d1962f5e`
+- `authorize_url`: `https://claude.ai/oauth/authorize`
+- `redirect_uri`: `https://console.anthropic.com/oauth/code/callback`
+- `scopes`: `org:create_api_key user:profile user:inference`
+
+Query params:
+- `code=true`
+- `client_id=<client_id>`
+- `response_type=code`
+- `redirect_uri=<redirect_uri>`
+- `scope=<scopes>`
+- `code_challenge=<challenge>`
+- `code_challenge_method=S256`
+- `state=<verifier>`
+
+The user completes login in the browser and then pastes either:
+- the full callback URL, or
+- `code#state`, or
+- just `code` (in which case `state` defaults to the original `verifier`)
+
+#### 8.5.3 Token Exchange
+
+POST `https://console.anthropic.com/v1/oauth/token` with JSON:
+```json
+{
+  "grant_type": "authorization_code",
+  "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+  "code": "<code>",
+  "state": "<state>",
+  "redirect_uri": "https://console.anthropic.com/oauth/code/callback",
+  "code_verifier": "<verifier>"
+}
+```
+
+Response JSON:
+```json
+{ "access_token": "...", "refresh_token": "...", "expires_in": 1234 }
+```
+
+Expiry is stored in milliseconds as:
+```
+expires = now_ms + (expires_in * 1000) - (5 * 60 * 1000)
+```
+
+#### 8.5.4 Refresh
+
+If an OAuth credential is expired, it must be refreshed automatically.
+
+POST `https://console.anthropic.com/v1/oauth/token` with JSON:
+```json
+{
+  "grant_type": "refresh_token",
+  "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+  "refresh_token": "<refresh_token>"
+}
+```
+
+The refreshed credentials overwrite the stored entry in `auth.json` and are persisted immediately.
+
 ---
 
 ## 9. CLI Commands and Flags
