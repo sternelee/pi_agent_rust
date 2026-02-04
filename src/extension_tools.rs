@@ -181,7 +181,10 @@ mod tests {
 
             match output.content.as_slice() {
                 [ContentBlock::Text(text)] => assert_eq!(text.text, "hello pi"),
-                other => panic!("Expected single text content block, got: {other:?}"),
+                other => assert!(
+                    matches!(other, [ContentBlock::Text(_)]),
+                    "Expected single text content block, got: {other:?}"
+                ),
             }
 
             let details = output.details.expect("details present");

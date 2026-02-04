@@ -17,6 +17,7 @@ use asupersync::runtime::RuntimeHandle;
 use asupersync::sync::Mutex;
 use asupersync::time::{sleep, wall_now};
 use async_trait::async_trait;
+use bubbles::list::{DefaultDelegate, Item as ListItem, List};
 use bubbles::spinner::{SpinnerModel, spinners};
 use bubbles::textarea::TextArea;
 use bubbles::viewport::Viewport;
@@ -440,13 +441,14 @@ impl PiApp {
     }
 
     fn format_input_history(&self) -> String {
-        if self.input_history.is_empty() {
+        let entries = self.history.entries();
+        if entries.is_empty() {
             return "No input history yet.".to_string();
         }
 
         let mut output = String::from("Input history (most recent first):\n");
-        for (idx, entry) in self.input_history.iter().rev().take(50).enumerate() {
-            let trimmed = entry.trim();
+        for (idx, entry) in entries.iter().rev().take(50).enumerate() {
+            let trimmed = entry.value.trim();
             if trimmed.is_empty() {
                 continue;
             }
@@ -3227,14 +3229,100 @@ impl InteractiveMessageQueue {
     }
 }
 
+#[derive(Debug, Clone)]
+struct HistoryItem {
+    value: String,
+}
+
+impl ListItem for HistoryItem {
+    fn filter_value(&self) -> &str {
+        &self.value
+    }
+}
+
+#[derive(Clone)]
+struct HistoryList {
+    // We never render the list UI; we use it as a battle-tested cursor+navigation model.
+    // The final item is always a sentinel representing "empty input".
+    list: List<HistoryItem, DefaultDelegate>,
+}
+
+impl HistoryList {
+    fn new() -> Self {
+        let mut list = List::new(
+            vec![HistoryItem {
+                value: String::new(),
+            }],
+            DefaultDelegate::new(),
+            0,
+            0,
+        );
+
+        // Keep behavior minimal/predictable for now; this is used as an index model.
+        list.filtering_enabled = false;
+        list.infinite_scrolling = false;
+
+        // Start at the "empty input" sentinel.
+        list.select(0);
+
+        Self { list }
+    }
+
+    fn entries(&self) -> &[HistoryItem] {
+        let items = self.list.items();
+        if items.len() <= 1 {
+            return &[];
+        }
+        &items[..items.len().saturating_sub(1)]
+    }
+
+    fn has_entries(&self) -> bool {
+        !self.entries().is_empty()
+    }
+
+    fn cursor_is_empty(&self) -> bool {
+        // Sentinel is always the final item.
+        self.list.index() + 1 == self.list.items().len()
+    }
+
+    fn reset_cursor(&mut self) {
+        let last = self.list.items().len().saturating_sub(1);
+        self.list.select(last);
+    }
+
+    fn push(&mut self, value: String) {
+        let mut items = self.entries().to_vec();
+        items.push(HistoryItem { value });
+        items.push(HistoryItem {
+            value: String::new(),
+        });
+
+        self.list.set_items(items);
+        self.reset_cursor();
+    }
+
+    fn cursor_up(&mut self) {
+        self.list.cursor_up();
+    }
+
+    fn cursor_down(&mut self) {
+        self.list.cursor_down();
+    }
+
+    fn selected_value(&self) -> &str {
+        self.list
+            .selected_item()
+            .map_or("", |item| item.value.as_str())
+    }
+}
+
 /// The main interactive TUI application model.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(bubbletea::Model)]
 pub struct PiApp {
     // Input state
     input: TextArea,
-    input_history: Vec<String>,
-    history_index: Option<usize>,
+    history: HistoryList,
     input_mode: InputMode,
     pending_inputs: VecDeque<PendingInput>,
     message_queue: Arc<StdMutex<InteractiveMessageQueue>>,
@@ -3855,8 +3943,7 @@ impl PiApp {
 
         let mut app = Self {
             input,
-            input_history: Vec::new(),
-            history_index: None,
+            history: HistoryList::new(),
             input_mode: InputMode::SingleLine,
             pending_inputs: VecDeque::from(pending_inputs),
             message_queue,
@@ -5290,8 +5377,7 @@ impl PiApp {
         let expanded = self.resources.expand_input(trimmed);
 
         // Track input history
-        self.input_history.push(trimmed.to_string());
-        self.history_index = None;
+        self.history.push(trimmed.to_string());
 
         if let Ok(mut queue) = self.message_queue.lock() {
             match kind {
@@ -5563,8 +5649,7 @@ impl PiApp {
         self.bash_running = true;
         self.agent_state = AgentState::ToolRunning;
         self.current_tool = Some("bash".to_string());
-        self.input_history.push(raw_message.to_string());
-        self.history_index = None;
+        self.history.push(raw_message.to_string());
 
         self.input.reset();
         self.input_mode = InputMode::SingleLine;
@@ -5726,8 +5811,7 @@ impl PiApp {
                 content.push(ContentBlock::Image(image));
             }
 
-            self.input_history.push(message_owned.clone());
-            self.history_index = None;
+            self.history.push(message_owned.clone());
 
             let display = content_blocks_to_text(&content);
             return self.submit_content_with_display(content, &display, Some(message_owned));
@@ -5741,8 +5825,7 @@ impl PiApp {
         self.abort_handle = Some(abort_handle);
 
         // Add to history
-        self.input_history.push(message_owned.clone());
-        self.history_index = None;
+        self.history.push(message_owned.clone());
 
         // Add user message to display
         self.messages.push(ConversationMessage {
@@ -5971,33 +6054,31 @@ impl PiApp {
 
     /// Navigate to previous history entry.
     fn navigate_history_back(&mut self) {
-        if self.input_history.is_empty() {
+        if !self.history.has_entries() {
             return;
         }
 
-        let new_index = match self.history_index {
-            None => self.input_history.len().saturating_sub(1),
-            Some(i) => i.saturating_sub(1),
-        };
-
-        if let Some(entry) = self.input_history.get(new_index) {
-            self.input.set_value(entry);
-            self.history_index = Some(new_index);
-        }
+        self.history.cursor_up();
+        self.apply_history_selection();
     }
 
     /// Navigate to next history entry.
     fn navigate_history_forward(&mut self) {
-        if let Some(index) = self.history_index {
-            let next_index = index + 1;
-            if let Some(entry) = self.input_history.get(next_index) {
-                self.input.set_value(entry);
-                self.history_index = Some(next_index);
-            } else {
-                // Back to empty input
-                self.input.reset();
-                self.history_index = None;
-            }
+        // Avoid clearing the editor when the user hasn't entered history navigation.
+        if self.history.cursor_is_empty() {
+            return;
+        }
+
+        self.history.cursor_down();
+        self.apply_history_selection();
+    }
+
+    fn apply_history_selection(&mut self) {
+        let selected = self.history.selected_value();
+        if selected.is_empty() {
+            self.input.reset();
+        } else {
+            self.input.set_value(selected);
         }
     }
 

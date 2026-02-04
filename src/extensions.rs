@@ -6219,7 +6219,10 @@ mod tests {
         let value = match read_outcome {
             HostcallOutcome::Success(value) => value,
             HostcallOutcome::Error { code, message } => {
-                assert!(false, "expected read success, got error {code}: {message}");
+                assert!(
+                    code == "__expected_success__",
+                    "expected read success, got error {code}: {message}"
+                );
                 return;
             }
         };

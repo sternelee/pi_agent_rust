@@ -1033,7 +1033,10 @@ mod tests {
                         assert_eq!(content, "hi");
                         assert!(*display);
                     }
-                    other => panic!("Unexpected message: {other:?}"),
+                    other => assert!(
+                        matches!(other, SessionMessage::Custom { .. }),
+                        "Unexpected message: {other:?}"
+                    ),
                 }
             }
 

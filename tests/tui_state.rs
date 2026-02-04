@@ -903,6 +903,20 @@ fn tui_state_enter_in_multiline_mode_inserts_newline_not_submit() {
 }
 
 #[test]
+fn tui_state_history_navigation_with_no_history_preserves_input() {
+    let harness = TestHarness::new("tui_state_history_navigation_with_no_history_preserves_input");
+    let mut app = build_app(&harness, Vec::new());
+    log_initial_state(&harness, &app);
+
+    type_text(&harness, &mut app, "draft");
+    let step = press_up(&harness, &mut app);
+    assert_after_contains(&harness, &step, "> draft");
+
+    let step = press_down(&harness, &mut app);
+    assert_after_contains(&harness, &step, "> draft");
+}
+
+#[test]
 fn tui_state_history_up_shows_last_submitted_input() {
     let harness = TestHarness::new("tui_state_history_up_shows_last_submitted_input");
     let mut app = build_app(&harness, Vec::new());
