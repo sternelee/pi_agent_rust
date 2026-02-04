@@ -4,8 +4,11 @@
 //! hostcall requests (tools, HTTP, session, UI, etc.) from the JS runtime to
 //! Rust implementations.
 
+use std::collections::BTreeSet;
 use std::collections::VecDeque;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::thread;
@@ -13,13 +16,15 @@ use std::time::{Duration, Instant};
 
 use asupersync::Cx;
 use asupersync::channel::oneshot;
+use asupersync::time::{sleep, wall_now};
 use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::connectors::{Connector, HostCallPayload, http::HttpConnector};
 use crate::error::Result;
+use crate::extensions::EXTENSION_EVENT_TIMEOUT_MS;
 use crate::extensions::{ExtensionSession, ExtensionUiRequest, ExtensionUiResponse};
-use crate::extensions_js::{HostcallKind, HostcallRequest, PiJsRuntime};
+use crate::extensions_js::{HostcallKind, HostcallRequest, PiJsRuntime, js_to_json, json_to_js};
 use crate::scheduler::{Clock as SchedulerClock, HostcallOutcome, WallClock};
 use crate::tools::ToolRegistry;
 
@@ -67,24 +72,33 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
 
     /// Dispatch a hostcall and enqueue its completion into the JS scheduler.
     #[allow(clippy::future_not_send)]
-    pub async fn dispatch_and_complete(&self, request: HostcallRequest) {
-        let HostcallRequest {
-            call_id,
-            kind,
-            payload,
-            ..
-        } = request;
+    pub fn dispatch_and_complete(
+        &self,
+        request: HostcallRequest,
+    ) -> Pin<Box<dyn Future<Output = ()> + '_>> {
+        Box::pin(async move {
+            let HostcallRequest {
+                call_id,
+                kind,
+                payload,
+                extension_id,
+                ..
+            } = request;
 
-        let outcome = match kind {
-            HostcallKind::Tool { name } => self.dispatch_tool(&call_id, &name, payload).await,
-            HostcallKind::Exec { cmd } => self.dispatch_exec(&call_id, &cmd, payload).await,
-            HostcallKind::Http => self.dispatch_http(&call_id, payload).await,
-            HostcallKind::Session { op } => self.dispatch_session(&call_id, &op, payload).await,
-            HostcallKind::Ui { op } => self.dispatch_ui(&call_id, &op, payload).await,
-            HostcallKind::Events { op } => self.dispatch_events(&call_id, &op, payload).await,
-        };
+            let outcome = match kind {
+                HostcallKind::Tool { name } => self.dispatch_tool(&call_id, &name, payload).await,
+                HostcallKind::Exec { cmd } => self.dispatch_exec(&call_id, &cmd, payload).await,
+                HostcallKind::Http => self.dispatch_http(&call_id, payload).await,
+                HostcallKind::Session { op } => self.dispatch_session(&call_id, &op, payload).await,
+                HostcallKind::Ui { op } => self.dispatch_ui(&call_id, &op, payload).await,
+                HostcallKind::Events { op } => {
+                    self.dispatch_events(&call_id, extension_id.as_deref(), &op, payload)
+                        .await
+                }
+            };
 
-        self.runtime.complete_hostcall(call_id, outcome);
+            self.runtime.complete_hostcall(call_id, outcome);
+        })
     }
 
     #[allow(clippy::future_not_send)]
@@ -400,10 +414,284 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
     }
 
     #[allow(clippy::future_not_send)]
-    async fn dispatch_events(&self, _call_id: &str, op: &str, _payload: Value) -> HostcallOutcome {
-        HostcallOutcome::Error {
-            code: "invalid_request".to_string(),
-            message: format!("Unsupported events op: {op}"),
+    async fn dispatch_events(
+        &self,
+        _call_id: &str,
+        extension_id: Option<&str>,
+        op: &str,
+        payload: Value,
+    ) -> HostcallOutcome {
+        match op.trim() {
+            "list" => match self.list_extension_events(extension_id).await {
+                Ok(events) => HostcallOutcome::Success(serde_json::json!({ "events": events })),
+                Err(err) => HostcallOutcome::Error {
+                    code: "io".to_string(),
+                    message: err.to_string(),
+                },
+            },
+            "emit" => {
+                let event_name = payload
+                    .get("event")
+                    .or_else(|| payload.get("name"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty());
+
+                let Some(event_name) = event_name else {
+                    return HostcallOutcome::Error {
+                        code: "invalid_request".to_string(),
+                        message: "events.emit requires non-empty `event`".to_string(),
+                    };
+                };
+
+                let event_payload = payload.get("data").cloned().unwrap_or(Value::Null);
+                let timeout_ms = payload
+                    .get("timeout_ms")
+                    .and_then(Value::as_u64)
+                    .or_else(|| payload.get("timeoutMs").and_then(Value::as_u64))
+                    .or_else(|| payload.get("timeout").and_then(Value::as_u64))
+                    .filter(|ms| *ms > 0)
+                    .unwrap_or(EXTENSION_EVENT_TIMEOUT_MS);
+
+                let ctx_payload = match payload.get("ctx") {
+                    Some(ctx) => ctx.clone(),
+                    None => self.build_default_event_ctx(extension_id).await,
+                };
+
+                match Box::pin(self.dispatch_extension_event(
+                    event_name,
+                    event_payload,
+                    ctx_payload,
+                    timeout_ms,
+                ))
+                .await
+                {
+                    Ok(result) => {
+                        let handler_count = self
+                            .count_event_handlers(event_name)
+                            .await
+                            .unwrap_or_default();
+
+                        HostcallOutcome::Success(serde_json::json!({
+                            "dispatched": true,
+                            "event": event_name,
+                            "handler_count": handler_count,
+                            "result": result,
+                        }))
+                    }
+                    Err(err) => HostcallOutcome::Error {
+                        code: "io".to_string(),
+                        message: err.to_string(),
+                    },
+                }
+            }
+            other => HostcallOutcome::Error {
+                code: "invalid_request".to_string(),
+                message: format!("Unsupported events op: {other}"),
+            },
+        }
+    }
+
+    #[allow(clippy::future_not_send)]
+    async fn list_extension_events(&self, extension_id: Option<&str>) -> Result<Vec<String>> {
+        #[derive(serde::Deserialize)]
+        struct Snapshot {
+            id: String,
+            #[serde(default)]
+            event_hooks: Vec<String>,
+        }
+
+        let json = self
+            .runtime
+            .with_ctx(|ctx| {
+                let global = ctx.globals();
+                let snapshot_fn: rquickjs::Function<'_> = global.get("__pi_snapshot_extensions")?;
+                let value: rquickjs::Value<'_> = snapshot_fn.call(())?;
+                js_to_json(&value)
+            })
+            .await?;
+
+        let snapshots: Vec<Snapshot> = serde_json::from_value(json)
+            .map_err(|err| crate::error::Error::extension(err.to_string()))?;
+
+        let mut events = BTreeSet::new();
+        match extension_id {
+            Some(needle) => {
+                for snapshot in snapshots {
+                    if snapshot.id == needle {
+                        for event in snapshot.event_hooks {
+                            let event = event.trim();
+                            if !event.is_empty() {
+                                events.insert(event.to_string());
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            None => {
+                for snapshot in snapshots {
+                    for event in snapshot.event_hooks {
+                        let event = event.trim();
+                        if !event.is_empty() {
+                            events.insert(event.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(events.into_iter().collect())
+    }
+
+    #[allow(clippy::future_not_send)]
+    async fn count_event_handlers(&self, event_name: &str) -> Result<Option<usize>> {
+        let literal = serde_json::to_string(event_name)
+            .map_err(|err| crate::error::Error::extension(err.to_string()))?;
+
+        self.runtime
+            .with_ctx(|ctx| {
+                let code = format!(
+                    "(function() {{ const handlers = (__pi_hook_index.get({literal}) || []); return handlers.length; }})()"
+                );
+                ctx.eval::<usize, _>(code)
+                    .map(Some)
+                    .or(Ok(None))
+            })
+            .await
+    }
+
+    #[allow(clippy::future_not_send)]
+    async fn build_default_event_ctx(&self, _extension_id: Option<&str>) -> Value {
+        let entries = self.session.get_entries().await;
+        let branch = self.session.get_branch().await;
+        let leaf_entry = branch.last().cloned().unwrap_or(Value::Null);
+
+        serde_json::json!({
+            "hasUI": true,
+            "cwd": self.cwd.display().to_string(),
+            "sessionEntries": entries,
+            "branch": branch,
+            "leafEntry": leaf_entry,
+            "modelRegistry": {},
+        })
+    }
+
+    #[allow(clippy::future_not_send)]
+    async fn dispatch_extension_event(
+        &self,
+        event_name: &str,
+        event_payload: Value,
+        ctx_payload: Value,
+        timeout_ms: u64,
+    ) -> Result<Value> {
+        #[derive(serde::Deserialize)]
+        struct JsTaskError {
+            #[serde(default)]
+            code: Option<String>,
+            message: String,
+            #[serde(default)]
+            stack: Option<String>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct JsTaskState {
+            status: String,
+            #[serde(default)]
+            value: Option<Value>,
+            #[serde(default)]
+            error: Option<JsTaskError>,
+        }
+
+        let task_id = format!("task-events-{call_id}", call_id = uuid::Uuid::new_v4());
+
+        self.runtime
+            .with_ctx(|ctx| {
+                let global = ctx.globals();
+                let dispatch_fn: rquickjs::Function<'_> =
+                    global.get("__pi_dispatch_extension_event")?;
+                let task_start: rquickjs::Function<'_> = global.get("__pi_task_start")?;
+
+                let event_js = json_to_js(&ctx, &event_payload)?;
+                let ctx_js = json_to_js(&ctx, &ctx_payload)?;
+                let promise: rquickjs::Value<'_> =
+                    dispatch_fn.call((event_name.to_string(), event_js, ctx_js))?;
+                let _task: String = task_start.call((task_id.clone(), promise))?;
+                Ok(())
+            })
+            .await?;
+
+        let start = Instant::now();
+        let timeout = Duration::from_millis(timeout_ms.max(1));
+
+        loop {
+            if start.elapsed() > timeout {
+                return Err(crate::error::Error::extension(format!(
+                    "events.emit timed out after {}ms",
+                    timeout.as_millis()
+                )));
+            }
+
+            let mut pending = self.runtime.drain_hostcall_requests();
+            while let Some(req) = pending.pop_front() {
+                self.dispatch_and_complete(req).await;
+            }
+
+            let _ = self.runtime.tick().await?;
+            let _ = self.runtime.drain_microtasks().await?;
+
+            let state_json = self
+                .runtime
+                .with_ctx(|ctx| {
+                    let global = ctx.globals();
+                    let take_fn: rquickjs::Function<'_> = global.get("__pi_task_take")?;
+                    let value: rquickjs::Value<'_> = take_fn.call((task_id.clone(),))?;
+                    js_to_json(&value)
+                })
+                .await?;
+
+            if state_json.is_null() {
+                return Err(crate::error::Error::extension(
+                    "events.emit task state missing".to_string(),
+                ));
+            }
+
+            let state: JsTaskState = serde_json::from_value(state_json)
+                .map_err(|err| crate::error::Error::extension(err.to_string()))?;
+
+            match state.status.as_str() {
+                "pending" => {
+                    if !self.runtime.has_pending() {
+                        sleep(wall_now(), Duration::from_millis(1)).await;
+                    }
+                }
+                "resolved" => return Ok(state.value.unwrap_or(Value::Null)),
+                "rejected" => {
+                    let err = state.error.unwrap_or_else(|| JsTaskError {
+                        code: None,
+                        message: "Unknown JS task error".to_string(),
+                        stack: None,
+                    });
+                    let mut message = err.message;
+                    if let Some(code) = err.code {
+                        message = format!("{code}: {message}");
+                    }
+                    if let Some(stack) = err.stack {
+                        if !stack.is_empty() {
+                            message.push('\n');
+                            message.push_str(&stack);
+                        }
+                    }
+                    return Err(crate::error::Error::extension(message));
+                }
+                other => {
+                    return Err(crate::error::Error::extension(format!(
+                        "Unexpected JS task status: {other}"
+                    )));
+                }
+            }
+
+            sleep(wall_now(), Duration::from_millis(0)).await;
         }
     }
 }
@@ -1453,6 +1741,116 @@ mod tests {
                 )
                 .await
                 .expect("verify error");
+        });
+    }
+
+    #[test]
+    fn dispatcher_events_list_returns_registered_hooks() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+
+            runtime
+                .eval(
+                    r#"
+                    globalThis.eventsList = null;
+                    __pi_begin_extension("ext.a", { name: "ext.a" });
+                    pi.on("custom_event", (_payload, _ctx) => {});
+                    pi.events("list", {}).then((r) => { globalThis.eventsList = r; });
+                    __pi_end_extension();
+                "#,
+                )
+                .await
+                .expect("eval");
+
+            let requests = runtime.drain_hostcall_requests();
+            assert_eq!(requests.len(), 1);
+
+            let dispatcher = build_dispatcher(Rc::clone(&runtime));
+            for request in requests {
+                dispatcher.dispatch_and_complete(request).await;
+            }
+
+            runtime.tick().await.expect("tick");
+
+            runtime
+                .eval(
+                    r#"
+                    if (!globalThis.eventsList) throw new Error("Promise not resolved");
+                    const events = globalThis.eventsList.events;
+                    if (!Array.isArray(events)) throw new Error("Missing events array");
+                    if (events.length !== 1 || events[0] !== "custom_event") {
+                        throw new Error("Wrong events list: " + JSON.stringify(events));
+                    }
+                "#,
+                )
+                .await
+                .expect("verify list");
+        });
+    }
+
+    #[test]
+    fn dispatcher_events_emit_dispatches_custom_event() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+
+            runtime
+                .eval(
+                    r#"
+                    globalThis.seen = [];
+                    globalThis.emitResult = null;
+
+                    __pi_begin_extension("ext.b", { name: "ext.b" });
+                    pi.on("custom_event", (payload, _ctx) => { globalThis.seen.push(payload); });
+                    __pi_end_extension();
+
+                    __pi_begin_extension("ext.a", { name: "ext.a" });
+                    pi.events("emit", { event: "custom_event", data: { hello: "world" } })
+                      .then((r) => { globalThis.emitResult = r; });
+                    __pi_end_extension();
+                "#,
+                )
+                .await
+                .expect("eval");
+
+            let requests = runtime.drain_hostcall_requests();
+            assert_eq!(requests.len(), 1);
+
+            let dispatcher = build_dispatcher(Rc::clone(&runtime));
+            for request in requests {
+                dispatcher.dispatch_and_complete(request).await;
+            }
+
+            runtime.tick().await.expect("tick");
+
+            runtime
+                .eval(
+                    r#"
+                    if (!globalThis.emitResult) throw new Error("emit promise not resolved");
+                    if (globalThis.emitResult.dispatched !== true) {
+                        throw new Error("emit did not report dispatched: " + JSON.stringify(globalThis.emitResult));
+                    }
+                    if (globalThis.emitResult.event !== "custom_event") {
+                        throw new Error("wrong event: " + JSON.stringify(globalThis.emitResult));
+                    }
+                    if (!Array.isArray(globalThis.seen) || globalThis.seen.length !== 1) {
+                        throw new Error("event handler not called: " + JSON.stringify(globalThis.seen));
+                    }
+                    const payload = globalThis.seen[0];
+                    if (!payload || payload.hello !== "world") {
+                        throw new Error("wrong payload: " + JSON.stringify(payload));
+                    }
+                "#,
+                )
+                .await
+                .expect("verify emit");
         });
     }
 }
