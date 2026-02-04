@@ -7,7 +7,10 @@ on:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     env:
       CI: "true"
       VCR_MODE: "playback"
@@ -16,26 +19,60 @@ jobs:
     defaults:
       run:
         working-directory: pi_agent_rust
+        shell: bash
     steps:
       - name: Checkout pi_agent_rust
         uses: actions/checkout@v4
         with:
           path: pi_agent_rust
 
-      - name: Checkout path dependencies
-        run: |
-          set -euxo pipefail
-          cd "$GITHUB_WORKSPACE"
-          git clone --depth 1 https://github.com/Dicklesworthstone/asupersync
-          git clone --depth 1 https://github.com/Dicklesworthstone/rich_rust
-          git clone --depth 1 https://github.com/Dicklesworthstone/charmed_rust
-          git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust
+      - name: Checkout asupersync
+        uses: actions/checkout@v4
+        with:
+          repository: Dicklesworthstone/asupersync
+          path: asupersync
+          fetch-depth: 1
 
-      - name: Install system deps (fd, rg)
+      - name: Checkout rich_rust
+        uses: actions/checkout@v4
+        with:
+          repository: Dicklesworthstone/rich_rust
+          path: rich_rust
+          fetch-depth: 1
+
+      - name: Checkout charmed_rust
+        uses: actions/checkout@v4
+        with:
+          repository: Dicklesworthstone/charmed_rust
+          path: charmed_rust
+          fetch-depth: 1
+
+      - name: Checkout sqlmodel_rust
+        uses: actions/checkout@v4
+        with:
+          repository: Dicklesworthstone/sqlmodel_rust
+          path: sqlmodel_rust
+          fetch-depth: 1
+
+      - name: Install system deps (fd, rg) [linux]
+        if: runner.os == 'Linux'
         run: |
           set -euxo pipefail
           sudo apt-get update
           sudo apt-get install -y fd-find ripgrep
+          sudo ln -sf "$(command -v fdfind)" /usr/local/bin/fd
+
+      - name: Install system deps (fd, rg) [macos]
+        if: runner.os == 'macOS'
+        run: |
+          set -euxo pipefail
+          brew install fd ripgrep
+
+      - name: Install system deps (fd, rg) [windows]
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install -y fd ripgrep
 
       - name: Install Rust toolchain (nightly)
         uses: dtolnay/rust-toolchain@nightly
@@ -43,6 +80,7 @@ jobs:
           components: rustfmt, clippy, llvm-tools-preview
 
       - name: Install cargo-llvm-cov
+        if: runner.os == 'Linux'
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
@@ -87,6 +125,7 @@ jobs:
         run: cargo test --all-targets
 
       - name: Coverage summary (llvm-cov)
+        if: runner.os == 'Linux'
         run: |
           set -euxo pipefail
           start=$(date +%s)
@@ -96,6 +135,7 @@ jobs:
           echo "coverage_summary_duration_s=$((end-start))"
 
       - name: Coverage gate (lcov)
+        if: runner.os == 'Linux'
         run: |
           set -euxo pipefail
           start=$(date +%s)
@@ -106,9 +146,11 @@ jobs:
           echo "coverage_lcov_duration_s=$((end-start))"
 
       - name: Coverage report (html)
+        if: runner.os == 'Linux'
         run: cargo llvm-cov --all-targets --workspace --html
 
       - name: Upload coverage artifacts
+        if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
           name: coverage
