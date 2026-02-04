@@ -77,25 +77,6 @@ impl PiConsole {
         }
     }
 
-    /// Render Markdown to the terminal (TTY only).
-    ///
-    /// If stdout is not a TTY, this falls back to emitting the raw Markdown.
-    pub fn render_markdown(&self, markdown: &str) {
-        if self.is_tty {
-            let doc = Markdown::new(markdown);
-            self.console.print_renderable(&doc);
-            if !markdown.ends_with('\n') {
-                self.console.print("\n");
-            }
-        } else {
-            print!("{markdown}");
-            if !markdown.ends_with('\n') {
-                println!();
-            }
-        }
-        let _ = io::stdout().flush();
-    }
-
     /// Print a newline.
     pub fn newline(&self) {
         println!();
@@ -494,13 +475,7 @@ mod tests {
 
         pi_console.render_markdown("# Title\n\n- Item 1\n- Item 2\n\n**bold**");
 
-        let output = String::from_utf8(
-            buffer
-                .lock()
-                .expect("lock buffer")
-                .clone(),
-        )
-        .expect("utf-8");
+        let output = String::from_utf8(buffer.lock().expect("lock buffer").clone()).expect("utf-8");
 
         assert!(
             output.contains("\u{1b}["),
