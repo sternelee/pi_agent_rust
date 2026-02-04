@@ -7907,6 +7907,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn normalize_raw_terminal_newlines_inserts_crlf() {
+        let normalized = normalize_raw_terminal_newlines("hello\nworld\n".to_string());
+        assert_eq!(normalized, "hello\r\nworld\r\n");
+    }
+
+    #[test]
+    fn normalize_raw_terminal_newlines_preserves_existing_crlf() {
+        let normalized = normalize_raw_terminal_newlines("hello\r\nworld\r\n".to_string());
+        assert_eq!(normalized, "hello\r\nworld\r\n");
+    }
+
+    #[test]
+    fn normalize_raw_terminal_newlines_handles_mixed_newlines() {
+        let normalized = normalize_raw_terminal_newlines("a\r\nb\nc\r\nd\n".to_string());
+        assert_eq!(normalized, "a\r\nb\r\nc\r\nd\r\n");
+    }
+
+    #[test]
     fn parse_bash_command_distinguishes_exclusion() {
         let (command, exclude) = parse_bash_command("! ls -la").expect("bang command");
         assert_eq!(command, "ls -la");

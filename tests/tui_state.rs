@@ -301,6 +301,20 @@ fn normalize_view(input: &str) -> String {
         .join("\n")
 }
 
+fn assert_all_newlines_are_crlf(input: &str) {
+    let bytes = input.as_bytes();
+    for idx in 0..bytes.len() {
+        if bytes[idx] == b'\n' {
+            assert!(idx > 0, "Found leading LF without preceding CR");
+            assert_eq!(
+                bytes[idx - 1],
+                b'\r',
+                "Found LF at byte {idx} not preceded by CR"
+            );
+        }
+    }
+}
+
 #[allow(dead_code)]
 fn create_session_on_disk(
     base_dir: &std::path::Path,
@@ -832,6 +846,25 @@ fn tui_state_shift_enter_inserts_newline_and_enters_multiline_mode() {
     let step = press_shift_enter(&harness, &mut app);
     assert_after_contains(&harness, &step, "[multi-line]");
     assert_after_not_contains(&harness, &step, "Processing...");
+}
+
+#[test]
+fn tui_view_normalizes_newlines_to_crlf_after_multiline_and_resize() {
+    let harness =
+        TestHarness::new("tui_view_normalizes_newlines_to_crlf_after_multiline_and_resize");
+    let mut app = build_app(&harness, Vec::new());
+    log_initial_state(&harness, &app);
+
+    type_text(&harness, &mut app, "line1");
+    press_shift_enter(&harness, &mut app);
+    type_text(&harness, &mut app, "line2");
+
+    let view = BubbleteaModel::view(&app);
+    assert_all_newlines_are_crlf(&view);
+
+    app.set_terminal_size(100, 40);
+    let view = BubbleteaModel::view(&app);
+    assert_all_newlines_are_crlf(&view);
 }
 
 #[test]
