@@ -742,26 +742,36 @@ mod tests {
                 dispatcher.dispatch_and_complete(request).await;
             }
 
-            runtime.tick().await.expect("tick");
+            while runtime.has_pending() {
+                runtime.tick().await.expect("tick");
+                runtime.drain_microtasks().await.expect("microtasks");
+            }
 
-            runtime
-                .eval(
-                    r#"
-                    if (!globalThis.state) throw new Error("State not resolved");
-                    if (globalThis.state.sessionFile !== "/tmp/session.jsonl") {
-                        throw new Error("Wrong sessionFile: " + JSON.stringify(globalThis.state));
-                    }
-                    if (globalThis.file !== "/tmp/session.jsonl") {
-                        throw new Error("Wrong get_file: " + JSON.stringify(globalThis.file));
-                    }
-                    if (globalThis.nameValue !== "demo") {
-                        throw new Error("Wrong get_name: " + JSON.stringify(globalThis.nameValue));
-                    }
-                    if (!globalThis.nameSet) throw new Error("set_name not resolved");
-                "#,
-                )
+            let (state_value, file_value, name_value, name_set) = runtime
+                .with_ctx(|ctx| {
+                    let global = ctx.globals();
+                    let state_js: rquickjs::Value<'_> = global.get("state")?;
+                    let file_js: rquickjs::Value<'_> = global.get("file")?;
+                    let name_js: rquickjs::Value<'_> = global.get("nameValue")?;
+                    let name_set_js: rquickjs::Value<'_> = global.get("nameSet")?;
+                    Ok((
+                        crate::extensions_js::js_to_json(&state_js)?,
+                        crate::extensions_js::js_to_json(&file_js)?,
+                        crate::extensions_js::js_to_json(&name_js)?,
+                        crate::extensions_js::js_to_json(&name_set_js)?,
+                    ))
+                })
                 .await
-                .expect("verify state");
+                .expect("read globals");
+
+            let state_file = state_value
+                .get("sessionFile")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            assert_eq!(state_file, "/tmp/session.jsonl");
+            assert_eq!(file_value, Value::String("/tmp/session.jsonl".to_string()));
+            assert_eq!(name_value, Value::String("demo".to_string()));
+            assert_eq!(name_set, Value::Bool(true));
 
             let name_value = name.lock().unwrap().clone();
             assert_eq!(name_value.as_deref(), Some("hello"));
