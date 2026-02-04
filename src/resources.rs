@@ -161,6 +161,7 @@ pub struct ResourceLoader {
     prompt_diagnostics: Vec<ResourceDiagnostic>,
     themes: Vec<ThemeResource>,
     theme_diagnostics: Vec<ResourceDiagnostic>,
+    extensions: Vec<PathBuf>,
     enable_skill_commands: bool,
 }
 
@@ -173,6 +174,7 @@ impl ResourceLoader {
             prompt_diagnostics: Vec::new(),
             themes: Vec::new(),
             theme_diagnostics: Vec::new(),
+            extensions: Vec::new(),
             enable_skill_commands,
         }
     }
@@ -215,6 +217,12 @@ impl ResourceLoader {
             .filter(|r| r.enabled)
             .map(|r| r.path)
             .collect::<Vec<_>>();
+        let resolved_extension_paths = resolved
+            .extensions
+            .into_iter()
+            .filter(|r| r.enabled)
+            .map(|r| r.path)
+            .collect::<Vec<_>>();
 
         let cli_skill_paths = cli_extensions
             .skills
@@ -230,6 +238,12 @@ impl ResourceLoader {
             .collect::<Vec<_>>();
         let cli_theme_paths = cli_extensions
             .themes
+            .into_iter()
+            .filter(|r| r.enabled)
+            .map(|r| r.path)
+            .collect::<Vec<_>>();
+        let cli_extension_paths = cli_extensions
+            .extensions
             .into_iter()
             .filter(|r| r.enabled)
             .map(|r| r.path)
@@ -261,6 +275,15 @@ impl ResourceLoader {
         theme_paths.extend(cli_theme_paths);
         theme_paths.extend(cli.theme_paths.iter().map(|p| resolve_path(p, cwd)));
         let theme_paths = dedupe_paths(theme_paths);
+
+        // Extension entries:
+        // - `--no-extensions` disables configured + auto discovery but still allows CLI `-e` sources.
+        let mut extension_entries = Vec::new();
+        if !cli.no_extensions {
+            extension_entries.extend(resolved_extension_paths);
+        }
+        extension_entries.extend(cli_extension_paths);
+        let extension_entries = dedupe_paths(extension_entries);
 
         let skills_result = load_skills(LoadSkillsOptions {
             cwd: cwd.to_path_buf(),
@@ -294,8 +317,13 @@ impl ResourceLoader {
             prompt_diagnostics,
             themes,
             theme_diagnostics: theme_diags,
+            extensions: extension_entries,
             enable_skill_commands,
         })
+    }
+
+    pub fn extensions(&self) -> &[PathBuf] {
+        &self.extensions
     }
 
     pub fn skills(&self) -> &[Skill] {
