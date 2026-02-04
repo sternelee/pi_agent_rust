@@ -533,6 +533,10 @@ const fn builtin_slash_commands() -> &'static [BuiltinSlashCommand] {
             description: "Show current settings summary",
         },
         BuiltinSlashCommand {
+            name: "theme",
+            description: "List or switch themes",
+        },
+        BuiltinSlashCommand {
             name: "resume",
             description: "Pick and resume a previous session",
         },

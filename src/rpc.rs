@@ -11,7 +11,7 @@
 #![allow(clippy::ignored_unit_patterns)]
 #![allow(clippy::needless_pass_by_value)]
 
-use crate::agent::{AbortHandle, AgentEvent, AgentSession};
+use crate::agent::{AbortHandle, AgentEvent, AgentSession, QueueMode};
 use crate::auth::AuthStorage;
 use crate::compaction::{
     ResolvedCompactionSettings, compact, compaction_details_to_value, prepare_compaction,
@@ -56,21 +56,6 @@ pub struct RpcScopedModel {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum QueueMode {
-    All,
-    OneAtATime,
-}
-
-impl QueueMode {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::OneAtATime => "one-at-a-time",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamingBehavior {
     Steer,
     FollowUp,
@@ -106,7 +91,7 @@ impl RpcStateSnapshot {
 }
 
 fn parse_queue_mode(mode: Option<&str>) -> Option<QueueMode> {
-    match mode {
+    match mode.map(str::trim) {
         Some("all") => Some(QueueMode::All),
         Some("one-at-a-time") => Some(QueueMode::OneAtATime),
         _ => None,
@@ -166,10 +151,8 @@ impl RpcSharedState {
         Self {
             steering: VecDeque::new(),
             follow_up: VecDeque::new(),
-            steering_mode: parse_queue_mode(config.steering_mode.as_deref())
-                .unwrap_or(QueueMode::OneAtATime),
-            follow_up_mode: parse_queue_mode(config.follow_up_mode.as_deref())
-                .unwrap_or(QueueMode::OneAtATime),
+            steering_mode: config.steering_queue_mode(),
+            follow_up_mode: config.follow_up_queue_mode(),
             auto_compaction_enabled: config.compaction_enabled(),
             auto_retry_enabled: config.retry_enabled(),
         }

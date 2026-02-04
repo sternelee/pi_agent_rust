@@ -73,6 +73,7 @@ pub enum SlashCommand {
     Export,
     Session,
     Settings,
+    Theme,
     Resume,
     New,
     Copy,
@@ -110,6 +111,68 @@ impl PiApp {
         } else {
             self.conversation_viewport.goto_bottom();
         }
+    }
+
+    fn apply_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+        self.styles = self.theme.tui_styles();
+        self.markdown_style = self.theme.glamour_style_config();
+        self.spinner =
+            SpinnerModel::with_spinner(spinners::dot()).style(self.styles.accent.clone());
+
+        let content = self.build_conversation_content();
+        self.conversation_viewport.set_content(&content);
+    }
+
+    fn format_themes_list(&self) -> String {
+        let mut names = Vec::new();
+        names.push("dark".to_string());
+        names.push("light".to_string());
+
+        for path in Theme::discover_themes(&self.cwd) {
+            if let Ok(theme) = Theme::load(&path) {
+                names.push(theme.name);
+            }
+        }
+
+        names.sort_by_key(|a| a.to_ascii_lowercase());
+        names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+
+        let mut output = String::from("Available themes:\n");
+        for name in names {
+            let marker = if name.eq_ignore_ascii_case(&self.theme.name) {
+                "* "
+            } else {
+                "  "
+            };
+            let _ = writeln!(output, "{marker}{name}");
+        }
+        output.push_str("\nUse /theme <name> to switch");
+        output
+    }
+
+    fn persist_project_theme(&self, theme_name: &str) -> crate::error::Result<()> {
+        let settings_path = self.cwd.join(Config::project_dir()).join("settings.json");
+        let mut settings = if settings_path.exists() {
+            let content = std::fs::read_to_string(&settings_path)?;
+            serde_json::from_str::<Value>(&content)?
+        } else {
+            json!({})
+        };
+
+        let obj = settings.as_object_mut().ok_or_else(|| {
+            crate::error::Error::config(format!(
+                "Settings file is not a JSON object: {}",
+                settings_path.display()
+            ))
+        })?;
+        obj.insert("theme".to_string(), Value::String(theme_name.to_string()));
+
+        if let Some(parent) = settings_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(settings_path, serde_json::to_string_pretty(&settings)?)?;
+        Ok(())
     }
 
     fn spawn_save_session(&self) {
@@ -1040,6 +1103,7 @@ impl SlashCommand {
             "/export" => Self::Export,
             "/session" | "/info" => Self::Session,
             "/settings" => Self::Settings,
+            "/theme" => Self::Theme,
             "/resume" | "/r" => Self::Resume,
             "/new" => Self::New,
             "/copy" | "/cp" => Self::Copy,
@@ -1071,6 +1135,7 @@ impl SlashCommand {
   /export [path]     - Export conversation to HTML
   /session, /info    - Show session info (path, tokens, cost)
   /settings          - Show current settings summary
+  /theme [name]      - List or switch themes (dark/light/custom)
   /resume, /r        - Pick and resume a previous session
   /new               - Start a new session
   /copy, /cp         - Copy last assistant message to clipboard
@@ -4635,6 +4700,47 @@ impl PiApp {
             }
             SlashCommand::Settings => {
                 self.status_message = Some("Settings summary not implemented yet".to_string());
+                None
+            }
+            SlashCommand::Theme => {
+                let name = args.trim();
+                if name.is_empty() {
+                    self.messages.push(ConversationMessage {
+                        role: MessageRole::System,
+                        content: self.format_themes_list(),
+                        thinking: None,
+                    });
+                    self.scroll_to_last_match("Available themes:");
+                    return None;
+                }
+
+                let theme = if name.eq_ignore_ascii_case("dark") {
+                    Theme::dark()
+                } else if name.eq_ignore_ascii_case("light") {
+                    Theme::light()
+                } else {
+                    match Theme::load_by_name(name, &self.cwd) {
+                        Ok(theme) => theme,
+                        Err(err) => {
+                            self.status_message = Some(err.to_string());
+                            return None;
+                        }
+                    }
+                };
+
+                let theme_name = theme.name.clone();
+                self.apply_theme(theme);
+                self.config.theme = Some(theme_name.clone());
+
+                if let Err(err) = self.persist_project_theme(&theme_name) {
+                    tracing::warn!("Failed to persist theme preference: {err}");
+                    self.status_message = Some(format!(
+                        "Switched to theme: {theme_name} (not saved: {err})"
+                    ));
+                } else {
+                    self.status_message = Some(format!("Switched to theme: {theme_name}"));
+                }
+
                 None
             }
             SlashCommand::Resume => {

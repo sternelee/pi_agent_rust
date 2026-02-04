@@ -297,10 +297,10 @@ fn record_step_artifacts(harness: &TestHarness, step: &StepOutcome) {
 
 fn fail_step(harness: &TestHarness, step: &StepOutcome, message: &str) -> ! {
     record_step_artifacts(harness, step);
-    panic!(
+    std::panic::panic_any(format!(
         "{message}\nlabel={}\nchanged_lines={}\nfirst_changed_line={:?}\n",
         step.label, step.delta.changed_lines, step.delta.first_changed_line
-    );
+    ));
 }
 
 fn assert_after_contains(harness: &TestHarness, step: &StepOutcome, needle: &str) {
@@ -331,9 +331,12 @@ fn assert_cmd_is_quit(harness: &TestHarness, mut step: StepOutcome) {
             "Expected a quit command, but update returned None",
         );
     };
-    let msg = cmd
-        .execute()
-        .unwrap_or_else(|| panic!("Quit cmd produced no message (label={})", step.label));
+    let msg = cmd.execute().unwrap_or_else(|| {
+        std::panic::panic_any(format!(
+            "Quit cmd produced no message (label={})",
+            step.label
+        ))
+    });
     if !msg.is::<QuitMsg>() {
         fail_step(harness, &step, "Expected quit command to produce QuitMsg");
     }
@@ -613,11 +616,10 @@ fn tui_state_pageup_changes_scroll_percent_when_scrollable() {
     );
 
     let baseline_view = normalize_view(&BubbleteaModel::view(&app));
-    let baseline_percent =
-        parse_scroll_percent(&baseline_view).unwrap_or_else(|| panic!("no scroll indicator"));
+    let baseline_percent = parse_scroll_percent(&baseline_view).expect("no scroll indicator");
 
     let step = press_pgup(&harness, &mut app);
-    let after_percent = parse_scroll_percent(&step.after).unwrap_or_else(|| panic!("no percent"));
+    let after_percent = parse_scroll_percent(&step.after).expect("no percent");
     assert!(
         after_percent < baseline_percent,
         "Expected PgUp percent < baseline ({after_percent} < {baseline_percent})"
@@ -646,7 +648,7 @@ fn tui_state_pagedown_restores_scroll_percent_when_scrollable() {
 
     press_pgup(&harness, &mut app);
     let step = press_pgdown(&harness, &mut app);
-    let percent = parse_scroll_percent(&step.after).unwrap_or_else(|| panic!("no percent"));
+    let percent = parse_scroll_percent(&step.after).expect("no percent");
     assert_eq!(percent, 100, "Expected PgDn to return to bottom (100%)");
 }
 
@@ -998,6 +1000,34 @@ fn tui_state_slash_help_adds_help_text() {
 }
 
 #[test]
+fn tui_state_slash_theme_lists_and_switches() {
+    let harness = TestHarness::new("tui_state_slash_theme_lists_and_switches");
+    let mut app = build_app(&harness, Vec::new());
+    log_initial_state(&harness, &app);
+
+    type_text(&harness, &mut app, "/theme");
+    let step = press_enter(&harness, &mut app);
+    assert_after_contains(&harness, &step, "Available themes:");
+    assert_after_contains(&harness, &step, "* dark");
+    assert_after_contains(&harness, &step, "light");
+
+    type_text(&harness, &mut app, "/theme light");
+    let step = press_enter(&harness, &mut app);
+    assert_after_contains(&harness, &step, "Switched to theme: light");
+
+    let settings_path = harness.temp_path(".pi/settings.json");
+    let settings = fs::read_to_string(settings_path).expect("read settings.json");
+    assert!(
+        settings.contains("\"theme\": \"light\""),
+        "expected theme persisted to settings.json"
+    );
+
+    type_text(&harness, &mut app, "/theme");
+    let step = press_enter(&harness, &mut app);
+    assert_after_contains(&harness, &step, "* light");
+}
+
+#[test]
 fn tui_state_slash_hotkeys_shows_dynamic_keybindings() {
     let harness = TestHarness::new("tui_state_slash_hotkeys_shows_dynamic_keybindings");
     let mut app = build_app(&harness, Vec::new());
@@ -1094,9 +1124,7 @@ fn tui_state_slash_tree_select_root_user_message_prefills_editor_and_resets_leaf
     // Build a simple two-node chain: Root -> Child, so current leaf is Child.
     {
         let session = app.session_handle();
-        let Ok(mut session_guard) = session.try_lock() else {
-            panic!("session try_lock");
-        };
+        let mut session_guard = session.try_lock().expect("session try_lock");
         session_guard.append_message(SessionMessage::User {
             content: UserContent::Text("Root".to_string()),
             timestamp: Some(0),

@@ -1,5 +1,6 @@
 //! Configuration loading and management.
 
+use crate::agent::QueueMode;
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -20,7 +21,9 @@ pub struct Config {
     pub enabled_models: Option<Vec<String>>,
 
     // Message Handling
+    #[serde(alias = "steeringMode")]
     pub steering_mode: Option<String>,
+    #[serde(alias = "followUpMode")]
     pub follow_up_mode: Option<String>,
 
     // Terminal Behavior
@@ -197,12 +200,16 @@ impl Config {
         cwd: &std::path::Path,
     ) -> Result<Self> {
         if let Some(path) = config_path {
-            return Self::load_from_path(path);
+            let config = Self::load_from_path(path)?;
+            config.emit_queue_mode_diagnostics();
+            return Ok(config);
         }
 
         let global = Self::load_from_path(&global_dir.join("settings.json"))?;
         let project = Self::load_from_path(&cwd.join(Self::project_dir()).join("settings.json"))?;
-        Ok(Self::merge(global, project))
+        let merged = Self::merge(global, project);
+        merged.emit_queue_mode_diagnostics();
+        Ok(merged)
     }
 
     /// Merge two configurations, with `other` taking precedence.
@@ -273,6 +280,14 @@ impl Config {
             .unwrap_or(true)
     }
 
+    pub fn steering_queue_mode(&self) -> QueueMode {
+        parse_queue_mode_or_default(self.steering_mode.as_deref())
+    }
+
+    pub fn follow_up_queue_mode(&self) -> QueueMode {
+        parse_queue_mode_or_default(self.follow_up_mode.as_deref())
+    }
+
     pub fn compaction_reserve_tokens(&self) -> u32 {
         self.compaction
             .as_ref()
@@ -338,11 +353,46 @@ impl Config {
     pub fn enable_skill_commands(&self) -> bool {
         self.enable_skill_commands.unwrap_or(true)
     }
+
+    fn emit_queue_mode_diagnostics(&self) {
+        emit_queue_mode_diagnostic("steering_mode", self.steering_mode.as_deref());
+        emit_queue_mode_diagnostic("follow_up_mode", self.follow_up_mode.as_deref());
+    }
+}
+
+fn parse_queue_mode(mode: Option<&str>) -> Option<QueueMode> {
+    match mode.map(str::trim) {
+        Some("all") => Some(QueueMode::All),
+        Some("one-at-a-time") => Some(QueueMode::OneAtATime),
+        _ => None,
+    }
+}
+
+fn parse_queue_mode_or_default(mode: Option<&str>) -> QueueMode {
+    parse_queue_mode(mode).unwrap_or(QueueMode::OneAtATime)
+}
+
+fn emit_queue_mode_diagnostic(setting: &'static str, mode: Option<&str>) {
+    let Some(mode) = mode else {
+        return;
+    };
+
+    let trimmed = mode.trim();
+    if parse_queue_mode(Some(trimmed)).is_some() {
+        return;
+    }
+
+    tracing::warn!(
+        setting,
+        value = trimmed,
+        "Unknown queue mode; falling back to one-at-a-time"
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::Config;
+    use crate::agent::QueueMode;
     use tempfile::TempDir;
 
     fn write_file(path: &std::path::Path, contents: &str) {
@@ -438,5 +488,35 @@ mod tests {
         assert!(config.theme.is_none());
         assert!(config.default_provider.is_none());
         assert!(config.default_model.is_none());
+    }
+
+    #[test]
+    fn queue_mode_accessors_parse_values_and_aliases() {
+        let temp = TempDir::new().expect("create tempdir");
+        let cwd = temp.path().join("cwd");
+        let global_dir = temp.path().join("global");
+        write_file(
+            &global_dir.join("settings.json"),
+            r#"{ "steeringMode": "all", "followUpMode": "one-at-a-time" }"#,
+        );
+
+        let config = Config::load_with_roots(None, &global_dir, &cwd).expect("load config");
+        assert_eq!(config.steering_queue_mode(), QueueMode::All);
+        assert_eq!(config.follow_up_queue_mode(), QueueMode::OneAtATime);
+    }
+
+    #[test]
+    fn queue_mode_accessors_default_on_unknown() {
+        let temp = TempDir::new().expect("create tempdir");
+        let cwd = temp.path().join("cwd");
+        let global_dir = temp.path().join("global");
+        write_file(
+            &global_dir.join("settings.json"),
+            r#"{ "steering_mode": "not-a-real-mode" }"#,
+        );
+
+        let config = Config::load_with_roots(None, &global_dir, &cwd).expect("load config");
+        assert_eq!(config.steering_queue_mode(), QueueMode::OneAtATime);
+        assert_eq!(config.follow_up_queue_mode(), QueueMode::OneAtATime);
     }
 }
