@@ -2228,31 +2228,31 @@ mod wasm_host {
                 execute.await
             }
             .map_err(|err| match &err {
-                        Error::Validation(_) => Self::host_error_json(
-                            HostCallErrorCode::InvalidRequest,
-                            err.to_string(),
-                            Some(json!({ "tool": tool_name })),
-                            None,
-                        ),
-                        Error::Tool { .. } | Error::Io(_) => Self::host_error_json(
-                            HostCallErrorCode::Io,
-                            err.to_string(),
-                            Some(json!({ "tool": tool_name })),
-                            None,
-                        ),
-                        Error::Aborted => Self::host_error_json(
-                            HostCallErrorCode::Timeout,
-                            "Tool execution aborted",
-                            Some(json!({ "tool": tool_name })),
-                            Some(true),
-                        ),
-                        _ => Self::host_error_json(
-                            HostCallErrorCode::Internal,
-                            err.to_string(),
-                            Some(json!({ "tool": tool_name })),
-                            None,
-                        ),
-                    })?;
+                Error::Validation(_) => Self::host_error_json(
+                    HostCallErrorCode::InvalidRequest,
+                    err.to_string(),
+                    Some(json!({ "tool": tool_name })),
+                    None,
+                ),
+                Error::Tool { .. } | Error::Io(_) => Self::host_error_json(
+                    HostCallErrorCode::Io,
+                    err.to_string(),
+                    Some(json!({ "tool": tool_name })),
+                    None,
+                ),
+                Error::Aborted => Self::host_error_json(
+                    HostCallErrorCode::Timeout,
+                    "Tool execution aborted",
+                    Some(json!({ "tool": tool_name })),
+                    Some(true),
+                ),
+                _ => Self::host_error_json(
+                    HostCallErrorCode::Internal,
+                    err.to_string(),
+                    Some(json!({ "tool": tool_name })),
+                    None,
+                ),
+            })?;
 
             serde_json::to_string(&output).map_err(|err| {
                 Self::host_error_json(
@@ -2346,7 +2346,16 @@ mod wasm_host {
                         .filter_map(Value::as_str)
                         .collect::<Vec<_>>()
                         .join(" ");
-                    params = json!({ "command": format!("{cmd} {args_str}") });
+                    if let Some(obj) = params.as_object_mut() {
+                        obj.insert(
+                            "command".to_string(),
+                            Value::String(format!("{cmd} {args_str}")),
+                        );
+                        obj.remove("cmd");
+                        obj.remove("args");
+                    } else {
+                        params = json!({ "command": format!("{cmd} {args_str}") });
+                    }
                 }
             }
 
@@ -2361,6 +2370,165 @@ mod wasm_host {
             };
 
             self.dispatch_tool(&bash_call).await
+        }
+
+        async fn dispatch_fs(&self, call: &HostCallPayload) -> std::result::Result<String, String> {
+            let result = self.fs.handle_host_call(call);
+
+            if result.is_error {
+                let error = result.error.as_ref().map_or_else(
+                    || {
+                        Self::host_error_json(
+                            HostCallErrorCode::Internal,
+                            "FS connector returned is_error=true but no error payload",
+                            None,
+                            None,
+                        )
+                    },
+                    |payload| {
+                        Self::host_error_json(
+                            payload.code,
+                            payload.message.clone(),
+                            payload.details.clone(),
+                            payload.retryable,
+                        )
+                    },
+                );
+                return Err(error);
+            }
+
+            serde_json::to_string(&result.output).map_err(|err| {
+                Self::host_error_json(
+                    HostCallErrorCode::Internal,
+                    format!("Failed to serialize fs output: {err}"),
+                    None,
+                    None,
+                )
+            })
+        }
+
+        fn sha256_hex(input: &str) -> String {
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(input.as_bytes());
+            let digest = hasher.finalize();
+            format!("{digest:x}")
+        }
+
+        fn canonicalize_json(value: &Value) -> Value {
+            match value {
+                Value::Object(map) => {
+                    let mut keys = map.keys().cloned().collect::<Vec<_>>();
+                    keys.sort();
+                    let mut out = serde_json::Map::new();
+                    for key in keys {
+                        if let Some(value) = map.get(&key) {
+                            out.insert(key, Self::canonicalize_json(value));
+                        }
+                    }
+                    Value::Object(out)
+                }
+                Value::Array(items) => {
+                    Value::Array(items.iter().map(Self::canonicalize_json).collect())
+                }
+                other => other.clone(),
+            }
+        }
+
+        fn hostcall_params_hash(method: &str, params: &Value) -> String {
+            let canonical = Self::canonicalize_json(&json!({ "method": method, "params": params }));
+            let encoded = serde_json::to_string(&canonical)
+                .unwrap_or_else(|_| "{\"error\":\"canonical_hostcall_failed\"}".to_string());
+            Self::sha256_hex(&encoded)
+        }
+
+        async fn dispatch_env(
+            &self,
+            call: &HostCallPayload,
+        ) -> std::result::Result<String, String> {
+            let params = &call.params;
+            let mut names = Vec::new();
+
+            if let Some(name) = params.get("name").and_then(Value::as_str) {
+                let name = name.trim();
+                if !name.is_empty() {
+                    names.push(name.to_string());
+                }
+            } else if let Some(items) = params.get("names").and_then(Value::as_array) {
+                for item in items {
+                    if let Some(name) = item.as_str() {
+                        let name = name.trim();
+                        if !name.is_empty() {
+                            names.push(name.to_string());
+                        }
+                    }
+                }
+            }
+
+            if names.is_empty() {
+                return Err(Self::host_error_json(
+                    HostCallErrorCode::InvalidRequest,
+                    "Missing env var name(s)",
+                    None,
+                    None,
+                ));
+            }
+
+            if self.env_allowlist.is_empty() {
+                return Err(Self::host_error_json(
+                    HostCallErrorCode::Denied,
+                    "Env access not configured (no allowlist)",
+                    Some(json!({ "capability": "env" })),
+                    None,
+                ));
+            }
+
+            let mut denied_hashes = Vec::new();
+            for name in &names {
+                if !self.env_allowlist.contains(name) {
+                    denied_hashes.push(Self::sha256_hex(name));
+                }
+            }
+
+            if !denied_hashes.is_empty() {
+                return Err(Self::host_error_json(
+                    HostCallErrorCode::Denied,
+                    "Env var not allowed by scope",
+                    Some(json!({ "denied_hashes": denied_hashes })),
+                    None,
+                ));
+            }
+
+            let mut values = serde_json::Map::new();
+            for name in names {
+                match std::env::var_os(&name) {
+                    None => {
+                        values.insert(name, Value::Null);
+                    }
+                    Some(value) => match value.into_string() {
+                        Ok(value) => {
+                            values.insert(name, Value::String(value));
+                        }
+                        Err(_) => {
+                            return Err(Self::host_error_json(
+                                HostCallErrorCode::Io,
+                                "Env var value is not valid UTF-8",
+                                Some(json!({ "name_hash": Self::sha256_hex(&name) })),
+                                None,
+                            ));
+                        }
+                    },
+                }
+            }
+
+            let output = json!({ "values": Value::Object(values) });
+            serde_json::to_string(&output).map_err(|err| {
+                Self::host_error_json(
+                    HostCallErrorCode::Internal,
+                    format!("Failed to serialize env output: {err}"),
+                    None,
+                    None,
+                )
+            })
         }
     }
 
@@ -2413,9 +2581,52 @@ mod wasm_host {
                 ));
             }
 
+            let call_timeout_ms = payload.timeout_ms.filter(|ms| *ms > 0);
+            let params_hash = Self::hostcall_params_hash(&payload.method, &payload.params);
+            let started_at = Instant::now();
+
+            tracing::info!(
+                event = "host_call.start",
+                runtime = "wasm",
+                call_id = %payload.call_id,
+                extension_id = ?self.extension_id.as_deref(),
+                capability = %required,
+                method = %payload.method,
+                params_hash = %params_hash,
+                timeout_ms = call_timeout_ms,
+                "Hostcall start"
+            );
+
             let policy_check = self.policy.evaluate(&required);
-            if policy_check.decision != PolicyDecision::Allow {
-                return Err(Self::host_error_json(
+            if policy_check.decision == PolicyDecision::Allow {
+                tracing::info!(
+                    event = "policy.decision",
+                    runtime = "wasm",
+                    call_id = %payload.call_id,
+                    extension_id = ?self.extension_id.as_deref(),
+                    capability = %policy_check.capability,
+                    decision = ?policy_check.decision,
+                    reason = %policy_check.reason,
+                    params_hash = %params_hash,
+                    "Hostcall allowed by policy"
+                );
+            } else {
+                tracing::warn!(
+                    event = "policy.decision",
+                    runtime = "wasm",
+                    call_id = %payload.call_id,
+                    extension_id = ?self.extension_id.as_deref(),
+                    capability = %policy_check.capability,
+                    decision = ?policy_check.decision,
+                    reason = %policy_check.reason,
+                    params_hash = %params_hash,
+                    "Hostcall denied by policy"
+                );
+            }
+
+            let method = payload.method.trim().to_ascii_lowercase();
+            let outcome = if policy_check.decision != PolicyDecision::Allow {
+                Err(Self::host_error_json(
                     HostCallErrorCode::Denied,
                     "Capability denied by policy",
                     Some(json!({
@@ -2424,21 +2635,84 @@ mod wasm_host {
                         "reason": policy_check.reason,
                     })),
                     None,
-                ));
+                ))
+            } else {
+                let dispatch = async {
+                    match method.as_str() {
+                        "tool" => self.dispatch_tool(&payload).await,
+                        "http" => self.dispatch_http(&payload).await,
+                        "exec" => self.dispatch_exec(&payload).await,
+                        "fs" => self.dispatch_fs(&payload).await,
+                        "env" => self.dispatch_env(&payload).await,
+                        _ => Err(Self::host_error_json(
+                            HostCallErrorCode::InvalidRequest,
+                            format!("Unsupported host_call method: {method}"),
+                            Some(json!({ "method": method })),
+                            None,
+                        )),
+                    }
+                };
+
+                if let Some(timeout_ms) = call_timeout_ms {
+                    match timeout(
+                        wall_now(),
+                        Duration::from_millis(timeout_ms),
+                        Box::pin(dispatch),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => Err(Self::host_error_json(
+                            HostCallErrorCode::Timeout,
+                            format!("Hostcall timed out after {timeout_ms}ms"),
+                            Some(json!({ "capability": required, "method": method })),
+                            Some(true),
+                        )),
+                    }
+                } else {
+                    dispatch.await
+                }
+            };
+
+            let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let (is_error, error_code) = match &outcome {
+                Ok(_) => (false, None),
+                Err(err_json) => (
+                    true,
+                    serde_json::from_str::<HostCallError>(err_json)
+                        .ok()
+                        .map(|err| err.code),
+                ),
+            };
+
+            if is_error {
+                tracing::warn!(
+                    event = "host_call.end",
+                    runtime = "wasm",
+                    call_id = %payload.call_id,
+                    extension_id = ?self.extension_id.as_deref(),
+                    capability = %required,
+                    method = %payload.method,
+                    params_hash = %params_hash,
+                    duration_ms,
+                    error_code = ?error_code,
+                    "Hostcall end (error)"
+                );
+            } else {
+                tracing::info!(
+                    event = "host_call.end",
+                    runtime = "wasm",
+                    call_id = %payload.call_id,
+                    extension_id = ?self.extension_id.as_deref(),
+                    capability = %required,
+                    method = %payload.method,
+                    params_hash = %params_hash,
+                    duration_ms,
+                    "Hostcall end (success)"
+                );
             }
 
-            let method = payload.method.trim().to_ascii_lowercase();
-            match method.as_str() {
-                "tool" => self.dispatch_tool(&payload).await,
-                "http" => self.dispatch_http(&payload).await,
-                "exec" => self.dispatch_exec(&payload).await,
-                _ => Err(Self::host_error_json(
-                    HostCallErrorCode::InvalidRequest,
-                    format!("Unsupported host_call method: {method}"),
-                    Some(json!({ "method": method })),
-                    None,
-                )),
-            }
+            outcome
         }
     }
 
@@ -2483,7 +2757,17 @@ mod wasm_host {
                 .await
                 .map_err(|err| Error::extension(format!("WASM init failed: {err}")))?;
 
-            result.map_err(Error::extension)
+            let registration_json = result.map_err(Error::extension)?;
+            let registration: RegisterPayload =
+                serde_json::from_str(&registration_json).map_err(|err| {
+                    Error::extension(format!(
+                        "WASM init returned invalid registration payload: {err}"
+                    ))
+                })?;
+            validate_register(&registration)?;
+            self.store.data_mut().apply_registration(&registration)?;
+
+            Ok(registration_json)
         }
 
         pub async fn handle_tool(&mut self, name: &str, input_json: &str) -> Result<String> {
@@ -2579,7 +2863,7 @@ impl WasmExtensionHost {
         wasm_host::Instance::instantiate(
             &self.engine,
             &extension.path,
-            wasm_host::HostState::new(self.policy.clone(), self.cwd.clone()),
+            wasm_host::HostState::new(self.policy.clone(), self.cwd.clone())?,
         )
         .await
     }

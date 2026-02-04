@@ -197,6 +197,8 @@ pub struct HostcallRequest {
     pub payload: serde_json::Value,
     /// Trace ID for correlation with macrotask.
     pub trace_id: u64,
+    /// Active extension id (when known) for policy/log correlation.
+    pub extension_id: Option<String>,
 }
 
 /// Stores pending Promise resolvers for hostcalls.
@@ -1961,11 +1963,19 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                             let timer_id =
                                 timeout_ms.map(|ms| scheduler.borrow_mut().set_timeout(ms));
                             tracker.borrow_mut().register(call_id.clone(), timer_id);
+                            let extension_id: Option<String> = _ctx
+                                .globals()
+                                .get::<_, Opt<String>>("__pi_current_extension_id")
+                                .ok()
+                                .and_then(|value| value.0)
+                                .map(|value| value.trim().to_string())
+                                .filter(|value| !value.is_empty());
                             let request = HostcallRequest {
                                 call_id: call_id.clone(),
                                 kind: HostcallKind::Tool { name },
                                 payload,
                                 trace_id,
+                                extension_id,
                             };
                             queue.borrow_mut().push_back(request);
                             Ok(call_id)
@@ -2024,11 +2034,19 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                             let timer_id =
                                 timeout_ms.map(|ms| scheduler.borrow_mut().set_timeout(ms));
                             tracker.borrow_mut().register(call_id.clone(), timer_id);
+                            let extension_id: Option<String> = _ctx
+                                .globals()
+                                .get::<_, Opt<String>>("__pi_current_extension_id")
+                                .ok()
+                                .and_then(|value| value.0)
+                                .map(|value| value.trim().to_string())
+                                .filter(|value| !value.is_empty());
                             let request = HostcallRequest {
                                 call_id: call_id.clone(),
                                 kind: HostcallKind::Exec { cmd },
                                 payload,
                                 trace_id,
+                                extension_id,
                             };
                             queue.borrow_mut().push_back(request);
                             Ok(call_id)
@@ -2054,11 +2072,19 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                             let timer_id =
                                 timeout_ms.map(|ms| scheduler.borrow_mut().set_timeout(ms));
                             tracker.borrow_mut().register(call_id.clone(), timer_id);
+                            let extension_id: Option<String> = _ctx
+                                .globals()
+                                .get::<_, Opt<String>>("__pi_current_extension_id")
+                                .ok()
+                                .and_then(|value| value.0)
+                                .map(|value| value.trim().to_string())
+                                .filter(|value| !value.is_empty());
                             let request = HostcallRequest {
                                 call_id: call_id.clone(),
                                 kind: HostcallKind::Http,
                                 payload,
                                 trace_id,
+                                extension_id,
                             };
                             queue.borrow_mut().push_back(request);
                             Ok(call_id)
@@ -2087,11 +2113,19 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                             let timer_id =
                                 timeout_ms.map(|ms| scheduler.borrow_mut().set_timeout(ms));
                             tracker.borrow_mut().register(call_id.clone(), timer_id);
+                            let extension_id: Option<String> = _ctx
+                                .globals()
+                                .get::<_, Opt<String>>("__pi_current_extension_id")
+                                .ok()
+                                .and_then(|value| value.0)
+                                .map(|value| value.trim().to_string())
+                                .filter(|value| !value.is_empty());
                             let request = HostcallRequest {
                                 call_id: call_id.clone(),
                                 kind: HostcallKind::Session { op },
                                 payload,
                                 trace_id,
+                                extension_id,
                             };
                             queue.borrow_mut().push_back(request);
                             Ok(call_id)
@@ -2120,11 +2154,19 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                             let timer_id =
                                 timeout_ms.map(|ms| scheduler.borrow_mut().set_timeout(ms));
                             tracker.borrow_mut().register(call_id.clone(), timer_id);
+                            let extension_id: Option<String> = _ctx
+                                .globals()
+                                .get::<_, Opt<String>>("__pi_current_extension_id")
+                                .ok()
+                                .and_then(|value| value.0)
+                                .map(|value| value.trim().to_string())
+                                .filter(|value| !value.is_empty());
                             let request = HostcallRequest {
                                 call_id: call_id.clone(),
                                 kind: HostcallKind::Ui { op },
                                 payload,
                                 trace_id,
+                                extension_id,
                             };
                             queue.borrow_mut().push_back(request);
                             Ok(call_id)
@@ -2153,11 +2195,19 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                             let timer_id =
                                 timeout_ms.map(|ms| scheduler.borrow_mut().set_timeout(ms));
                             tracker.borrow_mut().register(call_id.clone(), timer_id);
+                            let extension_id: Option<String> = _ctx
+                                .globals()
+                                .get::<_, Opt<String>>("__pi_current_extension_id")
+                                .ok()
+                                .and_then(|value| value.0)
+                                .map(|value| value.trim().to_string())
+                                .filter(|value| !value.is_empty());
                             let request = HostcallRequest {
                                 call_id: call_id.clone(),
                                 kind: HostcallKind::Events { op },
                                 payload,
                                 trace_id,
+                                extension_id,
                             };
                             queue.borrow_mut().push_back(request);
                             Ok(call_id)
@@ -2390,7 +2440,7 @@ const __pi_event_listeners = new Map();
 // Extension Registry (registration + hooks)
 // ============================================================================
 
-let __pi_current_extension_id = null;
+var __pi_current_extension_id = null;
 
 // extension_id -> { id, name, version, apiVersion, tools: Map, commands: Map, hooks: Map }
 const __pi_extensions = new Map();
