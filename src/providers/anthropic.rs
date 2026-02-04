@@ -823,13 +823,15 @@ mod tests {
 
         let out = collect_events(&events);
         assert_eq!(out.len(), 1);
-        match &out[0] {
-            StreamEvent::Error { reason, error } => {
-                assert_eq!(*reason, StopReason::Error);
-                assert_eq!(error.stop_reason, StopReason::Error);
-                assert_eq!(error.error_message.as_deref(), Some("nope"));
-            }
-            other => panic!("expected StreamEvent::Error, got {other:?}"),
+        assert!(
+            matches!(&out[0], StreamEvent::Error { .. }),
+            "expected StreamEvent::Error, got {:?}",
+            out[0]
+        );
+        if let StreamEvent::Error { reason, error } = &out[0] {
+            assert_eq!(*reason, StopReason::Error);
+            assert_eq!(error.stop_reason, StopReason::Error);
+            assert_eq!(error.error_message.as_deref(), Some("nope"));
         }
     }
 

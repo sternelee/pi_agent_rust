@@ -751,10 +751,10 @@ mod tests {
         let err = build_meta_from_file(&path).expect_err("expected error");
         harness.log().info("verify", format!("error: {err}"));
 
-        match err {
-            Error::Session(msg) => assert!(msg.contains("Parse session header")),
-            other => panic!("Expected Error::Session, got {other:?}"),
-        }
+        assert!(
+            matches!(err, Error::Session(ref msg) if msg.contains("Parse session header")),
+            "Expected Error::Session containing Parse session header, got {err:?}",
+        );
     }
 
     #[test]
@@ -764,13 +764,13 @@ mod tests {
         fs::write(&path, "").expect("write empty");
 
         let err = build_meta_from_file(&path).expect_err("expected error");
-        match err {
-            Error::Session(msg) => {
-                harness.log().info("verify", msg.clone());
-                assert!(msg.contains("Empty session file"));
-            }
-            other => panic!("Expected Error::Session, got {other:?}"),
+        if let Error::Session(msg) = &err {
+            harness.log().info("verify", msg.clone());
         }
+        assert!(
+            matches!(err, Error::Session(ref msg) if msg.contains("Empty session file")),
+            "Expected Error::Session containing Empty session file, got {err:?}",
+        );
     }
 
     #[test]
@@ -785,13 +785,13 @@ mod tests {
 
         let index = SessionIndex::for_sessions_root(&root);
         let err = index.list_sessions(None).expect_err("expected error");
-        match err {
-            Error::Session(msg) => {
-                harness.log().info("verify", msg.clone());
-                assert!(msg.contains("SQLite open"));
-            }
-            other => panic!("Expected Error::Session, got {other:?}"),
+        if let Error::Session(msg) = &err {
+            harness.log().info("verify", msg.clone());
         }
+        assert!(
+            matches!(err, Error::Session(ref msg) if msg.contains("SQLite open")),
+            "Expected Error::Session containing SQLite open, got {err:?}",
+        );
     }
 
     #[test]
@@ -812,15 +812,15 @@ mod tests {
             .expect("open file2");
 
         let guard1 = lock_file_guard(&file1, Duration::from_millis(50)).expect("acquire lock");
-        let Err(err) = lock_file_guard(&file2, Duration::from_millis(50)) else {
-            panic!("expected lock timeout");
-        };
+        let err = lock_file_guard(&file2, Duration::from_millis(50))
+            .err()
+            .expect("expected lock timeout");
         drop(guard1);
 
-        match err {
-            Error::Session(msg) => assert!(msg.contains("Timed out")),
-            other => panic!("Expected Error::Session, got {other:?}"),
-        }
+        assert!(
+            matches!(err, Error::Session(ref msg) if msg.contains("Timed out")),
+            "Expected Error::Session containing Timed out, got {err:?}",
+        );
 
         let _guard2 =
             lock_file_guard(&file2, Duration::from_millis(50)).expect("lock after release");
