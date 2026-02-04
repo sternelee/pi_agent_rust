@@ -11,6 +11,8 @@ Use `/theme` to switch themes interactively, or set the `theme` option in `setti
 /theme ocean-dark
 ```
 
+Theme selection is also exposed via `/settings` (choose the **Theme** entry).
+
 ```json
 // settings.json
 {
