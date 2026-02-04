@@ -890,7 +890,12 @@ mod tests {
         let result = run_async(async move { connector.dispatch(&call).await.unwrap() });
         assert!(result.is_error);
         let error = result.error.expect("error payload");
-        assert_eq!(error.code, HostCallErrorCode::Timeout);
+        assert!(
+            error.code == HostCallErrorCode::Timeout,
+            "expected timeout, got {:?} (details={:?})",
+            error.code,
+            error.details
+        );
 
         let _ = join.join();
     }
