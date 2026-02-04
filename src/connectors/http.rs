@@ -486,7 +486,7 @@ impl Connector for HttpConnector {
         }
 
         // Parse request
-        let request = match self.parse_request(&call.params) {
+        let mut request = match self.parse_request(&call.params) {
             Ok(req) => req,
             Err((code, message)) => {
                 warn!(
@@ -497,6 +497,11 @@ impl Connector for HttpConnector {
                 return Ok(host_result_err(call_id, code, message, None));
             }
         };
+
+        // Prefer explicit per-request timeout in params, otherwise fall back to host_call.timeout_ms.
+        if request.timeout_ms.is_none() {
+            request.timeout_ms = call.timeout_ms.filter(|ms| *ms > 0);
+        }
 
         Ok(self.dispatch_request(call_id, request).await)
     }

@@ -885,6 +885,7 @@ pub fn required_capability_for_host_call(call: &HostCallPayload) -> Option<Strin
             }
         }
         "exec" => Some("exec".to_string()),
+        "env" => Some("env".to_string()),
         "http" => Some("http".to_string()),
         "session" => Some("session".to_string()),
         "ui" => Some("ui".to_string()),
@@ -2029,7 +2030,8 @@ mod wasm_host {
     use super::*;
 
     use crate::connectors::Connector as _;
-    use crate::connectors::http::HttpConnector;
+    use crate::connectors::http::{HttpConnector, HttpConnectorConfig};
+    use std::collections::BTreeSet;
     use wasmtime::component::{Component, Linker};
 
     wasmtime::component::bindgen!({
@@ -2045,21 +2047,101 @@ mod wasm_host {
         pub cwd: PathBuf,
         pub tools: crate::tools::ToolRegistry,
         pub http: HttpConnector,
+        pub fs: FsConnector,
+        pub env_allowlist: BTreeSet<String>,
+        pub extension_id: Option<String>,
     }
 
     impl HostState {
-        pub fn new(policy: ExtensionPolicy, cwd: PathBuf) -> Self {
+        pub fn new(policy: ExtensionPolicy, cwd: PathBuf) -> Result<Self> {
             let tools = crate::tools::ToolRegistry::new(
                 &["read", "bash", "edit", "write", "grep", "find", "ls"],
                 &cwd,
                 None,
             );
-            Self {
+            let scopes = FsScopes::for_cwd(&cwd)?;
+            let fs = FsConnector::new(&cwd, policy.clone(), scopes)?;
+            Ok(Self {
                 policy,
                 cwd,
                 tools,
                 http: HttpConnector::with_defaults(),
+                fs,
+                env_allowlist: BTreeSet::new(),
+                extension_id: None,
+            })
+        }
+
+        fn env_allowlist_from_manifest(manifest: Option<&CapabilityManifest>) -> BTreeSet<String> {
+            let Some(manifest) = manifest else {
+                return BTreeSet::new();
+            };
+
+            let mut out = BTreeSet::new();
+            for req in &manifest.capabilities {
+                if !req.capability.trim().eq_ignore_ascii_case("env") {
+                    continue;
+                }
+                let Some(scope) = req.scope.as_ref() else {
+                    continue;
+                };
+                let Some(env) = scope.env.as_ref() else {
+                    continue;
+                };
+                for key in env {
+                    let key = key.trim();
+                    if !key.is_empty() {
+                        out.insert(key.to_string());
+                    }
+                }
             }
+            out
+        }
+
+        fn http_allowlist_from_manifest(manifest: Option<&CapabilityManifest>) -> Vec<String> {
+            let Some(manifest) = manifest else {
+                return Vec::new();
+            };
+
+            let mut out = Vec::new();
+            for req in &manifest.capabilities {
+                if !req.capability.trim().eq_ignore_ascii_case("http") {
+                    continue;
+                }
+                let Some(scope) = req.scope.as_ref() else {
+                    continue;
+                };
+                let Some(hosts) = scope.hosts.as_ref() else {
+                    continue;
+                };
+                for host in hosts {
+                    let host = host.trim();
+                    if !host.is_empty() {
+                        out.push(host.to_string());
+                    }
+                }
+            }
+            out
+        }
+
+        pub fn apply_registration(&mut self, registration: &RegisterPayload) -> Result<()> {
+            if !registration.name.trim().is_empty() {
+                self.extension_id = Some(registration.name.trim().to_string());
+            }
+
+            let manifest = registration.capability_manifest.as_ref();
+
+            self.env_allowlist = Self::env_allowlist_from_manifest(manifest);
+
+            let fs_scopes = FsScopes::from_manifest(manifest, &self.cwd)?;
+            self.fs = FsConnector::new(&self.cwd, self.policy.clone(), fs_scopes)?;
+
+            let http_allowlist = Self::http_allowlist_from_manifest(manifest);
+            let mut http_config = HttpConnectorConfig::default();
+            http_config.allowlist = http_allowlist;
+            self.http = HttpConnector::new(http_config);
+
+            Ok(())
         }
 
         fn host_error_json(
@@ -2087,6 +2169,7 @@ mod wasm_host {
             call: &HostCallPayload,
         ) -> std::result::Result<String, String> {
             let params = &call.params;
+            let call_timeout_ms = call.timeout_ms.filter(|ms| *ms > 0);
             let tool_name = params
                 .get("name")
                 .and_then(Value::as_str)
@@ -2099,10 +2182,19 @@ mod wasm_host {
                         None,
                     )
                 })?;
-            let input = params
+            let mut input = params
                 .get("input")
                 .cloned()
                 .unwrap_or_else(|| Value::Object(serde_json::Map::default()));
+
+            if tool_name.eq_ignore_ascii_case("bash") && input.get("timeout").is_none() {
+                if let Some(timeout_ms) = call_timeout_ms {
+                    let timeout_secs = (timeout_ms + 999) / 1000;
+                    if let Some(obj) = input.as_object_mut() {
+                        obj.insert("timeout".to_string(), json!(timeout_secs));
+                    }
+                }
+            }
 
             let tool = self.tools.get(tool_name).ok_or_else(|| {
                 Self::host_error_json(
@@ -2113,10 +2205,29 @@ mod wasm_host {
                 )
             })?;
 
-            let output =
-                tool.execute(&call.call_id, input, None)
-                    .await
-                    .map_err(|err| match &err {
+            let execute = tool.execute(&call.call_id, input, None);
+            let output = if let Some(timeout_ms) = call_timeout_ms {
+                match timeout(
+                    wall_now(),
+                    Duration::from_millis(timeout_ms),
+                    Box::pin(execute),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        return Err(Self::host_error_json(
+                            HostCallErrorCode::Timeout,
+                            format!("Tool execution timed out after {timeout_ms}ms"),
+                            Some(json!({ "tool": tool_name, "timeout_ms": timeout_ms })),
+                            Some(true),
+                        ));
+                    }
+                }
+            } else {
+                execute.await
+            }
+            .map_err(|err| match &err {
                         Error::Validation(_) => Self::host_error_json(
                             HostCallErrorCode::InvalidRequest,
                             err.to_string(),
