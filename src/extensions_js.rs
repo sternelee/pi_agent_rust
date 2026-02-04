@@ -963,7 +963,7 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
         map_js_error(&err)
     }
 
-    fn map_quickjs_job_error(&self, err: rquickjs::Error) -> Error {
+    fn map_quickjs_job_error(&self, err: rquickjs::AsyncJobException) -> Error {
         if self.interrupt_budget.did_trip() {
             self.interrupt_budget.clear_trip();
             return Error::extension("PiJS execution budget exceeded".to_string());
@@ -1056,12 +1056,6 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
         let macrotask = self.scheduler.borrow_mut().tick();
 
         let mut stats = PiJsTickStats::default();
-        stats.hostcalls_total = self
-            .hostcalls_total
-            .load(std::sync::atomic::Ordering::SeqCst);
-        stats.hostcalls_timed_out = self
-            .hostcalls_timed_out
-            .load(std::sync::atomic::Ordering::SeqCst);
 
         if let Some(task) = macrotask {
             stats.ran_macrotask = true;
@@ -1084,6 +1078,12 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
         }
 
         stats.pending_hostcalls = self.hostcall_tracker.borrow().pending_count();
+        stats.hostcalls_total = self
+            .hostcalls_total
+            .load(std::sync::atomic::Ordering::SeqCst);
+        stats.hostcalls_timed_out = self
+            .hostcalls_timed_out
+            .load(std::sync::atomic::Ordering::SeqCst);
 
         let usage = self.runtime.memory_usage().await;
         stats.memory_used_bytes = u64::try_from(usage.memory_used_size).unwrap_or(0);

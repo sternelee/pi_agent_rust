@@ -49,6 +49,7 @@ use crate::model::{
     ThinkingLevel, Usage, UserContent, UserMessage,
 };
 use crate::models::ModelEntry;
+use crate::package_manager::PackageManager;
 use crate::providers;
 use crate::resources::{ResourceCliOptions, ResourceLoader};
 use crate::session::{Session, SessionEntry, SessionMessage, bash_execution_to_text};
