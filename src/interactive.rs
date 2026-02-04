@@ -1547,7 +1547,10 @@ pub enum PiMsg {
     /// Non-error system message.
     System(String),
     /// Bash command result (non-agent).
-    BashResult { display: String },
+    BashResult {
+        display: String,
+        content_for_agent: Option<Vec<ContentBlock>>,
+    },
     /// Replace conversation state from session (compaction/fork).
     ConversationReset {
         messages: Vec<ConversationMessage>,
@@ -3774,14 +3777,26 @@ impl PiApp {
                     return Some(Cmd::new(|| Message::new(PiMsg::RunPending)));
                 }
             }
-            PiMsg::BashResult { display } => {
+            PiMsg::BashResult {
+                display,
+                content_for_agent,
+            } => {
+                self.bash_running = false;
+                self.current_tool = None;
+                self.agent_state = AgentState::Idle;
+
+                if let Some(content) = content_for_agent {
+                    self.scroll_to_bottom();
+                    return self.submit_content(content);
+                }
+
                 self.messages.push(ConversationMessage {
                     role: MessageRole::System,
                     content: display,
                     thinking: None,
                 });
-                self.bash_running = false;
                 self.scroll_to_bottom();
+                self.input.focus();
             }
             PiMsg::ConversationReset {
                 messages,

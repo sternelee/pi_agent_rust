@@ -1272,6 +1272,10 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
     async fn install_pi_bridge(&self) -> Result<()> {
         let hostcall_queue = self.hostcall_queue.clone();
         let scheduler = Rc::clone(&self.scheduler);
+        let hostcall_tracker = Rc::clone(&self.hostcall_tracker);
+        let hostcalls_total = Arc::clone(&self.hostcalls_total);
+        let trace_seq = Arc::clone(&self.trace_seq);
+        let default_hostcall_timeout_ms = self.config.limits.hostcall_timeout_ms;
         let process_cwd = self.config.cwd.clone();
         let process_args = self.config.args.clone();
         let env = self.config.env.clone();
@@ -1288,17 +1292,27 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                     "__pi_tool_native",
                     Func::from({
                         let queue = hostcall_queue.clone();
+                        let tracker = hostcall_tracker.clone();
+                        let scheduler = Rc::clone(&scheduler);
+                        let hostcalls_total = Arc::clone(&hostcalls_total);
+                        let trace_seq = Arc::clone(&trace_seq);
                         move |_ctx: Ctx<'_>,
                               name: String,
                               input: Value<'_>|
                               -> rquickjs::Result<String> {
                             let payload = js_to_json(&input)?;
                             let call_id = format!("call-{}", generate_call_id());
+                            hostcalls_total.fetch_add(1, AtomicOrdering::SeqCst);
+                            let trace_id = trace_seq.fetch_add(1, AtomicOrdering::SeqCst);
+                            let timeout_ms = default_hostcall_timeout_ms.filter(|ms| *ms > 0);
+                            let timer_id =
+                                timeout_ms.map(|ms| scheduler.borrow_mut().set_timeout(ms));
+                            tracker.borrow_mut().register(call_id.clone(), timer_id);
                             let request = HostcallRequest {
                                 call_id: call_id.clone(),
                                 kind: HostcallKind::Tool { name },
                                 payload,
-                                trace_id: 0,
+                                trace_id,
                             };
                             queue.borrow_mut().push_back(request);
                             Ok(call_id)
@@ -1311,17 +1325,27 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                     "__pi_exec_native",
                     Func::from({
                         let queue = hostcall_queue.clone();
+                        let tracker = hostcall_tracker.clone();
+                        let scheduler = Rc::clone(&scheduler);
+                        let hostcalls_total = Arc::clone(&hostcalls_total);
+                        let trace_seq = Arc::clone(&trace_seq);
                         move |_ctx: Ctx<'_>,
                               cmd: String,
                               args: Value<'_>|
                               -> rquickjs::Result<String> {
                             let payload = js_to_json(&args)?;
                             let call_id = format!("call-{}", generate_call_id());
+                            hostcalls_total.fetch_add(1, AtomicOrdering::SeqCst);
+                            let trace_id = trace_seq.fetch_add(1, AtomicOrdering::SeqCst);
+                            let timeout_ms = default_hostcall_timeout_ms.filter(|ms| *ms > 0);
+                            let timer_id =
+                                timeout_ms.map(|ms| scheduler.borrow_mut().set_timeout(ms));
+                            tracker.borrow_mut().register(call_id.clone(), timer_id);
                             let request = HostcallRequest {
                                 call_id: call_id.clone(),
                                 kind: HostcallKind::Exec { cmd },
                                 payload,
-                                trace_id: 0,
+                                trace_id,
                             };
                             queue.borrow_mut().push_back(request);
                             Ok(call_id)
@@ -1334,14 +1358,24 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                     "__pi_http_native",
                     Func::from({
                         let queue = hostcall_queue.clone();
+                        let tracker = hostcall_tracker.clone();
+                        let scheduler = Rc::clone(&scheduler);
+                        let hostcalls_total = Arc::clone(&hostcalls_total);
+                        let trace_seq = Arc::clone(&trace_seq);
                         move |_ctx: Ctx<'_>, req: Value<'_>| -> rquickjs::Result<String> {
                             let payload = js_to_json(&req)?;
                             let call_id = format!("call-{}", generate_call_id());
+                            hostcalls_total.fetch_add(1, AtomicOrdering::SeqCst);
+                            let trace_id = trace_seq.fetch_add(1, AtomicOrdering::SeqCst);
+                            let timeout_ms = default_hostcall_timeout_ms.filter(|ms| *ms > 0);
+                            let timer_id =
+                                timeout_ms.map(|ms| scheduler.borrow_mut().set_timeout(ms));
+                            tracker.borrow_mut().register(call_id.clone(), timer_id);
                             let request = HostcallRequest {
                                 call_id: call_id.clone(),
                                 kind: HostcallKind::Http,
                                 payload,
-                                trace_id: 0,
+                                trace_id,
                             };
                             queue.borrow_mut().push_back(request);
                             Ok(call_id)
@@ -1354,17 +1388,27 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                     "__pi_session_native",
                     Func::from({
                         let queue = hostcall_queue.clone();
+                        let tracker = hostcall_tracker.clone();
+                        let scheduler = Rc::clone(&scheduler);
+                        let hostcalls_total = Arc::clone(&hostcalls_total);
+                        let trace_seq = Arc::clone(&trace_seq);
                         move |_ctx: Ctx<'_>,
                               op: String,
                               args: Value<'_>|
                               -> rquickjs::Result<String> {
                             let payload = js_to_json(&args)?;
                             let call_id = format!("call-{}", generate_call_id());
+                            hostcalls_total.fetch_add(1, AtomicOrdering::SeqCst);
+                            let trace_id = trace_seq.fetch_add(1, AtomicOrdering::SeqCst);
+                            let timeout_ms = default_hostcall_timeout_ms.filter(|ms| *ms > 0);
+                            let timer_id =
+                                timeout_ms.map(|ms| scheduler.borrow_mut().set_timeout(ms));
+                            tracker.borrow_mut().register(call_id.clone(), timer_id);
                             let request = HostcallRequest {
                                 call_id: call_id.clone(),
                                 kind: HostcallKind::Session { op },
                                 payload,
-                                trace_id: 0,
+                                trace_id,
                             };
                             queue.borrow_mut().push_back(request);
                             Ok(call_id)
@@ -1377,17 +1421,27 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                     "__pi_ui_native",
                     Func::from({
                         let queue = hostcall_queue.clone();
+                        let tracker = hostcall_tracker.clone();
+                        let scheduler = Rc::clone(&scheduler);
+                        let hostcalls_total = Arc::clone(&hostcalls_total);
+                        let trace_seq = Arc::clone(&trace_seq);
                         move |_ctx: Ctx<'_>,
                               op: String,
                               args: Value<'_>|
                               -> rquickjs::Result<String> {
                             let payload = js_to_json(&args)?;
                             let call_id = format!("call-{}", generate_call_id());
+                            hostcalls_total.fetch_add(1, AtomicOrdering::SeqCst);
+                            let trace_id = trace_seq.fetch_add(1, AtomicOrdering::SeqCst);
+                            let timeout_ms = default_hostcall_timeout_ms.filter(|ms| *ms > 0);
+                            let timer_id =
+                                timeout_ms.map(|ms| scheduler.borrow_mut().set_timeout(ms));
+                            tracker.borrow_mut().register(call_id.clone(), timer_id);
                             let request = HostcallRequest {
                                 call_id: call_id.clone(),
                                 kind: HostcallKind::Ui { op },
                                 payload,
-                                trace_id: 0,
+                                trace_id,
                             };
                             queue.borrow_mut().push_back(request);
                             Ok(call_id)
@@ -1400,17 +1454,27 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                     "__pi_events_native",
                     Func::from({
                         let queue = hostcall_queue.clone();
+                        let tracker = hostcall_tracker.clone();
+                        let scheduler = Rc::clone(&scheduler);
+                        let hostcalls_total = Arc::clone(&hostcalls_total);
+                        let trace_seq = Arc::clone(&trace_seq);
                         move |_ctx: Ctx<'_>,
                               op: String,
                               args: Value<'_>|
                               -> rquickjs::Result<String> {
                             let payload = js_to_json(&args)?;
                             let call_id = format!("call-{}", generate_call_id());
+                            hostcalls_total.fetch_add(1, AtomicOrdering::SeqCst);
+                            let trace_id = trace_seq.fetch_add(1, AtomicOrdering::SeqCst);
+                            let timeout_ms = default_hostcall_timeout_ms.filter(|ms| *ms > 0);
+                            let timer_id =
+                                timeout_ms.map(|ms| scheduler.borrow_mut().set_timeout(ms));
+                            tracker.borrow_mut().register(call_id.clone(), timer_id);
                             let request = HostcallRequest {
                                 call_id: call_id.clone(),
                                 kind: HostcallKind::Events { op },
                                 payload,
-                                trace_id: 0,
+                                trace_id,
                             };
                             queue.borrow_mut().push_back(request);
                             Ok(call_id)
