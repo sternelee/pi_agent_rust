@@ -218,8 +218,7 @@ async fn run_scenario(scenario: Scenario) {
     let recorder = VcrRecorder::new_with(scenario.name, mode, &cassette_dir);
     let client = Client::new().with_vcr(recorder);
     let mut provider = AnthropicProvider::new(scenario.model.clone()).with_client(client);
-    let _mock_server = if let (true, Some(expectation)) =
-        (is_recording, error_expectation.as_ref())
+    let _mock_server = if let (true, Some(expectation)) = (is_recording, error_expectation.as_ref())
     {
         let server = harness.start_mock_http_server();
         let body = json!({
