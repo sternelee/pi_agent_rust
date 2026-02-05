@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{MockHttpResponse, TestHarness};
+use common::TestHarness;
 use serde::Deserialize;
 use serde_json::json;
 use std::cell::Cell;
@@ -1425,16 +1425,20 @@ fn e2e_cli_theme_path_discovery() {
 
 // ============================================================================
 // Print mode + stdin piping tests (bd-1ub)
+//
+// These tests use VCR playback to intercept HTTP at the client level inside
+// the pi binary.  No real network connections are made.
 // ============================================================================
 
-/// Build a mock Anthropic SSE event stream for a simple text response.
+/// Build VCR `body_chunks` for a simple Anthropic text response.
 ///
-/// Returns a complete SSE body that mimics the Anthropic streaming API format.
-fn build_mock_anthropic_sse(text: &str) -> String {
+/// Returns a `Vec<String>` where each element is one SSE frame suitable for
+/// inclusion in a VCR cassette `body_chunks` array.
+fn build_anthropic_response_chunks(text: &str) -> Vec<String> {
     let message_start = json!({
         "type": "message_start",
         "message": {
-            "model": "claude-sonnet-4-20250514",
+            "model": "claude-sonnet-4-5",
             "id": "msg_mock_e2e_001",
             "type": "message",
             "role": "assistant",
@@ -1445,10 +1449,6 @@ fn build_mock_anthropic_sse(text: &str) -> String {
                 "input_tokens": 10,
                 "cache_creation_input_tokens": 0,
                 "cache_read_input_tokens": 0,
-                "cache_creation": {
-                    "ephemeral_5m_input_tokens": 0,
-                    "ephemeral_1h_input_tokens": 0
-                },
                 "output_tokens": 1,
                 "service_tier": "standard"
             }
@@ -1479,83 +1479,95 @@ fn build_mock_anthropic_sse(text: &str) -> String {
         }
     });
 
-    format!(
-        "event: message_start\ndata: {message_start}\n\n\
-         event: content_block_start\ndata: {content_start}\n\n\
-         event: ping\ndata: {{\"type\": \"ping\"}}\n\n\
-         event: content_block_delta\ndata: {content_delta}\n\n\
-         event: content_block_stop\ndata: {content_stop}\n\n\
-         event: message_delta\ndata: {message_delta}\n\n\
-         event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
-    )
+    vec![
+        format!("event: message_start\ndata: {message_start}\n\n"),
+        format!("event: content_block_start\ndata: {content_start}\n\n"),
+        "event: ping\ndata: {\"type\": \"ping\"}\n\n".to_string(),
+        format!("event: content_block_delta\ndata: {content_delta}\n\n"),
+        format!("event: content_block_stop\ndata: {content_stop}\n\n"),
+        format!("event: message_delta\ndata: {message_delta}\n\n"),
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_string(),
+    ]
 }
 
-/// Set up a mock Anthropic API server with models.json override and SSE response.
+/// Create a VCR cassette file and configure the harness for VCR playback.
 ///
-/// Writes `models.json` to the agent dir pointing all Anthropic models at the mock
-/// server, registers a POST /v1/messages route returning the given text as SSE, and
-/// sets `ANTHROPIC_API_KEY` in the harness env.
-///
-/// The returned server must be kept alive for the duration of the test.
-fn setup_mock_anthropic(
+/// Writes a cassette JSON to a temp directory, then sets the `VCR_MODE`,
+/// `VCR_CASSETTE_DIR`, `PI_VCR_TEST_NAME`, `ANTHROPIC_API_KEY`, and
+/// `PI_TEST_MODE` env vars on the harness so the child binary will use
+/// VCR playback instead of real HTTP.
+fn setup_vcr_anthropic(
     harness: &mut CliTestHarness,
+    cassette_name: &str,
+    request_body: &serde_json::Value,
     response_text: &str,
-) -> common::MockHttpServer {
-    let server = harness.harness.start_mock_http_server();
+) {
+    let cassette_dir = harness.harness.temp_path("vcr-cassettes");
+    fs::create_dir_all(&cassette_dir).expect("create cassette dir");
 
-    let agent_dir = PathBuf::from(
-        harness
-            .env
-            .get("PI_CODING_AGENT_DIR")
-            .expect("PI_CODING_AGENT_DIR"),
-    );
-    fs::create_dir_all(&agent_dir).expect("create agent dir for models.json");
-
-    let models_config = json!({
-        "providers": {
-            "anthropic": {
-                "base_url": format!("{}/v1/messages", server.base_url()),
-                "api_key": "test-mock-key"
+    let chunks = build_anthropic_response_chunks(response_text);
+    let cassette = json!({
+        "version": "1.0",
+        "test_name": cassette_name,
+        "recorded_at": "2026-02-04T00:00:00.000Z",
+        "interactions": [{
+            "request": {
+                "method": "POST",
+                "url": "https://api.anthropic.com/v1/messages",
+                "headers": [
+                    ["Content-Type", "application/json"],
+                    ["Accept", "text/event-stream"],
+                    ["X-API-Key", "[REDACTED]"],
+                    ["anthropic-version", "2023-06-01"],
+                    ["Content-Type", "application/json"]
+                ],
+                "body": request_body
+            },
+            "response": {
+                "status": 200,
+                "headers": [
+                    ["Content-Type", "text/event-stream; charset=utf-8"]
+                ],
+                "body_chunks": chunks
             }
-        }
+        }]
     });
+
+    let cassette_path = cassette_dir.join(format!("{cassette_name}.json"));
     fs::write(
-        agent_dir.join("models.json"),
-        serde_json::to_string_pretty(&models_config).expect("serialize models config"),
+        &cassette_path,
+        serde_json::to_string_pretty(&cassette).expect("serialize cassette"),
     )
-    .expect("write models.json");
+    .expect("write cassette");
+
+    harness
+        .env
+        .insert("VCR_MODE".to_string(), "playback".to_string());
+    harness.env.insert(
+        "VCR_CASSETTE_DIR".to_string(),
+        cassette_dir.display().to_string(),
+    );
+    harness
+        .env
+        .insert("PI_VCR_TEST_NAME".to_string(), cassette_name.to_string());
+    harness
+        .env
+        .insert("ANTHROPIC_API_KEY".to_string(), "test-vcr-key".to_string());
+    harness
+        .env
+        .insert("PI_TEST_MODE".to_string(), "1".to_string());
+    // Enable body debug output in VCR errors for easier troubleshooting.
+    harness
+        .env
+        .insert("VCR_DEBUG_BODY".to_string(), "1".to_string());
 
     harness
         .harness
         .log()
-        .info_ctx("setup", "Mock Anthropic server configured", |ctx| {
-            ctx.push(("base_url".into(), server.base_url()));
-            ctx.push((
-                "models_json".into(),
-                agent_dir.join("models.json").display().to_string(),
-            ));
+        .info_ctx("setup", "VCR cassette configured", |ctx| {
+            ctx.push(("cassette_path".into(), cassette_path.display().to_string()));
+            ctx.push(("cassette_name".into(), cassette_name.to_string()));
         });
-
-    // Set API key env var as fallback.
-    harness
-        .env
-        .insert("ANTHROPIC_API_KEY".to_string(), "test-mock-key".to_string());
-
-    let sse_body = build_mock_anthropic_sse(response_text);
-    server.add_route(
-        "POST",
-        "/v1/messages",
-        MockHttpResponse {
-            status: 200,
-            headers: vec![(
-                "Content-Type".to_string(),
-                "text/event-stream; charset=utf-8".to_string(),
-            )],
-            body: sse_body.into_bytes(),
-        },
-    );
-
-    server
 }
 
 /// Common CLI flags that disable discovery side-effects for deterministic print mode tests.
@@ -1565,19 +1577,38 @@ const PRINT_MODE_ISOLATION_FLAGS: &[&str] = &[
     "--no-skills",
     "--no-prompt-templates",
     "--no-themes",
+    "--thinking",
+    "off",
 ];
 
+/// Build the system prompt that the binary produces when given `--system-prompt`
+/// with `PI_TEST_MODE=1`.  The binary always appends a timestamp/cwd footer.
+fn expected_system_prompt(custom: &str) -> String {
+    format!("{custom}\nCurrent date and time: <TIMESTAMP>\nCurrent working directory: <CWD>")
+}
+
 #[test]
-fn e2e_cli_print_mode_mock_sse_roundtrip() {
-    let mut harness = CliTestHarness::new("e2e_cli_print_mode_mock_sse_roundtrip");
-    let server = setup_mock_anthropic(&mut harness, "pong");
+fn e2e_cli_print_mode_vcr_roundtrip() {
+    let mut harness = CliTestHarness::new("e2e_cli_print_mode_vcr_roundtrip");
+
+    let request_body = json!({
+        "model": "claude-sonnet-4-5",
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "Reply with the single word: pong."}]}
+        ],
+        "system": expected_system_prompt("You are a test harness model."),
+        "max_tokens": 8192,
+        "stream": true
+    });
+
+    setup_vcr_anthropic(&mut harness, "e2e_print_roundtrip", &request_body, "pong");
 
     let mut args: Vec<&str> = vec![
         "-p",
         "--provider",
         "anthropic",
         "--model",
-        "claude-sonnet-4-20250514",
+        "claude-sonnet-4-5",
     ];
     args.extend_from_slice(PRINT_MODE_ISOLATION_FLAGS);
     args.extend_from_slice(&[
@@ -1591,31 +1622,22 @@ fn e2e_cli_print_mode_mock_sse_roundtrip() {
     harness
         .harness
         .log()
-        .info_ctx("verify", "Checking mock SSE roundtrip", |ctx| {
+        .info_ctx("verify", "Checking VCR roundtrip", |ctx| {
             ctx.push(("exit_code".into(), result.exit_code.to_string()));
             ctx.push(("stdout_len".into(), result.stdout.len().to_string()));
             ctx.push(("stderr_len".into(), result.stderr.len().to_string()));
+            ctx.push(("stderr".into(), result.stderr.clone()));
+            ctx.push(("stdout".into(), result.stdout.clone()));
         });
 
-    assert_exit_code(&harness.harness, &result, 0);
-    assert_contains(&harness.harness, &result.stdout, "pong");
-
-    // Verify mock server received exactly one request.
-    let requests = server.requests();
-    harness
-        .harness
-        .assert_log("assert mock server received 1 request");
-    assert_eq!(requests.len(), 1, "expected 1 request to mock server");
-    assert_eq!(requests[0].method, "POST");
-    assert_eq!(requests[0].path, "/v1/messages");
-
-    // Verify request body contains the user message.
-    let body_str = String::from_utf8_lossy(&requests[0].body);
-    assert_contains(
-        &harness.harness,
-        &body_str,
-        "Reply with the single word: pong.",
+    assert!(
+        result.exit_code == 0,
+        "expected exit code 0, got {}.\nstderr:\n{}\nstdout:\n{}",
+        result.exit_code,
+        result.stderr,
+        result.stdout,
     );
+    assert_contains(&harness.harness, &result.stdout, "pong");
 
     // Verify no session files created in print mode (even on success).
     let sessions_dir = PathBuf::from(harness.env.get("PI_SESSIONS_DIR").expect("PI_SESSIONS_DIR"));
@@ -1629,16 +1651,27 @@ fn e2e_cli_print_mode_mock_sse_roundtrip() {
 #[test]
 fn e2e_cli_print_mode_stdin_sends_to_provider() {
     let mut harness = CliTestHarness::new("e2e_cli_print_mode_stdin_sends_to_provider");
-    let server = setup_mock_anthropic(&mut harness, "Received your stdin.");
 
     let stdin_text = "Hello from stdin pipe content.\n";
 
-    let mut args: Vec<&str> = vec![
-        "--provider",
-        "anthropic",
-        "--model",
-        "claude-sonnet-4-20250514",
-    ];
+    let request_body = json!({
+        "model": "claude-sonnet-4-5",
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "Hello from stdin pipe content."}]}
+        ],
+        "system": expected_system_prompt("Echo test."),
+        "max_tokens": 8192,
+        "stream": true
+    });
+
+    setup_vcr_anthropic(
+        &mut harness,
+        "e2e_print_stdin",
+        &request_body,
+        "Received your stdin.",
+    );
+
+    let mut args: Vec<&str> = vec!["--provider", "anthropic", "--model", "claude-sonnet-4-5"];
     args.extend_from_slice(PRINT_MODE_ISOLATION_FLAGS);
     args.extend_from_slice(&["--system-prompt", "Echo test."]);
 
@@ -1651,24 +1684,11 @@ fn e2e_cli_print_mode_stdin_sends_to_provider() {
             ctx.push(("exit_code".into(), result.exit_code.to_string()));
             ctx.push(("stdout_len".into(), result.stdout.len().to_string()));
             ctx.push(("stdin_len".into(), stdin_text.len().to_string()));
+            ctx.push(("stderr".into(), result.stderr.clone()));
         });
 
     assert_exit_code(&harness.harness, &result, 0);
     assert_contains(&harness.harness, &result.stdout, "Received your stdin.");
-
-    // Verify the provider received the stdin content in the request body.
-    let requests = server.requests();
-    harness
-        .harness
-        .assert_log("assert mock server received 1 request from stdin pipe");
-    assert_eq!(requests.len(), 1, "expected 1 request to mock server");
-
-    let body_str = String::from_utf8_lossy(&requests[0].body);
-    assert_contains(
-        &harness.harness,
-        &body_str,
-        "Hello from stdin pipe content.",
-    );
 
     // Verify no session files created.
     let sessions_dir = PathBuf::from(harness.env.get("PI_SESSIONS_DIR").expect("PI_SESSIONS_DIR"));
@@ -1685,12 +1705,38 @@ fn e2e_cli_print_mode_stdin_sends_to_provider() {
 #[test]
 fn e2e_cli_print_mode_file_ref_reads_file() {
     let mut harness = CliTestHarness::new("e2e_cli_print_mode_file_ref_reads_file");
-    let server = setup_mock_anthropic(&mut harness, "File processed.");
 
     // Create a test file in the working directory (harness temp dir).
     let file_content = "This is test file content for @file expansion.";
     let file_path = harness.harness.temp_path("context-file.txt");
     fs::write(&file_path, file_content).expect("write context file");
+
+    // Build the user message text that the binary produces after @file expansion.
+    // process_file_arguments wraps text files as:
+    //   <file name="/absolute/path">\ncontent\n</file>\n
+    // Then prepare_initial_message appends the first message_arg.
+    let user_text = format!(
+        "<file name=\"{}\">\n{}\n</file>\nSummarize this file.",
+        file_path.display(),
+        file_content,
+    );
+
+    let request_body = json!({
+        "model": "claude-sonnet-4-5",
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": user_text}]}
+        ],
+        "system": expected_system_prompt("File test."),
+        "max_tokens": 8192,
+        "stream": true
+    });
+
+    setup_vcr_anthropic(
+        &mut harness,
+        "e2e_print_file_ref",
+        &request_body,
+        "File processed.",
+    );
 
     harness
         .harness
@@ -1705,7 +1751,7 @@ fn e2e_cli_print_mode_file_ref_reads_file() {
         "--provider",
         "anthropic",
         "--model",
-        "claude-sonnet-4-20250514",
+        "claude-sonnet-4-5",
     ];
     args.extend_from_slice(PRINT_MODE_ISOLATION_FLAGS);
     args.extend_from_slice(&[
@@ -1723,23 +1769,9 @@ fn e2e_cli_print_mode_file_ref_reads_file() {
         .info_ctx("verify", "Checking @file expansion", |ctx| {
             ctx.push(("exit_code".into(), result.exit_code.to_string()));
             ctx.push(("stdout_len".into(), result.stdout.len().to_string()));
+            ctx.push(("stderr".into(), result.stderr.clone()));
         });
 
     assert_exit_code(&harness.harness, &result, 0);
     assert_contains(&harness.harness, &result.stdout, "File processed.");
-
-    // Verify the provider received the file content in the request body.
-    let requests = server.requests();
-    harness
-        .harness
-        .assert_log("assert mock server received 1 request with file content");
-    assert_eq!(requests.len(), 1, "expected 1 request to mock server");
-
-    let body_str = String::from_utf8_lossy(&requests[0].body);
-    assert_contains(
-        &harness.harness,
-        &body_str,
-        "This is test file content for @file expansion.",
-    );
-    assert_contains(&harness.harness, &body_str, "Summarize this file.");
 }
