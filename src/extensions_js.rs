@@ -1024,8 +1024,19 @@ impl JsModuleResolver for PiJsResolver {
             return Err(rquickjs::Error::new_resolving(base, name));
         }
 
-        if self.state.borrow().virtual_modules.contains_key(spec) {
-            return Ok(spec.to_string());
+        // Alias bare Node.js builtins to their node: prefixed virtual modules.
+        let canonical = match spec {
+            "fs" => "node:fs",
+            "fs/promises" => "node:fs/promises",
+            "path" => "node:path",
+            "os" => "node:os",
+            "child_process" => "node:child_process",
+            "crypto" => "node:crypto",
+            other => other,
+        };
+
+        if self.state.borrow().virtual_modules.contains_key(canonical) {
+            return Ok(canonical.to_string());
         }
 
         if let Some(path) = resolve_module_path(base, spec) {
@@ -1340,11 +1351,25 @@ export class Spacer {
   constructor(..._args) {}
 }
 
+export function visibleWidth(str) {
+  return String(str ?? "").length;
+}
+
+export function wrapTextWithAnsi(text, _width) {
+  return String(text ?? "");
+}
+
+export class Editor {
+  constructor(_opts = {}) {
+    this.value = "";
+  }
+}
+
 export const Key = {
   ctrlAlt: (key) => ({ kind: "ctrlAlt", key: String(key) }),
 };
 
-export default { matchesKey, truncateToWidth, Text, Container, Markdown, Spacer, Key };
+export default { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, Text, Container, Markdown, Spacer, Editor, Key };
 "#
         .trim()
         .to_string(),
