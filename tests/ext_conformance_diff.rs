@@ -426,12 +426,24 @@ fn run_ts_oracle_result(extension_path: &Path) -> Result<Value, String> {
         ));
     }
 
-    serde_json::from_str(trimmed).map_err(|e| {
-        format!(
-            "TS oracle returned invalid JSON for {}:\n  error: {e}\n  stdout: {stdout}\n  stderr: {stderr}",
-            extension_path.display()
-        )
-    })
+    // Some extensions print to stdout before the JSON (e.g. "[WakaTime] Installing...").
+    // Try parsing the whole output first; if that fails, find the first '{' and parse from there.
+    serde_json::from_str(trimmed)
+        .or_else(|_| {
+            trimmed
+                .find('{')
+                .map(|idx| &trimmed[idx..])
+                .ok_or_else(|| "no JSON object found".to_string())
+                .and_then(|json_str| {
+                    serde_json::from_str(json_str).map_err(|e| e.to_string())
+                })
+        })
+        .map_err(|e| {
+            format!(
+                "TS oracle returned invalid JSON for {}:\n  error: {e}\n  stdout: {stdout}\n  stderr: {stderr}",
+                extension_path.display()
+            )
+        })
 }
 
 fn run_ts_harness_result(extension_path: &Path) -> Result<Value, String> {
