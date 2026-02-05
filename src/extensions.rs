@@ -1255,21 +1255,14 @@ fn canonicalize_for_create(path: &Path) -> std::result::Result<PathBuf, HostCall
     })?;
 
     let mut normalized_parts: Vec<std::ffi::OsString> = Vec::new();
+    let mut up_levels: usize = 0;
     for component in suffix.components() {
         match component {
             std::path::Component::CurDir => {}
             std::path::Component::Normal(part) => normalized_parts.push(part.to_os_string()),
             std::path::Component::ParentDir => {
                 if normalized_parts.pop().is_none() {
-                    return Err(HostCallError {
-                        code: HostCallErrorCode::InvalidRequest,
-                        message: "Path escapes existing ancestor".to_string(),
-                        details: Some(json!({
-                            "path": path.display().to_string(),
-                            "ancestor": ancestor.display().to_string(),
-                        })),
-                        retryable: None,
-                    });
+                    up_levels = up_levels.saturating_add(1);
                 }
             }
             std::path::Component::RootDir | std::path::Component::Prefix(_) => {
@@ -1286,12 +1279,28 @@ fn canonicalize_for_create(path: &Path) -> std::result::Result<PathBuf, HostCall
         }
     }
 
+    let mut base = canonical_ancestor;
+    for _ in 0..up_levels {
+        base = base
+            .parent()
+            .ok_or_else(|| HostCallError {
+                code: HostCallErrorCode::InvalidRequest,
+                message: "Path escapes filesystem root".to_string(),
+                details: Some(json!({
+                    "path": path.display().to_string(),
+                    "ancestor": ancestor.display().to_string(),
+                })),
+                retryable: None,
+            })?
+            .to_path_buf();
+    }
+
     let mut normalized_suffix = PathBuf::new();
     for part in normalized_parts {
         normalized_suffix.push(part);
     }
 
-    Ok(canonical_ancestor.join(normalized_suffix))
+    Ok(base.join(normalized_suffix))
 }
 
 fn hash_path(path: &Path) -> String {
