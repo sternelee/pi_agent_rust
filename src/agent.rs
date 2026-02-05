@@ -1153,49 +1153,32 @@ impl Agent {
         tool_call: &ToolCall,
         on_event: &Arc<dyn Fn(AgentEvent) + Send + Sync>,
     ) -> (ToolOutput, bool) {
-        if let Some(extensions) = self.extensions.clone() {
-            match extensions
-                .dispatch_tool_call(tool_call, EXTENSION_EVENT_TIMEOUT_MS)
-                .await
-            {
-                Ok(Some(result)) if result.block => {
-                    let reason = result
-                        .reason
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|reason| !reason.is_empty());
-                    let message = reason.map_or_else(
-                        || "Tool execution was blocked by an extension".to_string(),
-                        |reason| format!("Tool execution blocked: {reason}"),
-                    );
+        let extensions = self.extensions.clone();
 
-                    return (
-                        ToolOutput {
-                            content: vec![ContentBlock::Text(TextContent::new(message))],
-                            details: None,
-                            is_error: true,
-                        },
-                        true,
-                    );
-                }
-                Ok(_) => {}
-                Err(err) => tracing::warn!("tool_call extension hook failed (fail-open): {err}"),
+        let (mut output, is_error) = if let Some(extensions) = &extensions {
+            match Self::dispatch_tool_call_hook(extensions, tool_call).await {
+                Some(blocked_output) => (blocked_output, true),
+                None => self.execute_tool_without_hooks(tool_call, on_event).await,
             }
+        } else {
+            self.execute_tool_without_hooks(tool_call, on_event).await
+        };
+
+        if let Some(extensions) = &extensions {
+            Self::apply_tool_result_hook(extensions, tool_call, &mut output, is_error).await;
         }
 
+        (output, is_error)
+    }
+
+    async fn execute_tool_without_hooks(
+        &self,
+        tool_call: &ToolCall,
+        on_event: &Arc<dyn Fn(AgentEvent) + Send + Sync>,
+    ) -> (ToolOutput, bool) {
         // Find the tool
         let Some(tool) = self.tools.get(&tool_call.name) else {
-            return (
-                ToolOutput {
-                    content: vec![ContentBlock::Text(TextContent::new(format!(
-                        "Error: Tool '{}' not found",
-                        tool_call.name
-                    )))],
-                    details: None,
-                    is_error: true,
-                },
-                true,
-            );
+            return (Self::tool_not_found_output(&tool_call.name), true);
         };
 
         let tool_name = tool_call.name.clone();
@@ -1236,6 +1219,72 @@ impl Agent {
                 },
                 true,
             ),
+        }
+    }
+
+    fn tool_not_found_output(tool_name: &str) -> ToolOutput {
+        ToolOutput {
+            content: vec![ContentBlock::Text(TextContent::new(format!(
+                "Error: Tool '{tool_name}' not found"
+            )))],
+            details: None,
+            is_error: true,
+        }
+    }
+
+    async fn dispatch_tool_call_hook(
+        extensions: &ExtensionManager,
+        tool_call: &ToolCall,
+    ) -> Option<ToolOutput> {
+        match extensions
+            .dispatch_tool_call(tool_call, EXTENSION_EVENT_TIMEOUT_MS)
+            .await
+        {
+            Ok(Some(result)) if result.block => {
+                Some(Self::tool_call_blocked_output(result.reason.as_deref()))
+            }
+            Ok(_) => None,
+            Err(err) => {
+                tracing::warn!("tool_call extension hook failed (fail-open): {err}");
+                None
+            }
+        }
+    }
+
+    fn tool_call_blocked_output(reason: Option<&str>) -> ToolOutput {
+        let reason = reason.map(str::trim).filter(|reason| !reason.is_empty());
+        let message = reason.map_or_else(
+            || "Tool execution was blocked by an extension".to_string(),
+            |reason| format!("Tool execution blocked: {reason}"),
+        );
+
+        ToolOutput {
+            content: vec![ContentBlock::Text(TextContent::new(message))],
+            details: None,
+            is_error: true,
+        }
+    }
+
+    async fn apply_tool_result_hook(
+        extensions: &ExtensionManager,
+        tool_call: &ToolCall,
+        output: &mut ToolOutput,
+        is_error: bool,
+    ) {
+        match extensions
+            .dispatch_tool_result(tool_call, &*output, is_error, EXTENSION_EVENT_TIMEOUT_MS)
+            .await
+        {
+            Ok(Some(result)) => {
+                if let Some(content) = result.content {
+                    output.content = content;
+                }
+                if let Some(details) = result.details {
+                    output.details = Some(details);
+                }
+            }
+            Ok(None) => {}
+            Err(err) => tracing::warn!("tool_result extension hook failed (fail-open): {err}"),
         }
     }
 
@@ -1820,6 +1869,279 @@ mod extensions_integration_tests {
             );
             if let [ContentBlock::Text(text)] = output.content.as_slice() {
                 assert_eq!(text.text, "Tool execution blocked: blocked bash in test");
+            }
+        });
+    }
+
+    #[test]
+    fn tool_result_hook_can_modify_tool_output() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async {
+            let temp_dir = tempfile::tempdir().expect("tempdir");
+            let entry_path = temp_dir.path().join("ext.mjs");
+            std::fs::write(
+                &entry_path,
+                r#"
+                export default function init(pi) {
+                  pi.on("tool_result", async (event) => {
+                    if (event && event.toolName === "count_tool") {
+                      return {
+                        content: [{ type: "text", text: "modified" }],
+                        details: { from: "tool_result" }
+                      };
+                    }
+                    return {};
+                  });
+                }
+                "#,
+            )
+            .expect("write extension entry");
+
+            let provider = Arc::new(NoopProvider);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let tools = ToolRegistry::from_tools(vec![Box::new(CountingTool {
+                calls: Arc::clone(&calls),
+            })]);
+            let agent = Agent::new(provider, tools, AgentConfig::default());
+            let session = Session::in_memory();
+            let mut agent_session = AgentSession::new(agent, session, false);
+
+            agent_session
+                .enable_extensions(&[], temp_dir.path(), None, &[entry_path])
+                .await
+                .expect("enable extensions");
+
+            let tool_call = ToolCall {
+                id: "call-1".to_string(),
+                name: "count_tool".to_string(),
+                arguments: json!({}),
+                thought_signature: None,
+            };
+
+            let on_event: Arc<dyn Fn(AgentEvent) + Send + Sync> = Arc::new(|_| {});
+            let (output, is_error) = agent_session
+                .agent
+                .execute_tool(&tool_call, &on_event)
+                .await;
+
+            assert!(!is_error);
+            assert!(!output.is_error);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(output.details, Some(json!({ "from": "tool_result" })));
+
+            assert!(
+                matches!(output.content.as_slice(), [ContentBlock::Text(_)]),
+                "Expected text output, got {:?}",
+                output.content
+            );
+            if let [ContentBlock::Text(text)] = output.content.as_slice() {
+                assert_eq!(text.text, "modified");
+            }
+        });
+    }
+
+    #[test]
+    fn tool_result_hook_can_modify_tool_not_found_error() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async {
+            let temp_dir = tempfile::tempdir().expect("tempdir");
+            let entry_path = temp_dir.path().join("ext.mjs");
+            std::fs::write(
+                &entry_path,
+                r#"
+                export default function init(pi) {
+                  pi.on("tool_result", async (event) => {
+                    if (event && event.toolName === "missing_tool" && event.isError) {
+                      return {
+                        content: [{ type: "text", text: "overridden" }],
+                        details: { handled: true }
+                      };
+                    }
+                    return {};
+                  });
+                }
+                "#,
+            )
+            .expect("write extension entry");
+
+            let provider = Arc::new(NoopProvider);
+            let tools = ToolRegistry::from_tools(Vec::new());
+            let agent = Agent::new(provider, tools, AgentConfig::default());
+            let session = Session::in_memory();
+            let mut agent_session = AgentSession::new(agent, session, false);
+
+            agent_session
+                .enable_extensions(&[], temp_dir.path(), None, &[entry_path])
+                .await
+                .expect("enable extensions");
+
+            let tool_call = ToolCall {
+                id: "call-1".to_string(),
+                name: "missing_tool".to_string(),
+                arguments: json!({}),
+                thought_signature: None,
+            };
+
+            let on_event: Arc<dyn Fn(AgentEvent) + Send + Sync> = Arc::new(|_| {});
+            let (output, is_error) = agent_session
+                .agent
+                .execute_tool(&tool_call, &on_event)
+                .await;
+
+            assert!(is_error);
+            assert!(output.is_error);
+            assert_eq!(output.details, Some(json!({ "handled": true })));
+
+            assert!(
+                matches!(output.content.as_slice(), [ContentBlock::Text(_)]),
+                "Expected text output, got {:?}",
+                output.content
+            );
+            if let [ContentBlock::Text(text)] = output.content.as_slice() {
+                assert_eq!(text.text, "overridden");
+            }
+        });
+    }
+
+    #[test]
+    fn tool_result_hook_errors_fail_open() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async {
+            let temp_dir = tempfile::tempdir().expect("tempdir");
+            let entry_path = temp_dir.path().join("ext.mjs");
+            std::fs::write(
+                &entry_path,
+                r#"
+                export default function init(pi) {
+                  pi.on("tool_result", async (_event) => {
+                    throw new Error("boom");
+                  });
+                }
+                "#,
+            )
+            .expect("write extension entry");
+
+            let provider = Arc::new(NoopProvider);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let tools = ToolRegistry::from_tools(vec![Box::new(CountingTool {
+                calls: Arc::clone(&calls),
+            })]);
+            let agent = Agent::new(provider, tools, AgentConfig::default());
+            let session = Session::in_memory();
+            let mut agent_session = AgentSession::new(agent, session, false);
+
+            agent_session
+                .enable_extensions(&[], temp_dir.path(), None, &[entry_path])
+                .await
+                .expect("enable extensions");
+
+            let tool_call = ToolCall {
+                id: "call-1".to_string(),
+                name: "count_tool".to_string(),
+                arguments: json!({}),
+                thought_signature: None,
+            };
+
+            let on_event: Arc<dyn Fn(AgentEvent) + Send + Sync> = Arc::new(|_| {});
+            let (output, is_error) = agent_session
+                .agent
+                .execute_tool(&tool_call, &on_event)
+                .await;
+
+            assert!(!is_error);
+            assert!(!output.is_error);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+            assert_eq!(output.details, None);
+            assert!(
+                matches!(output.content.as_slice(), [ContentBlock::Text(_)]),
+                "Expected text output, got {:?}",
+                output.content
+            );
+            if let [ContentBlock::Text(text)] = output.content.as_slice() {
+                assert_eq!(text.text, "ok");
+            }
+        });
+    }
+
+    #[test]
+    fn tool_result_hook_runs_on_blocked_tool_call() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async {
+            let temp_dir = tempfile::tempdir().expect("tempdir");
+            let entry_path = temp_dir.path().join("ext.mjs");
+            std::fs::write(
+                &entry_path,
+                r#"
+                export default function init(pi) {
+                  pi.on("tool_call", async (event) => {
+                    if (event && event.toolName === "count_tool") {
+                      return { block: true, reason: "blocked in test" };
+                    }
+                    return {};
+                  });
+
+                  pi.on("tool_result", async (event) => {
+                    if (event && event.toolName === "count_tool" && event.isError) {
+                      return { content: [{ type: "text", text: "override" }] };
+                    }
+                    return {};
+                  });
+                }
+                "#,
+            )
+            .expect("write extension entry");
+
+            let provider = Arc::new(NoopProvider);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let tools = ToolRegistry::from_tools(vec![Box::new(CountingTool {
+                calls: Arc::clone(&calls),
+            })]);
+            let agent = Agent::new(provider, tools, AgentConfig::default());
+            let session = Session::in_memory();
+            let mut agent_session = AgentSession::new(agent, session, false);
+
+            agent_session
+                .enable_extensions(&[], temp_dir.path(), None, &[entry_path])
+                .await
+                .expect("enable extensions");
+
+            let tool_call = ToolCall {
+                id: "call-1".to_string(),
+                name: "count_tool".to_string(),
+                arguments: json!({}),
+                thought_signature: None,
+            };
+
+            let on_event: Arc<dyn Fn(AgentEvent) + Send + Sync> = Arc::new(|_| {});
+            let (output, is_error) = agent_session
+                .agent
+                .execute_tool(&tool_call, &on_event)
+                .await;
+
+            assert!(is_error);
+            assert!(output.is_error);
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+            assert!(
+                matches!(output.content.as_slice(), [ContentBlock::Text(_)]),
+                "Expected text output, got {:?}",
+                output.content
+            );
+            if let [ContentBlock::Text(text)] = output.content.as_slice() {
+                assert_eq!(text.text, "override");
             }
         });
     }
