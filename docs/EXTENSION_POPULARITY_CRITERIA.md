@@ -292,16 +292,29 @@ The candidate inventory should be representable as JSON objects with these field
     "capabilities": ["read","write","edit","exec","http","ui","session"]
   },
   "signals": {
+    "official_listing": false,
+    "pi_mono_example": false,
+    "badlogic_gist": false,
     "github_stars": 0,
     "github_forks": 0,
     "npm_downloads_month": 0,
-    "references": ["https://…"]
+    "references": ["https://…"],
+    "marketplace": {
+      "rank": 0,
+      "installs_month": 0,
+      "featured": false
+    }
   },
   "recency": { "updated_at": "2026-01-31T00:00:00Z" },
   "compat": {
+    "status": "unmodified|required_shims|runtime_gap|blocked",
     "unmodified_required": true,
     "blocked_reasons": [],
     "required_shims": ["pi:node/fs", "pi:node/path"]
+  },
+  "gates": {
+    "provenance_pinned": true,
+    "deterministic": true
   },
   "score": {
     "popularity": 0,
@@ -312,7 +325,7 @@ The candidate inventory should be representable as JSON objects with these field
     "risk_penalty": 0,
     "base_total": 0,
     "final_total": 0,
-    "tier": "tier-1|tier-2|excluded",
+    "tier": "tier-0|tier-1|tier-2|excluded",
     "rationale": "1-3 sentences explaining the score.",
     "risk_notes": "Optional: why the risk penalty was applied."
   }
