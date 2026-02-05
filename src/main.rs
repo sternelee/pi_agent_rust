@@ -22,6 +22,7 @@ use pi::app::StartupError;
 use pi::auth::{AuthCredential, AuthStorage};
 use pi::cli;
 use pi::config::Config;
+use pi::extensions::{ExtensionEventName, extension_event_from_agent};
 use pi::model::{AssistantMessage, ContentBlock, StopReason};
 use pi::models::{ModelEntry, ModelRegistry, default_models_path};
 use pi::package_manager::{PackageEntry, PackageManager, PackageScope};
@@ -32,6 +33,7 @@ use pi::session::Session;
 use pi::session_index::SessionIndex;
 use pi::tools::ToolRegistry;
 use pi::tui::PiConsole;
+use serde_json::json;
 use tracing_subscriber::EnvFilter;
 
 fn main() {
@@ -335,7 +337,15 @@ async fn run(mut cli: cli::Cli, runtime_handle: RuntimeHandle) -> Result<()> {
         .await;
     }
 
-    run_print_mode(&mut agent_session, &mode, initial, messages, &resources).await
+    run_print_mode(
+        &mut agent_session,
+        &mode,
+        initial,
+        messages,
+        &resources,
+        runtime_handle.clone(),
+    )
+    .await
 }
 
 async fn handle_subcommand(command: cli::Commands, cwd: &Path) -> Result<()> {
@@ -816,12 +826,14 @@ async fn run_rpc_mode(
     .map_err(anyhow::Error::new)
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run_print_mode(
     session: &mut AgentSession,
     mode: &str,
     initial: Option<InitialMessage>,
     messages: Vec<String>,
     resources: &ResourceLoader,
+    runtime_handle: RuntimeHandle,
 ) -> Result<()> {
     if mode != "text" && mode != "json" {
         bail!("Unknown mode: {mode}");
@@ -835,11 +847,26 @@ async fn run_print_mode(
     }
 
     let mut last_message: Option<AssistantMessage> = None;
+    let extensions = session.extensions.clone();
     let emit_json_events = mode == "json";
-    let event_handler = move |event: AgentEvent| {
-        if emit_json_events {
-            if let Ok(serialized) = serde_json::to_string(&event) {
-                println!("{serialized}");
+    let runtime_for_events = runtime_handle.clone();
+    let make_event_handler = move || {
+        let extensions = extensions.clone();
+        let runtime_for_events = runtime_for_events.clone();
+        move |event: AgentEvent| {
+            if emit_json_events {
+                if let Ok(serialized) = serde_json::to_string(&event) {
+                    println!("{serialized}");
+                }
+            }
+            if let Some(manager) = &extensions {
+                if let Some((event_name, data)) = extension_event_from_agent(&event) {
+                    let manager = manager.clone();
+                    let runtime_handle = runtime_for_events.clone();
+                    runtime_handle.spawn(async move {
+                        let _ = manager.dispatch_event(event_name, data).await;
+                    });
+                }
             }
         }
     };
@@ -862,18 +889,49 @@ async fn run_print_mode(
         .collect::<Vec<_>>();
 
     if let Some(initial) = initial {
+        if let Some(manager) = session.extensions.clone() {
+            let message = initial.text.clone();
+            let runtime_handle = runtime_handle.clone();
+            runtime_handle.spawn(async move {
+                let _ = manager
+                    .dispatch_event(ExtensionEventName::Input, Some(json!({ "text": message })))
+                    .await;
+                let _ = manager
+                    .dispatch_event(ExtensionEventName::BeforeAgentStart, None)
+                    .await;
+            });
+        }
         let content = pi::app::build_initial_content(&initial);
         last_message = Some(
             session
-                .run_with_content_with_abort(content, Some(abort_signal.clone()), event_handler)
+                .run_with_content_with_abort(
+                    content,
+                    Some(abort_signal.clone()),
+                    make_event_handler(),
+                )
                 .await?,
         );
     }
 
     for message in messages {
+        if let Some(manager) = session.extensions.clone() {
+            let message_text = message.clone();
+            let runtime_handle = runtime_handle.clone();
+            runtime_handle.spawn(async move {
+                let _ = manager
+                    .dispatch_event(
+                        ExtensionEventName::Input,
+                        Some(json!({ "text": message_text })),
+                    )
+                    .await;
+                let _ = manager
+                    .dispatch_event(ExtensionEventName::BeforeAgentStart, None)
+                    .await;
+            });
+        }
         last_message = Some(
             session
-                .run_text_with_abort(message, Some(abort_signal.clone()), event_handler)
+                .run_text_with_abort(message, Some(abort_signal.clone()), make_event_handler())
                 .await?,
         );
     }
