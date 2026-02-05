@@ -3231,9 +3231,9 @@ function __pi_make_extension_ctx(ctx_payload) {
 	            try {
 	                result = await __pi_with_extension_async(entry.extensionId, () => handler(event, ctx));
 	            } catch (e) {
-	                console.error('Event handler error:', eventName, entry.extensionId, e);
-	                continue;
-	            }
+		                try { globalThis.console && globalThis.console.error && globalThis.console.error('Event handler error:', eventName, entry.extensionId, e); } catch (_e) {}
+		                continue;
+		            }
 	            if (result && typeof result === 'object') {
 	                if (result.action === 'handled') return result;
 	                if (result.action === 'transform' && typeof result.text === 'string') {
@@ -3265,9 +3265,9 @@ function __pi_make_extension_ctx(ctx_payload) {
 	            try {
 	                result = await __pi_with_extension_async(entry.extensionId, () => handler(event, ctx));
 	            } catch (e) {
-	                console.error('Event handler error:', eventName, entry.extensionId, e);
-	                continue;
-	            }
+		                try { globalThis.console && globalThis.console.error && globalThis.console.error('Event handler error:', eventName, entry.extensionId, e); } catch (_e) {}
+		                continue;
+		            }
 	            if (result && typeof result === 'object') {
 	                if (result.message !== undefined) messages.push(result.message);
 	                if (result.systemPrompt !== undefined) {
@@ -3291,9 +3291,9 @@ function __pi_make_extension_ctx(ctx_payload) {
 	        try {
 	            value = await __pi_with_extension_async(entry.extensionId, () => handler(event_payload, ctx));
 	        } catch (e) {
-	            console.error('Event handler error:', eventName, entry.extensionId, e);
-	            continue;
-	        }
+		            try { globalThis.console && globalThis.console.error && globalThis.console.error('Event handler error:', eventName, entry.extensionId, e); } catch (_e) {}
+		            continue;
+		        }
 	        if (value === undefined) continue;
 
         // First-result semantics (legacy parity)

@@ -6331,6 +6331,7 @@ impl ExtensionManager {
 
     /// Convert extension-registered providers into model entries suitable for
     /// merging into the [`ModelRegistry`].
+    #[allow(clippy::too_many_lines)]
     pub fn extension_model_entries(&self) -> Vec<crate::models::ModelEntry> {
         use crate::provider::{InputType, Model, ModelCost};
         use std::collections::HashMap;
@@ -6392,13 +6393,11 @@ impl ExtensionManager {
                 let model_name = model_spec
                     .get("name")
                     .and_then(Value::as_str)
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| model_id.clone());
+                    .map_or_else(|| model_id.clone(), ToString::to_string);
                 let model_api = model_spec
                     .get("api")
                     .and_then(Value::as_str)
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| api.clone());
+                    .map_or_else(|| api.clone(), ToString::to_string);
                 let reasoning = model_spec
                     .get("reasoning")
                     .and_then(Value::as_bool)

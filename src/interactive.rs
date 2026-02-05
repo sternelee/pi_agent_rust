@@ -47,13 +47,14 @@ use crate::autocomplete::{
 use crate::config::{Config, SettingsScope};
 use crate::extension_events::{InputEventOutcome, apply_input_event_response};
 use crate::extensions::{
-    EXTENSION_EVENT_TIMEOUT_MS, ExtensionEventName, ExtensionManager, ExtensionSession,
+    EXTENSION_EVENT_TIMEOUT_MS, ExtensionDeliverAs, ExtensionEventName, ExtensionHostActions,
+    ExtensionManager, ExtensionSendMessage, ExtensionSendUserMessage, ExtensionSession,
     ExtensionUiRequest, ExtensionUiResponse, extension_event_from_agent,
 };
 use crate::keybindings::{AppAction, KeyBinding, KeyBindings};
 use crate::model::{
-    AssistantMessageEvent, ContentBlock, ImageContent, Message as ModelMessage, StopReason,
-    TextContent, ThinkingLevel, Usage, UserContent, UserMessage,
+    AssistantMessageEvent, ContentBlock, CustomMessage, ImageContent, Message as ModelMessage,
+    StopReason, TextContent, ThinkingLevel, Usage, UserContent, UserMessage,
 };
 use crate::models::{ModelEntry, ModelRegistry, default_models_path};
 use crate::package_manager::PackageManager;
@@ -2667,6 +2668,8 @@ pub enum PiMsg {
     AgentStart,
     /// Trigger processing of the next queued input (CLI startup messages).
     RunPending,
+    /// Enqueue a pending input (extensions may inject while idle).
+    EnqueuePendingInput(PendingInput),
     /// Internal: shut down the async→UI message bridge (used for clean exit).
     UiShutdown,
     /// Text delta from assistant.
@@ -2698,6 +2701,8 @@ pub enum PiMsg {
     AgentError(String),
     /// Non-error system message.
     System(String),
+    /// System note that does not mutate agent state (safe during streaming).
+    SystemNote(String),
     /// Update last user message content (input transform/redaction).
     UpdateLastUserMessage(String),
     /// Bash command result (non-agent).
