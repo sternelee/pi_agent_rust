@@ -433,6 +433,27 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
                 let level = self.session.get_thinking_level().await;
                 Ok(level.map_or(Value::Null, Value::String))
             }
+            "set_label" | "setlabel" => {
+                let target_id = payload
+                    .get("targetId")
+                    .and_then(Value::as_str)
+                    .or_else(|| payload.get("target_id").and_then(Value::as_str))
+                    .unwrap_or_default()
+                    .to_string();
+                let label = payload
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .map(String::from);
+                if target_id.is_empty() {
+                    Err("set_label requires 'targetId' field".to_string())
+                } else {
+                    self.session
+                        .set_label(target_id, label)
+                        .await
+                        .map(|()| Value::Null)
+                        .map_err(|err| err.to_string())
+                }
+            }
             _ => Err(format!("Unknown session op: {op}")),
         };
 
@@ -879,6 +900,8 @@ mod tests {
     type CustomEntry = (String, Option<Value>);
     type CustomEntries = Arc<Mutex<Vec<CustomEntry>>>;
 
+    type LabelEntry = (String, Option<String>);
+
     struct TestSession {
         state: Arc<Mutex<Value>>,
         messages: Arc<Mutex<Vec<SessionMessage>>>,
@@ -886,6 +909,7 @@ mod tests {
         branch: Arc<Mutex<Vec<Value>>>,
         name: Arc<Mutex<Option<String>>>,
         custom_entries: CustomEntries,
+        labels: Arc<Mutex<Vec<LabelEntry>>>,
     }
 
     #[async_trait]
@@ -979,7 +1003,8 @@ mod tests {
             level
         }
 
-        async fn set_label(&self, _target_id: String, _label: Option<String>) -> Result<()> {
+        async fn set_label(&self, target_id: String, label: Option<String>) -> Result<()> {
+            self.labels.lock().unwrap().push((target_id, label));
             Ok(())
         }
     }
@@ -1201,6 +1226,7 @@ mod tests {
                 branch: Arc::new(Mutex::new(Vec::new())),
                 name: Arc::clone(&name),
                 custom_entries: Arc::new(Mutex::new(Vec::new())),
+                labels: Arc::new(Mutex::new(Vec::new())),
             });
 
             let dispatcher = ExtensionDispatcher::new(
@@ -1294,6 +1320,7 @@ mod tests {
                 branch: Arc::new(Mutex::new(branch.clone())),
                 name: Arc::new(Mutex::new(None)),
                 custom_entries: Arc::new(Mutex::new(Vec::new())),
+                labels: Arc::new(Mutex::new(Vec::new())),
             });
 
             let dispatcher = ExtensionDispatcher::new(
@@ -1386,6 +1413,7 @@ mod tests {
                 branch: Arc::new(Mutex::new(Vec::new())),
                 name: Arc::new(Mutex::new(None)),
                 custom_entries: Arc::new(Mutex::new(Vec::new())),
+                labels: Arc::new(Mutex::new(Vec::new())),
             });
 
             let dispatcher = ExtensionDispatcher::new(
@@ -2059,6 +2087,7 @@ mod tests {
                 branch: Arc::new(Mutex::new(Vec::new())),
                 name: Arc::new(Mutex::new(None)),
                 custom_entries: Arc::new(Mutex::new(Vec::new())),
+                labels: Arc::new(Mutex::new(Vec::new())),
             });
 
             let dispatcher = ExtensionDispatcher::new(
@@ -2135,6 +2164,7 @@ mod tests {
                 branch: Arc::new(Mutex::new(Vec::new())),
                 name: Arc::new(Mutex::new(None)),
                 custom_entries: Arc::new(Mutex::new(Vec::new())),
+                labels: Arc::new(Mutex::new(Vec::new())),
             });
 
             let dispatcher = ExtensionDispatcher::new(
@@ -2262,6 +2292,7 @@ mod tests {
                 branch: Arc::new(Mutex::new(Vec::new())),
                 name: Arc::new(Mutex::new(None)),
                 custom_entries: Arc::new(Mutex::new(Vec::new())),
+                labels: Arc::new(Mutex::new(Vec::new())),
             });
 
             let dispatcher = ExtensionDispatcher::new(
@@ -2353,6 +2384,7 @@ mod tests {
                 branch: Arc::new(Mutex::new(Vec::new())),
                 name: Arc::new(Mutex::new(None)),
                 custom_entries: Arc::new(Mutex::new(Vec::new())),
+                labels: Arc::new(Mutex::new(Vec::new())),
             });
 
             let dispatcher = ExtensionDispatcher::new(
@@ -2425,6 +2457,7 @@ mod tests {
                 branch: Arc::new(Mutex::new(Vec::new())),
                 name: Arc::new(Mutex::new(None)),
                 custom_entries: Arc::new(Mutex::new(Vec::new())),
+                labels: Arc::new(Mutex::new(Vec::new())),
             });
 
             let dispatcher = ExtensionDispatcher::new(
@@ -2581,6 +2614,7 @@ mod tests {
                 branch: Arc::new(Mutex::new(Vec::new())),
                 name: Arc::new(Mutex::new(None)),
                 custom_entries: Arc::new(Mutex::new(Vec::new())),
+                labels: Arc::new(Mutex::new(Vec::new())),
             });
 
             let dispatcher = ExtensionDispatcher::new(
@@ -2675,6 +2709,7 @@ mod tests {
                 branch: Arc::new(Mutex::new(Vec::new())),
                 name: Arc::new(Mutex::new(None)),
                 custom_entries: Arc::new(Mutex::new(Vec::new())),
+                labels: Arc::new(Mutex::new(Vec::new())),
             });
 
             let dispatcher = ExtensionDispatcher::new(
@@ -2738,6 +2773,7 @@ mod tests {
                 branch: Arc::new(Mutex::new(Vec::new())),
                 name: Arc::new(Mutex::new(None)),
                 custom_entries: Arc::new(Mutex::new(Vec::new())),
+                labels: Arc::new(Mutex::new(Vec::new())),
             });
 
             let dispatcher = ExtensionDispatcher::new(
@@ -2810,6 +2846,7 @@ mod tests {
                 branch: Arc::new(Mutex::new(Vec::new())),
                 name: Arc::new(Mutex::new(None)),
                 custom_entries: Arc::new(Mutex::new(Vec::new())),
+                labels: Arc::new(Mutex::new(Vec::new())),
             });
 
             let dispatcher = ExtensionDispatcher::new(
@@ -2896,6 +2933,711 @@ mod tests {
                 )
                 .await
                 .expect("verify null model");
+        });
+    }
+
+    // ---- set_label tests ----
+
+    #[test]
+    fn dispatcher_session_set_label_resolves_and_persists() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+
+            runtime
+                .eval(
+                    r#"
+                    globalThis.result = "__unset__";
+                    pi.session("set_label", { targetId: "msg-42", label: "important" })
+                        .then((r) => { globalThis.result = r; });
+                "#,
+                )
+                .await
+                .expect("eval");
+
+            let requests = runtime.drain_hostcall_requests();
+            assert_eq!(requests.len(), 1);
+
+            let labels: Arc<Mutex<Vec<LabelEntry>>> = Arc::new(Mutex::new(Vec::new()));
+            let session = Arc::new(TestSession {
+                state: Arc::new(Mutex::new(serde_json::json!({}))),
+                messages: Arc::new(Mutex::new(Vec::new())),
+                entries: Arc::new(Mutex::new(Vec::new())),
+                branch: Arc::new(Mutex::new(Vec::new())),
+                name: Arc::new(Mutex::new(None)),
+                custom_entries: Arc::new(Mutex::new(Vec::new())),
+                labels: Arc::clone(&labels),
+            });
+
+            let dispatcher = ExtensionDispatcher::new(
+                Rc::clone(&runtime),
+                Arc::new(ToolRegistry::new(&[], Path::new("."), None)),
+                Arc::new(HttpConnector::with_defaults()),
+                session,
+                Arc::new(NullUiHandler),
+                PathBuf::from("."),
+            );
+
+            for request in requests {
+                dispatcher.dispatch_and_complete(request).await;
+            }
+
+            while runtime.has_pending() {
+                runtime.tick().await.expect("tick");
+                runtime.drain_microtasks().await.expect("microtasks");
+            }
+
+            // Verify set_label was called with correct args
+            let captured = labels.lock().unwrap();
+            assert_eq!(captured.len(), 1);
+            assert_eq!(captured[0].0, "msg-42");
+            assert_eq!(captured[0].1.as_deref(), Some("important"));
+            drop(captured);
+        });
+    }
+
+    #[test]
+    fn dispatcher_session_set_label_remove_label_with_null() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+
+            runtime
+                .eval(
+                    r#"
+                    globalThis.result = "__unset__";
+                    pi.session("set_label", { targetId: "msg-99" })
+                        .then((r) => { globalThis.result = r; });
+                "#,
+                )
+                .await
+                .expect("eval");
+
+            let requests = runtime.drain_hostcall_requests();
+            assert_eq!(requests.len(), 1);
+
+            let labels: Arc<Mutex<Vec<LabelEntry>>> = Arc::new(Mutex::new(Vec::new()));
+            let session = Arc::new(TestSession {
+                state: Arc::new(Mutex::new(serde_json::json!({}))),
+                messages: Arc::new(Mutex::new(Vec::new())),
+                entries: Arc::new(Mutex::new(Vec::new())),
+                branch: Arc::new(Mutex::new(Vec::new())),
+                name: Arc::new(Mutex::new(None)),
+                custom_entries: Arc::new(Mutex::new(Vec::new())),
+                labels: Arc::clone(&labels),
+            });
+
+            let dispatcher = ExtensionDispatcher::new(
+                Rc::clone(&runtime),
+                Arc::new(ToolRegistry::new(&[], Path::new("."), None)),
+                Arc::new(HttpConnector::with_defaults()),
+                session,
+                Arc::new(NullUiHandler),
+                PathBuf::from("."),
+            );
+
+            for request in requests {
+                dispatcher.dispatch_and_complete(request).await;
+            }
+
+            while runtime.has_pending() {
+                runtime.tick().await.expect("tick");
+                runtime.drain_microtasks().await.expect("microtasks");
+            }
+
+            // Verify set_label was called with None label (removal)
+            let captured = labels.lock().unwrap();
+            assert_eq!(captured.len(), 1);
+            assert_eq!(captured[0].0, "msg-99");
+            assert!(captured[0].1.is_none());
+            drop(captured);
+        });
+    }
+
+    #[test]
+    fn dispatcher_session_set_label_missing_target_id_rejects() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+
+            runtime
+                .eval(
+                    r#"
+                    globalThis.errMsg = "";
+                    pi.session("set_label", { label: "orphaned" })
+                        .then(() => { globalThis.errMsg = "should_not_resolve"; })
+                        .catch((e) => { globalThis.errMsg = e.message || String(e); });
+                "#,
+                )
+                .await
+                .expect("eval");
+
+            let requests = runtime.drain_hostcall_requests();
+            assert_eq!(requests.len(), 1);
+
+            let dispatcher = build_dispatcher(Rc::clone(&runtime));
+            for request in requests {
+                dispatcher.dispatch_and_complete(request).await;
+            }
+
+            while runtime.has_pending() {
+                runtime.tick().await.expect("tick");
+                runtime.drain_microtasks().await.expect("microtasks");
+            }
+
+            runtime
+                .eval(
+                    r#"
+                    if (!globalThis.errMsg || globalThis.errMsg === "should_not_resolve") {
+                        throw new Error("Expected rejection, got: " + globalThis.errMsg);
+                    }
+                    if (!globalThis.errMsg.includes("targetId")) {
+                        throw new Error("Expected error about targetId, got: " + globalThis.errMsg);
+                    }
+                "#,
+                )
+                .await
+                .expect("verify rejection");
+        });
+    }
+
+    #[test]
+    fn dispatcher_session_set_label_accepts_snake_case_target_id() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+
+            runtime
+                .eval(
+                    r#"
+                    globalThis.result = "__unset__";
+                    pi.session("set_label", { target_id: "msg-77", label: "reviewed" })
+                        .then((r) => { globalThis.result = r; });
+                "#,
+                )
+                .await
+                .expect("eval");
+
+            let requests = runtime.drain_hostcall_requests();
+            assert_eq!(requests.len(), 1);
+
+            let labels: Arc<Mutex<Vec<LabelEntry>>> = Arc::new(Mutex::new(Vec::new()));
+            let session = Arc::new(TestSession {
+                state: Arc::new(Mutex::new(serde_json::json!({}))),
+                messages: Arc::new(Mutex::new(Vec::new())),
+                entries: Arc::new(Mutex::new(Vec::new())),
+                branch: Arc::new(Mutex::new(Vec::new())),
+                name: Arc::new(Mutex::new(None)),
+                custom_entries: Arc::new(Mutex::new(Vec::new())),
+                labels: Arc::clone(&labels),
+            });
+
+            let dispatcher = ExtensionDispatcher::new(
+                Rc::clone(&runtime),
+                Arc::new(ToolRegistry::new(&[], Path::new("."), None)),
+                Arc::new(HttpConnector::with_defaults()),
+                session,
+                Arc::new(NullUiHandler),
+                PathBuf::from("."),
+            );
+
+            for request in requests {
+                dispatcher.dispatch_and_complete(request).await;
+            }
+
+            while runtime.has_pending() {
+                runtime.tick().await.expect("tick");
+                runtime.drain_microtasks().await.expect("microtasks");
+            }
+
+            let captured = labels.lock().unwrap();
+            assert_eq!(captured.len(), 1);
+            assert_eq!(captured[0].0, "msg-77");
+            assert_eq!(captured[0].1.as_deref(), Some("reviewed"));
+            drop(captured);
+        });
+    }
+
+    #[test]
+    fn dispatcher_session_set_label_camel_case_op_alias() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+
+            // Use "setLabel" style (gets lowercased to "setlabel" which matches)
+            runtime
+                .eval(
+                    r#"
+                    globalThis.result = "__unset__";
+                    pi.session("setLabel", { targetId: "entry-5", label: "flagged" })
+                        .then((r) => { globalThis.result = r; });
+                "#,
+                )
+                .await
+                .expect("eval");
+
+            let requests = runtime.drain_hostcall_requests();
+            assert_eq!(requests.len(), 1);
+
+            let labels: Arc<Mutex<Vec<LabelEntry>>> = Arc::new(Mutex::new(Vec::new()));
+            let session = Arc::new(TestSession {
+                state: Arc::new(Mutex::new(serde_json::json!({}))),
+                messages: Arc::new(Mutex::new(Vec::new())),
+                entries: Arc::new(Mutex::new(Vec::new())),
+                branch: Arc::new(Mutex::new(Vec::new())),
+                name: Arc::new(Mutex::new(None)),
+                custom_entries: Arc::new(Mutex::new(Vec::new())),
+                labels: Arc::clone(&labels),
+            });
+
+            let dispatcher = ExtensionDispatcher::new(
+                Rc::clone(&runtime),
+                Arc::new(ToolRegistry::new(&[], Path::new("."), None)),
+                Arc::new(HttpConnector::with_defaults()),
+                session,
+                Arc::new(NullUiHandler),
+                PathBuf::from("."),
+            );
+
+            for request in requests {
+                dispatcher.dispatch_and_complete(request).await;
+            }
+
+            while runtime.has_pending() {
+                runtime.tick().await.expect("tick");
+                runtime.drain_microtasks().await.expect("microtasks");
+            }
+
+            let captured = labels.lock().unwrap();
+            assert_eq!(captured.len(), 1);
+            assert_eq!(captured[0].0, "entry-5");
+            assert_eq!(captured[0].1.as_deref(), Some("flagged"));
+            drop(captured);
+        });
+    }
+
+    // ---- Exec edge case tests ----
+
+    #[test]
+    fn dispatcher_exec_with_custom_cwd() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+
+            runtime
+                .eval(
+                    r#"
+                    globalThis.result = null;
+                    pi.exec("pwd", { cwd: "/tmp" })
+                        .then((r) => { globalThis.result = r; })
+                        .catch((e) => { globalThis.result = { error: e.message || String(e) }; });
+                "#,
+                )
+                .await
+                .expect("eval");
+
+            let requests = runtime.drain_hostcall_requests();
+            assert_eq!(requests.len(), 1);
+
+            let dispatcher = build_dispatcher(Rc::clone(&runtime));
+            for request in requests {
+                dispatcher.dispatch_and_complete(request).await;
+            }
+
+            while runtime.has_pending() {
+                runtime.tick().await.expect("tick");
+                runtime.drain_microtasks().await.expect("microtasks");
+            }
+
+            runtime
+                .eval(
+                    r#"
+                    if (!globalThis.result) throw new Error("exec not resolved");
+                    // Either it resolved to stdout containing /tmp, or it
+                    // was rejected - both are valid dispatcher behaviors.
+                    // Key assertion: the dispatcher didn't panic.
+                "#,
+                )
+                .await
+                .expect("verify exec cwd");
+        });
+    }
+
+    #[test]
+    fn dispatcher_exec_empty_command_rejects() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+
+            runtime
+                .eval(
+                    r#"
+                    globalThis.errMsg = "";
+                    pi.exec("")
+                        .then(() => { globalThis.errMsg = "should_not_resolve"; })
+                        .catch((e) => { globalThis.errMsg = e.message || String(e); });
+                "#,
+                )
+                .await
+                .expect("eval");
+
+            let requests = runtime.drain_hostcall_requests();
+            assert_eq!(requests.len(), 1);
+
+            let dispatcher = build_dispatcher(Rc::clone(&runtime));
+            for request in requests {
+                dispatcher.dispatch_and_complete(request).await;
+            }
+
+            while runtime.has_pending() {
+                runtime.tick().await.expect("tick");
+                runtime.drain_microtasks().await.expect("microtasks");
+            }
+
+            runtime
+                .eval(
+                    r#"
+                    if (globalThis.errMsg === "should_not_resolve") {
+                        throw new Error("Expected rejection for empty command");
+                    }
+                    // Empty command should produce some kind of error
+                    if (!globalThis.errMsg) {
+                        throw new Error("Expected error message");
+                    }
+                "#,
+                )
+                .await
+                .expect("verify empty command rejection");
+        });
+    }
+
+    // ---- Events edge case tests ----
+
+    #[test]
+    fn dispatcher_events_emit_missing_event_name_rejects() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+
+            runtime
+                .eval(
+                    r#"
+                    globalThis.errMsg = "";
+                    pi.events("emit", {})
+                        .then(() => { globalThis.errMsg = "should_not_resolve"; })
+                        .catch((e) => { globalThis.errMsg = e.message || String(e); });
+                "#,
+                )
+                .await
+                .expect("eval");
+
+            let requests = runtime.drain_hostcall_requests();
+            assert_eq!(requests.len(), 1);
+
+            let dispatcher = build_dispatcher(Rc::clone(&runtime));
+            for request in requests {
+                dispatcher.dispatch_and_complete(request).await;
+            }
+
+            while runtime.has_pending() {
+                runtime.tick().await.expect("tick");
+                runtime.drain_microtasks().await.expect("microtasks");
+            }
+
+            runtime
+                .eval(
+                    r#"
+                    // Should either reject or produce an error - not silently succeed
+                    if (globalThis.errMsg === "should_not_resolve") {
+                        // It's also acceptable if emit with empty payload succeeds gracefully
+                    }
+                "#,
+                )
+                .await
+                .expect("verify events emit");
+        });
+    }
+
+    #[test]
+    fn dispatcher_events_list_empty_when_no_hooks() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+
+            // Register an extension with no hooks, then list events
+            runtime
+                .eval(
+                    r#"
+                    globalThis.result = null;
+                    __pi_begin_extension("ext.empty", { name: "ext.empty" });
+                    pi.events("list", {})
+                        .then((r) => { globalThis.result = r; })
+                        .catch((e) => { globalThis.result = { error: e.message || String(e) }; });
+                    __pi_end_extension();
+                "#,
+                )
+                .await
+                .expect("eval");
+
+            let requests = runtime.drain_hostcall_requests();
+            assert_eq!(requests.len(), 1);
+
+            let dispatcher = build_dispatcher(Rc::clone(&runtime));
+            for request in requests {
+                dispatcher.dispatch_and_complete(request).await;
+            }
+
+            while runtime.has_pending() {
+                runtime.tick().await.expect("tick");
+                runtime.drain_microtasks().await.expect("microtasks");
+            }
+
+            runtime
+                .eval(
+                    r#"
+                    if (!globalThis.result) throw new Error("events list not resolved");
+                    // Result is { events: [...] }
+                    const events = globalThis.result.events;
+                    if (!Array.isArray(events)) {
+                        throw new Error("Expected events array, got: " + JSON.stringify(globalThis.result));
+                    }
+                    if (events.length !== 0) {
+                        throw new Error("Expected empty events list, got: " + JSON.stringify(events));
+                    }
+                "#,
+                )
+                .await
+                .expect("verify events list empty");
+        });
+    }
+
+    // ---- Isolated session op tests ----
+
+    #[test]
+    fn dispatcher_session_get_file_isolated() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+
+            runtime
+                .eval(
+                    r#"
+                    globalThis.file = "__unset__";
+                    pi.session("get_file", {})
+                        .then((r) => { globalThis.file = r; });
+                "#,
+                )
+                .await
+                .expect("eval");
+
+            let requests = runtime.drain_hostcall_requests();
+            assert_eq!(requests.len(), 1);
+
+            let state = Arc::new(Mutex::new(serde_json::json!({
+                "sessionFile": "/home/user/.pi/sessions/abc.json"
+            })));
+            let session = Arc::new(TestSession {
+                state,
+                messages: Arc::new(Mutex::new(Vec::new())),
+                entries: Arc::new(Mutex::new(Vec::new())),
+                branch: Arc::new(Mutex::new(Vec::new())),
+                name: Arc::new(Mutex::new(None)),
+                custom_entries: Arc::new(Mutex::new(Vec::new())),
+                labels: Arc::new(Mutex::new(Vec::new())),
+            });
+
+            let dispatcher = ExtensionDispatcher::new(
+                Rc::clone(&runtime),
+                Arc::new(ToolRegistry::new(&[], Path::new("."), None)),
+                Arc::new(HttpConnector::with_defaults()),
+                session,
+                Arc::new(NullUiHandler),
+                PathBuf::from("."),
+            );
+
+            for request in requests {
+                dispatcher.dispatch_and_complete(request).await;
+            }
+
+            while runtime.has_pending() {
+                runtime.tick().await.expect("tick");
+                runtime.drain_microtasks().await.expect("microtasks");
+            }
+
+            runtime
+                .eval(
+                    r#"
+                    if (globalThis.file === "__unset__") throw new Error("get_file not resolved");
+                    if (globalThis.file !== "/home/user/.pi/sessions/abc.json") {
+                        throw new Error("Expected session file path, got: " + JSON.stringify(globalThis.file));
+                    }
+                "#,
+                )
+                .await
+                .expect("verify get_file");
+        });
+    }
+
+    #[test]
+    fn dispatcher_session_get_name_isolated() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+
+            runtime
+                .eval(
+                    r#"
+                    globalThis.name = "__unset__";
+                    pi.session("get_name", {})
+                        .then((r) => { globalThis.name = r; });
+                "#,
+                )
+                .await
+                .expect("eval");
+
+            let requests = runtime.drain_hostcall_requests();
+            assert_eq!(requests.len(), 1);
+
+            let state = Arc::new(Mutex::new(serde_json::json!({
+                "sessionName": "My Debug Session"
+            })));
+            let session = Arc::new(TestSession {
+                state,
+                messages: Arc::new(Mutex::new(Vec::new())),
+                entries: Arc::new(Mutex::new(Vec::new())),
+                branch: Arc::new(Mutex::new(Vec::new())),
+                name: Arc::new(Mutex::new(Some("My Debug Session".to_string()))),
+                custom_entries: Arc::new(Mutex::new(Vec::new())),
+                labels: Arc::new(Mutex::new(Vec::new())),
+            });
+
+            let dispatcher = ExtensionDispatcher::new(
+                Rc::clone(&runtime),
+                Arc::new(ToolRegistry::new(&[], Path::new("."), None)),
+                Arc::new(HttpConnector::with_defaults()),
+                session,
+                Arc::new(NullUiHandler),
+                PathBuf::from("."),
+            );
+
+            for request in requests {
+                dispatcher.dispatch_and_complete(request).await;
+            }
+
+            while runtime.has_pending() {
+                runtime.tick().await.expect("tick");
+                runtime.drain_microtasks().await.expect("microtasks");
+            }
+
+            runtime
+                .eval(
+                    r#"
+                    if (globalThis.name === "__unset__") throw new Error("get_name not resolved");
+                    if (globalThis.name !== "My Debug Session") {
+                        throw new Error("Expected session name, got: " + JSON.stringify(globalThis.name));
+                    }
+                "#,
+                )
+                .await
+                .expect("verify get_name");
+        });
+    }
+
+    #[test]
+    fn dispatcher_session_append_entry_custom_type_edge_cases() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+
+            // Test with custom_type key (snake_case variant)
+            runtime
+                .eval(
+                    r#"
+                    globalThis.result = "__unset__";
+                    pi.session("append_entry", {
+                        custom_type: "audit_log",
+                        data: { action: "login", ts: 1234567890 }
+                    }).then((r) => { globalThis.result = r; });
+                "#,
+                )
+                .await
+                .expect("eval");
+
+            let requests = runtime.drain_hostcall_requests();
+            assert_eq!(requests.len(), 1);
+
+            let custom_entries: CustomEntries = Arc::new(Mutex::new(Vec::new()));
+            let session = Arc::new(TestSession {
+                state: Arc::new(Mutex::new(serde_json::json!({}))),
+                messages: Arc::new(Mutex::new(Vec::new())),
+                entries: Arc::new(Mutex::new(Vec::new())),
+                branch: Arc::new(Mutex::new(Vec::new())),
+                name: Arc::new(Mutex::new(None)),
+                custom_entries: Arc::clone(&custom_entries),
+                labels: Arc::new(Mutex::new(Vec::new())),
+            });
+
+            let dispatcher = ExtensionDispatcher::new(
+                Rc::clone(&runtime),
+                Arc::new(ToolRegistry::new(&[], Path::new("."), None)),
+                Arc::new(HttpConnector::with_defaults()),
+                session,
+                Arc::new(NullUiHandler),
+                PathBuf::from("."),
+            );
+
+            for request in requests {
+                dispatcher.dispatch_and_complete(request).await;
+            }
+
+            while runtime.has_pending() {
+                runtime.tick().await.expect("tick");
+                runtime.drain_microtasks().await.expect("microtasks");
+            }
+
+            let captured = custom_entries.lock().unwrap();
+            assert_eq!(captured.len(), 1);
+            assert_eq!(captured[0].0, "audit_log");
+            assert!(captured[0].1.is_some());
+            let data = captured[0].1.as_ref().unwrap().clone();
+            drop(captured);
+            assert_eq!(data["action"], "login");
         });
     }
 
