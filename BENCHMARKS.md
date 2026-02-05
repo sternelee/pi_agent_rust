@@ -43,9 +43,10 @@ These are the target performance metrics. Regressions beyond these thresholds sh
 | ext_policy/evaluate | <1μs | ~20ns | ✅ |
 | ext_dispatch/decision | <10μs | ~100ns | ✅ |
 | ext_protocol/parse | <100μs | ~5μs | ✅ |
-| ext_js_runtime/cold_start | <200ms | ~315μs | ✅ |
-| ext_js_runtime/warm_eval_noop | <25ms | ~3.48μs | ✅ |
-| ext_js_runtime/tool_call_roundtrip | <500μs | TBD | ⬜ |
+| ext_js_runtime/cold_start | <200ms | ~308μs | ✅ |
+| ext_js_runtime/warm_eval_noop | <25ms | ~3.50μs | ✅ |
+| ext_js_runtime/warm_run_pending_jobs_empty | <1μs | ~84ns | ✅ |
+| ext_js_runtime/tool_call_roundtrip | <500μs | ~43.9μs | ✅ |
 
 ### Extension Runtime (Planned)
 
@@ -270,16 +271,16 @@ Summary (times in ms):
 
 | Scenario | Mean ± σ | Min / Max | per_call_us | calls/sec |
 |----------|----------|-----------|-------------|-----------|
-| pijs_workload_200x1 | 15.57 ± 0.69 | 14.44 / 16.32 | 42 | 23,312 |
-| pijs_workload_200x10 | 87.38 ± 2.93 | 84.05 / 93.07 | 42 | 23,302 |
+| pijs_workload_200x1 | 19.83 ± 1.74 | 17.89 / 24.13 | 51 | 19,535 |
+| pijs_workload_200x10 | 110.72 ± 1.56 | 108.41 / 112.81 | 50 | 19,828 |
 
 JSONL logs (hyperfine + workload):
 
 ```jsonl
-{"tool":"hyperfine","scenario":"pijs_workload_200x1","command":"target/release/pijs_workload --iterations 200 --tool-calls 1","mean_ms":15.57,"stddev_ms":0.69,"min_ms":14.44,"max_ms":16.32}
-{"tool":"hyperfine","scenario":"pijs_workload_200x10","command":"target/release/pijs_workload --iterations 200 --tool-calls 10","mean_ms":87.38,"stddev_ms":2.93,"min_ms":84.05,"max_ms":93.07}
-{"tool":"pijs_workload","scenario":"tool_call_roundtrip","iterations":200,"tool_calls_per_iteration":1,"total_calls":200,"elapsed_ms":8,"per_call_us":42,"calls_per_sec":23312}
-{"tool":"pijs_workload","scenario":"tool_call_roundtrip","iterations":200,"tool_calls_per_iteration":10,"total_calls":2000,"elapsed_ms":85,"per_call_us":42,"calls_per_sec":23302}
+{"tool":"hyperfine","scenario":"pijs_workload_200x1","command":"target/release/pijs_workload --iterations 200 --tool-calls 1","mean_ms":19.83,"stddev_ms":1.74,"min_ms":17.89,"max_ms":24.13}
+{"tool":"hyperfine","scenario":"pijs_workload_200x10","command":"target/release/pijs_workload --iterations 200 --tool-calls 10","mean_ms":110.72,"stddev_ms":1.56,"min_ms":108.41,"max_ms":112.81}
+{"tool":"pijs_workload","scenario":"tool_call_roundtrip","iterations":200,"tool_calls_per_iteration":1,"total_calls":200,"elapsed_ms":10,"per_call_us":51,"calls_per_sec":19535}
+{"tool":"pijs_workload","scenario":"tool_call_roundtrip","iterations":200,"tool_calls_per_iteration":10,"total_calls":2000,"elapsed_ms":100,"per_call_us":50,"calls_per_sec":19828}
 ```
 
 Raw artifacts (local):
@@ -291,7 +292,16 @@ Raw artifacts (local):
 
 - CPU hotspots: `cargo flamegraph --bench extensions` (requires `cargo install flamegraph`).
 - Allocations: `heaptrack cargo bench --bench extensions` (Linux).
-- Note (2026-02-05): `cargo flamegraph --bench extensions -- ext_js_runtime` failed on this host due to `perf_event_paranoid=4` (no perf access). Retry on a machine with perf permissions or CAP_PERFMON.
+- Flamegraph run (2026-02-05): `cargo flamegraph --bench extensions -- ext_js_runtime --noplot` compiled benches successfully, then failed during sampling because `perf_event_paranoid=4` on this host (no perf access). Retry on a host with `CAP_PERFMON` (or lower `perf_event_paranoid`) and keep the resulting SVG as the flamegraph artifact.
+
+Hotspot snapshot from Criterion `new/estimates.json` (mean point estimate):
+
+| Benchmark | Mean (ns) | Mean (μs) | Relative cost vs `warm_eval_noop` |
+|-----------|-----------|-----------|------------------------------------|
+| `ext_js_runtime/cold_start` | 307,950.60 | 307.95 | 88.0× |
+| `ext_js_runtime/tool_call_roundtrip` | 43,915.12 | 43.92 | 12.6× |
+| `ext_js_runtime/warm_eval_noop` | 3,498.12 | 3.50 | 1.0× |
+| `ext_js_runtime/warm_run_pending_jobs_empty` | 84.45 | 0.08 | 0.02× |
 
 #### 3) Prove (No “silent regressions”)
 
@@ -299,11 +309,13 @@ Raw artifacts (local):
 - Store benchmark artifacts in `target/criterion/` (Criterion JSON + reports).
 - Use `--save-baseline` / `--baseline` comparisons for regression detection.
 
-#### 4) Opportunity Matrix (Template)
+#### 4) Opportunity Matrix (Prioritized)
 
 | Opportunity | Evidence | Expected impact | Confidence | Effort | Score | Notes |
 |-------------|----------|-----------------|------------|--------|-------|-------|
-| (fill) | (bench/flamegraph link) | (ms/μs) | 1–5 | 1–5 | impact×confidence/effort | (guardrails) |
+| Cache compiled extension setup program across repeated loads | `ext_js_runtime/cold_start` = 307.95μs dominates runtime hotspot table | -150μs to -220μs cold-start cost on repeated extension loads | 4 | 3 | 5.33 | Keep module hash keyed by source+runtime config; preserve deterministic teardown semantics |
+| Reduce JSON bridge overhead in hostcall tool path | `ext_js_runtime/tool_call_roundtrip` = 43.92μs and `pijs_workload` steady-state per-call = 43–46μs | -8μs to -15μs per roundtrip | 3 | 2 | 4.50 | Target serialization/path allocation churn first; validate with criterion baseline diff |
+| Keep `run_pending_jobs` empty fast path as invariant | `ext_js_runtime/warm_run_pending_jobs_empty` = 84.45ns | Avoid regressions in scheduler idle overhead | 5 | 1 | 5.00 | No optimization work needed; treat as guardrail metric in future PRs |
 
 ### CPU Profiling with perf
 
