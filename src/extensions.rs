@@ -7,7 +7,7 @@ use crate::agent::AgentEvent;
 use crate::connectors::Connector;
 use crate::connectors::http::HttpConnector;
 use crate::error::{Error, Result};
-use crate::extension_events::ToolCallEventResult;
+use crate::extension_events::{ToolCallEventResult, ToolResultEventResult};
 use crate::extensions_js::{
     ExtensionToolDef, HostcallKind, HostcallRequest, PiJsRuntime, PiJsRuntimeConfig, js_to_json,
     json_to_js,
@@ -5437,6 +5437,92 @@ impl ExtensionManager {
             "toolName": tool_call.name.clone(),
             "toolCallId": tool_call.id.clone(),
             "input": tool_call.arguments.clone()
+        });
+
+        let response = runtime
+            .dispatch_event(event_name, event_payload, Value::Object(ctx), timeout_ms)
+            .await?;
+
+        if response.is_null() {
+            Ok(None)
+        } else {
+            Ok(Some(
+                serde_json::from_value(response)
+                    .map_err(|err| Error::extension(err.to_string()))?,
+            ))
+        }
+    }
+
+    /// Dispatch a `tool_result` event to registered extensions and return the
+    /// last handler response (if any).
+    pub async fn dispatch_tool_result(
+        &self,
+        tool_call: &crate::model::ToolCall,
+        output: &crate::tools::ToolOutput,
+        is_error: bool,
+        timeout_ms: u64,
+    ) -> Result<Option<ToolResultEventResult>> {
+        let event_name = "tool_result".to_string();
+        let Some(runtime) = self.js_runtime() else {
+            return Ok(None);
+        };
+
+        let (has_ui, session, cwd_override, model_registry_values, has_hook) = {
+            let guard = self.inner.lock().unwrap();
+            let has_hook = guard
+                .extensions
+                .iter()
+                .any(|ext| ext.event_hooks.iter().any(|hook| hook == &event_name));
+            (
+                guard.ui_sender.is_some(),
+                guard.session.clone(),
+                guard.cwd.clone(),
+                guard.model_registry_values.clone(),
+                has_hook,
+            )
+        };
+
+        if !has_hook {
+            return Ok(None);
+        }
+
+        let mut ctx = serde_json::Map::new();
+        ctx.insert("hasUI".to_string(), Value::Bool(has_ui));
+        if let Some(cwd) = cwd_override.or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.display().to_string())
+        }) {
+            ctx.insert("cwd".to_string(), Value::String(cwd));
+        }
+
+        if !model_registry_values.is_empty() {
+            let mut map = serde_json::Map::new();
+            for (key, value) in model_registry_values {
+                map.insert(key, Value::String(value));
+            }
+            ctx.insert("modelRegistry".to_string(), Value::Object(map));
+        }
+
+        if let Some(session) = session {
+            let state = session.get_state().await;
+            let entries = session.get_entries().await;
+            let branch = session.get_branch().await;
+            let leaf_entry = entries.last().cloned().unwrap_or(Value::Null);
+            ctx.insert("sessionState".to_string(), state);
+            ctx.insert("sessionEntries".to_string(), Value::Array(entries));
+            ctx.insert("sessionBranch".to_string(), Value::Array(branch));
+            ctx.insert("sessionLeafEntry".to_string(), leaf_entry);
+        }
+
+        let event_payload = json!({
+            "type": "tool_result",
+            "toolName": tool_call.name.clone(),
+            "toolCallId": tool_call.id.clone(),
+            "input": tool_call.arguments.clone(),
+            "content": output.content.clone(),
+            "details": output.details.clone(),
+            "isError": is_error
         });
 
         let response = runtime
