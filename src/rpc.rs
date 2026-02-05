@@ -2480,20 +2480,28 @@ async fn apply_thinking_level(
     guard: &mut AgentSession,
     level: crate::model::ThinkingLevel,
 ) -> Result<()> {
-    guard.session.header.thinking_level = Some(level.to_string());
-    guard
-        .session
-        .append_thinking_level_change(level.to_string());
+    let cx = Cx::for_request();
+    {
+        let mut inner_session = guard.session.lock(&cx).await.map_err(|err| {
+            Error::session(format!("inner session lock failed: {err}"))
+        })?;
+        inner_session.header.thinking_level = Some(level.to_string());
+        inner_session.append_thinking_level_change(level.to_string());
+    }
     guard.agent.stream_options_mut().thinking_level = Some(level);
     guard.persist_session().await
 }
 
 async fn apply_model_change(guard: &mut AgentSession, entry: &ModelEntry) -> Result<()> {
-    guard.session.header.provider = Some(entry.model.provider.clone());
-    guard.session.header.model_id = Some(entry.model.id.clone());
-    guard
-        .session
-        .append_model_change(entry.model.provider.clone(), entry.model.id.clone());
+    let cx = Cx::for_request();
+    {
+        let mut inner_session = guard.session.lock(&cx).await.map_err(|err| {
+            Error::session(format!("inner session lock failed: {err}"))
+        })?;
+        inner_session.header.provider = Some(entry.model.provider.clone());
+        inner_session.header.model_id = Some(entry.model.id.clone());
+        inner_session.append_model_change(entry.model.provider.clone(), entry.model.id.clone());
+    }
     guard.persist_session().await
 }
 
