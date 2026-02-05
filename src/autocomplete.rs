@@ -1029,4 +1029,33 @@ mod tests {
         let resp = provider.suggest("foo /he bar", "foo /he".len());
         assert_eq!(resp.replace, 4..7);
     }
+
+    #[test]
+    fn slash_suggests_extension_commands() {
+        let catalog = AutocompleteCatalog {
+            prompt_templates: Vec::new(),
+            skills: Vec::new(),
+            extension_commands: vec![NamedEntry {
+                name: "deploy".to_string(),
+                description: Some("Deploy to production".to_string()),
+            }],
+            enable_skill_commands: false,
+        };
+        let mut provider = AutocompleteProvider::new(PathBuf::from("."), catalog);
+        let resp = provider.suggest("/dep", 4);
+        assert!(resp.items.iter().any(|item| item.insert == "/deploy"
+            && item.kind == AutocompleteItemKind::ExtensionCommand
+            && item.description == Some("Deploy to production".to_string())));
+
+        // Verify extension commands don't appear with empty catalog
+        let empty_catalog = AutocompleteCatalog::default();
+        provider.set_catalog(empty_catalog);
+        let resp = provider.suggest("/dep", 4);
+        assert!(
+            !resp
+                .items
+                .iter()
+                .any(|item| item.kind == AutocompleteItemKind::ExtensionCommand)
+        );
+    }
 }

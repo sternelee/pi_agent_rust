@@ -13,8 +13,8 @@
 
 mod common;
 
-use asupersync::runtime::RuntimeBuilder;
 use common::TestHarness;
+use futures::StreamExt;
 use pi::http::client::Client;
 use pi::model::{Message, StopReason, StreamEvent, ThinkingLevel, UserContent, UserMessage};
 use pi::provider::{CacheRetention, Context, Provider, StreamOptions, ThinkingBudgets, ToolDef};
@@ -23,7 +23,6 @@ use pi::vcr::{VcrMode, VcrRecorder};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
-use std::future::Future;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -50,25 +49,13 @@ fn user_text(text: &str) -> Message {
     })
 }
 
-fn run_test_value<F, Fut, T>(f: F) -> T
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = T>,
-{
-    asupersync::test_utils::init_test_logging();
-    let runtime = RuntimeBuilder::current_thread()
-        .build()
-        .expect("failed to build test runtime");
-    runtime.block_on(f())
-}
-
 // ─── Event ordering validation ───────────────────────────────────────────────
 
 /// Verify that the event sequence follows expected ordering invariants:
 /// - `Start` must appear first (if any events at all)
 /// - `Done` or `Error` must appear last (if present)
 /// - Content events appear between start and done
-/// - Text deltas appear between TextStart and TextEnd
+/// - Text deltas appear between `TextStart` and `TextEnd`
 fn validate_event_ordering(events: &[StreamEvent], harness: &TestHarness, scenario: &str) {
     if events.is_empty() {
         return;
@@ -85,8 +72,7 @@ fn validate_event_ordering(events: &[StreamEvent], harness: &TestHarness, scenar
 
     // Last event should be Done or Error (if stream completed normally)
     let last = &events[events.len() - 1];
-    let last_is_terminal =
-        matches!(last, StreamEvent::Done { .. } | StreamEvent::Error { .. });
+    let last_is_terminal = matches!(last, StreamEvent::Done { .. } | StreamEvent::Error { .. });
     if last_is_terminal {
         harness.assert_log(&format!("{scenario}: terminal event present"));
     }
@@ -100,10 +86,7 @@ fn validate_event_ordering(events: &[StreamEvent], harness: &TestHarness, scenar
     for (idx, event) in events.iter().enumerate() {
         match event {
             StreamEvent::Start { .. } => {
-                assert!(
-                    !has_started,
-                    "{scenario}: duplicate Start at index {idx}"
-                );
+                assert!(!has_started, "{scenario}: duplicate Start at index {idx}");
                 has_started = true;
             }
             StreamEvent::TextStart { .. } => {
@@ -184,6 +167,7 @@ struct E2eScenario {
     expect_stop_reasons: Vec<StopReason>,
 }
 
+#[allow(clippy::too_many_lines)]
 fn all_anthropic_scenarios() -> Vec<E2eScenario> {
     vec![
         // ── Happy path ──────────────────────────────────────────────
@@ -453,6 +437,7 @@ fn multiply_tool() -> ToolDef {
 
 // ─── Core runner ─────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_lines)]
 async fn run_e2e_scenario(
     scenario: &E2eScenario,
     harness: &TestHarness,
@@ -460,10 +445,7 @@ async fn run_e2e_scenario(
 ) -> serde_json::Value {
     let cassette_dir = cassette_root();
     let cassette_path = cassette_dir.join(format!("{}.json", scenario.cassette_name));
-    harness.record_artifact(
-        format!("{}.json", scenario.cassette_name),
-        &cassette_path,
-    );
+    harness.record_artifact(format!("{}.json", scenario.cassette_name), &cassette_path);
 
     if !cassette_path.exists() {
         harness.log().warn(
@@ -478,8 +460,7 @@ async fn run_e2e_scenario(
     }
 
     let start = Instant::now();
-    let recorder =
-        VcrRecorder::new_with(scenario.cassette_name, VcrMode::Playback, &cassette_dir);
+    let recorder = VcrRecorder::new_with(scenario.cassette_name, VcrMode::Playback, &cassette_dir);
     let client = Client::new().with_vcr(recorder);
     let provider = AnthropicProvider::new(model).with_client(client);
 
@@ -495,7 +476,11 @@ async fn run_e2e_scenario(
     let thinking_enabled = scenario
         .thinking_level
         .is_some_and(|level| level != ThinkingLevel::Off);
-    let temperature = if thinking_enabled { Some(1.0) } else { Some(0.0) };
+    let temperature = if thinking_enabled {
+        Some(1.0)
+    } else {
+        Some(0.0)
+    };
     let thinking_budgets = thinking_enabled.then_some(ThinkingBudgets {
         minimal: 1024,
         low: 1024,
@@ -503,7 +488,7 @@ async fn run_e2e_scenario(
         high: 1024,
         xhigh: 1024,
     });
-    let max_tokens = if let Some(ref budgets) = thinking_budgets {
+    let max_tokens = thinking_budgets.as_ref().map_or(scenario.max_tokens, |budgets| {
         let budget = match scenario.thinking_level.unwrap_or(ThinkingLevel::Off) {
             ThinkingLevel::Off => 0,
             ThinkingLevel::Minimal => budgets.minimal,
@@ -513,9 +498,7 @@ async fn run_e2e_scenario(
             ThinkingLevel::XHigh => budgets.xhigh,
         };
         scenario.max_tokens.max(budget.saturating_add(256))
-    } else {
-        scenario.max_tokens
-    };
+    });
 
     let options = StreamOptions {
         api_key: Some("vcr-playback".to_string()),
@@ -723,12 +706,14 @@ fn e2e_anthropic_streaming_all_scenarios() {
     let model = std::env::var("ANTHROPIC_TEST_MODEL")
         .unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
 
-    harness.log().info_ctx("e2e", "Starting E2E provider streaming suite", |ctx| {
-        ctx.push(("provider".into(), "anthropic".to_string()));
-        ctx.push(("model".into(), model.clone()));
-        ctx.push(("vcr_mode".into(), "playback".to_string()));
-        ctx.push(("cassette_dir".into(), cassette_root().display().to_string()));
-    });
+    harness
+        .log()
+        .info_ctx("e2e", "Starting E2E provider streaming suite", |ctx| {
+            ctx.push(("provider".into(), "anthropic".to_string()));
+            ctx.push(("model".into(), model.clone()));
+            ctx.push(("vcr_mode".into(), "playback".to_string()));
+            ctx.push(("cassette_dir".into(), cassette_root().display().to_string()));
+        });
 
     let scenarios = all_anthropic_scenarios();
 
@@ -793,7 +778,8 @@ fn e2e_anthropic_streaming_all_scenarios() {
             });
 
             assert_eq!(
-                failed, 0,
+                failed,
+                0,
                 "E2E streaming suite: {failed} scenarios failed out of {}",
                 scenarios_ref.len()
             );
@@ -843,12 +829,17 @@ fn e2e_anthropic_streaming_determinism() {
                 .map(String::from);
 
             if let (Some(h1), Some(h2)) = (&hash1, &hash2) {
-                harness_ref.log().info_ctx("determinism", "Hash comparison", |ctx| {
-                    ctx.push(("run1".into(), h1.clone()));
-                    ctx.push(("run2".into(), h2.clone()));
-                    ctx.push(("match".into(), (h1 == h2).to_string()));
-                });
-                assert_eq!(h1, h2, "Content hashes differ between runs (non-deterministic)");
+                harness_ref
+                    .log()
+                    .info_ctx("determinism", "Hash comparison", |ctx| {
+                        ctx.push(("run1".into(), h1.clone()));
+                        ctx.push(("run2".into(), h2.clone()));
+                        ctx.push(("match".into(), (h1 == h2).to_string()));
+                    });
+                assert_eq!(
+                    h1, h2,
+                    "Content hashes differ between runs (non-deterministic)"
+                );
             }
         }
     });
@@ -875,10 +866,9 @@ fn e2e_anthropic_error_scenarios_comprehensive() {
 
         let cassette_path = cassette_root().join(format!("{cassette}.json"));
         if !cassette_path.exists() {
-            harness.log().warn(
-                "vcr",
-                format!("Missing cassette {cassette}; skipping"),
-            );
+            harness
+                .log()
+                .warn("vcr", format!("Missing cassette {cassette}; skipping"));
             continue;
         }
 
@@ -888,11 +878,8 @@ fn e2e_anthropic_error_scenarios_comprehensive() {
             let expected = *expected_status;
             async move {
                 let cassette_dir = cassette_root();
-                let recorder = VcrRecorder::new_with(
-                    cassette_name,
-                    VcrMode::Playback,
-                    &cassette_dir,
-                );
+                let recorder =
+                    VcrRecorder::new_with(cassette_name, VcrMode::Playback, &cassette_dir);
                 let client = Client::new().with_vcr(recorder);
                 let provider = AnthropicProvider::new(&model).with_client(client);
 

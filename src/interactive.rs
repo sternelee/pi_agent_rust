@@ -5575,7 +5575,7 @@ impl PiApp {
         }
     }
 
-    fn dispatch_extension_command(&mut self, command: &str, args: Vec<String>) -> Option<Cmd> {
+    fn dispatch_extension_command(&mut self, command: &str, args: &[String]) -> Option<Cmd> {
         let Some(manager) = &self.extensions else {
             self.status_message = Some("Extensions are disabled".to_string());
             return None;
@@ -6095,7 +6095,7 @@ impl PiApp {
         if let Some((command, args)) = parse_extension_command(message) {
             if let Some(manager) = &self.extensions {
                 if manager.has_command(&command) {
-                    return self.dispatch_extension_command(&command, args);
+                    return self.dispatch_extension_command(&command, &args);
                 }
             }
         }

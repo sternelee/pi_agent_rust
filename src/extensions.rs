@@ -5120,7 +5120,7 @@ async fn dispatch_hostcall_allowed(
             dispatch_hostcall_ui(&call_id, &host.manager, &op, payload).await
         }
         (HostcallKind::Events { op }, payload) => {
-            dispatch_hostcall_events(&call_id, &host.manager, &op, payload).await
+            dispatch_hostcall_events(&call_id, &host.manager, &host.tools, &op, payload).await
         }
     }
 }
@@ -5486,11 +5486,42 @@ async fn dispatch_hostcall_ui(
 async fn dispatch_hostcall_events(
     _call_id: &str,
     manager: &ExtensionManager,
+    tools: &ToolRegistry,
     op: &str,
     payload: Value,
 ) -> HostcallOutcome {
     let op_norm = op.trim().to_ascii_lowercase();
     match op_norm.as_str() {
+        "getactivetools" | "get_active_tools" => {
+            let active = manager
+                .active_tools()
+                .unwrap_or_else(|| tools.tools().iter().map(|t| t.name().to_string()).collect());
+            HostcallOutcome::Success(json!({ "tools": active }))
+        }
+        "getalltools" | "get_all_tools" => {
+            let mut result: Vec<Value> = tools
+                .tools()
+                .iter()
+                .map(|t| {
+                    json!({
+                        "name": t.name(),
+                        "description": t.description(),
+                    })
+                })
+                .collect();
+            for def in manager.extension_tool_defs() {
+                let name = def.get("name").and_then(Value::as_str).unwrap_or_default();
+                let description = def
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                result.push(json!({
+                    "name": name,
+                    "description": description,
+                }));
+            }
+            HostcallOutcome::Success(json!({ "tools": result }))
+        }
         "setactivetools" | "set_active_tools" => {
             let tools = payload
                 .get("tools")
@@ -5984,6 +6015,16 @@ impl ExtensionManager {
     pub fn set_active_tools(&self, tools: Vec<String>) {
         let mut guard = self.inner.lock().unwrap();
         guard.active_tools = Some(tools);
+    }
+
+    /// Collect tool definitions from all registered extensions.
+    pub fn extension_tool_defs(&self) -> Vec<Value> {
+        let guard = self.inner.lock().unwrap();
+        guard
+            .extensions
+            .iter()
+            .flat_map(|ext| ext.tools.iter().cloned())
+            .collect()
     }
 
     pub fn register(&self, payload: RegisterPayload) {
