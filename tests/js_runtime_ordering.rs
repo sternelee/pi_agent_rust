@@ -388,7 +388,7 @@ fn late_completion_after_timeout_is_ignored() {
 fn hostcall_completions_processed_before_timers() {
     let harness = TestHarness::new("hostcall_completions_before_timers");
     futures::executor::block_on(async {
-        let (runtime, clock) = make_runtime().await;
+        let (runtime, _clock) = make_runtime().await;
 
         runtime.eval(r"globalThis.order = [];").await.expect("init");
 

@@ -35,6 +35,49 @@ Warnings unless explicitly approved.
 
 ---
 
+## 1A. Unmodified Compatibility (Normative)
+
+The expanded extension corpus work (`bd-po15`) is explicitly about proving that **real-world**
+extensions run **unmodified**. If an extension needs “special handling”, that is a gap in Pi’s
+runtime/shims/harness — not a reason to patch the extension.
+
+### Definition: “unmodified”
+
+An extension is **unmodified-compatible** if it can be executed from its pinned provenance with:
+- deterministic TS→JS compilation (if the source is TS),
+- deterministic bundling (if multi-file),
+- deterministic import/specifier rewrites (e.g. Node builtins → `pi:node/*`),
+- Pi-provided shims/connectors that are **generic** (apply to classes of extensions, not one-off),
+
+…and **without** manual edits to the extension’s logic.
+
+### Allowed transformations (build-time)
+
+Allowed (and should be logged/audited):
+- transpilation (TypeScript → JavaScript)
+- bundling (directory → single artifact) with deterministic module resolution
+- canonical rewrites (specifier mapping, path canonicalization)
+- injecting generic compatibility helpers (e.g. `pi:node/*` shims), provided the mapping is
+  deterministic and the helpers are versioned
+
+Not allowed:
+- per-extension patches (editing source to “make it work”)
+- post-bundle “sed fixes” or other opaque transformations
+- runtime branching on extension identity (`if extension_id == "foo" { … }`)
+
+### What happens when an “unmodified” extension fails?
+
+- If the extension is using a legacy Pi API surface: implement the protocol mapping/shims.
+- If it uses Node builtins: extend the generic `pi:node/*` shim set (or mark Blocked with a precise
+  compatibility-scanner finding).
+- If it requires network/auth: add deterministic harness support (VCR/offline error-path scenarios).
+- Only exclude the extension if it violates a gate (license/redistribution, unpinnable provenance,
+  or genuinely unsafe/unsupported primitives).
+
+See `docs/EXTENSION_POPULARITY_CRITERIA.md` for the selection rubric that assumes this contract.
+
+---
+
 ## 2. Legacy API → Protocol Mapping
 
 ### Registration

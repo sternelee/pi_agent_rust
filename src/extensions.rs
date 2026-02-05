@@ -4430,9 +4430,22 @@ fn parse_extension_tool_defs(tools: &[Value]) -> Vec<ExtensionToolDef> {
 #[derive(Clone)]
 struct JsRuntimeHost {
     tools: Arc<ToolRegistry>,
-    manager: ExtensionManager,
+    /// Weak reference to avoid Arc cycle with the runtime thread.
+    /// The thread holds a `JsRuntimeHost` which would otherwise prevent
+    /// `ExtensionManager` from being dropped (and the channel from closing).
+    manager_ref: Weak<Mutex<ExtensionManagerInner>>,
     http: Arc<HttpConnector>,
     policy: ExtensionPolicy,
+}
+
+impl JsRuntimeHost {
+    /// Upgrade the weak manager reference.  Returns `None` if the
+    /// `ExtensionManager` has already been dropped (shutdown in progress).
+    fn manager(&self) -> Option<ExtensionManager> {
+        self.manager_ref
+            .upgrade()
+            .map(|inner| ExtensionManager { inner })
+    }
 }
 
 #[derive(Debug)]
@@ -4499,11 +4512,31 @@ enum JsRuntimeCommand {
         value: Value,
         reply: oneshot::Sender<Result<()>>,
     },
+    /// Request the runtime thread to shut down gracefully.
+    Shutdown,
 }
 
-#[derive(Clone)]
+/// Handle to the JS extension runtime thread.
+///
+/// Cloning shares the same underlying runtime. Call [`shutdown`](Self::shutdown)
+/// to request a graceful exit; the runtime thread will finish the current
+/// command, break out of the event loop, and signal completion via
+/// `exit_signal`.
 pub struct JsExtensionRuntimeHandle {
     sender: mpsc::Sender<JsRuntimeCommand>,
+    /// Receives `()` when the runtime thread exits its event loop.
+    /// Wrapped in `Arc<Mutex<Option<_>>>` so only the first `shutdown()`
+    /// caller actually awaits the signal.
+    exit_signal: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+}
+
+impl Clone for JsExtensionRuntimeHandle {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            exit_signal: Arc::clone(&self.exit_signal),
+        }
+    }
 }
 
 impl JsExtensionRuntimeHandle {
@@ -4515,9 +4548,10 @@ impl JsExtensionRuntimeHandle {
     ) -> Result<Self> {
         let (tx, rx) = mpsc::channel(32);
         let (init_tx, init_rx) = oneshot::channel();
+        let (exit_tx, exit_rx) = oneshot::channel();
         let host = JsRuntimeHost {
             tools,
-            manager,
+            manager_ref: Arc::downgrade(&manager.inner),
             http: Arc::new(HttpConnector::with_defaults()),
             policy: ExtensionPolicy::default(),
         };
@@ -4543,6 +4577,7 @@ impl JsExtensionRuntimeHandle {
 
                 while let Ok(cmd) = rx.recv(&cx).await {
                     match cmd {
+                        JsRuntimeCommand::Shutdown => break,
                         JsRuntimeCommand::LoadExtensions { specs, reply } => {
                             let result = load_all_extensions(&js_runtime, &host, &specs).await;
                             let _ = reply.send(&cx, result);
