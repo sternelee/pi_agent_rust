@@ -1284,7 +1284,7 @@ fn canonicalize_for_create(path: &Path) -> std::result::Result<PathBuf, HostCall
         base = base
             .parent()
             .ok_or_else(|| HostCallError {
-                code: HostCallErrorCode::InvalidRequest,
+                code: HostCallErrorCode::Denied,
                 message: "Path escapes filesystem root".to_string(),
                 details: Some(json!({
                     "path": path.display().to_string(),
