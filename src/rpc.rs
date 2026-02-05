@@ -682,8 +682,13 @@ pub async fn run(
                         .lock(&cx)
                         .await
                         .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
-                    let provider_impl =
-                        providers::create_provider(&entry, guard.extensions.as_ref().map(|r| r.manager()))?;
+                    let provider_impl = providers::create_provider(
+                        &entry,
+                        guard
+                            .extensions
+                            .as_ref()
+                            .map(crate::extensions::ExtensionRegion::manager),
+                    )?;
                     guard.agent.set_provider(provider_impl);
                     let _ = guard.agent.stream_options_mut().api_key.replace(key);
                     guard
@@ -2655,7 +2660,13 @@ async fn cycle_model_for_rpc(
     let next_index = current_index.map_or(0, |idx| (idx + 1) % candidates.len());
 
     let next_entry = candidates[next_index].clone();
-    let provider_impl = crate::providers::create_provider(&next_entry, guard.extensions.as_ref().map(|r| r.manager()))?;
+    let provider_impl = crate::providers::create_provider(
+        &next_entry,
+        guard
+            .extensions
+            .as_ref()
+            .map(crate::extensions::ExtensionRegion::manager),
+    )?;
     guard.agent.set_provider(provider_impl);
 
     let key = resolve_model_key(&options.auth, &next_entry).ok_or_else(|| {

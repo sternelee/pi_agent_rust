@@ -310,8 +310,8 @@ async fn run(mut cli: cli::Cli, runtime_handle: RuntimeHandle) -> Result<()> {
             .map_err(anyhow::Error::new)?;
 
         // Merge extension-registered providers into the model registry.
-        if let Some(manager) = &agent_session.extensions {
-            let ext_entries = manager.extension_model_entries();
+        if let Some(region) = &agent_session.extensions {
+            let ext_entries = region.manager().extension_model_entries();
             if !ext_entries.is_empty() {
                 model_registry.merge_entries(ext_entries);
             }
@@ -881,7 +881,7 @@ async fn run_print_mode(
     }
 
     let mut last_message: Option<AssistantMessage> = None;
-    let extensions = session.extensions.clone();
+    let extensions = session.extensions.as_ref().map(|r| r.manager().clone());
     let emit_json_events = mode == "json";
     let runtime_for_events = runtime_handle.clone();
     let make_event_handler = move || {
@@ -1006,9 +1006,12 @@ async fn run_interactive_mode(
     let AgentSession {
         agent,
         session,
-        extensions,
+        extensions: region,
         ..
     } = session;
+    // Extract manager for the interactive loop; the region stays alive to
+    // handle shutdown when this scope exits.
+    let extensions = region.as_ref().map(|r| r.manager().clone());
     pi::interactive::run_interactive(
         agent,
         session,

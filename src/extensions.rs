@@ -15,12 +15,12 @@ use crate::extensions_js::{
 use crate::scheduler::HostcallOutcome;
 use crate::session::SessionMessage;
 use crate::tools::ToolRegistry;
-use asupersync::{Budget, Cx};
 use asupersync::channel::{mpsc, oneshot};
 use asupersync::runtime::RuntimeBuilder;
 #[cfg(feature = "wasm-host")]
 use asupersync::sync::Mutex as AsyncMutex;
 use asupersync::time::{sleep, timeout, wall_now};
+use asupersync::{Budget, Cx};
 use async_trait::async_trait;
 use base64::Engine as _;
 use regex::Regex;
@@ -4734,7 +4734,10 @@ impl JsExtensionRuntimeHandle {
                 }
                 // Signal that the runtime thread has exited its event loop.
                 let _ = exit_tx.send(&cx, ());
-                tracing::info!(event = "extension_runtime.exit", "JS extension runtime thread exiting");
+                tracing::info!(
+                    event = "extension_runtime.exit",
+                    "JS extension runtime thread exiting"
+                );
             });
         });
 
@@ -4759,10 +4762,7 @@ impl JsExtensionRuntimeHandle {
         let cx = Cx::for_request();
 
         // Send shutdown command (ignore error if channel already closed).
-        let _ = self
-            .sender
-            .send(&cx, JsRuntimeCommand::Shutdown)
-            .await;
+        let _ = self.sender.send(&cx, JsRuntimeCommand::Shutdown).await;
 
         // Take the exit signal — only the first caller can await it.
         let exit_rx = {
@@ -4777,7 +4777,7 @@ impl JsExtensionRuntimeHandle {
             return true;
         };
 
-        if let Ok(Ok(())) = timeout(wall_now(), budget, rx.recv(&cx)).await {
+        if timeout(wall_now(), budget, rx.recv(&cx)).await == Ok(Ok(())) {
             true
         } else {
             let budget_ms = u64::try_from(budget.as_millis()).unwrap_or(u64::MAX);
@@ -6642,10 +6642,7 @@ impl ExtensionRegion {
 
 impl Drop for ExtensionRegion {
     fn drop(&mut self) {
-        if self
-            .shutdown_done
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
+        if self.shutdown_done.load(std::sync::atomic::Ordering::SeqCst) {
             return;
         }
         // Best-effort: the Weak reference in JsRuntimeHost will fail to
@@ -6714,9 +6711,7 @@ impl ExtensionManager {
     /// Otherwise returns a standard request-scoped Cx.
     pub fn extension_cx(&self) -> Cx {
         let budget = self.budget();
-        if budget.deadline.is_some()
-            || budget.poll_quota < u32::MAX
-            || budget.cost_quota.is_some()
+        if budget.deadline.is_some() || budget.poll_quota < u32::MAX || budget.cost_quota.is_some()
         {
             Cx::for_request_with_budget(budget)
         } else {
@@ -11233,6 +11228,60 @@ mod tests {
                 .await
                 .expect("next after cancel");
             assert!(after_cancel.is_none(), "expected None after cancellation");
+        });
+    }
+
+    // ========================================================================
+    // Budget / structured concurrency tests (bd-2vie)
+    // ========================================================================
+
+    #[test]
+    fn extension_manager_default_budget_is_infinite() {
+        let manager = ExtensionManager::new();
+        let budget = manager.budget();
+        assert!(budget.deadline.is_none());
+        assert_eq!(budget.poll_quota, u32::MAX);
+        assert!(budget.cost_quota.is_none());
+    }
+
+    #[test]
+    fn extension_manager_with_budget_stores_it() {
+        let budget = Budget::with_deadline_secs(30);
+        let manager = ExtensionManager::with_budget(budget);
+        let stored = manager.budget();
+        assert!(stored.deadline.is_some());
+    }
+
+    #[test]
+    fn extension_manager_set_budget_updates() {
+        let manager = ExtensionManager::new();
+        assert!(manager.budget().deadline.is_none());
+
+        manager.set_budget(Budget::with_deadline_secs(10));
+        assert!(manager.budget().deadline.is_some());
+    }
+
+    #[test]
+    fn extension_cx_returns_unbounded_by_default() {
+        let manager = ExtensionManager::new();
+        let cx = manager.extension_cx();
+        // Default budget is infinite, so Cx should be unbounded.
+        assert!(cx.budget().deadline.is_none());
+    }
+
+    #[test]
+    fn extension_cx_applies_configured_budget() {
+        let manager = ExtensionManager::with_budget(Budget::with_deadline_secs(30));
+        let cx = manager.extension_cx();
+        assert!(cx.budget().deadline.is_some());
+    }
+
+    #[test]
+    fn extension_manager_shutdown_without_runtime_is_noop() {
+        asupersync::test_utils::run_test(|| async {
+            let manager = ExtensionManager::new();
+            let ok = manager.shutdown(Duration::from_secs(1)).await;
+            assert!(ok, "shutdown without runtime should succeed");
         });
     }
 

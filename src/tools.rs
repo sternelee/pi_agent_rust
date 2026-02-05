@@ -2322,45 +2322,55 @@ impl Tool for GrepTool {
         let mut match_limit_reached = false;
         let mut stderr_bytes = Vec::new();
 
+        let mut process_stdout_line = |line_res: std::io::Result<String>| -> Result<()> {
+            if match_limit_reached {
+                return Ok(());
+            }
+
+            let line = line_res.map_err(|e| Error::tool("grep", e.to_string()))?;
+            if line.trim().is_empty() {
+                return Ok(());
+            }
+
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
+                return Ok(());
+            };
+
+            if event.get("type").and_then(serde_json::Value::as_str) != Some("match") {
+                return Ok(());
+            }
+
+            match_count += 1;
+
+            let file_path = event
+                .pointer("/data/path/text")
+                .and_then(serde_json::Value::as_str)
+                .map(PathBuf::from);
+            let line_number = event
+                .pointer("/data/line_number")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|n| usize::try_from(n).ok());
+
+            if let (Some(fp), Some(ln)) = (file_path, line_number) {
+                matches.push((fp, ln));
+            }
+
+            if match_count >= effective_limit {
+                match_limit_reached = true;
+            }
+
+            Ok(())
+        };
+
         let tick = Duration::from_millis(10);
 
         loop {
             while let Ok(line_res) = stdout_rx.try_recv() {
+                if let Err(err) = process_stdout_line(line_res) {
+                    return Err(err);
+                }
                 if match_limit_reached {
-                    continue;
-                }
-
-                let line = line_res.map_err(|e| Error::tool("grep", e.to_string()))?;
-                if line.trim().is_empty() {
-                    continue;
-                }
-
-                let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
-                    continue;
-                };
-
-                if event.get("type").and_then(serde_json::Value::as_str) != Some("match") {
-                    continue;
-                }
-
-                match_count += 1;
-
-                let file_path = event
-                    .pointer("/data/path/text")
-                    .and_then(serde_json::Value::as_str)
-                    .map(PathBuf::from);
-                let line_number = event
-                    .pointer("/data/line_number")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|n| usize::try_from(n).ok());
-
-                if let (Some(fp), Some(ln)) = (file_path, line_number) {
-                    matches.push((fp, ln));
-                }
-
-                if match_count >= effective_limit {
-                    match_limit_reached = true;
-                    break; // We'll terminate ripgrep once we have enough matches.
+                    break;
                 }
             }
 
@@ -2378,6 +2388,15 @@ impl Tool for GrepTool {
                     sleep(wall_now(), tick).await;
                 }
                 Err(e) => return Err(Error::tool("grep", e.to_string())),
+            }
+        }
+
+        while let Ok(line_res) = stdout_rx.try_recv() {
+            if let Err(err) = process_stdout_line(line_res) {
+                return Err(err);
+            }
+            if match_limit_reached {
+                break;
             }
         }
 
