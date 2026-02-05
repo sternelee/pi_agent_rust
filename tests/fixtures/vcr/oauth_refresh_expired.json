@@ -13,7 +13,7 @@
         "body": {
           "grant_type": "refresh_token",
           "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-          "refresh_token": "refresh-expired"
+          "refresh_token": "[REDACTED]"
         },
         "body_text": null
       },
@@ -29,4 +29,3 @@
     }
   ]
 }
-
