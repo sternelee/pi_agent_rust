@@ -126,7 +126,7 @@ impl Provider for GeminiProvider {
     }
 
     fn api(&self) -> &'static str {
-        "gemini"
+        "google-generative-ai"
     }
 
     fn model_id(&self) -> &str {
@@ -671,7 +671,7 @@ mod tests {
     fn test_provider_info() {
         let provider = GeminiProvider::new("gemini-2.0-flash");
         assert_eq!(provider.name(), "google");
-        assert_eq!(provider.api(), "gemini");
+        assert_eq!(provider.api(), "google-generative-ai");
     }
 
     #[test]

@@ -216,7 +216,7 @@ fn create_provider_for_gemini() {
         });
 
     assert_eq!(provider.name(), "google");
-    assert_eq!(provider.api(), "gemini");
+    assert_eq!(provider.api(), "google-generative-ai");
     assert_eq!(provider.model_id(), "gemini-test");
 }
 
