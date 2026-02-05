@@ -669,3 +669,571 @@ describe("test", () => { it("works", () => {}); });"#,
     assert_eq!(test_file.classification, "non_extension");
     assert!(test_file.patterns_found.contains(&"test_file".to_string()));
 }
+
+// ---------------------------------------------------------------------------
+// Validated extension manifest (bd-3ay7)
+// ---------------------------------------------------------------------------
+
+const EXCLUDED_DIRS: &[&str] = &[
+    "plugins-official",
+    "plugins-community",
+    "plugins-ariff",
+    "agents-wshobson",
+    "templates-davila7",
+];
+
+#[derive(Debug, Clone, Serialize)]
+struct ValidatedManifest {
+    schema: &'static str,
+    generated_at: String,
+    extensions: Vec<ManifestEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ManifestEntry {
+    id: String,
+    entry_path: String,
+    source_tier: String,
+    capabilities: ManifestCapabilities,
+    conformance_tier: u8,
+    mock_requirements: Vec<String>,
+    registrations: ManifestRegistrations,
+}
+
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Serialize)]
+struct ManifestCapabilities {
+    registers_tools: bool,
+    registers_commands: bool,
+    registers_flags: bool,
+    registers_providers: bool,
+    subscribes_events: Vec<String>,
+    uses_exec: bool,
+    uses_http: bool,
+    uses_ui: bool,
+    uses_session: bool,
+    is_multi_file: bool,
+    has_npm_deps: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ManifestRegistrations {
+    tools: Vec<String>,
+    commands: Vec<String>,
+    flags: Vec<String>,
+    event_handlers: Vec<String>,
+}
+
+fn determine_source_tier(rel_path: &str) -> &'static str {
+    if rel_path.starts_with("community/") {
+        "community"
+    } else if rel_path.starts_with("npm/") {
+        "npm-registry"
+    } else if rel_path.starts_with("third-party/") {
+        "third-party-github"
+    } else if rel_path.starts_with("agents-mikeastock/") {
+        "agents-mikeastock"
+    } else {
+        "official-pi-mono"
+    }
+}
+
+fn is_excluded_dir(name: &str) -> bool {
+    EXCLUDED_DIRS.contains(&name)
+}
+
+/// Return a substring window starting at `start` with up to `max_len` bytes,
+/// clamped to the nearest char boundary.
+fn safe_window(s: &str, start: usize, max_len: usize) -> &str {
+    let end = s.len().min(start + max_len);
+    // Walk back to a valid char boundary
+    let end = (start..=end)
+        .rev()
+        .find(|&i| s.is_char_boundary(i))
+        .unwrap_or(start);
+    &s[start..end]
+}
+
+/// Extract registration names from source content using content-level scanning.
+/// Handles multi-line patterns like `registerTool({ name: "foo" })`.
+fn extract_registrations(content: &str) -> ManifestRegistrations {
+    let mut tools = Vec::new();
+    let mut commands = Vec::new();
+    let mut flags = Vec::new();
+    let mut event_handlers = Vec::new();
+
+    for (idx, _) in content.match_indices("registerTool(") {
+        let window = safe_window(content, idx, 500);
+        if let Some(name) = extract_quoted_after(window, "name:") {
+            if !tools.contains(&name) {
+                tools.push(name);
+            }
+        }
+    }
+
+    for (idx, _) in content.match_indices("registerCommand(") {
+        let window = safe_window(content, idx, 200);
+        if let Some(name) = extract_first_string_arg(window, "registerCommand(") {
+            if !commands.contains(&name) {
+                commands.push(name);
+            }
+        }
+    }
+
+    for (idx, _) in content.match_indices("registerFlag(") {
+        let window = safe_window(content, idx, 500);
+        if let Some(name) = extract_quoted_after(window, "name:") {
+            if !flags.contains(&name) {
+                flags.push(name);
+            }
+        }
+    }
+
+    for (idx, _) in content.match_indices(".on(") {
+        let window = safe_window(content, idx, 100);
+        if let Some(name) = extract_first_string_arg(window, ".on(") {
+            if !event_handlers.contains(&name) {
+                event_handlers.push(name);
+            }
+        }
+    }
+
+    tools.sort();
+    commands.sort();
+    flags.sort();
+    event_handlers.sort();
+
+    ManifestRegistrations {
+        tools,
+        commands,
+        flags,
+        event_handlers,
+    }
+}
+
+fn extract_quoted_after(text: &str, key: &str) -> Option<String> {
+    let idx = text.find(key)?;
+    let after = &text[idx + key.len()..];
+    let after = after.trim_start();
+    let quote = after.chars().next()?;
+    if quote != '"' && quote != '\'' && quote != '`' {
+        return None;
+    }
+    let rest = &after[1..];
+    let end = rest.find(quote)?;
+    Some(rest[..end].to_string())
+}
+
+fn extract_first_string_arg(text: &str, prefix: &str) -> Option<String> {
+    let idx = text.find(prefix)?;
+    let after = &text[idx + prefix.len()..];
+    let after = after.trim_start();
+    let quote = after.chars().next()?;
+    if quote != '"' && quote != '\'' && quote != '`' {
+        return None;
+    }
+    let rest = &after[1..];
+    let end = rest.find(quote)?;
+    Some(rest[..end].to_string())
+}
+
+fn has_npm_dependencies(dir: &Path) -> bool {
+    let pkg_path = dir.join("package.json");
+    if !pkg_path.is_file() {
+        return false;
+    }
+    let Ok(bytes) = fs::read(&pkg_path) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    json.get("dependencies")
+        .and_then(|d| d.as_object())
+        .is_some_and(|d| !d.is_empty())
+}
+
+fn classify_tier(caps: &ManifestCapabilities, has_forbidden: bool) -> u8 {
+    if has_forbidden {
+        return 5;
+    }
+    if caps.uses_ui && (caps.registers_tools || caps.subscribes_events.len() > 2) {
+        return 4;
+    }
+    if caps.is_multi_file || caps.has_npm_deps || caps.registers_providers {
+        return 3;
+    }
+    let active = [
+        caps.registers_tools,
+        caps.registers_commands,
+        caps.registers_flags,
+        caps.uses_exec,
+        caps.uses_http,
+        caps.uses_ui,
+        caps.uses_session,
+    ]
+    .iter()
+    .filter(|&&v| v)
+    .count();
+    if active >= 2 || !caps.subscribes_events.is_empty() {
+        return 2;
+    }
+    1
+}
+
+fn determine_mock_requirements(caps: &ManifestCapabilities) -> Vec<String> {
+    let mut mocks = Vec::new();
+    if caps.uses_exec {
+        mocks.push("exec".to_string());
+    }
+    if caps.uses_http {
+        mocks.push("http".to_string());
+    }
+    if caps.uses_ui {
+        mocks.push("ui".to_string());
+    }
+    if caps.uses_session {
+        mocks.push("session".to_string());
+    }
+    mocks
+}
+
+/// Discover extension directories under `artifacts_dir`, excluding non-`ExtensionAPI` dirs.
+/// Returns `(extension_id, extension_dir)` pairs sorted by ID.
+fn discover_extension_dirs(artifacts_dir: &Path) -> Vec<(String, PathBuf)> {
+    let mut result = Vec::new();
+
+    let Ok(entries) = fs::read_dir(artifacts_dir) else {
+        return result;
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+            continue;
+        }
+        if is_excluded_dir(&name) {
+            continue;
+        }
+
+        match name.as_str() {
+            "community" | "npm" | "third-party" | "agents-mikeastock" => {
+                if let Ok(sub_entries) = fs::read_dir(entry.path()) {
+                    for sub in sub_entries.flatten() {
+                        if sub.file_type().is_ok_and(|ft| ft.is_dir()) {
+                            let sub_name = sub.file_name().to_string_lossy().to_string();
+                            let id = format!("{name}/{sub_name}");
+                            result.push((id, sub.path()));
+                        }
+                    }
+                }
+            }
+            _ => {
+                result.push((name, entry.path()));
+            }
+        }
+    }
+
+    result.sort_by(|a, b| a.0.cmp(&b.0));
+    result
+}
+
+fn find_entry_point(ext_dir: &Path, artifacts_dir: &Path) -> Option<String> {
+    // Check package.json for explicit declaration.
+    let pkg_path = ext_dir.join("package.json");
+    if pkg_path.is_file() {
+        if let Ok(bytes) = fs::read(&pkg_path) {
+            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if let Some(extensions) = json.pointer("/pi/extensions").and_then(|v| v.as_array())
+                {
+                    if let Some(first) = extensions.first().and_then(|v| v.as_str()) {
+                        let cleaned = first.strip_prefix("./").unwrap_or(first);
+                        let candidate = ext_dir.join(cleaned);
+                        if candidate.is_file() {
+                            return Some(relative_posix(artifacts_dir, &candidate));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Scan TS files and pick the best entry point candidate.
+    let ts_files = collect_ts_files(ext_dir);
+    let mut best: Option<(String, u8)> = None;
+
+    for file in &ts_files {
+        let rel = relative_posix(artifacts_dir, file);
+        let Ok(content) = fs::read_to_string(file) else {
+            continue;
+        };
+        let scan = classify_ts_file(&content, &rel);
+        if scan.classification == "entry_point" {
+            let is_index = file
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("index"));
+            let rank = match (scan.confidence.as_str(), is_index) {
+                ("high", true) => 4,
+                ("high", false) => 3,
+                ("medium", true) => 2,
+                _ => 1,
+            };
+            let current_rank = best.as_ref().map_or(0, |b| b.1);
+            if rank > current_rank {
+                best = Some((rel, rank));
+            }
+        }
+    }
+
+    best.map(|(path, _)| path)
+}
+
+#[allow(clippy::too_many_lines)]
+#[test]
+fn test_generate_validated_manifest() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let artifacts_dir = repo_root.join("tests/ext_conformance/artifacts");
+
+    let ext_dirs = discover_extension_dirs(&artifacts_dir);
+    assert!(
+        ext_dirs.len() >= 100,
+        "expected >= 100 extension dirs, got {}",
+        ext_dirs.len()
+    );
+
+    let mut entries = Vec::new();
+    let mut missing_entry_points = Vec::new();
+
+    for (id, ext_dir) in &ext_dirs {
+        let Some(entry_path) = find_entry_point(ext_dir, &artifacts_dir) else {
+            missing_entry_points.push(id.clone());
+            continue;
+        };
+
+        let source_tier = determine_source_tier(&entry_path);
+
+        let scanner = CompatibilityScanner::new(ext_dir.clone());
+        let ledger = scanner
+            .scan_root()
+            .unwrap_or_else(|err| panic!("scan {id}: {err}"));
+
+        let cap_names: Vec<&str> = ledger
+            .capabilities
+            .iter()
+            .map(|c| c.capability.as_str())
+            .collect();
+
+        let has_forbidden = !ledger.forbidden.is_empty();
+
+        let ts_files = collect_ts_files(ext_dir);
+        let mut all_content = String::new();
+        for file in &ts_files {
+            if let Ok(content) = fs::read_to_string(file) {
+                all_content.push_str(&content);
+                all_content.push('\n');
+            }
+        }
+
+        let registrations = extract_registrations(&all_content);
+
+        let caps = ManifestCapabilities {
+            registers_tools: cap_names.contains(&"tool")
+                || !registrations.tools.is_empty()
+                || all_content.contains("registerTool("),
+            registers_commands: !registrations.commands.is_empty()
+                || all_content.contains("registerCommand("),
+            registers_flags: !registrations.flags.is_empty()
+                || all_content.contains("registerFlag("),
+            registers_providers: all_content.contains("registerProvider("),
+            subscribes_events: registrations.event_handlers.clone(),
+            uses_exec: cap_names.contains(&"exec"),
+            uses_http: cap_names.contains(&"http"),
+            uses_ui: cap_names.contains(&"ui"),
+            uses_session: cap_names.contains(&"session"),
+            is_multi_file: ts_files.len() > 1,
+            has_npm_deps: has_npm_dependencies(ext_dir),
+        };
+
+        let conformance_tier = classify_tier(&caps, has_forbidden);
+        let mock_requirements = determine_mock_requirements(&caps);
+
+        entries.push(ManifestEntry {
+            id: id.clone(),
+            entry_path,
+            source_tier: source_tier.to_string(),
+            capabilities: caps,
+            conformance_tier,
+            mock_requirements,
+            registrations,
+        });
+    }
+
+    let manifest = ValidatedManifest {
+        schema: "pi.ext.validated-manifest.v1",
+        generated_at: "2026-02-05T00:00:00Z".to_string(),
+        extensions: entries,
+    };
+
+    let manifest_path = repo_root.join("tests/ext_conformance/VALIDATED_MANIFEST.json");
+    let json = serde_json::to_string_pretty(&manifest).expect("serialize manifest");
+    fs::write(&manifest_path, &json).expect("write VALIDATED_MANIFEST.json");
+
+    eprintln!("=== Validated Manifest Summary ===");
+    eprintln!("Extensions:          {}", manifest.extensions.len());
+    eprintln!("Missing entry point: {}", missing_entry_points.len());
+    if !missing_entry_points.is_empty() {
+        eprintln!("  Missing: {}", missing_entry_points.join(", "));
+    }
+
+    let mut tier_counts = [0u32; 6];
+    for ext in &manifest.extensions {
+        if (ext.conformance_tier as usize) < tier_counts.len() {
+            tier_counts[ext.conformance_tier as usize] += 1;
+        }
+    }
+    for (i, count) in tier_counts.iter().enumerate().skip(1) {
+        eprintln!("  Tier {i}: {count}");
+    }
+
+    let mut source_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for ext in &manifest.extensions {
+        *source_counts.entry(&ext.source_tier).or_default() += 1;
+    }
+    for (tier, count) in &source_counts {
+        eprintln!("  Source {tier}: {count}");
+    }
+
+    eprintln!("Manifest: {}", manifest_path.display());
+
+    assert!(
+        manifest.extensions.len() >= 150,
+        "expected >= 150 extensions in manifest, got {}",
+        manifest.extensions.len()
+    );
+    assert!(
+        missing_entry_points.len() < 20,
+        "too many missing entry points: {}",
+        missing_entry_points.len()
+    );
+    assert!(
+        tier_counts[1] > 10,
+        "too few tier 1 extensions: {}",
+        tier_counts[1]
+    );
+}
+
+#[test]
+fn test_manifest_spot_check_known_extensions() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let artifacts_dir = repo_root.join("tests/ext_conformance/artifacts");
+
+    let hello_dir = artifacts_dir.join("hello");
+    let entry = find_entry_point(&hello_dir, &artifacts_dir);
+    assert_eq!(entry.as_deref(), Some("hello/hello.ts"));
+
+    let content = fs::read_to_string(hello_dir.join("hello.ts")).expect("read hello.ts");
+    let regs = extract_registrations(&content);
+    assert!(
+        regs.tools.contains(&"hello".to_string()),
+        "hello.ts should register 'hello' tool, got: {:?}",
+        regs.tools
+    );
+
+    let plan_dir = artifacts_dir.join("plan-mode");
+    let plan_entry = find_entry_point(&plan_dir, &artifacts_dir);
+    assert!(
+        plan_entry
+            .as_deref()
+            .is_some_and(|e| e.contains("index.ts")),
+        "plan-mode entry should be index.ts, got: {plan_entry:?}"
+    );
+
+    let provider_dir = artifacts_dir.join("custom-provider-anthropic");
+    assert!(
+        has_npm_dependencies(&provider_dir),
+        "custom-provider-anthropic should have npm deps"
+    );
+}
+
+#[test]
+fn test_source_tier_mapping() {
+    assert_eq!(determine_source_tier("hello/hello.ts"), "official-pi-mono");
+    assert_eq!(
+        determine_source_tier("community/mitsuhiko-answer/answer.ts"),
+        "community"
+    );
+    assert_eq!(
+        determine_source_tier("npm/pi-annotate/index.ts"),
+        "npm-registry"
+    );
+    assert_eq!(
+        determine_source_tier("third-party/aliou-pi-extensions/defaults/index.ts"),
+        "third-party-github"
+    );
+    assert_eq!(
+        determine_source_tier("agents-mikeastock/extensions/pi/AskUserQuestion/index.ts"),
+        "agents-mikeastock"
+    );
+}
+
+#[test]
+fn test_extract_registrations_synthetic() {
+    let content = r#"
+pi.registerTool({
+    name: "my_tool",
+    description: "does stuff",
+});
+pi.registerCommand("/test-cmd", { handler: () => {} });
+pi.on("tool_call", async (ev) => {});
+pi.on("agent_end", () => {});
+"#;
+    let regs = extract_registrations(content);
+    assert_eq!(regs.tools, vec!["my_tool"]);
+    assert_eq!(regs.commands, vec!["/test-cmd"]);
+    assert_eq!(regs.event_handlers, vec!["agent_end", "tool_call"]);
+}
+
+#[test]
+fn test_tier_classification_logic() {
+    let simple = ManifestCapabilities {
+        registers_tools: true,
+        registers_commands: false,
+        registers_flags: false,
+        registers_providers: false,
+        subscribes_events: vec![],
+        uses_exec: false,
+        uses_http: false,
+        uses_ui: false,
+        uses_session: false,
+        is_multi_file: false,
+        has_npm_deps: false,
+    };
+    assert_eq!(classify_tier(&simple, false), 1);
+
+    let medium = ManifestCapabilities {
+        registers_commands: true,
+        ..simple.clone()
+    };
+    assert_eq!(classify_tier(&medium, false), 2);
+
+    let complex_multi = ManifestCapabilities {
+        is_multi_file: true,
+        ..simple.clone()
+    };
+    assert_eq!(classify_tier(&complex_multi, false), 3);
+
+    let complex_npm = ManifestCapabilities {
+        has_npm_deps: true,
+        ..simple.clone()
+    };
+    assert_eq!(classify_tier(&complex_npm, false), 3);
+
+    let ui_heavy = ManifestCapabilities {
+        uses_ui: true,
+        subscribes_events: vec!["a".into(), "b".into(), "c".into()],
+        ..simple
+    };
+    assert_eq!(classify_tier(&ui_heavy, false), 4);
+
+    assert_eq!(classify_tier(&simple, true), 5);
+}
