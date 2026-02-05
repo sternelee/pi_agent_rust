@@ -5032,6 +5032,11 @@ impl ExtensionManager {
         guard.ui_sender = Some(sender);
     }
 
+    pub fn clear_ui_sender(&self) {
+        let mut guard = self.inner.lock().unwrap();
+        guard.ui_sender = None;
+    }
+
     pub fn set_js_runtime(&self, runtime: JsExtensionRuntimeHandle) {
         let mut guard = self.inner.lock().unwrap();
         guard.js_runtime = Some(runtime);

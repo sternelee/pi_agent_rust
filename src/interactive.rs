@@ -2215,6 +2215,15 @@ pub async fn run_interactive(
         });
     }
 
+    let (messages, usage) = {
+        let cx = Cx::for_request();
+        let guard = session
+            .lock(&cx)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to lock session: {e}"))?;
+        load_conversation_from_session(&guard)
+    };
+
     let app = PiApp::new(
         agent,
         session,
@@ -2231,6 +2240,8 @@ pub async fn run_interactive(
         save_enabled,
         extensions,
         None,
+        messages,
+        usage,
     );
 
     Program::new(app)
@@ -3990,11 +4001,6 @@ impl PiApp {
             Viewport::new(term_width.saturating_sub(2), viewport_height);
         conversation_viewport.mouse_wheel_enabled = true;
         conversation_viewport.mouse_wheel_delta = 3;
-
-        let (messages, total_usage) = {
-            let guard = session.try_lock().expect("session lock unavailable during PiApp init");
-            load_conversation_from_session(&guard)
-        };
 
         let model = format!(
             "{}/{}",
@@ -6654,6 +6660,10 @@ impl PiApp {
     }
 
     fn quit_cmd(&mut self) -> Cmd {
+        if let Some(manager) = &self.extensions {
+            manager.clear_ui_sender();
+        }
+
         // Drop the async → bubbletea bridge sender so bubbletea can shut down cleanly.
         // Without this, bubbletea's external forwarder thread can block on `recv()` during quit.
         let (tx, _rx) = mpsc::channel::<PiMsg>(1);

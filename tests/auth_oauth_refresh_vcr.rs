@@ -105,17 +105,17 @@ async fn run_refresh_scenario(
 
     let (_, before_redactions) = write_redacted_snapshot(harness, &auth_path, "auth.before.json");
 
-    harness.log().info_ctx("vcr", "Running OAuth refresh scenario", |ctx| {
-        ctx.push(("cassette".into(), cassette_name.to_string()));
-        ctx.push(("auth_path".into(), auth_path.display().to_string()));
-    });
+    harness
+        .log()
+        .info_ctx("vcr", "Running OAuth refresh scenario", |ctx| {
+            ctx.push(("cassette".into(), cassette_name.to_string()));
+            ctx.push(("auth_path".into(), auth_path.display().to_string()));
+        });
 
     let recorder = VcrRecorder::new_with(cassette_name, VcrMode::Playback, &cassette_dir);
     let client = Client::new().with_vcr(recorder);
 
-    let result = auth
-        .refresh_expired_oauth_tokens_with_client(&client)
-        .await;
+    let result = auth.refresh_expired_oauth_tokens_with_client(&client).await;
 
     let after_json = read_json(&auth_path);
     let entry = oauth_entry(&after_json, "anthropic");
@@ -128,7 +128,11 @@ async fn run_refresh_scenario(
 
     let now = chrono::Utc::now().timestamp_millis();
 
-    match (expected_new_access, expected_new_refresh, expected_error_fragment) {
+    match (
+        expected_new_access,
+        expected_new_refresh,
+        expected_error_fragment,
+    ) {
         (Some(expected_access), Some(expected_refresh), None) => {
             result.expect("expected refresh to succeed");
             assert_eq!(after_access, expected_access);
@@ -159,12 +163,14 @@ async fn run_refresh_scenario(
 
     let (_, after_redactions) = write_redacted_snapshot(harness, &auth_path, "auth.after.json");
 
-    harness.log().info_ctx("summary", "OAuth refresh summary", |ctx| {
-        ctx.push(("old_access_sha256".into(), sha256_hex(&old_access)));
-        ctx.push(("new_access_sha256".into(), sha256_hex(after_access)));
-        ctx.push(("before_redactions".into(), before_redactions.to_string()));
-        ctx.push(("after_redactions".into(), after_redactions.to_string()));
-    });
+    harness
+        .log()
+        .info_ctx("summary", "OAuth refresh summary", |ctx| {
+            ctx.push(("old_access_sha256".into(), sha256_hex(&old_access)));
+            ctx.push(("new_access_sha256".into(), sha256_hex(after_access)));
+            ctx.push(("before_redactions".into(), before_redactions.to_string()));
+            ctx.push(("after_redactions".into(), after_redactions.to_string()));
+        });
 
     // Emit deterministic JSONL logs + artifact index for this scenario.
     let logs_path = harness.temp_path("auth_refresh.log.jsonl");

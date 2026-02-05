@@ -1259,9 +1259,21 @@ fn e2e_interactive_smoke_tmux() {
     }
 
     if tmux.session_exists() {
+        logger.warn("tmux", "/exit did not terminate; sending Ctrl+D fallback");
+        tmux.send_key("C-d");
+        let start = Instant::now();
+        while tmux.session_exists() {
+            if start.elapsed() > Duration::from_secs(5) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    if tmux.session_exists() {
         logger.warn(
             "tmux",
-            "/exit did not terminate; sending Ctrl+C double-tap fallback",
+            "Ctrl+D fallback did not terminate; sending Ctrl+C double-tap fallback",
         );
         tmux.send_key("C-c");
         std::thread::sleep(Duration::from_millis(100));

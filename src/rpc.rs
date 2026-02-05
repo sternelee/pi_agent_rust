@@ -560,11 +560,9 @@ pub async fn run(
                         .lock(&cx)
                         .await
                         .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
-                    let inner_session = guard
-                        .session
-                        .lock(&cx)
-                        .await
-                        .map_err(|err| Error::session(format!("inner session lock failed: {err}")))?;
+                    let inner_session = guard.session.lock(&cx).await.map_err(|err| {
+                        Error::session(format!("inner session lock failed: {err}"))
+                    })?;
                     session_state(
                         &inner_session,
                         &options,
@@ -582,11 +580,9 @@ pub async fn run(
                         .lock(&cx)
                         .await
                         .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
-                    let inner_session = guard
-                        .session
-                        .lock(&cx)
-                        .await
-                        .map_err(|err| Error::session(format!("inner session lock failed: {err}")))?;
+                    let inner_session = guard.session.lock(&cx).await.map_err(|err| {
+                        Error::session(format!("inner session lock failed: {err}"))
+                    })?;
                     session_stats(&inner_session)
                 };
                 let _ = out_tx.send(response_ok(id, "get_session_stats", Some(data)));
@@ -598,11 +594,9 @@ pub async fn run(
                         .lock(&cx)
                         .await
                         .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
-                    let inner_session = guard
-                        .session
-                        .lock(&cx)
-                        .await
-                        .map_err(|err| Error::session(format!("inner session lock failed: {err}")))?;
+                    let inner_session = guard.session.lock(&cx).await.map_err(|err| {
+                        Error::session(format!("inner session lock failed: {err}"))
+                    })?;
                     inner_session
                         .entries_for_current_path()
                         .iter()
@@ -772,8 +766,9 @@ pub async fn run(
                         .await
                         .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
                     let level = {
-                        let inner_session = guard.session.lock(&cx).await
-                            .map_err(|err| Error::session(format!("inner session lock failed: {err}")))?;
+                        let inner_session = guard.session.lock(&cx).await.map_err(|err| {
+                            Error::session(format!("inner session lock failed: {err}"))
+                        })?;
                         current_model_entry(&inner_session, &options)
                             .map_or(level, |entry| clamp_thinking_level(level, entry))
                     };
@@ -796,8 +791,9 @@ pub async fn run(
                         .await
                         .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
                     let entry = {
-                        let inner_session = guard.session.lock(&cx).await
-                            .map_err(|err| Error::session(format!("inner session lock failed: {err}")))?;
+                        let inner_session = guard.session.lock(&cx).await.map_err(|err| {
+                            Error::session(format!("inner session lock failed: {err}"))
+                        })?;
                         current_model_entry(&inner_session, &options).cloned()
                     };
                     let Some(entry) = entry else {
@@ -940,8 +936,9 @@ pub async fn run(
                         .await
                         .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
                     {
-                        let mut inner_session = guard.session.lock(&cx).await
-                            .map_err(|err| Error::session(format!("inner session lock failed: {err}")))?;
+                        let mut inner_session = guard.session.lock(&cx).await.map_err(|err| {
+                            Error::session(format!("inner session lock failed: {err}"))
+                        })?;
                         inner_session.append_session_info(Some(name.to_string()));
                     }
                     guard.persist_session().await?;
@@ -955,8 +952,9 @@ pub async fn run(
                         .lock(&cx)
                         .await
                         .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
-                    let inner_session = guard.session.lock(&cx).await
-                        .map_err(|err| Error::session(format!("inner session lock failed: {err}")))?;
+                    let inner_session = guard.session.lock(&cx).await.map_err(|err| {
+                        Error::session(format!("inner session lock failed: {err}"))
+                    })?;
                     last_assistant_text(&inner_session)
                 };
                 let _ = out_tx.send(response_ok(
@@ -976,8 +974,9 @@ pub async fn run(
                         .lock(&cx)
                         .await
                         .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
-                    let inner_session = guard.session.lock(&cx).await
-                        .map_err(|err| Error::session(format!("inner session lock failed: {err}")))?;
+                    let inner_session = guard.session.lock(&cx).await.map_err(|err| {
+                        Error::session(format!("inner session lock failed: {err}"))
+                    })?;
                     export_html(&inner_session, output_path.as_deref()).await?
                 };
                 let _ = out_tx.send(response_ok(
@@ -1024,16 +1023,18 @@ pub async fn run(
                     let response = match result {
                         Ok(result) => {
                             if let Ok(mut guard) = session.lock(&cx).await {
-                                guard.session.append_message(SessionMessage::BashExecution {
-                                    command: command.clone(),
-                                    output: result.output.clone(),
-                                    exit_code: result.exit_code,
-                                    cancelled: Some(result.cancelled),
-                                    truncated: Some(result.truncated),
-                                    full_output_path: result.full_output_path.clone(),
-                                    timestamp: Some(chrono::Utc::now().timestamp_millis()),
-                                    extra: std::collections::HashMap::default(),
-                                });
+                                if let Ok(mut inner_session) = guard.session.lock(&cx).await {
+                                    inner_session.append_message(SessionMessage::BashExecution {
+                                        command: command.clone(),
+                                        output: result.output.clone(),
+                                        exit_code: result.exit_code,
+                                        cancelled: Some(result.cancelled),
+                                        truncated: Some(result.truncated),
+                                        full_output_path: result.full_output_path.clone(),
+                                        timestamp: Some(chrono::Utc::now().timestamp_millis()),
+                                        extra: std::collections::HashMap::default(),
+                                    });
+                                }
                                 let _ = guard.persist_session().await;
                             }
 
@@ -1081,7 +1082,17 @@ pub async fn run(
                         .lock(&cx)
                         .await
                         .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
-                    guard.session.ensure_entry_ids();
+                    let path_entries = {
+                        let mut inner_session = guard.session.lock(&cx).await.map_err(|err| {
+                            Error::session(format!("inner session lock failed: {err}"))
+                        })?;
+                        inner_session.ensure_entry_ids();
+                        inner_session
+                            .entries_for_current_path()
+                            .into_iter()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    };
 
                     let api_key = guard
                         .agent
@@ -1098,13 +1109,6 @@ pub async fn run(
                         keep_recent_tokens: options.config.compaction_keep_recent_tokens(),
                     };
 
-                    let path_entries = guard
-                        .session
-                        .entries_for_current_path()
-                        .into_iter()
-                        .cloned()
-                        .collect::<Vec<_>>();
-
                     let prep = prepare_compaction(&path_entries, settings).ok_or_else(|| {
                         Error::session(
                             "Compaction not available (already compacted or missing IDs)",
@@ -1117,15 +1121,20 @@ pub async fn run(
                     is_compacting.store(false, Ordering::SeqCst);
                     let details_value = compaction_details_to_value(&result.details)?;
 
-                    guard.session.append_compaction(
-                        result.summary.clone(),
-                        result.first_kept_entry_id.clone(),
-                        result.tokens_before,
-                        Some(details_value.clone()),
-                        None,
-                    );
+                    let messages = {
+                        let mut inner_session = guard.session.lock(&cx).await.map_err(|err| {
+                            Error::session(format!("inner session lock failed: {err}"))
+                        })?;
+                        inner_session.append_compaction(
+                            result.summary.clone(),
+                            result.first_kept_entry_id.clone(),
+                            result.tokens_before,
+                            Some(details_value.clone()),
+                            None,
+                        );
+                        inner_session.to_messages_for_current_path()
+                    };
                     guard.persist_session().await?;
-                    let messages = guard.session.to_messages_for_current_path();
                     guard.agent.replace_messages(messages);
 
                     json!({
@@ -1149,7 +1158,17 @@ pub async fn run(
                         .lock(&cx)
                         .await
                         .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
-                    let session_dir = guard.session.session_dir.clone();
+                    let (session_dir, provider, model_id, thinking_level) = {
+                        let inner_session = guard.session.lock(&cx).await.map_err(|err| {
+                            Error::session(format!("inner session lock failed: {err}"))
+                        })?;
+                        (
+                            inner_session.session_dir.clone(),
+                            inner_session.header.provider.clone(),
+                            inner_session.header.model_id.clone(),
+                            inner_session.header.thinking_level.clone(),
+                        )
+                    };
                     let mut new_session = if guard.save_enabled() {
                         crate::session::Session::create_with_dir(session_dir)
                     } else {
@@ -1160,20 +1179,26 @@ pub async fn run(
                     new_session
                         .header
                         .provider
-                        .clone_from(&guard.session.header.provider);
+                        .clone_from(&provider);
                     new_session
                         .header
                         .model_id
-                        .clone_from(&guard.session.header.model_id);
+                        .clone_from(&model_id);
                     new_session
                         .header
                         .thinking_level
-                        .clone_from(&guard.session.header.thinking_level);
+                        .clone_from(&thinking_level);
 
-                    guard.session = new_session;
+                    let session_id = new_session.header.id.clone();
+                    {
+                        let mut inner_session = guard.session.lock(&cx).await.map_err(|err| {
+                            Error::session(format!("inner session lock failed: {err}"))
+                        })?;
+                        *inner_session = new_session;
+                    }
                     guard.agent.clear_messages();
                     guard.agent.stream_options_mut().session_id =
-                        Some(guard.session.header.id.clone());
+                        Some(session_id);
                 }
                 {
                     let mut state = shared_state
@@ -1203,15 +1228,21 @@ pub async fn run(
                 let loaded = crate::session::Session::open(session_path).await;
                 match loaded {
                     Ok(new_session) => {
+                        let messages = new_session.to_messages_for_current_path();
+                        let session_id = new_session.header.id.clone();
                         let mut guard = session
                             .lock(&cx)
                             .await
                             .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
-                        guard.session = new_session;
-                        let messages = guard.session.to_messages_for_current_path();
+                        {
+                            let mut inner_session = guard.session.lock(&cx).await.map_err(|err| {
+                                Error::session(format!("inner session lock failed: {err}"))
+                            })?;
+                            *inner_session = new_session;
+                        }
                         guard.agent.replace_messages(messages);
                         guard.agent.stream_options_mut().session_id =
-                            Some(guard.session.header.id.clone());
+                            Some(session_id);
                         let _ = out_tx.send(response_ok(
                             id,
                             "switch_session",
