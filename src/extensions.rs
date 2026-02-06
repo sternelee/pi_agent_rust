@@ -2935,7 +2935,6 @@ mod wasm_host {
     mod tests {
         use super::*;
         use crate::connectors::http::HttpConnectorConfig;
-        use crate::model::ContentBlock;
         use crate::tools::{Tool, ToolOutput, ToolRegistry, ToolUpdate};
         use asupersync::runtime::RuntimeBuilder;
         use asupersync::time::{sleep, wall_now};

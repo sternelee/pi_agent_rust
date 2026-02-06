@@ -96,9 +96,9 @@ fn run_case(case: &Case) {
                 timers.insert(save_as.as_str(), id);
             }
             Op::ClearTimeout { timer } => {
-                let id = *timers
-                    .get(timer.as_str())
-                    .unwrap_or_else(|| unreachable!("{}: step {idx}: unknown timer {timer}", case.name));
+                let id = *timers.get(timer.as_str()).unwrap_or_else(|| {
+                    unreachable!("{}: step {idx}: unknown timer {timer}", case.name)
+                });
                 loop_state.clear_timeout(id);
             }
             Op::EnqueueHostcallCompletion { call_id } => {
