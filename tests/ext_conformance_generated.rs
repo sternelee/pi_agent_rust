@@ -1021,11 +1021,7 @@ conformance_test!(ext_mac_system_theme, "mac-system-theme");
 conformance_test!(ext_modal_editor, "modal-editor");
 conformance_test!(ext_model_status, "model-status");
 conformance_test!(ext_notify, "notify");
-conformance_test!(
-    ext_npm_ogulcancelik_pi_sketch,
-    "npm/ogulcancelik-pi-sketch",
-    ignore
-);
+conformance_test!(ext_npm_ogulcancelik_pi_sketch, "npm/ogulcancelik-pi-sketch");
 conformance_test!(ext_npm_pi_ephemeral, "npm/pi-ephemeral");
 conformance_test!(ext_npm_pi_ghostty_theme_sync, "npm/pi-ghostty-theme-sync");
 conformance_test!(ext_npm_pi_md_export, "npm/pi-md-export");
@@ -1069,8 +1065,7 @@ conformance_test!(
 );
 conformance_test!(
     ext_third_party_ogulcancelik_pi_sketch,
-    "third-party/ogulcancelik-pi-sketch",
-    ignore
+    "third-party/ogulcancelik-pi-sketch"
 );
 conformance_test!(
     ext_third_party_raunovillberg_pi_stuffed,
@@ -1297,6 +1292,5 @@ conformance_test!(
 conformance_test!(ext_npm_pi_annotate, "npm/pi-annotate");
 conformance_test!(
     ext_third_party_kcosr_pi_extensions,
-    "third-party/kcosr-pi-extensions",
-    ignore
+    "third-party/kcosr-pi-extensions"
 );
