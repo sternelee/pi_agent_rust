@@ -937,7 +937,7 @@ fn full_wiring_refresh_skips_providers_without_config() {
             Some(AuthCredential::OAuth { access_token, .. }) => {
                 assert_eq!(access_token, "old");
             }
-            other => panic!("expected OAuth credential, got {other:?}"),
+            other => unreachable!("expected OAuth credential, got {other:?}"),
         }
     });
 }

@@ -87,10 +87,10 @@ fn test_user_message_text_round_trip() {
         if let UserContent::Text(text) = &user.content {
             assert_eq!(text, "Hello, world!");
         } else {
-            panic!("Expected Text content");
+            unreachable!("Expected Text content");
         }
     } else {
-        panic!("Expected User message");
+        unreachable!("Expected User message");
     }
 }
 
@@ -117,10 +117,10 @@ fn test_user_message_blocks_round_trip() {
         if let UserContent::Blocks(blocks) = &user.content {
             assert_eq!(blocks.len(), 2);
         } else {
-            panic!("Expected Blocks content");
+            unreachable!("Expected Blocks content");
         }
     } else {
-        panic!("Expected User message");
+        unreachable!("Expected User message");
     }
 }
 
@@ -174,7 +174,7 @@ fn test_assistant_message_round_trip() {
         assert_eq!(assistant.usage.input, 100);
         assert_eq!(assistant.stop_reason, StopReason::Stop);
     } else {
-        panic!("Expected Assistant message");
+        unreachable!("Expected Assistant message");
     }
 }
 
@@ -207,7 +207,7 @@ fn test_assistant_message_with_error() {
         );
         assert_eq!(assistant.stop_reason, StopReason::Error);
     } else {
-        panic!("Expected Assistant message");
+        unreachable!("Expected Assistant message");
     }
 }
 
@@ -246,7 +246,7 @@ fn test_tool_result_message_round_trip() {
         assert!(!result.is_error);
         assert!(result.details.is_some());
     } else {
-        panic!("Expected ToolResult message");
+        unreachable!("Expected ToolResult message");
     }
 }
 
@@ -274,7 +274,7 @@ fn test_tool_result_error() {
     if let Message::ToolResult(result) = parsed {
         assert!(result.is_error);
     } else {
-        panic!("Expected ToolResult message");
+        unreachable!("Expected ToolResult message");
     }
 }
 
@@ -307,7 +307,7 @@ fn test_content_block_text() {
         assert_eq!(text.text, "Hello, world!");
         assert_eq!(text.text_signature, Some("sig_abc".to_string()));
     } else {
-        panic!("Expected Text block");
+        unreachable!("Expected Text block");
     }
 }
 
@@ -331,7 +331,7 @@ fn test_content_block_text_no_signature() {
         assert_eq!(text.text, "Simple text");
         assert!(text.text_signature.is_none());
     } else {
-        panic!("Expected Text block");
+        unreachable!("Expected Text block");
     }
 }
 
@@ -354,7 +354,7 @@ fn test_content_block_thinking() {
     if let ContentBlock::Thinking(thinking) = parsed {
         assert_eq!(thinking.thinking, "Analyzing the problem...");
     } else {
-        panic!("Expected Thinking block");
+        unreachable!("Expected Thinking block");
     }
 }
 
@@ -380,7 +380,7 @@ fn test_content_block_image() {
         assert_eq!(image.mime_type, "image/png");
         assert!(!image.data.is_empty());
     } else {
-        panic!("Expected Image block");
+        unreachable!("Expected Image block");
     }
 }
 
@@ -412,7 +412,7 @@ fn test_content_block_tool_call() {
         assert_eq!(call.name, "read");
         assert_eq!(call.arguments["path"], "/tmp/test.txt");
     } else {
-        panic!("Expected ToolCall block");
+        unreachable!("Expected ToolCall block");
     }
 }
 
@@ -448,7 +448,7 @@ fn test_content_block_tool_call_complex_args() {
     if let ContentBlock::ToolCall(call) = parsed {
         assert_eq!(call.arguments["nested"]["deep"]["value"][0], 1);
     } else {
-        panic!("Expected ToolCall block");
+        unreachable!("Expected ToolCall block");
     }
 }
 
@@ -788,7 +788,7 @@ fn test_empty_content_blocks() {
     if let Message::Assistant(assistant) = parsed {
         assert!(assistant.content.is_empty());
     } else {
-        panic!("Expected Assistant message");
+        unreachable!("Expected Assistant message");
     }
 }
 
@@ -811,10 +811,10 @@ fn test_unicode_content() {
             assert!(text.contains("שלום"));
             assert!(text.contains("🌍"));
         } else {
-            panic!("Expected Text content");
+            unreachable!("Expected Text content");
         }
     } else {
-        panic!("Expected User message");
+        unreachable!("Expected User message");
     }
 }
 
@@ -836,7 +836,7 @@ fn test_multiline_text_content() {
         assert!(text.text.contains('\n'));
         assert!(text.text.contains('\t'));
     } else {
-        panic!("Expected Text block");
+        unreachable!("Expected Text block");
     }
 }
 
@@ -863,7 +863,7 @@ fn test_special_characters_in_tool_args() {
         assert!(cmd.contains('|'));
         assert!(cmd.contains("grep"));
     } else {
-        panic!("Expected ToolCall block");
+        unreachable!("Expected ToolCall block");
     }
 }
 
@@ -896,7 +896,7 @@ fn test_large_tool_arguments() {
         let content = call.arguments["content"].as_str().unwrap();
         assert_eq!(content.len(), 2048);
     } else {
-        panic!("Expected ToolCall block");
+        unreachable!("Expected ToolCall block");
     }
 }
 
@@ -950,7 +950,7 @@ fn test_mixed_content_sequence() {
         assert!(matches!(assistant.content[2], ContentBlock::ToolCall(_)));
         assert!(matches!(assistant.content[3], ContentBlock::ToolCall(_)));
     } else {
-        panic!("Expected Assistant message");
+        unreachable!("Expected Assistant message");
     }
 }
 
@@ -1038,7 +1038,7 @@ fn test_deserialize_anthropic_style_message() {
         assert_eq!(assistant.usage.input, 10);
         assert_eq!(assistant.stop_reason, StopReason::Stop);
     } else {
-        panic!("Expected Assistant message");
+        unreachable!("Expected Assistant message");
     }
 }
 
