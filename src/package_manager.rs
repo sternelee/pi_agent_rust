@@ -2986,4 +2986,1305 @@ mod tests {
         let entries = resolve_extension_entries(&extension_dir).expect("entries");
         assert_eq!(entries, vec![extension_dir]);
     }
+
+    // ======================================================================
+    // is_pattern / split_patterns
+    // ======================================================================
+
+    #[test]
+    fn is_pattern_detects_all_prefix_operators() {
+        assert!(is_pattern("!exclude_me"));
+        assert!(is_pattern("+force_include"));
+        assert!(is_pattern("-force_exclude"));
+        assert!(is_pattern("*.js"));
+        assert!(is_pattern("foo?bar"));
+        assert!(!is_pattern("plain_entry"));
+        assert!(!is_pattern("extensions/a.js"));
+        assert!(!is_pattern(""));
+    }
+
+    #[test]
+    fn split_patterns_separates_plain_from_operators() {
+        let entries = vec![
+            "a.js".to_string(),
+            "!b.js".to_string(),
+            "c.js".to_string(),
+            "+d.js".to_string(),
+            "-e.js".to_string(),
+            "*.ts".to_string(),
+        ];
+        let (plain, patterns) = split_patterns(&entries);
+        assert_eq!(plain, vec!["a.js", "c.js"]);
+        assert_eq!(patterns, vec!["!b.js", "+d.js", "-e.js", "*.ts"]);
+    }
+
+    #[test]
+    fn split_patterns_empty_input() {
+        let (plain, patterns) = split_patterns(&[]);
+        assert!(plain.is_empty());
+        assert!(patterns.is_empty());
+    }
+
+    // ======================================================================
+    // posix_string / relative_posix
+    // ======================================================================
+
+    #[test]
+    fn posix_string_normalizes_separators() {
+        assert_eq!(posix_string(Path::new("a/b/c")), "a/b/c");
+        assert_eq!(posix_string(Path::new("/abs/path")), "/abs/path");
+    }
+
+    #[test]
+    fn relative_posix_computes_relative_path() {
+        let base = Path::new("/home/user/project");
+        let path = Path::new("/home/user/project/src/main.rs");
+        assert_eq!(relative_posix(base, path), "src/main.rs");
+    }
+
+    #[test]
+    fn relative_posix_with_parent_traversal() {
+        let base = Path::new("/home/user/project/src");
+        let path = Path::new("/home/user/project/tests/foo.rs");
+        assert_eq!(relative_posix(base, path), "../tests/foo.rs");
+    }
+
+    #[test]
+    fn relative_posix_no_common_prefix() {
+        let base = Path::new("/a/b");
+        let path = Path::new("/c/d");
+        let result = relative_posix(base, path);
+        assert_eq!(result, "../../c/d");
+    }
+
+    // ======================================================================
+    // normalize_exact_pattern
+    // ======================================================================
+
+    #[test]
+    fn normalize_exact_pattern_strips_dot_slash() {
+        assert_eq!(normalize_exact_pattern("./foo.js"), "foo.js");
+        assert_eq!(normalize_exact_pattern("foo.js"), "foo.js");
+        assert_eq!(normalize_exact_pattern(""), "");
+    }
+
+    // ======================================================================
+    // pattern_matches
+    // ======================================================================
+
+    #[test]
+    fn pattern_matches_simple_glob() {
+        assert!(pattern_matches("*.js", "foo.js"));
+        assert!(pattern_matches("*.js", "bar.js"));
+        assert!(!pattern_matches("*.js", "foo.ts"));
+    }
+
+    #[test]
+    fn pattern_matches_exact() {
+        assert!(pattern_matches("foo.js", "foo.js"));
+        assert!(!pattern_matches("foo.js", "bar.js"));
+    }
+
+    #[test]
+    fn pattern_matches_question_mark() {
+        assert!(pattern_matches("?.js", "a.js"));
+        assert!(!pattern_matches("?.js", "ab.js"));
+    }
+
+    // ======================================================================
+    // looks_like_git_url / looks_like_local_path
+    // ======================================================================
+
+    #[test]
+    fn looks_like_git_url_recognizes_known_hosts() {
+        assert!(looks_like_git_url("github.com/user/repo"));
+        assert!(looks_like_git_url("https://github.com/user/repo"));
+        assert!(looks_like_git_url("gitlab.com/user/repo"));
+        assert!(looks_like_git_url("bitbucket.org/user/repo"));
+        assert!(looks_like_git_url("codeberg.org/user/repo"));
+        assert!(!looks_like_git_url("example.com/user/repo"));
+        assert!(!looks_like_git_url("npm:foo"));
+        assert!(!looks_like_git_url("./local"));
+    }
+
+    #[test]
+    fn looks_like_local_path_various_forms() {
+        assert!(looks_like_local_path("./relative"));
+        assert!(looks_like_local_path("../parent"));
+        assert!(looks_like_local_path("/absolute"));
+        assert!(looks_like_local_path("~/home_relative"));
+        assert!(looks_like_local_path("file:///abs/path"));
+        assert!(!looks_like_local_path("npm:foo"));
+        assert!(!looks_like_local_path("github.com/user/repo"));
+    }
+
+    // ======================================================================
+    // hex_encode
+    // ======================================================================
+
+    #[test]
+    fn hex_encode_correctness() {
+        assert_eq!(hex_encode(&[0x00, 0xff, 0xab, 0x12]), "00ffab12");
+        assert_eq!(hex_encode(&[]), "");
+        assert_eq!(hex_encode(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
+    }
+
+    // ======================================================================
+    // normalize_dot_segments
+    // ======================================================================
+
+    #[test]
+    fn normalize_dot_segments_removes_current_dir() {
+        let result = normalize_dot_segments(Path::new("/a/./b/./c"));
+        assert_eq!(result, PathBuf::from("/a/b/c"));
+    }
+
+    #[test]
+    fn normalize_dot_segments_resolves_parent_dir() {
+        let result = normalize_dot_segments(Path::new("/a/b/../c"));
+        assert_eq!(result, PathBuf::from("/a/c"));
+    }
+
+    #[test]
+    fn normalize_dot_segments_multiple_parents() {
+        let result = normalize_dot_segments(Path::new("/a/b/c/../../d"));
+        assert_eq!(result, PathBuf::from("/a/d"));
+    }
+
+    #[test]
+    fn normalize_dot_segments_cannot_go_above_root() {
+        let result = normalize_dot_segments(Path::new("/a/../.."));
+        assert_eq!(result, PathBuf::from("/"));
+    }
+
+    #[test]
+    fn normalize_dot_segments_relative_path_keeps_parents() {
+        let result = normalize_dot_segments(Path::new("a/../../b"));
+        assert_eq!(result, PathBuf::from("../b"));
+    }
+
+    // ======================================================================
+    // resolve_path_from_base
+    // ======================================================================
+
+    #[test]
+    fn resolve_path_from_base_absolute_path() {
+        let result = resolve_path_from_base("/abs/path", Path::new("/base"));
+        assert_eq!(result, PathBuf::from("/abs/path"));
+    }
+
+    #[test]
+    fn resolve_path_from_base_relative_path() {
+        let result = resolve_path_from_base("foo/bar", Path::new("/base"));
+        assert_eq!(result, PathBuf::from("/base/foo/bar"));
+    }
+
+    #[test]
+    fn resolve_path_from_base_tilde_expansion() {
+        let result = resolve_path_from_base("~/docs", Path::new("/base"));
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/base"));
+        assert_eq!(result, home.join("docs"));
+    }
+
+    #[test]
+    fn resolve_path_from_base_bare_tilde() {
+        let result = resolve_path_from_base("~", Path::new("/base"));
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/base"));
+        assert_eq!(result, home);
+    }
+
+    // ======================================================================
+    // extract_string_array
+    // ======================================================================
+
+    #[test]
+    fn extract_string_array_from_string() {
+        let val = json!("single");
+        let result = extract_string_array(Some(&val));
+        assert_eq!(result, vec!["single"]);
+    }
+
+    #[test]
+    fn extract_string_array_from_array() {
+        let val = json!(["a", "b", "c"]);
+        let result = extract_string_array(Some(&val));
+        assert_eq!(result, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn extract_string_array_from_null() {
+        let result = extract_string_array(None);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn extract_string_array_filters_non_strings() {
+        let val = json!(["a", 42, "b", null, "c"]);
+        let result = extract_string_array(Some(&val));
+        assert_eq!(result, vec!["a", "b", "c"]);
+    }
+
+    // ======================================================================
+    // extract_package_spec / extract_filter_field
+    // ======================================================================
+
+    #[test]
+    fn extract_package_spec_from_string() {
+        let spec = extract_package_spec(&json!("npm:foo@1.0"));
+        assert!(spec.is_some());
+        let spec = spec.unwrap();
+        assert_eq!(spec.source, "npm:foo@1.0");
+        assert!(spec.filter.is_none());
+    }
+
+    #[test]
+    fn extract_package_spec_from_object() {
+        let val = json!({
+            "source": "npm:bar",
+            "extensions": ["a.js", "b.js"],
+            "skills": "my-skill"
+        });
+        let spec = extract_package_spec(&val);
+        assert!(spec.is_some());
+        let spec = spec.unwrap();
+        assert_eq!(spec.source, "npm:bar");
+        let filter = spec.filter.unwrap();
+        assert_eq!(
+            filter.extensions,
+            Some(vec!["a.js".to_string(), "b.js".to_string()])
+        );
+        assert_eq!(filter.skills, Some(vec!["my-skill".to_string()]));
+        assert!(filter.prompts.is_none());
+        assert!(filter.themes.is_none());
+    }
+
+    #[test]
+    fn extract_package_spec_from_object_missing_source() {
+        let val = json!({"extensions": ["a.js"]});
+        assert!(extract_package_spec(&val).is_none());
+    }
+
+    #[test]
+    fn extract_package_spec_from_non_string_non_object() {
+        assert!(extract_package_spec(&json!(42)).is_none());
+        assert!(extract_package_spec(&json!(null)).is_none());
+        assert!(extract_package_spec(&json!(true)).is_none());
+    }
+
+    #[test]
+    fn extract_filter_field_absent_key() {
+        let obj = serde_json::Map::new();
+        assert!(extract_filter_field(&obj, "extensions").is_none());
+    }
+
+    #[test]
+    fn extract_filter_field_string_value() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("skills".to_string(), json!("my-skill"));
+        let result = extract_filter_field(&obj, "skills");
+        assert_eq!(result, Some(vec!["my-skill".to_string()]));
+    }
+
+    #[test]
+    fn extract_filter_field_array_value() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("themes".to_string(), json!(["dark", "light"]));
+        let result = extract_filter_field(&obj, "themes");
+        assert_eq!(result, Some(vec!["dark".to_string(), "light".to_string()]));
+    }
+
+    #[test]
+    fn extract_filter_field_non_string_array_or_null() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("prompts".to_string(), json!(42));
+        let result = extract_filter_field(&obj, "prompts");
+        assert_eq!(result, Some(Vec::<String>::new()));
+    }
+
+    // ======================================================================
+    // is_enabled_by_overrides
+    // ======================================================================
+
+    #[test]
+    fn is_enabled_by_overrides_no_overrides_enables_all() {
+        let path = Path::new("/base/extensions/foo.js");
+        let patterns: Vec<String> = vec!["extensions/foo.js".to_string()];
+        assert!(is_enabled_by_overrides(path, &patterns, Path::new("/base")));
+    }
+
+    #[test]
+    fn is_enabled_by_overrides_exclude_disables() {
+        let path = Path::new("/base/extensions/foo.js");
+        let patterns = vec!["!*.js".to_string()];
+        assert!(!is_enabled_by_overrides(
+            path,
+            &patterns,
+            Path::new("/base")
+        ));
+    }
+
+    #[test]
+    fn is_enabled_by_overrides_force_include_overrides_exclude() {
+        let path = Path::new("/base/extensions/foo.js");
+        let patterns = vec!["!*.js".to_string(), "+extensions/foo.js".to_string()];
+        assert!(is_enabled_by_overrides(path, &patterns, Path::new("/base")));
+    }
+
+    #[test]
+    fn is_enabled_by_overrides_force_exclude_overrides_force_include() {
+        let path = Path::new("/base/extensions/foo.js");
+        let patterns = vec![
+            "+extensions/foo.js".to_string(),
+            "-extensions/foo.js".to_string(),
+        ];
+        assert!(!is_enabled_by_overrides(
+            path,
+            &patterns,
+            Path::new("/base")
+        ));
+    }
+
+    // ======================================================================
+    // apply_patterns
+    // ======================================================================
+
+    #[test]
+    fn apply_patterns_include_glob() {
+        let base = Path::new("/base");
+        let paths = vec![
+            PathBuf::from("/base/a.js"),
+            PathBuf::from("/base/b.ts"),
+            PathBuf::from("/base/c.js"),
+        ];
+        let patterns = vec!["*.js".to_string()];
+        let result = apply_patterns(&paths, &patterns, base);
+        assert!(result.contains(&PathBuf::from("/base/a.js")));
+        assert!(result.contains(&PathBuf::from("/base/c.js")));
+        assert!(!result.contains(&PathBuf::from("/base/b.ts")));
+    }
+
+    #[test]
+    fn apply_patterns_exclude_removes_from_includes() {
+        let base = Path::new("/base");
+        let paths = vec![
+            PathBuf::from("/base/a.js"),
+            PathBuf::from("/base/b.js"),
+            PathBuf::from("/base/c.js"),
+        ];
+        let patterns = vec!["*.js".to_string(), "!b.js".to_string()];
+        let result = apply_patterns(&paths, &patterns, base);
+        assert!(result.contains(&PathBuf::from("/base/a.js")));
+        assert!(!result.contains(&PathBuf::from("/base/b.js")));
+        assert!(result.contains(&PathBuf::from("/base/c.js")));
+    }
+
+    #[test]
+    fn apply_patterns_no_patterns_returns_all() {
+        let base = Path::new("/base");
+        let paths = vec![PathBuf::from("/base/a.js"), PathBuf::from("/base/b.js")];
+        let result = apply_patterns(&paths, &[], base);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn apply_patterns_force_include_adds_excluded() {
+        let base = Path::new("/base");
+        let paths = vec![PathBuf::from("/base/a.js"), PathBuf::from("/base/b.js")];
+        let patterns = vec!["a.js".to_string(), "+b.js".to_string()];
+        let result = apply_patterns(&paths, &patterns, base);
+        assert!(result.contains(&PathBuf::from("/base/a.js")));
+        assert!(result.contains(&PathBuf::from("/base/b.js")));
+    }
+
+    #[test]
+    fn apply_patterns_force_exclude_removes_everything() {
+        let base = Path::new("/base");
+        let paths = vec![PathBuf::from("/base/a.js"), PathBuf::from("/base/b.js")];
+        let patterns = vec!["-a.js".to_string()];
+        let result = apply_patterns(&paths, &patterns, base);
+        assert!(!result.contains(&PathBuf::from("/base/a.js")));
+        assert!(result.contains(&PathBuf::from("/base/b.js")));
+    }
+
+    // ======================================================================
+    // normalize_source / sources_match (additional coverage)
+    // ======================================================================
+
+    #[test]
+    fn normalize_source_empty_returns_none() {
+        assert!(normalize_source("").is_none());
+        assert!(normalize_source("  ").is_none());
+    }
+
+    #[test]
+    fn normalize_source_npm() {
+        let result = normalize_source("npm:@scope/pkg@2.0.0").unwrap();
+        assert_eq!(result.kind, NormalizedKind::Npm);
+        assert_eq!(result.key, "@scope/pkg");
+    }
+
+    #[test]
+    fn normalize_source_git() {
+        let result = normalize_source("git:github.com/user/repo@v1").unwrap();
+        assert_eq!(result.kind, NormalizedKind::Git);
+        assert_eq!(result.key, "github.com/user/repo");
+    }
+
+    #[test]
+    fn normalize_source_https_git_url() {
+        let result = normalize_source("https://github.com/user/repo.git@v2").unwrap();
+        assert_eq!(result.kind, NormalizedKind::Git);
+        assert_eq!(result.key, "github.com/user/repo");
+    }
+
+    #[test]
+    fn normalize_source_local() {
+        let result = normalize_source("my-local-package").unwrap();
+        assert_eq!(result.kind, NormalizedKind::Local);
+        assert_eq!(result.key, "my-local-package");
+    }
+
+    // ======================================================================
+    // parse_npm_spec (additional edge cases)
+    // ======================================================================
+
+    #[test]
+    fn parse_npm_spec_empty() {
+        assert_eq!(parse_npm_spec(""), (String::new(), None));
+    }
+
+    #[test]
+    fn parse_npm_spec_whitespace() {
+        assert_eq!(parse_npm_spec("  foo  "), ("foo".to_string(), None));
+    }
+
+    #[test]
+    fn parse_npm_spec_scoped_with_version() {
+        let (name, version) = parse_npm_spec("@org/pkg@^3.0.0");
+        assert_eq!(name, "@org/pkg");
+        assert_eq!(version, Some("^3.0.0".to_string()));
+    }
+
+    #[test]
+    fn parse_npm_spec_trailing_at() {
+        let (name, version) = parse_npm_spec("foo@");
+        assert_eq!(name, "foo@");
+        assert!(version.is_none());
+    }
+
+    // ======================================================================
+    // ResourceList dedup
+    // ======================================================================
+
+    #[test]
+    fn resource_list_deduplicates_by_path() {
+        let mut list = ResourceList::default();
+        let metadata = PathMetadata {
+            source: "test".to_string(),
+            scope: PackageScope::User,
+            origin: ResourceOrigin::Package,
+            base_dir: None,
+        };
+        list.add(PathBuf::from("/a"), &metadata, true);
+        list.add(PathBuf::from("/a"), &metadata, true);
+        list.add(PathBuf::from("/b"), &metadata, false);
+        assert_eq!(list.items.len(), 2);
+        assert_eq!(list.items[0].path, PathBuf::from("/a"));
+        assert_eq!(list.items[1].path, PathBuf::from("/b"));
+    }
+
+    // ======================================================================
+    // ResourceAccumulator into_resolved_paths
+    // ======================================================================
+
+    #[test]
+    fn resource_accumulator_sorts_by_path() {
+        let mut acc = ResourceAccumulator::new();
+        let metadata = PathMetadata {
+            source: "test".to_string(),
+            scope: PackageScope::User,
+            origin: ResourceOrigin::Package,
+            base_dir: None,
+        };
+        acc.extensions.add(PathBuf::from("/z/ext"), &metadata, true);
+        acc.extensions.add(PathBuf::from("/a/ext"), &metadata, true);
+        acc.skills.add(PathBuf::from("/z/skill"), &metadata, true);
+        acc.skills.add(PathBuf::from("/a/skill"), &metadata, true);
+
+        let resolved = acc.into_resolved_paths();
+        assert_eq!(resolved.extensions[0].path, PathBuf::from("/a/ext"));
+        assert_eq!(resolved.extensions[1].path, PathBuf::from("/z/ext"));
+        assert_eq!(resolved.skills[0].path, PathBuf::from("/a/skill"));
+        assert_eq!(resolved.skills[1].path, PathBuf::from("/z/skill"));
+    }
+
+    // ======================================================================
+    // SettingsSnapshot::entries_for
+    // ======================================================================
+
+    #[test]
+    fn settings_snapshot_entries_for_returns_correct_type() {
+        let snapshot = SettingsSnapshot {
+            packages: vec![],
+            extensions: vec!["ext".to_string()],
+            skills: vec!["skill".to_string()],
+            prompts: vec!["prompt".to_string()],
+            themes: vec!["theme".to_string()],
+        };
+        assert_eq!(snapshot.entries_for(ResourceType::Extensions), &["ext"]);
+        assert_eq!(snapshot.entries_for(ResourceType::Skills), &["skill"]);
+        assert_eq!(snapshot.entries_for(ResourceType::Prompts), &["prompt"]);
+        assert_eq!(snapshot.entries_for(ResourceType::Themes), &["theme"]);
+    }
+
+    // ======================================================================
+    // read_settings_json / read_settings_snapshot (filesystem tests)
+    // ======================================================================
+
+    #[test]
+    fn read_settings_json_missing_file_returns_empty_object() {
+        let result = read_settings_json(Path::new("/nonexistent/path/settings.json"));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), json!({}));
+    }
+
+    #[test]
+    fn read_settings_json_valid_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        fs::write(&path, r#"{"foo": "bar"}"#).expect("write");
+        let result = read_settings_json(&path).expect("read");
+        assert_eq!(result, json!({"foo": "bar"}));
+    }
+
+    #[test]
+    fn read_settings_json_invalid_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        fs::write(&path, "not json").expect("write");
+        assert!(read_settings_json(&path).is_err());
+    }
+
+    #[test]
+    fn read_settings_snapshot_with_packages_and_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        let settings = json!({
+            "packages": ["npm:foo", {"source": "npm:bar", "extensions": ["a.js"]}],
+            "extensions": ["ext1.js"],
+            "skills": "my-skill",
+            "themes": ["dark.json", "light.json"]
+        });
+        fs::write(&path, serde_json::to_string(&settings).unwrap()).expect("write");
+        let snapshot = read_settings_snapshot(&path).expect("read");
+        assert_eq!(snapshot.packages.len(), 2);
+        assert_eq!(snapshot.packages[0].source, "npm:foo");
+        assert_eq!(snapshot.packages[1].source, "npm:bar");
+        assert!(snapshot.packages[1].filter.is_some());
+        assert_eq!(snapshot.extensions, vec!["ext1.js"]);
+        assert_eq!(snapshot.skills, vec!["my-skill"]);
+        assert_eq!(snapshot.themes, vec!["dark.json", "light.json"]);
+        assert!(snapshot.prompts.is_empty());
+    }
+
+    // ======================================================================
+    // write_settings_json_atomic / update_package_sources
+    // ======================================================================
+
+    #[test]
+    fn write_settings_json_atomic_creates_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sub/settings.json");
+        let value = json!({"test": true});
+        write_settings_json_atomic(&path, &value).expect("write");
+        let content = fs::read_to_string(&path).expect("read");
+        let parsed: Value = serde_json::from_str(&content).expect("parse");
+        assert_eq!(parsed, json!({"test": true}));
+    }
+
+    #[test]
+    fn update_package_sources_add_and_remove() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        fs::write(&path, "{}").expect("write initial");
+
+        update_package_sources(&path, "npm:foo", UpdateAction::Add).expect("add");
+        let settings = read_settings_json(&path).expect("read");
+        let packages = settings["packages"].as_array().expect("packages array");
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0], json!("npm:foo"));
+
+        // Adding same source again should not duplicate
+        update_package_sources(&path, "npm:foo@2.0", UpdateAction::Add).expect("add again");
+        let settings = read_settings_json(&path).expect("read");
+        let packages = settings["packages"].as_array().expect("packages array");
+        assert_eq!(packages.len(), 1, "duplicate source should not be added");
+
+        update_package_sources(&path, "npm:foo", UpdateAction::Remove).expect("remove");
+        let settings = read_settings_json(&path).expect("read");
+        let packages = settings["packages"].as_array().expect("packages array");
+        assert!(packages.is_empty());
+    }
+
+    // ======================================================================
+    // list_packages_in_settings
+    // ======================================================================
+
+    #[test]
+    fn list_packages_in_settings_reads_all_formats() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        let settings = json!({
+            "packages": [
+                "npm:foo",
+                {"source": "git:github.com/user/repo", "extensions": ["a.js"]}
+            ]
+        });
+        fs::write(&path, serde_json::to_string(&settings).unwrap()).expect("write");
+        let packages = list_packages_in_settings(&path).expect("list");
+        assert_eq!(packages.len(), 2);
+        assert_eq!(packages[0].source, "npm:foo");
+        assert!(packages[0].filter.is_none());
+        assert_eq!(packages[1].source, "git:github.com/user/repo");
+        assert!(packages[1].filter.is_some());
+    }
+
+    // ======================================================================
+    // read_pi_manifest
+    // ======================================================================
+
+    #[test]
+    fn read_pi_manifest_with_pi_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest = json!({
+            "name": "test-pkg",
+            "version": "1.0.0",
+            "pi": {
+                "extensions": ["ext/a.js", "ext/b.js"],
+                "skills": ["skills/foo.md"]
+            }
+        });
+        fs::write(
+            dir.path().join("package.json"),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .expect("write");
+        let result = read_pi_manifest(dir.path());
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert_eq!(
+            result.extensions,
+            Some(vec!["ext/a.js".to_string(), "ext/b.js".to_string()])
+        );
+        assert_eq!(result.skills, Some(vec!["skills/foo.md".to_string()]));
+        assert!(result.prompts.is_none());
+        assert!(result.themes.is_none());
+    }
+
+    #[test]
+    fn read_pi_manifest_no_pi_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name": "test", "version": "1.0.0"}"#,
+        )
+        .expect("write");
+        assert!(read_pi_manifest(dir.path()).is_none());
+    }
+
+    #[test]
+    fn read_pi_manifest_no_package_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(read_pi_manifest(dir.path()).is_none());
+    }
+
+    // ======================================================================
+    // temporary_dir
+    // ======================================================================
+
+    #[test]
+    fn temporary_dir_stable_hash() {
+        let a = temporary_dir("npm", None);
+        let b = temporary_dir("npm", None);
+        assert_eq!(a, b, "same inputs should produce same path");
+
+        let c = temporary_dir("npm", Some("foo"));
+        assert_ne!(a, c, "different suffix should produce different path");
+    }
+
+    #[test]
+    fn temporary_dir_includes_prefix() {
+        let result = temporary_dir("git-github.com", Some("user/repo"));
+        let path_str = result.to_string_lossy();
+        assert!(path_str.contains("pi-extensions"));
+        assert!(path_str.contains("git-github.com"));
+    }
+
+    // ======================================================================
+    // compat_scan_enabled
+    // ======================================================================
+
+    #[test]
+    fn compat_scan_enabled_recognizes_truthy_values() {
+        // Test the parsing logic inline (cannot mutate env in safe Rust 2024)
+        let truthy = ["1", "true", "yes", "on", "TRUE", "Yes", "ON"];
+        for val in truthy {
+            let lower = val.trim().to_ascii_lowercase();
+            assert!(
+                matches!(lower.as_str(), "1" | "true" | "yes" | "on"),
+                "{val} should be truthy"
+            );
+        }
+        let falsy = ["0", "false", "no", "off", "", "random"];
+        for val in falsy {
+            let lower = val.trim().to_ascii_lowercase();
+            assert!(
+                !matches!(lower.as_str(), "1" | "true" | "yes" | "on"),
+                "{val} should be falsy"
+            );
+        }
+    }
+
+    // ======================================================================
+    // parse_source (additional cases)
+    // ======================================================================
+
+    #[test]
+    fn parse_source_npm_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        match parse_source("npm:@scope/pkg@1.0", dir.path()) {
+            ParsedSource::Npm { spec, name, pinned } => {
+                assert_eq!(spec, "@scope/pkg@1.0");
+                assert_eq!(name, "@scope/pkg");
+                assert!(pinned);
+            }
+            other => panic!("expected Npm, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_source_npm_unpinned() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        match parse_source("npm:express", dir.path()) {
+            ParsedSource::Npm { pinned, .. } => {
+                assert!(!pinned);
+            }
+            other => panic!("expected Npm, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_source_git_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        match parse_source("git:github.com/user/repo@v2", dir.path()) {
+            ParsedSource::Git {
+                repo,
+                host,
+                path,
+                r#ref,
+                pinned,
+            } => {
+                assert_eq!(repo, "github.com/user/repo");
+                assert_eq!(host, "github.com");
+                assert_eq!(path, "user/repo");
+                assert_eq!(r#ref, Some("v2".to_string()));
+                assert!(pinned);
+            }
+            other => panic!("expected Git, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_source_https_github_url() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        match parse_source("https://github.com/user/repo.git", dir.path()) {
+            ParsedSource::Git { repo, host, .. } => {
+                assert_eq!(repo, "github.com/user/repo");
+                assert_eq!(host, "github.com");
+            }
+            other => panic!("expected Git, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_source_local_relative() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        match parse_source("./my-ext", dir.path()) {
+            ParsedSource::Local { path } => {
+                assert_eq!(path, dir.path().join("my-ext"));
+            }
+            other => panic!("expected Local, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_source_local_absolute() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        match parse_source("/abs/my-ext", dir.path()) {
+            ParsedSource::Local { path } => {
+                assert_eq!(path, PathBuf::from("/abs/my-ext"));
+            }
+            other => panic!("expected Local, got {other:?}"),
+        }
+    }
+
+    // ======================================================================
+    // parse_git_source local paths
+    // ======================================================================
+
+    #[test]
+    fn parse_git_source_local_path_hashes_deterministically() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let result1 = parse_git_source("./local-repo", dir.path());
+        let result2 = parse_git_source("./local-repo", dir.path());
+        match (&result1, &result2) {
+            (ParsedSource::Git { path: p1, .. }, ParsedSource::Git { path: p2, .. }) => {
+                assert_eq!(p1, p2, "same local source should produce same hash");
+            }
+            _ => panic!("expected Git for both"),
+        }
+    }
+
+    // ======================================================================
+    // PackageManager::dedupe_packages
+    // ======================================================================
+
+    #[test]
+    fn dedupe_packages_project_wins_over_user() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = PackageManager::new(dir.path().to_path_buf());
+
+        let packages = vec![
+            ScopedPackage {
+                pkg: PackageSpec {
+                    source: "npm:foo@1.0".to_string(),
+                    filter: None,
+                },
+                scope: PackageScope::User,
+            },
+            ScopedPackage {
+                pkg: PackageSpec {
+                    source: "npm:foo@2.0".to_string(),
+                    filter: None,
+                },
+                scope: PackageScope::Project,
+            },
+        ];
+
+        let deduped = manager.dedupe_packages(packages);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].scope, PackageScope::Project);
+        assert_eq!(deduped[0].pkg.source, "npm:foo@2.0");
+    }
+
+    #[test]
+    fn dedupe_packages_user_does_not_override_project() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = PackageManager::new(dir.path().to_path_buf());
+
+        let packages = vec![
+            ScopedPackage {
+                pkg: PackageSpec {
+                    source: "npm:bar@1.0".to_string(),
+                    filter: None,
+                },
+                scope: PackageScope::Project,
+            },
+            ScopedPackage {
+                pkg: PackageSpec {
+                    source: "npm:bar@2.0".to_string(),
+                    filter: None,
+                },
+                scope: PackageScope::User,
+            },
+        ];
+
+        let deduped = manager.dedupe_packages(packages);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].scope, PackageScope::Project);
+        assert_eq!(deduped[0].pkg.source, "npm:bar@1.0");
+    }
+
+    #[test]
+    fn dedupe_packages_different_names_preserved() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = PackageManager::new(dir.path().to_path_buf());
+
+        let packages = vec![
+            ScopedPackage {
+                pkg: PackageSpec {
+                    source: "npm:foo".to_string(),
+                    filter: None,
+                },
+                scope: PackageScope::User,
+            },
+            ScopedPackage {
+                pkg: PackageSpec {
+                    source: "npm:bar".to_string(),
+                    filter: None,
+                },
+                scope: PackageScope::User,
+            },
+        ];
+
+        let deduped = manager.dedupe_packages(packages);
+        assert_eq!(deduped.len(), 2);
+    }
+
+    // ======================================================================
+    // collect_auto_prompt_entries / collect_auto_theme_entries
+    // ======================================================================
+
+    #[test]
+    fn collect_auto_prompt_entries_finds_md_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let prompts_dir = dir.path().join("prompts");
+        fs::create_dir_all(&prompts_dir).expect("create dir");
+        fs::write(prompts_dir.join("hello.md"), "# Hello").expect("write");
+        fs::write(prompts_dir.join("world.md"), "# World").expect("write");
+        fs::write(prompts_dir.join("notmd.txt"), "text").expect("write");
+        fs::write(prompts_dir.join(".hidden.md"), "hidden").expect("write");
+
+        let entries = collect_auto_prompt_entries(&prompts_dir);
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|p| p.extension().unwrap() == "md"));
+    }
+
+    #[test]
+    fn collect_auto_prompt_entries_nonexistent_dir() {
+        let entries = collect_auto_prompt_entries(Path::new("/nonexistent"));
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn collect_auto_theme_entries_finds_json_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let themes_dir = dir.path().join("themes");
+        fs::create_dir_all(&themes_dir).expect("create dir");
+        fs::write(themes_dir.join("dark.json"), "{}").expect("write");
+        fs::write(themes_dir.join("light.json"), "{}").expect("write");
+        fs::write(themes_dir.join("readme.md"), "text").expect("write");
+
+        let entries = collect_auto_theme_entries(&themes_dir);
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|p| p.extension().unwrap() == "json"));
+    }
+
+    // ======================================================================
+    // collect_auto_extension_entries
+    // ======================================================================
+
+    #[test]
+    fn collect_auto_extension_entries_finds_js_ts_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ext_dir = dir.path().join("extensions");
+        fs::create_dir_all(&ext_dir).expect("create dir");
+        fs::write(ext_dir.join("a.js"), "a").expect("write");
+        fs::write(ext_dir.join("b.ts"), "b").expect("write");
+        fs::write(ext_dir.join("c.md"), "c").expect("write");
+
+        let entries = collect_auto_extension_entries(&ext_dir);
+        assert!(entries.len() >= 2);
+        let has_js = entries.iter().any(|p| p.file_name().unwrap() == "a.js");
+        let has_ts = entries.iter().any(|p| p.file_name().unwrap() == "b.ts");
+        let has_md = entries.iter().any(|p| p.file_name().unwrap() == "c.md");
+        assert!(has_js, "should find .js files");
+        assert!(has_ts, "should find .ts files");
+        assert!(!has_md, "should not find .md files");
+    }
+
+    // ======================================================================
+    // resolve_extension_entries with index.ts / index.js
+    // ======================================================================
+
+    #[test]
+    fn resolve_extension_entries_finds_index_ts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ext_dir = dir.path().join("ext");
+        fs::create_dir_all(&ext_dir).expect("create dir");
+        fs::write(ext_dir.join("index.ts"), "export default {}").expect("write");
+
+        let entries = resolve_extension_entries(&ext_dir).expect("entries");
+        assert_eq!(entries, vec![ext_dir.join("index.ts")]);
+    }
+
+    #[test]
+    fn resolve_extension_entries_finds_index_js() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ext_dir = dir.path().join("ext");
+        fs::create_dir_all(&ext_dir).expect("create dir");
+        fs::write(ext_dir.join("index.js"), "export default {}").expect("write");
+
+        let entries = resolve_extension_entries(&ext_dir).expect("entries");
+        assert_eq!(entries, vec![ext_dir.join("index.js")]);
+    }
+
+    #[test]
+    fn resolve_extension_entries_prefers_manifest_over_index() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ext_dir = dir.path().join("ext");
+        fs::create_dir_all(&ext_dir).expect("create dir");
+        fs::write(
+            ext_dir.join("extension.json"),
+            serde_json::to_string_pretty(&json!({
+                "schema": "pi.ext.manifest.v1",
+                "extension_id": "test.ext",
+                "name": "Test",
+                "version": "0.1.0",
+                "api_version": "1.0",
+                "runtime": "js",
+                "entrypoint": "main.js",
+                "capabilities": []
+            }))
+            .unwrap(),
+        )
+        .expect("write manifest");
+        fs::write(ext_dir.join("main.js"), "main").expect("write main");
+        fs::write(ext_dir.join("index.ts"), "index").expect("write index");
+
+        let entries = resolve_extension_entries(&ext_dir).expect("entries");
+        // Manifest presence should return the directory itself, not index.ts
+        assert_eq!(entries, vec![ext_dir]);
+    }
+
+    #[test]
+    fn resolve_extension_entries_empty_dir_returns_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ext_dir = dir.path().join("ext");
+        fs::create_dir_all(&ext_dir).expect("create dir");
+        assert!(resolve_extension_entries(&ext_dir).is_none());
+    }
+
+    // ======================================================================
+    // collect_skill_entries
+    // ======================================================================
+
+    #[test]
+    fn collect_skill_entries_finds_skill_md_in_subdirs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let skills_dir = dir.path().join("skills");
+        fs::create_dir_all(skills_dir.join("my-skill")).expect("create dir");
+        fs::write(skills_dir.join("my-skill/SKILL.md"), "# Skill").expect("write skill");
+        fs::write(skills_dir.join("top-level.md"), "# Top").expect("write top");
+        fs::write(skills_dir.join("readme.txt"), "text").expect("write txt");
+
+        let entries = collect_skill_entries(&skills_dir);
+        assert!(entries.iter().any(|p| p.file_name().unwrap() == "SKILL.md"));
+        assert!(
+            entries
+                .iter()
+                .any(|p| p.file_name().unwrap() == "top-level.md")
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|p| p.file_name().unwrap() == "readme.txt")
+        );
+    }
+
+    // ======================================================================
+    // prune_empty_git_parents
+    // ======================================================================
+
+    #[test]
+    fn prune_empty_git_parents_removes_empty_ancestors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("git");
+        let deep = root.join("github.com/user/repo");
+        fs::create_dir_all(&deep).expect("create dirs");
+
+        // Remove the deepest dir first
+        fs::remove_dir(&deep).expect("remove repo dir");
+
+        prune_empty_git_parents(&deep, &root);
+
+        // Both github.com/user and github.com should be pruned
+        assert!(!root.join("github.com/user").exists());
+        assert!(!root.join("github.com").exists());
+        // Root itself should remain
+        assert!(root.exists());
+    }
+
+    // ======================================================================
+    // ensure_npm_project / ensure_git_ignore
+    // ======================================================================
+
+    #[test]
+    fn ensure_npm_project_creates_package_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("npm");
+        ensure_npm_project(&root).expect("ensure");
+        assert!(root.join("package.json").exists());
+        assert!(root.join(".gitignore").exists());
+
+        let content = fs::read_to_string(root.join("package.json")).expect("read");
+        let json: Value = serde_json::from_str(&content).expect("parse");
+        assert_eq!(json["name"], "pi-packages");
+        assert_eq!(json["private"], true);
+    }
+
+    #[test]
+    fn ensure_npm_project_does_not_overwrite_existing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("npm");
+        fs::create_dir_all(&root).expect("create dir");
+        fs::write(root.join("package.json"), r#"{"name":"existing"}"#).expect("write");
+        ensure_npm_project(&root).expect("ensure");
+        let content = fs::read_to_string(root.join("package.json")).expect("read");
+        assert!(content.contains("existing"), "should not overwrite");
+    }
+
+    #[test]
+    fn ensure_git_ignore_creates_gitignore() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("git");
+        ensure_git_ignore(&root).expect("ensure");
+        let content = fs::read_to_string(root.join(".gitignore")).expect("read");
+        assert!(content.contains('*'));
+        assert!(content.contains("!.gitignore"));
+    }
+
+    // ======================================================================
+    // PiManifest::entries_for
+    // ======================================================================
+
+    #[test]
+    fn pi_manifest_entries_for_returns_cloned_vectors() {
+        let manifest = PiManifest {
+            extensions: Some(vec!["a.js".to_string()]),
+            skills: None,
+            prompts: Some(vec!["p.md".to_string()]),
+            themes: None,
+        };
+        assert_eq!(
+            manifest.entries_for(ResourceType::Extensions),
+            Some(vec!["a.js".to_string()])
+        );
+        assert!(manifest.entries_for(ResourceType::Skills).is_none());
+        assert_eq!(
+            manifest.entries_for(ResourceType::Prompts),
+            Some(vec!["p.md".to_string()])
+        );
+        assert!(manifest.entries_for(ResourceType::Themes).is_none());
+    }
+
+    // ======================================================================
+    // ResourceType::all / as_str
+    // ======================================================================
+
+    #[test]
+    fn resource_type_all_and_as_str() {
+        let all = ResourceType::all();
+        assert_eq!(all.len(), 4);
+        assert_eq!(ResourceType::Extensions.as_str(), "extensions");
+        assert_eq!(ResourceType::Skills.as_str(), "skills");
+        assert_eq!(ResourceType::Prompts.as_str(), "prompts");
+        assert_eq!(ResourceType::Themes.as_str(), "themes");
+    }
+
+    // ======================================================================
+    // read_installed_npm_version
+    // ======================================================================
+
+    #[test]
+    fn read_installed_npm_version_parses_package_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"foo","version":"1.2.3"}"#,
+        )
+        .expect("write");
+        let version = read_installed_npm_version(dir.path());
+        assert_eq!(version, Some("1.2.3".to_string()));
+    }
+
+    #[test]
+    fn read_installed_npm_version_missing_version_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("package.json"), r#"{"name":"foo"}"#).expect("write");
+        assert!(read_installed_npm_version(dir.path()).is_none());
+    }
+
+    #[test]
+    fn read_installed_npm_version_no_package_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(read_installed_npm_version(dir.path()).is_none());
+    }
+
+    // ======================================================================
+    // PackageScope / extract_package_source
+    // ======================================================================
+
+    #[test]
+    fn extract_package_source_string_value() {
+        let (source, is_obj) = extract_package_source(&json!("npm:foo")).unwrap();
+        assert_eq!(source, "npm:foo");
+        assert!(!is_obj);
+    }
+
+    #[test]
+    fn extract_package_source_object_value() {
+        let val = json!({"source": "git:repo"});
+        let (source, is_obj) = extract_package_source(&val).unwrap();
+        assert_eq!(source, "git:repo");
+        assert!(is_obj);
+    }
+
+    #[test]
+    fn extract_package_source_invalid_returns_none() {
+        assert!(extract_package_source(&json!(42)).is_none());
+        assert!(extract_package_source(&json!(null)).is_none());
+    }
+
+    // ======================================================================
+    // AutoDirs
+    // ======================================================================
+
+    #[test]
+    fn auto_dirs_constructs_correct_paths() {
+        let base = Path::new("/home/user/.pi/agent");
+        let dirs = AutoDirs::new(base);
+        assert_eq!(dirs.extensions, base.join("extensions"));
+        assert_eq!(dirs.skills, base.join("skills"));
+        assert_eq!(dirs.prompts, base.join("prompts"));
+        assert_eq!(dirs.themes, base.join("themes"));
+    }
+
+    // ======================================================================
+    // get_override_patterns
+    // ======================================================================
+
+    #[test]
+    fn get_override_patterns_filters_correctly() {
+        let entries = vec![
+            "a.js".to_string(),
+            "!excluded.js".to_string(),
+            "+forced.js".to_string(),
+            "-removed.js".to_string(),
+            "b.js".to_string(),
+        ];
+        let overrides = get_override_patterns(&entries);
+        assert_eq!(overrides.len(), 3);
+        assert!(overrides.contains(&"!excluded.js".to_string()));
+        assert!(overrides.contains(&"+forced.js".to_string()));
+        assert!(overrides.contains(&"-removed.js".to_string()));
+    }
+
+    // ======================================================================
+    // local_path_from_spec
+    // ======================================================================
+
+    #[test]
+    fn local_path_from_spec_file_url() {
+        let cwd = Path::new("/home/user/project");
+        let result = local_path_from_spec("file:///abs/repo", cwd);
+        assert_eq!(result, PathBuf::from("/abs/repo"));
+    }
+
+    #[test]
+    fn local_path_from_spec_relative() {
+        let cwd = Path::new("/home/user/project");
+        let result = local_path_from_spec("./my-repo", cwd);
+        assert_eq!(result, PathBuf::from("/home/user/project/my-repo"));
+    }
 }

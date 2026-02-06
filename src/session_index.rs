@@ -873,4 +873,406 @@ mod tests {
 
         assert!(index.should_reindex(Duration::from_secs(60)));
     }
+
+    // ── session_stats ────────────────────────────────────────────────
+
+    #[test]
+    fn session_stats_empty_entries() {
+        let (count, name) = session_stats(&[]);
+        assert_eq!(count, 0);
+        assert!(name.is_none());
+    }
+
+    #[test]
+    fn session_stats_counts_messages_only() {
+        let entries = vec![
+            make_user_entry(None, "m1", "hello"),
+            make_session_info_entry(Some("m1".to_string()), "info1", None),
+            make_user_entry(Some("info1".to_string()), "m2", "world"),
+        ];
+        let (count, name) = session_stats(&entries);
+        assert_eq!(count, 2);
+        assert!(name.is_none());
+    }
+
+    #[test]
+    fn session_stats_extracts_last_name() {
+        let entries = vec![
+            make_session_info_entry(None, "info1", Some("First Name")),
+            make_user_entry(Some("info1".to_string()), "m1", "msg"),
+            make_session_info_entry(Some("m1".to_string()), "info2", Some("Final Name")),
+        ];
+        let (count, name) = session_stats(&entries);
+        assert_eq!(count, 1);
+        assert_eq!(name.as_deref(), Some("Final Name"));
+    }
+
+    #[test]
+    fn session_stats_name_not_overwritten_by_none() {
+        let entries = vec![
+            make_session_info_entry(None, "info1", Some("My Session")),
+            make_session_info_entry(Some("info1".to_string()), "info2", None),
+        ];
+        let (_, name) = session_stats(&entries);
+        // None doesn't overwrite previous name because of `if info.name.is_some()`
+        assert_eq!(name.as_deref(), Some("My Session"));
+    }
+
+    // ── file_stats ──────────────────────────────────────────────────
+
+    #[test]
+    fn file_stats_returns_size_and_mtime() {
+        let harness = TestHarness::new("file_stats_returns_size_and_mtime");
+        let path = harness.temp_path("test_file.txt");
+        fs::write(&path, "hello world").expect("write");
+
+        let (last_modified_ms, size_bytes) = file_stats(&path).expect("file_stats");
+        assert_eq!(size_bytes, 11); // "hello world" = 11 bytes
+        assert!(last_modified_ms > 0, "Expected positive modification time");
+    }
+
+    #[test]
+    fn file_stats_missing_file_returns_error() {
+        let err = file_stats(Path::new("/nonexistent/file.txt"));
+        assert!(err.is_err());
+    }
+
+    // ── is_session_file_path ────────────────────────────────────────
+
+    #[test]
+    fn is_session_file_path_jsonl() {
+        assert!(is_session_file_path(Path::new("session.jsonl")));
+        assert!(is_session_file_path(Path::new("/foo/bar/test.jsonl")));
+    }
+
+    #[test]
+    fn is_session_file_path_non_session() {
+        assert!(!is_session_file_path(Path::new("session.txt")));
+        assert!(!is_session_file_path(Path::new("session.json")));
+        assert!(!is_session_file_path(Path::new("session")));
+    }
+
+    // ── walk_sessions ───────────────────────────────────────────────
+
+    #[test]
+    fn walk_sessions_finds_jsonl_files_recursively() {
+        let harness = TestHarness::new("walk_sessions_finds_jsonl_files_recursively");
+        let root = harness.temp_path("sessions");
+        fs::create_dir_all(root.join("project")).expect("create dirs");
+
+        fs::write(root.join("a.jsonl"), "").expect("write");
+        fs::write(root.join("project/b.jsonl"), "").expect("write");
+        fs::write(root.join("not_session.txt"), "").expect("write");
+
+        let paths = walk_sessions(&root);
+        let ok_paths: Vec<_> = paths.into_iter().filter_map(|r| r.ok()).collect();
+        assert_eq!(ok_paths.len(), 2);
+        assert!(ok_paths.iter().any(|p| p.ends_with("a.jsonl")));
+        assert!(ok_paths.iter().any(|p| p.ends_with("b.jsonl")));
+    }
+
+    #[test]
+    fn walk_sessions_empty_dir() {
+        let harness = TestHarness::new("walk_sessions_empty_dir");
+        let root = harness.temp_path("sessions");
+        fs::create_dir_all(&root).expect("create dirs");
+
+        let paths = walk_sessions(&root);
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn walk_sessions_nonexistent_dir() {
+        let paths = walk_sessions(Path::new("/nonexistent/path"));
+        assert!(paths.is_empty());
+    }
+
+    // ── current_epoch_ms ────────────────────────────────────────────
+
+    #[test]
+    fn current_epoch_ms_is_valid_number() {
+        let ms = current_epoch_ms();
+        let parsed: i64 = ms.parse().expect("should be valid i64");
+        assert!(parsed > 0, "Epoch ms should be positive");
+        // Should be after 2020-01-01
+        assert!(parsed > 1_577_836_800_000, "Epoch ms should be after 2020");
+    }
+
+    // ── delete_session_path ─────────────────────────────────────────
+
+    #[test]
+    fn delete_session_path_removes_row() {
+        let harness = TestHarness::new("delete_session_path_removes_row");
+        let root = harness.temp_path("sessions");
+        fs::create_dir_all(&root).expect("create root dir");
+        let index = SessionIndex::for_sessions_root(&root);
+
+        let session_path = harness.temp_path("sessions/project/del.jsonl");
+        fs::create_dir_all(session_path.parent().expect("parent")).expect("create dirs");
+        fs::write(&session_path, "data").expect("write");
+
+        let mut session = Session::in_memory();
+        session.header = make_header("id-del", "cwd-del");
+        session.path = Some(session_path.clone());
+        session.entries.push(make_user_entry(None, "m1", "hi"));
+        index.index_session(&session).expect("index session");
+
+        let before = index.list_sessions(None).expect("list before");
+        assert_eq!(before.len(), 1);
+
+        index
+            .delete_session_path(&session_path)
+            .expect("delete session path");
+
+        let after = index.list_sessions(None).expect("list after");
+        assert!(after.is_empty());
+    }
+
+    #[test]
+    fn delete_session_path_noop_when_not_exists() {
+        let harness = TestHarness::new("delete_session_path_noop_when_not_exists");
+        let root = harness.temp_path("sessions");
+        fs::create_dir_all(&root).expect("create root dir");
+        let index = SessionIndex::for_sessions_root(&root);
+
+        // Delete a path that was never indexed — should succeed without error
+        index
+            .delete_session_path(Path::new("/nonexistent/session.jsonl"))
+            .expect("delete nonexistent should succeed");
+    }
+
+    // ── should_reindex ──────────────────────────────────────────────
+
+    #[test]
+    fn should_reindex_returns_false_when_db_is_fresh() {
+        let harness = TestHarness::new("should_reindex_returns_false_when_db_is_fresh");
+        let root = harness.temp_path("sessions");
+        fs::create_dir_all(&root).expect("create root dir");
+        let index = SessionIndex::for_sessions_root(&root);
+
+        // Create the db by indexing a session
+        let session_path = harness.temp_path("sessions/project/fresh.jsonl");
+        fs::create_dir_all(session_path.parent().expect("parent")).expect("create dirs");
+        fs::write(&session_path, "data").expect("write");
+
+        let mut session = Session::in_memory();
+        session.header = make_header("id-fresh", "cwd-fresh");
+        session.path = Some(session_path);
+        session.entries.push(make_user_entry(None, "m1", "hi"));
+        index.index_session(&session).expect("index session");
+
+        // DB just created — should not need reindex for large max_age
+        assert!(!index.should_reindex(Duration::from_secs(3600)));
+    }
+
+    // ── reindex_if_stale ────────────────────────────────────────────
+
+    #[test]
+    fn reindex_if_stale_returns_false_when_fresh() {
+        let harness = TestHarness::new("reindex_if_stale_returns_false_when_fresh");
+        let root = harness.temp_path("sessions");
+        fs::create_dir_all(&root).expect("create root dir");
+        let index = SessionIndex::for_sessions_root(&root);
+
+        // Create a session file on disk
+        let session_path = harness.temp_path("sessions/project/stale_test.jsonl");
+        fs::create_dir_all(session_path.parent().expect("parent")).expect("create dirs");
+        let header = make_header("id-stale", "cwd-stale");
+        let entries = vec![make_user_entry(None, "m1", "msg")];
+        write_session_jsonl(&session_path, &header, &entries);
+
+        // First reindex (no db exists yet)
+        let result = index
+            .reindex_if_stale(Duration::from_secs(3600))
+            .expect("reindex");
+        assert!(result, "First reindex should return true (no db)");
+
+        // Second call with large max_age should return false (fresh)
+        let result = index
+            .reindex_if_stale(Duration::from_secs(3600))
+            .expect("reindex");
+        assert!(!result, "Second reindex should return false (fresh)");
+    }
+
+    #[test]
+    fn reindex_if_stale_returns_true_when_stale() {
+        let harness = TestHarness::new("reindex_if_stale_returns_true_when_stale");
+        let root = harness.temp_path("sessions");
+        fs::create_dir_all(&root).expect("create root dir");
+        let index = SessionIndex::for_sessions_root(&root);
+
+        // Create a session on disk
+        let session_path = harness.temp_path("sessions/project/stale.jsonl");
+        fs::create_dir_all(session_path.parent().expect("parent")).expect("create dirs");
+        let header = make_header("id-stale2", "cwd-stale2");
+        let entries = vec![make_user_entry(None, "m1", "msg")];
+        write_session_jsonl(&session_path, &header, &entries);
+
+        // Reindex with zero max_age — always stale
+        let result = index.reindex_if_stale(Duration::ZERO).expect("reindex");
+        assert!(result, "Should reindex with zero max_age");
+    }
+
+    // ── build_meta ──────────────────────────────────────────────────
+
+    #[test]
+    fn build_meta_from_file_returns_correct_fields() {
+        let harness = TestHarness::new("build_meta_from_file_returns_correct_fields");
+        let path = harness.temp_path("test_session.jsonl");
+        let header = make_header("id-bm", "cwd-bm");
+        let entries = vec![
+            make_user_entry(None, "m1", "hello"),
+            make_user_entry(Some("m1".to_string()), "m2", "world"),
+            make_session_info_entry(Some("m2".to_string()), "info1", Some("Named Session")),
+        ];
+        write_session_jsonl(&path, &header, &entries);
+
+        let meta = build_meta_from_file(&path).expect("build_meta_from_file");
+        assert_eq!(meta.id, "id-bm");
+        assert_eq!(meta.cwd, "cwd-bm");
+        assert_eq!(meta.message_count, 2);
+        assert_eq!(meta.name.as_deref(), Some("Named Session"));
+        assert!(meta.size_bytes > 0);
+        assert!(meta.last_modified_ms > 0);
+        assert!(meta.path.contains("test_session.jsonl"));
+    }
+
+    // ── for_sessions_root path construction ─────────────────────────
+
+    #[test]
+    fn for_sessions_root_constructs_correct_paths() {
+        let root = Path::new("/home/user/.pi/sessions");
+        let index = SessionIndex::for_sessions_root(root);
+        assert_eq!(
+            index.db_path,
+            PathBuf::from("/home/user/.pi/sessions/session-index.sqlite")
+        );
+        assert_eq!(
+            index.lock_path,
+            PathBuf::from("/home/user/.pi/sessions/session-index.lock")
+        );
+    }
+
+    // ── sessions_root accessor ──────────────────────────────────────
+
+    #[test]
+    fn sessions_root_returns_parent_of_db_path() {
+        let root = Path::new("/home/user/.pi/sessions");
+        let index = SessionIndex::for_sessions_root(root);
+        assert_eq!(index.sessions_root(), root);
+    }
+
+    // ── reindex_all clears old rows ─────────────────────────────────
+
+    #[test]
+    fn reindex_all_replaces_stale_rows() {
+        let harness = TestHarness::new("reindex_all_replaces_stale_rows");
+        let root = harness.temp_path("sessions");
+        fs::create_dir_all(root.join("project")).expect("create dirs");
+
+        // Index two sessions manually
+        let index = SessionIndex::for_sessions_root(&root);
+
+        let path_a = harness.temp_path("sessions/project/a.jsonl");
+        let header_a = make_header("id-a", "cwd-a");
+        write_session_jsonl(&path_a, &header_a, &[make_user_entry(None, "m1", "a")]);
+
+        let path_b = harness.temp_path("sessions/project/b.jsonl");
+        let header_b = make_header("id-b", "cwd-b");
+        write_session_jsonl(&path_b, &header_b, &[make_user_entry(None, "m1", "b")]);
+
+        // Index both
+        index.reindex_all().expect("reindex_all");
+        let all = index.list_sessions(None).expect("list all");
+        assert_eq!(all.len(), 2);
+
+        // Now delete one file on disk and reindex
+        fs::remove_file(&path_a).expect("remove file");
+        index.reindex_all().expect("reindex_all after delete");
+        let all = index.list_sessions(None).expect("list after reindex");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, "id-b");
+    }
+
+    // ── Session with multiple info entries ───────────────────────────
+
+    #[test]
+    fn index_session_with_session_name() {
+        let harness = TestHarness::new("index_session_with_session_name");
+        let root = harness.temp_path("sessions");
+        fs::create_dir_all(&root).expect("create root dir");
+        let index = SessionIndex::for_sessions_root(&root);
+
+        let session_path = harness.temp_path("sessions/project/named.jsonl");
+        fs::create_dir_all(session_path.parent().expect("parent")).expect("create dirs");
+        fs::write(&session_path, "data").expect("write");
+
+        let mut session = Session::in_memory();
+        session.header = make_header("id-named", "cwd-named");
+        session.path = Some(session_path);
+        session.entries.push(make_user_entry(None, "m1", "hi"));
+        session.entries.push(make_session_info_entry(
+            Some("m1".to_string()),
+            "info1",
+            Some("My Project"),
+        ));
+
+        index.index_session(&session).expect("index session");
+
+        let sessions = index.list_sessions(None).expect("list");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name.as_deref(), Some("My Project"));
+    }
+
+    // ── Multiple cwd filtering ──────────────────────────────────────
+
+    #[test]
+    fn list_sessions_no_cwd_returns_all() {
+        let harness = TestHarness::new("list_sessions_no_cwd_returns_all");
+        let root = harness.temp_path("sessions");
+        fs::create_dir_all(&root).expect("create root dir");
+        let index = SessionIndex::for_sessions_root(&root);
+
+        for (id, cwd) in [("id-x", "cwd-x"), ("id-y", "cwd-y"), ("id-z", "cwd-z")] {
+            let path = harness.temp_path(format!("sessions/project/{id}.jsonl"));
+            fs::create_dir_all(path.parent().expect("parent")).expect("create dirs");
+            fs::write(&path, id).expect("write");
+
+            let mut session = Session::in_memory();
+            session.header = make_header(id, cwd);
+            session.path = Some(path);
+            session.entries.push(make_user_entry(None, "m1", id));
+            index.index_session(&session).expect("index session");
+        }
+
+        let all = index.list_sessions(None).expect("list all");
+        assert_eq!(all.len(), 3);
+    }
+
+    // ── build_meta_from_jsonl with entries having parse errors ───────
+
+    #[test]
+    fn build_meta_from_jsonl_skips_bad_entry_lines() {
+        let harness = TestHarness::new("build_meta_from_jsonl_skips_bad_entry_lines");
+        let path = harness.temp_path("mixed.jsonl");
+
+        let header = make_header("id-mixed", "cwd-mixed");
+        let good_entry = make_user_entry(None, "m1", "good");
+        let mut content = serde_json::to_string(&header).expect("ser header");
+        content.push('\n');
+        content.push_str(&serde_json::to_string(&good_entry).expect("ser entry"));
+        content.push('\n');
+        content.push_str("not valid json\n");
+        content.push_str(
+            &serde_json::to_string(&make_user_entry(Some("m1".to_string()), "m2", "another"))
+                .expect("ser entry"),
+        );
+        content.push('\n');
+
+        fs::write(&path, content).expect("write");
+
+        let meta = build_meta_from_jsonl(&path).expect("build_meta");
+        // Bad line is skipped, so we get 2 messages
+        assert_eq!(meta.message_count, 2);
+    }
 }

@@ -1058,4 +1058,767 @@ mod tests {
                 .any(|item| item.kind == AutocompleteItemKind::ExtensionCommand)
         );
     }
+
+    // ── clamp_cursor / clamp_to_char_boundary ────────────────────────
+
+    #[test]
+    fn clamp_cursor_stays_within_bounds() {
+        assert_eq!(clamp_cursor("hello", 0), 0);
+        assert_eq!(clamp_cursor("hello", 5), 5);
+        assert_eq!(clamp_cursor("hello", 100), 5);
+    }
+
+    #[test]
+    fn clamp_cursor_avoids_mid_char_boundary() {
+        let text = "café"; // é is 2 bytes
+        // Try clamping to byte 4, which is the middle of é (bytes 3,4)
+        let clamped = clamp_cursor(text, 4);
+        assert!(text.is_char_boundary(clamped));
+    }
+
+    #[test]
+    fn clamp_cursor_empty_string() {
+        assert_eq!(clamp_cursor("", 0), 0);
+        assert_eq!(clamp_cursor("", 10), 0);
+    }
+
+    #[test]
+    fn clamp_to_char_boundary_retreats_to_valid_position() {
+        let text = "a🎉b"; // 🎉 is 4 bytes, starts at byte 1
+        // Byte 2 is mid-emoji, should retreat to byte 1
+        let clamped = clamp_to_char_boundary(text, 2);
+        assert_eq!(clamped, 1);
+        assert!(text.is_char_boundary(clamped));
+    }
+
+    // ── token_at_cursor ─────────────────────────────────────────────
+
+    #[test]
+    fn token_at_cursor_single_word() {
+        let tok = token_at_cursor("hello", 3);
+        assert_eq!(tok.text, "hello");
+        assert_eq!(tok.range, 0..5);
+    }
+
+    #[test]
+    fn token_at_cursor_multiple_words() {
+        let tok = token_at_cursor("foo bar baz", 5);
+        assert_eq!(tok.text, "bar");
+        assert_eq!(tok.range, 4..7);
+    }
+
+    #[test]
+    fn token_at_cursor_at_boundary() {
+        // Cursor at start of "bar"
+        let tok = token_at_cursor("foo bar", 4);
+        assert_eq!(tok.text, "bar");
+        assert_eq!(tok.range, 4..7);
+    }
+
+    #[test]
+    fn token_at_cursor_at_end() {
+        let tok = token_at_cursor("foo bar", 7);
+        assert_eq!(tok.text, "bar");
+        assert_eq!(tok.range, 4..7);
+    }
+
+    #[test]
+    fn token_at_cursor_empty_string() {
+        let tok = token_at_cursor("", 0);
+        assert_eq!(tok.text, "");
+        assert_eq!(tok.range, 0..0);
+    }
+
+    #[test]
+    fn token_at_cursor_cursor_at_start() {
+        let tok = token_at_cursor("hello world", 0);
+        assert_eq!(tok.text, "hello");
+        assert_eq!(tok.range, 0..5);
+    }
+
+    // ── fuzzy_match_score ────────────────────────────────────────────
+
+    #[test]
+    fn fuzzy_match_empty_query_returns_prefix_zero() {
+        let result = fuzzy_match_score("anything", "");
+        assert_eq!(result, Some((true, 0)));
+    }
+
+    #[test]
+    fn fuzzy_match_whitespace_query_returns_prefix_zero() {
+        let result = fuzzy_match_score("anything", "   ");
+        assert_eq!(result, Some((true, 0)));
+    }
+
+    #[test]
+    fn fuzzy_match_exact_prefix() {
+        let (is_prefix, score) = fuzzy_match_score("help", "help").unwrap();
+        assert!(is_prefix);
+        assert_eq!(score, 1000); // exact match → 0 penalty
+    }
+
+    #[test]
+    fn fuzzy_match_case_insensitive() {
+        let (is_prefix, _) = fuzzy_match_score("Help", "he").unwrap();
+        assert!(is_prefix);
+    }
+
+    #[test]
+    fn fuzzy_match_substring_not_prefix() {
+        let (is_prefix, score) = fuzzy_match_score("xhelp", "help").unwrap();
+        assert!(!is_prefix);
+        // substring found at index 1 → 700 - 1 = 699
+        assert_eq!(score, 699);
+    }
+
+    #[test]
+    fn fuzzy_match_no_match() {
+        let result = fuzzy_match_score("help", "xyz");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn fuzzy_match_subsequence_with_gaps() {
+        let (is_prefix, score) = fuzzy_match_score("model", "mdl").unwrap();
+        assert!(!is_prefix);
+        assert!(score > 0, "Subsequence match should have positive score");
+    }
+
+    // ── is_path_like ─────────────────────────────────────────────────
+
+    #[test]
+    fn is_path_like_empty_returns_false() {
+        assert!(!is_path_like(""));
+        assert!(!is_path_like("   "));
+    }
+
+    #[test]
+    fn is_path_like_dot_slash() {
+        assert!(is_path_like("./foo"));
+        assert!(is_path_like("../bar"));
+    }
+
+    #[test]
+    fn is_path_like_absolute() {
+        assert!(is_path_like("/usr/bin"));
+    }
+
+    #[test]
+    fn is_path_like_contains_slash() {
+        assert!(is_path_like("src/main.rs"));
+    }
+
+    #[test]
+    fn is_path_like_plain_word_not_path() {
+        assert!(!is_path_like("hello"));
+        assert!(!is_path_like("foo.bar"));
+    }
+
+    // ── expand_tilde ─────────────────────────────────────────────────
+
+    #[test]
+    fn expand_tilde_no_tilde() {
+        assert_eq!(expand_tilde("/foo/bar"), "/foo/bar");
+        assert_eq!(expand_tilde("hello"), "hello");
+    }
+
+    #[test]
+    fn expand_tilde_with_home() {
+        let expanded = expand_tilde("~/notes.txt");
+        // If there is a home dir, the path should not start with ~/
+        if dirs::home_dir().is_some() {
+            assert!(!expanded.starts_with("~/"));
+            assert!(expanded.ends_with("notes.txt"));
+        }
+    }
+
+    // ── resolve_dir_path ─────────────────────────────────────────────
+
+    #[test]
+    fn resolve_dir_path_absolute() {
+        let result = resolve_dir_path(Path::new("/tmp"), "/usr/bin", None);
+        assert_eq!(result, Some(PathBuf::from("/usr/bin")));
+    }
+
+    #[test]
+    fn resolve_dir_path_relative() {
+        let result = resolve_dir_path(Path::new("/home/user"), "src", None);
+        assert_eq!(result, Some(PathBuf::from("/home/user/src")));
+    }
+
+    #[test]
+    fn resolve_dir_path_tilde_with_override() {
+        let result = resolve_dir_path(Path::new("/cwd"), "~/docs", Some(Path::new("/mock_home")));
+        assert_eq!(result, Some(PathBuf::from("/mock_home/docs")));
+    }
+
+    #[test]
+    fn resolve_dir_path_tilde_alone() {
+        let result = resolve_dir_path(Path::new("/cwd"), "~", Some(Path::new("/mock_home")));
+        assert_eq!(result, Some(PathBuf::from("/mock_home")));
+    }
+
+    // ── split_path_prefix ────────────────────────────────────────────
+
+    #[test]
+    fn split_path_prefix_simple_file() {
+        assert_eq!(
+            split_path_prefix("hello.txt"),
+            (".".to_string(), "hello.txt".to_string())
+        );
+    }
+
+    #[test]
+    fn split_path_prefix_trailing_slash() {
+        assert_eq!(
+            split_path_prefix("src/"),
+            ("src/".to_string(), String::new())
+        );
+    }
+
+    #[test]
+    fn split_path_prefix_nested_path() {
+        assert_eq!(
+            split_path_prefix("src/main.rs"),
+            ("src".to_string(), "main.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn split_path_prefix_root_path() {
+        assert_eq!(
+            split_path_prefix("/main.rs"),
+            ("/".to_string(), "main.rs".to_string())
+        );
+    }
+
+    // ── normalize_file_ref_candidate ─────────────────────────────────
+
+    #[test]
+    fn normalize_file_ref_trims_whitespace() {
+        assert_eq!(normalize_file_ref_candidate("  hello  "), "hello");
+    }
+
+    #[test]
+    fn normalize_file_ref_replaces_backslashes() {
+        assert_eq!(normalize_file_ref_candidate("src\\main.rs"), "src/main.rs");
+    }
+
+    #[test]
+    fn normalize_file_ref_empty() {
+        assert_eq!(normalize_file_ref_candidate(""), "");
+        assert_eq!(normalize_file_ref_candidate("   "), "");
+    }
+
+    // ── is_absolute_like ─────────────────────────────────────────────
+
+    #[test]
+    fn is_absolute_like_empty() {
+        assert!(!is_absolute_like(""));
+    }
+
+    #[test]
+    fn is_absolute_like_tilde() {
+        assert!(is_absolute_like("~/foo"));
+        assert!(is_absolute_like("~"));
+    }
+
+    #[test]
+    fn is_absolute_like_double_slash() {
+        assert!(is_absolute_like("//network/share"));
+    }
+
+    #[test]
+    fn is_absolute_like_absolute_path() {
+        assert!(is_absolute_like("/usr/bin"));
+    }
+
+    #[test]
+    fn is_absolute_like_relative_path() {
+        assert!(!is_absolute_like("src/main.rs"));
+        assert!(!is_absolute_like("./foo"));
+    }
+
+    // ── kind_rank ordering ──────────────────────────────────────────
+
+    #[test]
+    fn kind_rank_ordering() {
+        assert!(
+            kind_rank(AutocompleteItemKind::SlashCommand)
+                < kind_rank(AutocompleteItemKind::ExtensionCommand)
+        );
+        assert!(
+            kind_rank(AutocompleteItemKind::ExtensionCommand)
+                < kind_rank(AutocompleteItemKind::PromptTemplate)
+        );
+        assert!(
+            kind_rank(AutocompleteItemKind::PromptTemplate)
+                < kind_rank(AutocompleteItemKind::Skill)
+        );
+        assert!(kind_rank(AutocompleteItemKind::Skill) < kind_rank(AutocompleteItemKind::File));
+        assert!(kind_rank(AutocompleteItemKind::File) < kind_rank(AutocompleteItemKind::Path));
+    }
+
+    // ── sort_scored_items ───────────────────────────────────────────
+
+    #[test]
+    fn sort_scored_items_prefix_first() {
+        let mut items = vec![
+            ScoredItem {
+                is_prefix: false,
+                score: 900,
+                kind_rank: 0,
+                label: "b".to_string(),
+                item: AutocompleteItem {
+                    kind: AutocompleteItemKind::SlashCommand,
+                    label: "b".to_string(),
+                    insert: "b".to_string(),
+                    description: None,
+                },
+            },
+            ScoredItem {
+                is_prefix: true,
+                score: 100,
+                kind_rank: 0,
+                label: "a".to_string(),
+                item: AutocompleteItem {
+                    kind: AutocompleteItemKind::SlashCommand,
+                    label: "a".to_string(),
+                    insert: "a".to_string(),
+                    description: None,
+                },
+            },
+        ];
+        sort_scored_items(&mut items);
+        // Prefix match comes first despite lower score
+        assert_eq!(items[0].label, "a");
+    }
+
+    #[test]
+    fn sort_scored_items_higher_score_first() {
+        let mut items = vec![
+            ScoredItem {
+                is_prefix: true,
+                score: 100,
+                kind_rank: 0,
+                label: "low".to_string(),
+                item: AutocompleteItem {
+                    kind: AutocompleteItemKind::SlashCommand,
+                    label: "low".to_string(),
+                    insert: "low".to_string(),
+                    description: None,
+                },
+            },
+            ScoredItem {
+                is_prefix: true,
+                score: 900,
+                kind_rank: 0,
+                label: "high".to_string(),
+                item: AutocompleteItem {
+                    kind: AutocompleteItemKind::SlashCommand,
+                    label: "high".to_string(),
+                    insert: "high".to_string(),
+                    description: None,
+                },
+            },
+        ];
+        sort_scored_items(&mut items);
+        assert_eq!(items[0].label, "high");
+    }
+
+    #[test]
+    fn sort_scored_items_kind_rank_tiebreaker() {
+        let mut items = vec![
+            ScoredItem {
+                is_prefix: true,
+                score: 500,
+                kind_rank: kind_rank(AutocompleteItemKind::PromptTemplate),
+                label: "template".to_string(),
+                item: AutocompleteItem {
+                    kind: AutocompleteItemKind::PromptTemplate,
+                    label: "template".to_string(),
+                    insert: "template".to_string(),
+                    description: None,
+                },
+            },
+            ScoredItem {
+                is_prefix: true,
+                score: 500,
+                kind_rank: kind_rank(AutocompleteItemKind::SlashCommand),
+                label: "command".to_string(),
+                item: AutocompleteItem {
+                    kind: AutocompleteItemKind::SlashCommand,
+                    label: "command".to_string(),
+                    insert: "command".to_string(),
+                    description: None,
+                },
+            },
+        ];
+        sort_scored_items(&mut items);
+        // SlashCommand has lower kind_rank, so it comes first
+        assert_eq!(items[0].label, "command");
+    }
+
+    #[test]
+    fn sort_scored_items_label_tiebreaker() {
+        let mut items = vec![
+            ScoredItem {
+                is_prefix: true,
+                score: 500,
+                kind_rank: 0,
+                label: "zebra".to_string(),
+                item: AutocompleteItem {
+                    kind: AutocompleteItemKind::SlashCommand,
+                    label: "zebra".to_string(),
+                    insert: "zebra".to_string(),
+                    description: None,
+                },
+            },
+            ScoredItem {
+                is_prefix: true,
+                score: 500,
+                kind_rank: 0,
+                label: "apple".to_string(),
+                item: AutocompleteItem {
+                    kind: AutocompleteItemKind::SlashCommand,
+                    label: "apple".to_string(),
+                    insert: "apple".to_string(),
+                    description: None,
+                },
+            },
+        ];
+        sort_scored_items(&mut items);
+        assert_eq!(items[0].label, "apple");
+    }
+
+    // ── clamp_usize_to_i32 ──────────────────────────────────────────
+
+    #[test]
+    fn clamp_usize_to_i32_within_range() {
+        assert_eq!(clamp_usize_to_i32(0), 0);
+        assert_eq!(clamp_usize_to_i32(42), 42);
+        assert_eq!(clamp_usize_to_i32(i32::MAX as usize), i32::MAX);
+    }
+
+    #[test]
+    fn clamp_usize_to_i32_overflow() {
+        assert_eq!(clamp_usize_to_i32(usize::MAX), i32::MAX);
+        assert_eq!(clamp_usize_to_i32(i32::MAX as usize + 1), i32::MAX);
+    }
+
+    // ── builtin_slash_commands ───────────────────────────────────────
+
+    #[test]
+    fn builtin_slash_commands_not_empty() {
+        let cmds = builtin_slash_commands();
+        assert!(!cmds.is_empty());
+    }
+
+    #[test]
+    fn builtin_slash_commands_contains_help() {
+        let cmds = builtin_slash_commands();
+        assert!(cmds.iter().any(|c| c.name == "help"));
+    }
+
+    #[test]
+    fn builtin_slash_commands_contains_exit() {
+        let cmds = builtin_slash_commands();
+        assert!(cmds.iter().any(|c| c.name == "exit"));
+    }
+
+    #[test]
+    fn builtin_slash_commands_all_unique_names() {
+        let cmds = builtin_slash_commands();
+        let mut names: Vec<_> = cmds.iter().map(|c| c.name).collect();
+        let orig_len = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), orig_len, "Duplicate slash command names found");
+    }
+
+    // ── set_max_items ────────────────────────────────────────────────
+
+    #[test]
+    fn set_max_items_clamps_to_one() {
+        let mut provider =
+            AutocompleteProvider::new(PathBuf::from("."), AutocompleteCatalog::default());
+        provider.set_max_items(0);
+        assert_eq!(provider.max_items(), 1);
+    }
+
+    #[test]
+    fn set_max_items_accepts_large_value() {
+        let mut provider =
+            AutocompleteProvider::new(PathBuf::from("."), AutocompleteCatalog::default());
+        provider.set_max_items(1000);
+        assert_eq!(provider.max_items(), 1000);
+    }
+
+    // ── max_items limits output ──────────────────────────────────────
+
+    #[test]
+    fn suggest_respects_max_items() {
+        let mut provider =
+            AutocompleteProvider::new(PathBuf::from("."), AutocompleteCatalog::default());
+        provider.set_max_items(3);
+        // "/" with empty query returns all builtins, should be capped at 3
+        let resp = provider.suggest("/", 1);
+        assert!(resp.items.len() <= 3);
+    }
+
+    // ── suggest with non-matching input ──────────────────────────────
+
+    #[test]
+    fn suggest_plain_text_returns_empty() {
+        let mut provider =
+            AutocompleteProvider::new(PathBuf::from("."), AutocompleteCatalog::default());
+        let resp = provider.suggest("hello world", 5);
+        assert!(resp.items.is_empty());
+    }
+
+    // ── suggest_slash with empty query ───────────────────────────────
+
+    #[test]
+    fn suggest_slash_alone_returns_all_builtins() {
+        let mut provider =
+            AutocompleteProvider::new(PathBuf::from("."), AutocompleteCatalog::default());
+        let resp = provider.suggest("/", 1);
+        let builtin_count = builtin_slash_commands().len();
+        assert_eq!(resp.items.len(), builtin_count);
+    }
+
+    // ── set_cwd invalidates cache ────────────────────────────────────
+
+    #[test]
+    fn set_cwd_invalidates_file_cache() {
+        let tmp1 = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp1.path().join("one.txt"), "1").expect("write");
+
+        let tmp2 = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp2.path().join("two.txt"), "2").expect("write");
+
+        let mut provider =
+            AutocompleteProvider::new(tmp1.path().to_path_buf(), AutocompleteCatalog::default());
+        let resp = provider.suggest("@on", 3);
+        assert!(resp.items.iter().any(|i| i.insert == "@one.txt"));
+
+        provider.set_cwd(tmp2.path().to_path_buf());
+        let resp = provider.suggest("@tw", 3);
+        assert!(resp.items.iter().any(|i| i.insert == "@two.txt"));
+        // Old file should no longer appear
+        let resp = provider.suggest("@on", 3);
+        assert!(!resp.items.iter().any(|i| i.insert == "@one.txt"));
+    }
+
+    // ── walk_project_files ──────────────────────────────────────────
+
+    #[test]
+    fn walk_project_files_returns_sorted_deduped() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join("sub")).expect("mkdir");
+        std::fs::write(tmp.path().join("b.txt"), "b").expect("write");
+        std::fs::write(tmp.path().join("a.txt"), "a").expect("write");
+        std::fs::write(tmp.path().join("sub/c.txt"), "c").expect("write");
+
+        let files = walk_project_files(tmp.path());
+        assert!(files.contains(&"a.txt".to_string()));
+        assert!(files.contains(&"b.txt".to_string()));
+        assert!(files.contains(&"sub/c.txt".to_string()));
+        // Verify sorted
+        let mut sorted = files.clone();
+        sorted.sort();
+        assert_eq!(files, sorted);
+    }
+
+    #[test]
+    fn walk_project_files_empty_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let files = walk_project_files(tmp.path());
+        assert!(files.is_empty());
+    }
+
+    // ── resolve_file_ref ─────────────────────────────────────────────
+
+    #[test]
+    fn resolve_file_ref_absolute_returns_normalized() {
+        let mut provider =
+            AutocompleteProvider::new(PathBuf::from("/tmp"), AutocompleteCatalog::default());
+        let result = provider.resolve_file_ref("/some/absolute/path.txt");
+        assert_eq!(result, Some("/some/absolute/path.txt".to_string()));
+    }
+
+    #[test]
+    fn resolve_file_ref_tilde_returns_normalized() {
+        let mut provider =
+            AutocompleteProvider::new(PathBuf::from("/tmp"), AutocompleteCatalog::default());
+        let result = provider.resolve_file_ref("~/notes.txt");
+        assert_eq!(result, Some("~/notes.txt".to_string()));
+    }
+
+    #[test]
+    fn resolve_file_ref_empty_returns_none() {
+        let mut provider =
+            AutocompleteProvider::new(PathBuf::from("/tmp"), AutocompleteCatalog::default());
+        assert!(provider.resolve_file_ref("").is_none());
+        assert!(provider.resolve_file_ref("   ").is_none());
+    }
+
+    #[test]
+    fn resolve_file_ref_matches_project_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("README.md"), "hi").expect("write");
+
+        let mut provider =
+            AutocompleteProvider::new(tmp.path().to_path_buf(), AutocompleteCatalog::default());
+        let result = provider.resolve_file_ref("README.md");
+        assert_eq!(result, Some("README.md".to_string()));
+    }
+
+    #[test]
+    fn resolve_file_ref_nonexistent_file_returns_none() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut provider =
+            AutocompleteProvider::new(tmp.path().to_path_buf(), AutocompleteCatalog::default());
+        assert!(provider.resolve_file_ref("nonexistent.txt").is_none());
+    }
+
+    #[test]
+    fn resolve_file_ref_strips_dot_slash() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("foo.txt"), "hi").expect("write");
+
+        let mut provider =
+            AutocompleteProvider::new(tmp.path().to_path_buf(), AutocompleteCatalog::default());
+        let result = provider.resolve_file_ref("./foo.txt");
+        assert_eq!(result, Some("foo.txt".to_string()));
+    }
+
+    // ── AutocompleteCatalog ──────────────────────────────────────────
+
+    #[test]
+    fn autocomplete_catalog_default_is_empty() {
+        let catalog = AutocompleteCatalog::default();
+        assert!(catalog.prompt_templates.is_empty());
+        assert!(catalog.skills.is_empty());
+        assert!(catalog.extension_commands.is_empty());
+        assert!(!catalog.enable_skill_commands);
+    }
+
+    // ── AutocompleteResponse empty ──────────────────────────────────
+
+    #[test]
+    fn suggest_cursor_past_end_clamps() {
+        let mut provider =
+            AutocompleteProvider::new(PathBuf::from("."), AutocompleteCatalog::default());
+        // Cursor way past end of text
+        let resp = provider.suggest("/he", 1000);
+        // Should still find /help since cursor clamps to end
+        assert!(resp.items.iter().any(|i| i.insert == "/help"));
+    }
+
+    // ── Mixed catalog with slash query ───────────────────────────────
+
+    #[test]
+    fn slash_suggests_mixed_sources_sorted_by_kind() {
+        let catalog = AutocompleteCatalog {
+            prompt_templates: vec![NamedEntry {
+                name: "test-prompt".to_string(),
+                description: Some("A test".to_string()),
+            }],
+            skills: Vec::new(),
+            extension_commands: vec![NamedEntry {
+                name: "test-ext".to_string(),
+                description: Some("An extension".to_string()),
+            }],
+            enable_skill_commands: false,
+        };
+        let mut provider = AutocompleteProvider::new(PathBuf::from("."), catalog);
+        let resp = provider.suggest("/test", 5);
+
+        assert!(
+            resp.items
+                .iter()
+                .any(|i| i.kind == AutocompleteItemKind::ExtensionCommand)
+        );
+        assert!(
+            resp.items
+                .iter()
+                .any(|i| i.kind == AutocompleteItemKind::PromptTemplate)
+        );
+    }
+
+    // ── skill commands disabled returns empty ────────────────────────
+
+    #[test]
+    fn skill_query_disabled_returns_empty() {
+        let catalog = AutocompleteCatalog {
+            prompt_templates: Vec::new(),
+            skills: vec![NamedEntry {
+                name: "deploy".to_string(),
+                description: None,
+            }],
+            extension_commands: Vec::new(),
+            enable_skill_commands: false,
+        };
+        let mut provider = AutocompleteProvider::new(PathBuf::from("."), catalog);
+        let resp = provider.suggest("/skill:de", "/skill:de".len());
+        assert!(resp.items.is_empty());
+    }
+
+    // ── file ref suggest with @ ──────────────────────────────────────
+
+    #[test]
+    fn file_ref_suggest_empty_query_returns_all_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("a.txt"), "a").expect("write");
+        std::fs::write(tmp.path().join("b.txt"), "b").expect("write");
+
+        let mut provider =
+            AutocompleteProvider::new(tmp.path().to_path_buf(), AutocompleteCatalog::default());
+        // Just "@" with no query
+        let resp = provider.suggest("@", 1);
+        assert!(resp.items.len() >= 2);
+    }
+
+    // ── path completion with tilde override ──────────────────────────
+
+    #[test]
+    fn path_completion_with_home_override() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mock_home = tmp.path().join("home");
+        std::fs::create_dir_all(&mock_home).expect("mkdir");
+        std::fs::write(mock_home.join("notes.txt"), "hi").expect("write");
+
+        let mut provider =
+            AutocompleteProvider::new(tmp.path().to_path_buf(), AutocompleteCatalog::default());
+        provider.home_dir_override = Some(mock_home);
+
+        let resp = provider.suggest("~/no", 4);
+        assert!(resp.items.iter().any(|i| i.insert.contains("notes.txt")));
+    }
+
+    // ── FileCache invalidation ───────────────────────────────────────
+
+    #[test]
+    fn file_cache_invalidate_clears_files() {
+        let mut cache = FileCache::new();
+        cache.files = vec!["a.txt".to_string()];
+        cache.refreshed_at = Some(Instant::now());
+
+        cache.invalidate();
+        assert!(cache.files.is_empty());
+        assert!(cache.refreshed_at.is_none());
+    }
+
+    // ── NamedEntry equality ──────────────────────────────────────────
+
+    #[test]
+    fn named_entry_equality() {
+        let a = NamedEntry {
+            name: "test".to_string(),
+            description: Some("desc".to_string()),
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
 }

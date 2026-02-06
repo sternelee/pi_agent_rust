@@ -30,13 +30,38 @@ use serde_json::{Value, json};
 use sha2::Digest as _;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
+
+fn hostcall_params_hash(method: &str, params: &Value) -> String {
+    fn canonicalize_json(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let mut keys = map.keys().cloned().collect::<Vec<_>>();
+                keys.sort();
+                let mut out = serde_json::Map::new();
+                for key in keys {
+                    if let Some(value) = map.get(&key) {
+                        out.insert(key, canonicalize_json(value));
+                    }
+                }
+                Value::Object(out)
+            }
+            Value::Array(items) => Value::Array(items.iter().map(canonicalize_json).collect()),
+            other => other.clone(),
+        }
+    }
+
+    let canonical = canonicalize_json(&json!({ "method": method, "params": params }));
+    let encoded = serde_json::to_string(&canonical).expect("serialize canonical hostcall params");
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(encoded.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
 
 pub const PROTOCOL_VERSION: &str = "1.0";
 pub const LOG_SCHEMA_VERSION: &str = "pi.ext.log.v1";
@@ -1666,6 +1691,146 @@ pub struct HostResultPayload {
     pub chunk: Option<HostStreamChunk>,
 }
 
+// ============================================================================
+// Shared Hostcall Dispatch (bd-1uy.1.3)
+// ============================================================================
+
+/// Context for the shared hostcall dispatcher.
+///
+/// Carries the runtime resources needed to dispatch any hostcall, regardless of
+/// whether it originated from a JS extension, WASM component, or protocol message.
+pub struct HostCallContext<'a> {
+    /// Runtime origin identifier (e.g. `"js"`, `"wasm"`, `"protocol"`).
+    pub runtime_name: &'a str,
+    /// Extension that initiated the call (for policy + logging).
+    pub extension_id: Option<&'a str>,
+    /// Built-in tool registry.
+    pub tools: &'a ToolRegistry,
+    /// HTTP connector for outbound requests.
+    pub http: &'a HttpConnector,
+    /// Extension manager for session/ui/events dispatch.
+    pub manager: Option<ExtensionManager>,
+    /// Policy governing capability access.
+    pub policy: &'a ExtensionPolicy,
+    /// Optional JS runtime for exec streaming.
+    pub js_runtime: Option<&'a PiJsRuntime>,
+    /// Test interceptor (if any).
+    pub interceptor: Option<&'a dyn HostcallInterceptor>,
+}
+
+/// Convert a [`HostcallRequest`] (JS-origin) into the canonical [`HostCallPayload`].
+///
+/// The canonical params shapes are:
+/// - `tool`:  `{ "name": <tool_name>, "input": <payload> }`
+/// - `exec`:  `{ "cmd": <string>, ...payload_fields }`
+/// - `http`:  payload passthrough
+/// - `session/ui/events`:  `{ "op": <string>, ...payload_fields }`
+pub fn hostcall_request_to_payload(request: &HostcallRequest) -> HostCallPayload {
+    let method = request.method().to_string();
+    let capability = request.required_capability();
+    let params = request.params_for_hash();
+    let timeout_ms = js_hostcall_timeout_ms(request);
+
+    HostCallPayload {
+        call_id: request.call_id.clone(),
+        capability,
+        method,
+        params,
+        timeout_ms,
+        cancel_token: None,
+        context: None,
+    }
+}
+
+/// Convert a [`HostResultPayload`] into the JS-facing [`HostcallOutcome`].
+pub fn host_result_to_outcome(result: HostResultPayload) -> HostcallOutcome {
+    if let Some(chunk_info) = result.chunk {
+        return HostcallOutcome::StreamChunk {
+            sequence: chunk_info.index,
+            chunk: result.output,
+            is_final: chunk_info.is_last,
+        };
+    }
+    if result.is_error {
+        let code = result
+            .error
+            .as_ref()
+            .map_or("internal", |e| host_call_error_code_str(e.code));
+        let message = result
+            .error
+            .as_ref()
+            .map_or_else(|| "Unknown error".to_string(), |e| e.message.clone());
+        HostcallOutcome::Error {
+            code: code.to_string(),
+            message,
+        }
+    } else {
+        HostcallOutcome::Success(result.output)
+    }
+}
+
+/// Convert a [`HostcallOutcome`] into a [`HostResultPayload`].
+pub fn outcome_to_host_result(call_id: &str, outcome: &HostcallOutcome) -> HostResultPayload {
+    match outcome {
+        HostcallOutcome::Success(output) => HostResultPayload {
+            call_id: call_id.to_string(),
+            output: output.clone(),
+            is_error: false,
+            error: None,
+            chunk: None,
+        },
+        HostcallOutcome::Error { code, message } => HostResultPayload {
+            call_id: call_id.to_string(),
+            output: json!({}),
+            is_error: true,
+            error: Some(HostCallError {
+                code: parse_error_code(code),
+                message: message.clone(),
+                details: None,
+                retryable: None,
+            }),
+            chunk: None,
+        },
+        HostcallOutcome::StreamChunk {
+            sequence,
+            chunk,
+            is_final,
+        } => HostResultPayload {
+            call_id: call_id.to_string(),
+            output: chunk.clone(),
+            is_error: false,
+            error: None,
+            chunk: Some(HostStreamChunk {
+                index: *sequence,
+                is_last: *is_final,
+                backpressure: None,
+            }),
+        },
+    }
+}
+
+/// Map a string error code to the taxonomy enum, defaulting to `Internal`.
+fn parse_error_code(code: &str) -> HostCallErrorCode {
+    match code {
+        "timeout" => HostCallErrorCode::Timeout,
+        "denied" => HostCallErrorCode::Denied,
+        "io" => HostCallErrorCode::Io,
+        "invalid_request" => HostCallErrorCode::InvalidRequest,
+        _ => HostCallErrorCode::Internal,
+    }
+}
+
+/// Convert a taxonomy error code to its string representation.
+const fn host_call_error_code_str(code: HostCallErrorCode) -> &'static str {
+    match code {
+        HostCallErrorCode::Timeout => "timeout",
+        HostCallErrorCode::Denied => "denied",
+        HostCallErrorCode::Io => "io",
+        HostCallErrorCode::InvalidRequest => "invalid_request",
+        HostCallErrorCode::Internal => "internal",
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlashCommandPayload {
     pub name: String,
@@ -2488,24 +2653,8 @@ mod wasm_host {
                         )
                     },
                     |payload| {
-                        let code = match payload.code {
-                            crate::connectors::HostCallErrorCode::Timeout => {
-                                HostCallErrorCode::Timeout
-                            }
-                            crate::connectors::HostCallErrorCode::Denied => {
-                                HostCallErrorCode::Denied
-                            }
-                            crate::connectors::HostCallErrorCode::Io => HostCallErrorCode::Io,
-                            crate::connectors::HostCallErrorCode::InvalidRequest => {
-                                HostCallErrorCode::InvalidRequest
-                            }
-                            crate::connectors::HostCallErrorCode::Internal => {
-                                HostCallErrorCode::Internal
-                            }
-                        };
-
                         Self::host_error_json(
-                            code,
+                            payload.code,
                             payload.message.clone(),
                             payload.details.clone(),
                             payload.retryable,
@@ -5602,7 +5751,7 @@ async fn pump_js_runtime_once(runtime: &PiJsRuntime, host: &JsRuntimeHost) -> Re
     ) {
         while let Some(req) = pending.pop_front() {
             let call_id = req.call_id.clone();
-            let outcome = dispatch_hostcall(host, req).await;
+            let outcome = dispatch_hostcall_with_runtime(Some(runtime), host, req).await;
             runtime.complete_hostcall(call_id, outcome);
         }
     }
@@ -5697,7 +5846,8 @@ async fn prompt_capability_once(
     }
 }
 
-#[allow(clippy::future_not_send)]
+// NOTE: Superseded by resolve_shared_policy_prompt in dispatch_host_call_shared (bd-1uy.1.3).
+#[allow(dead_code, clippy::future_not_send)]
 async fn resolve_js_hostcall_policy_decision(
     host: &JsRuntimeHost,
     extension_id: Option<&str>,
@@ -5754,7 +5904,8 @@ async fn resolve_js_hostcall_policy_decision(
     (decision, reason, capability)
 }
 
-fn log_js_hostcall_start(
+fn log_hostcall_start(
+    runtime: &str,
     call_id: &str,
     extension_id: Option<&str>,
     required: &str,
@@ -5764,7 +5915,7 @@ fn log_js_hostcall_start(
 ) {
     tracing::info!(
         event = "host_call.start",
-        runtime = "js",
+        runtime = runtime,
         call_id = %call_id,
         extension_id = ?extension_id,
         capability = %required,
@@ -5775,7 +5926,8 @@ fn log_js_hostcall_start(
     );
 }
 
-fn log_js_policy_decision(
+fn log_policy_decision(
+    runtime: &str,
     call_id: &str,
     extension_id: Option<&str>,
     capability: &str,
@@ -5786,7 +5938,7 @@ fn log_js_policy_decision(
     if *decision == PolicyDecision::Allow {
         tracing::info!(
             event = "policy.decision",
-            runtime = "js",
+            runtime = runtime,
             call_id = %call_id,
             extension_id = ?extension_id,
             capability = %capability,
@@ -5798,7 +5950,7 @@ fn log_js_policy_decision(
     } else {
         tracing::warn!(
             event = "policy.decision",
-            runtime = "js",
+            runtime = runtime,
             call_id = %call_id,
             extension_id = ?extension_id,
             capability = %capability,
@@ -5810,7 +5962,9 @@ fn log_js_policy_decision(
     }
 }
 
-fn log_js_hostcall_end(
+#[allow(clippy::too_many_arguments)]
+fn log_hostcall_end(
+    runtime: &str,
     call_id: &str,
     extension_id: Option<&str>,
     required: &str,
@@ -5827,7 +5981,7 @@ fn log_js_hostcall_end(
     if is_error {
         tracing::warn!(
             event = "host_call.end",
-            runtime = "js",
+            runtime = runtime,
             call_id = %call_id,
             extension_id = ?extension_id,
             capability = %required,
@@ -5840,7 +5994,7 @@ fn log_js_hostcall_end(
     } else {
         tracing::info!(
             event = "host_call.end",
-            runtime = "js",
+            runtime = runtime,
             call_id = %call_id,
             extension_id = ?extension_id,
             capability = %required,
@@ -5852,89 +6006,65 @@ fn log_js_hostcall_end(
     }
 }
 
+// ============================================================================
+// Shared Hostcall Dispatcher (bd-1uy.1.3)
+// ============================================================================
+
+/// Dispatch a hostcall through the unified ABI surface.
+///
+/// This is the **single source of truth** for hostcall execution, usable by
+/// JS extensions, WASM components, and protocol-based runtimes alike.
+///
+/// 1. Resolves the required capability from the payload.
+/// 2. Evaluates policy (allow / deny / prompt).
+/// 3. Routes to the appropriate type-specific handler.
+/// 4. Returns a taxonomy-compliant [`HostResultPayload`].
 #[allow(clippy::future_not_send)]
-async fn dispatch_hostcall_allowed(
-    host: &JsRuntimeHost,
-    request: HostcallRequest,
-) -> HostcallOutcome {
-    // Allow test interceptors to short-circuit before real dispatch.
-    if let Some(ref interceptor) = host.interceptor {
-        if let Some(outcome) = interceptor.intercept(&request) {
-            return outcome;
-        }
+pub async fn dispatch_host_call_shared(
+    ctx: &HostCallContext<'_>,
+    call: HostCallPayload,
+) -> HostResultPayload {
+    if let Err(err) = validate_host_call(&call) {
+        return outcome_to_host_result(
+            &call.call_id,
+            &HostcallOutcome::Error {
+                code: "invalid_request".to_string(),
+                message: err.to_string(),
+            },
+        );
     }
 
-    let HostcallRequest {
-        call_id,
-        kind,
-        payload,
-        ..
-    } = request;
-
-    match (kind, payload) {
-        (HostcallKind::Tool { name }, payload) => {
-            dispatch_hostcall_tool(&host.tools, &call_id, &name, payload).await
-        }
-        (HostcallKind::Exec { cmd }, payload) => {
-            dispatch_hostcall_exec(&call_id, &cmd, payload).await
-        }
-        (HostcallKind::Http, payload) => {
-            dispatch_hostcall_http(&call_id, &host.http, payload).await
-        }
-        (HostcallKind::Session { op }, payload) => {
-            let Some(manager) = host.manager() else {
-                return HostcallOutcome::Error {
-                    code: "SHUTDOWN".to_string(),
-                    message: "Extension manager is shutting down".to_string(),
-                };
-            };
-            dispatch_hostcall_session(&call_id, &manager, &op, payload).await
-        }
-        (HostcallKind::Ui { op }, payload) => {
-            let Some(manager) = host.manager() else {
-                return HostcallOutcome::Error {
-                    code: "SHUTDOWN".to_string(),
-                    message: "Extension manager is shutting down".to_string(),
-                };
-            };
-            dispatch_hostcall_ui(&call_id, &manager, &op, payload).await
-        }
-        (HostcallKind::Events { op }, payload) => {
-            let Some(manager) = host.manager() else {
-                return HostcallOutcome::Error {
-                    code: "SHUTDOWN".to_string(),
-                    message: "Extension manager is shutting down".to_string(),
-                };
-            };
-            dispatch_hostcall_events(&call_id, &manager, &host.tools, &op, payload).await
-        }
-    }
-}
-
-#[allow(clippy::future_not_send)]
-async fn dispatch_hostcall(host: &JsRuntimeHost, request: HostcallRequest) -> HostcallOutcome {
-    let call_id = request.call_id.clone();
-    let extension_id = request.extension_id.clone();
-    let method = request.method();
-    let required = request.required_capability();
-    let params_hash = request.params_hash();
-    let call_timeout_ms = js_hostcall_timeout_ms(&request);
+    let call_id = call.call_id.clone();
+    let method = call.method.clone();
+    let capability = required_capability_for_host_call(&call).unwrap_or_else(|| "internal".into());
+    let params_hash = hostcall_params_hash(&method, &call.params);
     let started_at = Instant::now();
 
-    log_js_hostcall_start(
+    log_hostcall_start(
+        ctx.runtime_name,
         &call_id,
-        extension_id.as_deref(),
-        &required,
-        method,
+        ctx.extension_id,
+        &capability,
+        &method,
         &params_hash,
-        call_timeout_ms,
+        call.timeout_ms,
     );
 
-    let (decision, reason, capability) =
-        resolve_js_hostcall_policy_decision(host, extension_id.as_deref(), &required).await;
-    log_js_policy_decision(
+    // Policy check.
+    let policy_check = ctx.policy.evaluate(&capability);
+    let (decision, reason) = match policy_check.decision {
+        PolicyDecision::Allow => (PolicyDecision::Allow, policy_check.reason),
+        PolicyDecision::Deny => (PolicyDecision::Deny, policy_check.reason),
+        PolicyDecision::Prompt => {
+            // Check prompt cache, then prompt the user.
+            resolve_shared_policy_prompt(ctx, &capability).await
+        }
+    };
+
+    log_policy_decision(
+        ctx.runtime_name,
         &call_id,
-        extension_id.as_deref(),
+        ctx.extension_id,
         &capability,
         &decision,
         &reason,
@@ -5942,7 +6072,7 @@ async fn dispatch_hostcall(host: &JsRuntimeHost, request: HostcallRequest) -> Ho
     );
 
     let outcome = if decision == PolicyDecision::Allow {
-        dispatch_hostcall_allowed(host, request).await
+        dispatch_shared_allowed(ctx, &call).await
     } else {
         HostcallOutcome::Error {
             code: "denied".to_string(),
@@ -5951,17 +6081,246 @@ async fn dispatch_hostcall(host: &JsRuntimeHost, request: HostcallRequest) -> Ho
     };
 
     let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-    log_js_hostcall_end(
+    log_hostcall_end(
+        ctx.runtime_name,
         &call_id,
-        extension_id.as_deref(),
-        &required,
-        method,
+        ctx.extension_id,
+        &capability,
+        &method,
         &params_hash,
         duration_ms,
         &outcome,
     );
 
-    outcome
+    outcome_to_host_result(&call_id, &outcome)
+}
+
+/// Resolve a policy `Prompt` decision using the extension manager cache + UI.
+#[allow(clippy::future_not_send)]
+async fn resolve_shared_policy_prompt(
+    ctx: &HostCallContext<'_>,
+    capability: &str,
+) -> (PolicyDecision, String) {
+    // Check prompt cache.
+    if let Some(ext_id) = ctx.extension_id {
+        if let Some(allow) = ctx
+            .manager
+            .as_ref()
+            .and_then(|m| m.cached_policy_prompt_decision(ext_id, capability))
+        {
+            let decision = if allow {
+                PolicyDecision::Allow
+            } else {
+                PolicyDecision::Deny
+            };
+            let reason = if allow {
+                "prompt_cache_allow"
+            } else {
+                "prompt_cache_deny"
+            };
+            return (decision, reason.to_string());
+        }
+    }
+
+    // Prompt the user via UI.
+    let Some(ref manager) = ctx.manager else {
+        return (PolicyDecision::Deny, "shutdown".to_string());
+    };
+
+    let prompt_ext_id = ctx.extension_id.unwrap_or("<unknown>");
+    let allow = prompt_capability_once(manager, prompt_ext_id, capability).await;
+
+    if let Some(ext_id) = ctx.extension_id {
+        manager.cache_policy_prompt_decision(ext_id, capability, allow);
+    }
+
+    let decision = if allow {
+        PolicyDecision::Allow
+    } else {
+        PolicyDecision::Deny
+    };
+    let reason = if allow {
+        "prompt_user_allow"
+    } else {
+        "prompt_user_deny"
+    };
+    (decision, reason.to_string())
+}
+
+/// Route an allowed hostcall to the appropriate handler based on method.
+///
+/// Converts the canonical [`HostCallPayload`] params back into the format
+/// expected by the type-specific dispatch functions.
+#[allow(clippy::future_not_send, clippy::too_many_lines)]
+async fn dispatch_shared_allowed(
+    ctx: &HostCallContext<'_>,
+    call: &HostCallPayload,
+) -> HostcallOutcome {
+    match call.method.as_str() {
+        "tool" => {
+            let name = call
+                .params
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let input = call.params.get("input").cloned().unwrap_or(Value::Null);
+            dispatch_hostcall_tool(ctx.tools, &call.call_id, name, input).await
+        }
+        "exec" => {
+            let cmd = call
+                .params
+                .get("cmd")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            // Reconstruct exec payload: everything except "cmd".
+            let payload = if let Value::Object(map) = &call.params {
+                let mut out = map.clone();
+                out.remove("cmd");
+                Value::Object(out)
+            } else {
+                Value::Null
+            };
+            dispatch_hostcall_exec(ctx.js_runtime, &call.call_id, cmd, payload).await
+        }
+        "http" => dispatch_hostcall_http(&call.call_id, ctx.http, call.params.clone()).await,
+        "session" => {
+            let op = call
+                .params
+                .get("op")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let Some(op) = op else {
+                return HostcallOutcome::Error {
+                    code: "invalid_request".to_string(),
+                    message: "host_call session requires non-empty params.op".to_string(),
+                };
+            };
+            let Some(ref manager) = ctx.manager else {
+                return HostcallOutcome::Error {
+                    code: "denied".to_string(),
+                    message: "Extension manager is shutting down".to_string(),
+                };
+            };
+            // Reconstruct session payload: everything except "op".
+            let payload = if let Value::Object(map) = &call.params {
+                let mut out = map.clone();
+                out.remove("op");
+                Value::Object(out)
+            } else {
+                Value::Null
+            };
+            dispatch_hostcall_session(&call.call_id, manager, op, payload).await
+        }
+        "ui" => {
+            let op = call
+                .params
+                .get("op")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let Some(op) = op else {
+                return HostcallOutcome::Error {
+                    code: "invalid_request".to_string(),
+                    message: "host_call ui requires non-empty params.op".to_string(),
+                };
+            };
+            let Some(ref manager) = ctx.manager else {
+                return HostcallOutcome::Error {
+                    code: "denied".to_string(),
+                    message: "Extension manager is shutting down".to_string(),
+                };
+            };
+            // Reconstruct ui payload: everything except "op".
+            let payload = if let Value::Object(map) = &call.params {
+                let mut out = map.clone();
+                out.remove("op");
+                Value::Object(out)
+            } else {
+                Value::Null
+            };
+            dispatch_hostcall_ui(&call.call_id, manager, op, payload).await
+        }
+        "events" => {
+            let op = call
+                .params
+                .get("op")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let Some(op) = op else {
+                return HostcallOutcome::Error {
+                    code: "invalid_request".to_string(),
+                    message: "host_call events requires non-empty params.op".to_string(),
+                };
+            };
+            let Some(ref manager) = ctx.manager else {
+                return HostcallOutcome::Error {
+                    code: "denied".to_string(),
+                    message: "Extension manager is shutting down".to_string(),
+                };
+            };
+            // Reconstruct events payload: everything except "op".
+            let payload = if let Value::Object(map) = &call.params {
+                let mut out = map.clone();
+                out.remove("op");
+                Value::Object(out)
+            } else {
+                Value::Null
+            };
+            dispatch_hostcall_events(&call.call_id, manager, ctx.tools, op, payload).await
+        }
+        _ => HostcallOutcome::Error {
+            code: "invalid_request".to_string(),
+            message: format!("Unsupported hostcall method: {}", call.method),
+        },
+    }
+}
+
+#[allow(clippy::future_not_send)]
+async fn dispatch_hostcall(host: &JsRuntimeHost, request: HostcallRequest) -> HostcallOutcome {
+    dispatch_hostcall_with_runtime(None, host, request).await
+}
+
+/// Dispatch a JS hostcall through the shared ABI surface (bd-1uy.1.3).
+///
+/// All JS-origin hostcalls now route through [`dispatch_host_call_shared`],
+/// which enforces the canonical [`HostCallPayload`] representation,
+/// taxonomy-only error codes, and deterministic params hashing.
+///
+/// The test interceptor is checked *before* entering the shared path since
+/// it operates on the JS-specific [`HostcallRequest`] type.
+#[allow(clippy::future_not_send)]
+async fn dispatch_hostcall_with_runtime(
+    runtime: Option<&PiJsRuntime>,
+    host: &JsRuntimeHost,
+    request: HostcallRequest,
+) -> HostcallOutcome {
+    // Test interceptor check (short-circuits before the shared ABI path).
+    if let Some(ref interceptor) = host.interceptor {
+        if let Some(outcome) = interceptor.intercept(&request) {
+            return outcome;
+        }
+    }
+
+    // Convert JS request to canonical payload.
+    let canonical = hostcall_request_to_payload(&request);
+
+    // Build the shared dispatch context from the JsRuntimeHost.
+    let ctx = HostCallContext {
+        runtime_name: "js",
+        extension_id: request.extension_id.as_deref(),
+        tools: &host.tools,
+        http: &host.http,
+        manager: host.manager(),
+        policy: &host.policy,
+        js_runtime: runtime,
+        interceptor: None, // already checked above
+    };
+
+    // Dispatch through the shared ABI and convert back to JS outcome.
+    let result = dispatch_host_call_shared(&ctx, canonical).await;
+    host_result_to_outcome(result)
 }
 
 #[allow(clippy::future_not_send)]
@@ -5987,14 +6346,58 @@ async fn dispatch_hostcall_tool(
             },
         },
         Err(err) => HostcallOutcome::Error {
-            code: "tool_error".to_string(),
+            code: "io".to_string(),
             message: err.to_string(),
         },
     }
 }
 
 #[allow(clippy::future_not_send, clippy::too_many_lines)]
-async fn dispatch_hostcall_exec(_call_id: &str, cmd: &str, payload: Value) -> HostcallOutcome {
+async fn dispatch_hostcall_exec(
+    runtime: Option<&PiJsRuntime>,
+    call_id: &str,
+    cmd: &str,
+    payload: Value,
+) -> HostcallOutcome {
+    use std::io::{BufRead as _, Read as _};
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+    use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
+
+    enum ExecStreamFrame {
+        Stdout(String),
+        Stderr(String),
+        Final { code: i32, killed: bool },
+        Error(String),
+    }
+
+    fn pump_stream<R: std::io::Read>(
+        reader: R,
+        tx: &SyncSender<ExecStreamFrame>,
+        stdout: bool,
+    ) -> std::result::Result<(), String> {
+        let mut reader = std::io::BufReader::new(reader);
+        loop {
+            let mut buf = Vec::new();
+            let read = reader
+                .read_until(b'\n', &mut buf)
+                .map_err(|err| err.to_string())?;
+            if read == 0 {
+                break;
+            }
+
+            let text = String::from_utf8_lossy(&buf).to_string();
+            let frame = if stdout {
+                ExecStreamFrame::Stdout(text)
+            } else {
+                ExecStreamFrame::Stderr(text)
+            };
+            if tx.send(frame).is_err() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     let args_value = payload.get("args").cloned().unwrap_or(Value::Null);
     let args_array = match args_value {
         Value::Null => Vec::new(),
@@ -6026,6 +6429,160 @@ async fn dispatch_hostcall_exec(_call_id: &str, cmd: &str, payload: Value) -> Ho
         .or_else(|| options.get("timeoutMs").and_then(Value::as_u64))
         .or_else(|| options.get("timeout_ms").and_then(Value::as_u64))
         .filter(|ms| *ms > 0);
+    let stream = options
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    if stream {
+        if let Some(runtime) = runtime {
+            let cmd = cmd.to_string();
+            let (tx, rx) = mpsc::sync_channel::<ExecStreamFrame>(256);
+            let cancel = Arc::new(AtomicBool::new(false));
+            let cancel_worker = Arc::clone(&cancel);
+            let call_id_for_error = call_id.to_string();
+
+            thread::spawn(move || {
+                let result = (|| -> std::result::Result<(), String> {
+                    let mut command = Command::new(&cmd);
+                    command
+                        .args(&args)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped());
+
+                    if let Some(cwd) = cwd.as_ref() {
+                        command.current_dir(cwd);
+                    }
+
+                    let mut child = command.spawn().map_err(|err| err.to_string())?;
+                    let pid = child.id();
+
+                    let stdout = child.stdout.take().ok_or("Missing stdout pipe")?;
+                    let stderr = child.stderr.take().ok_or("Missing stderr pipe")?;
+
+                    let stdout_tx = tx.clone();
+                    let stderr_tx = tx.clone();
+                    let stdout_handle =
+                        thread::spawn(move || pump_stream(stdout, &stdout_tx, true));
+                    let stderr_handle =
+                        thread::spawn(move || pump_stream(stderr, &stderr_tx, false));
+
+                    let start = Instant::now();
+                    let mut killed = false;
+                    let status = loop {
+                        if let Some(status) = child.try_wait().map_err(|err| err.to_string())? {
+                            break status;
+                        }
+
+                        if cancel_worker.load(AtomicOrdering::SeqCst) {
+                            killed = true;
+                            crate::tools::kill_process_tree(Some(pid));
+                            let _ = child.kill();
+                            break child.wait().map_err(|err| err.to_string())?;
+                        }
+
+                        if let Some(timeout_ms) = timeout_ms {
+                            if start.elapsed() >= Duration::from_millis(timeout_ms) {
+                                killed = true;
+                                crate::tools::kill_process_tree(Some(pid));
+                                let _ = child.kill();
+                                break child.wait().map_err(|err| err.to_string())?;
+                            }
+                        }
+
+                        thread::sleep(Duration::from_millis(10));
+                    };
+
+                    let stdout_result = stdout_handle
+                        .join()
+                        .map_err(|_| "stdout reader thread panicked".to_string())?;
+                    if let Err(err) = stdout_result {
+                        return Err(format!("Read stdout: {err}"));
+                    }
+
+                    let stderr_result = stderr_handle
+                        .join()
+                        .map_err(|_| "stderr reader thread panicked".to_string())?;
+                    if let Err(err) = stderr_result {
+                        return Err(format!("Read stderr: {err}"));
+                    }
+
+                    let code = status.code().unwrap_or(0);
+                    let _ = tx.send(ExecStreamFrame::Final { code, killed });
+                    Ok(())
+                })();
+
+                if let Err(err) = result {
+                    if tx.send(ExecStreamFrame::Error(err)).is_err() {
+                        tracing::trace!(
+                            call_id = %call_id_for_error,
+                            "Exec hostcall stream result dropped before completion"
+                        );
+                    }
+                }
+            });
+
+            let mut sequence = 0_u64;
+            loop {
+                if !runtime.is_hostcall_pending(call_id) {
+                    cancel.store(true, AtomicOrdering::SeqCst);
+                    return HostcallOutcome::Error {
+                        code: "timeout".to_string(),
+                        message: "exec stream cancelled".to_string(),
+                    };
+                }
+
+                match rx.recv_timeout(Duration::from_millis(25)) {
+                    Ok(ExecStreamFrame::Stdout(chunk)) => {
+                        runtime.complete_hostcall(
+                            call_id.to_string(),
+                            HostcallOutcome::StreamChunk {
+                                sequence,
+                                chunk: json!({ "stdout": chunk }),
+                                is_final: false,
+                            },
+                        );
+                        sequence = sequence.saturating_add(1);
+                    }
+                    Ok(ExecStreamFrame::Stderr(chunk)) => {
+                        runtime.complete_hostcall(
+                            call_id.to_string(),
+                            HostcallOutcome::StreamChunk {
+                                sequence,
+                                chunk: json!({ "stderr": chunk }),
+                                is_final: false,
+                            },
+                        );
+                        sequence = sequence.saturating_add(1);
+                    }
+                    Ok(ExecStreamFrame::Final { code, killed }) => {
+                        return HostcallOutcome::StreamChunk {
+                            sequence,
+                            chunk: json!({
+                                "code": code,
+                                "killed": killed,
+                            }),
+                            is_final: true,
+                        };
+                    }
+                    Ok(ExecStreamFrame::Error(message)) => {
+                        return HostcallOutcome::Error {
+                            code: "io".to_string(),
+                            message,
+                        };
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => {
+                        return HostcallOutcome::Error {
+                            code: "internal".to_string(),
+                            message: "exec stream channel closed".to_string(),
+                        };
+                    }
+                }
+            }
+        }
+    }
 
     let cmd = cmd.to_string();
     let (tx, rx) = oneshot::channel();
@@ -6153,13 +6710,13 @@ async fn dispatch_hostcall_http(
     }
 }
 
-const fn hostcall_code_to_str(code: crate::connectors::HostCallErrorCode) -> &'static str {
+const fn hostcall_code_to_str(code: HostCallErrorCode) -> &'static str {
     match code {
-        crate::connectors::HostCallErrorCode::Timeout => "timeout",
-        crate::connectors::HostCallErrorCode::Denied => "denied",
-        crate::connectors::HostCallErrorCode::Io => "io",
-        crate::connectors::HostCallErrorCode::InvalidRequest => "invalid_request",
-        crate::connectors::HostCallErrorCode::Internal => "internal",
+        HostCallErrorCode::Timeout => "timeout",
+        HostCallErrorCode::Denied => "denied",
+        HostCallErrorCode::Io => "io",
+        HostCallErrorCode::InvalidRequest => "invalid_request",
+        HostCallErrorCode::Internal => "internal",
     }
 }
 
@@ -6334,6 +6891,14 @@ async fn dispatch_hostcall_ui(
     op: &str,
     payload: Value,
 ) -> HostcallOutcome {
+    let op = op.trim();
+    if op.is_empty() {
+        return HostcallOutcome::Error {
+            code: "invalid_request".to_string(),
+            message: "host_call ui requires non-empty op".to_string(),
+        };
+    }
+
     let request = ExtensionUiRequest {
         id: call_id.to_string(),
         method: op.to_string(),
@@ -6342,12 +6907,38 @@ async fn dispatch_hostcall_ui(
     };
 
     match manager.request_ui(request).await {
-        Ok(Some(response)) => HostcallOutcome::Success(response.value.unwrap_or(Value::Null)),
+        Ok(Some(response)) => HostcallOutcome::Success(ui_response_value_for_op(op, &response)),
         Ok(None) => HostcallOutcome::Success(Value::Null),
         Err(err) => HostcallOutcome::Error {
-            code: "io".to_string(),
+            code: classify_ui_hostcall_error(&err).to_string(),
             message: err.to_string(),
         },
+    }
+}
+
+fn ui_response_value_for_op(op: &str, response: &ExtensionUiResponse) -> Value {
+    if response.cancelled {
+        return match op {
+            // Deterministic defaults: confirm cancellation/timeout resolves false.
+            "confirm" => Value::Bool(false),
+            _ => Value::Null,
+        };
+    }
+    response.value.clone().unwrap_or(Value::Null)
+}
+
+fn classify_ui_hostcall_error(err: &Error) -> &'static str {
+    let msg = err.to_string();
+    let lower = msg.to_ascii_lowercase();
+    if lower.contains("timeout") || lower.contains("timed out") || lower.contains("cancel") {
+        "timeout"
+    } else if lower.contains("not configured")
+        || lower.contains("channel closed")
+        || lower.contains("response dropped")
+    {
+        "denied"
+    } else {
+        err.hostcall_error_code()
     }
 }
 
@@ -8859,6 +9450,288 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn js_runtime_pump_once_exec_streaming_callback_delivers_chunks_and_final_result() {
+        futures::executor::block_on(async {
+            let dir = tempdir().expect("tempdir");
+            let manager = ExtensionManager::new();
+            let host = JsRuntimeHost {
+                tools: Arc::new(ToolRegistry::new(&[], dir.path(), None)),
+                manager_ref: Arc::downgrade(&manager.inner),
+                http: Arc::new(HttpConnector::with_defaults()),
+                policy: ExtensionPolicy {
+                    mode: ExtensionPolicyMode::Permissive,
+                    max_memory_mb: 256,
+                    default_caps: Vec::new(),
+                    deny_caps: Vec::new(),
+                },
+                interceptor: None,
+            };
+
+            let runtime = PiJsRuntime::new().await.expect("runtime");
+            runtime
+                .eval(
+                    r#"
+                    globalThis.chunks = [];
+                    globalThis.finalResult = null;
+                    globalThis.finalErr = null;
+                    pi.exec("sh", ["-c", "printf 'out-1\n'; printf 'err-1\n' 1>&2; printf 'out-2\n'"], {
+                        stream: true,
+                        onChunk: (chunk, isFinal) => {
+                            globalThis.chunks.push({ chunk, isFinal });
+                        },
+                    })
+                    .then((r) => { globalThis.finalResult = r; })
+                    .catch((e) => { globalThis.finalErr = { code: e.code, message: e.message || String(e) }; });
+                "#,
+                )
+                .await
+                .expect("eval");
+
+            for _ in 0..256 {
+                let has_pending = pump_js_runtime_once(&runtime, &host)
+                    .await
+                    .expect("pump_once");
+                if !has_pending {
+                    break;
+                }
+            }
+            assert!(
+                !runtime.has_pending(),
+                "runtime should have no pending tasks after streaming exec"
+            );
+
+            let chunks = runtime
+                .read_global_json("chunks")
+                .await
+                .expect("read chunks");
+            let entries = chunks.as_array().expect("chunks array");
+            assert!(
+                entries.len() >= 3,
+                "expected stream chunks plus final chunk, got: {entries:?}"
+            );
+            assert!(
+                entries.iter().any(|entry| {
+                    entry
+                        .get("chunk")
+                        .and_then(|chunk| chunk.get("stdout"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| text.contains("out-1"))
+                }),
+                "missing stdout chunk: {entries:?}"
+            );
+            assert!(
+                entries.iter().any(|entry| {
+                    entry
+                        .get("chunk")
+                        .and_then(|chunk| chunk.get("stderr"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| text.contains("err-1"))
+                }),
+                "missing stderr chunk: {entries:?}"
+            );
+            assert_eq!(
+                entries.last().and_then(|entry| entry.get("isFinal")),
+                Some(&Value::Bool(true)),
+                "expected final stream marker: {entries:?}"
+            );
+
+            let final_result = runtime
+                .read_global_json("finalResult")
+                .await
+                .expect("read finalResult");
+            assert_eq!(final_result.get("code"), Some(&json!(0)));
+            assert_eq!(final_result.get("killed"), Some(&Value::Bool(false)));
+            assert_eq!(
+                runtime
+                    .read_global_json("finalErr")
+                    .await
+                    .expect("read finalErr"),
+                Value::Null
+            );
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn js_runtime_pump_once_exec_streaming_async_iterator_delivers_chunks_in_order() {
+        futures::executor::block_on(async {
+            let dir = tempdir().expect("tempdir");
+            let manager = ExtensionManager::new();
+            let host = JsRuntimeHost {
+                tools: Arc::new(ToolRegistry::new(&[], dir.path(), None)),
+                manager_ref: Arc::downgrade(&manager.inner),
+                http: Arc::new(HttpConnector::with_defaults()),
+                policy: ExtensionPolicy {
+                    mode: ExtensionPolicyMode::Permissive,
+                    max_memory_mb: 256,
+                    default_caps: Vec::new(),
+                    deny_caps: Vec::new(),
+                },
+                interceptor: None,
+            };
+
+            let runtime = PiJsRuntime::new().await.expect("runtime");
+            runtime
+                .eval(
+                    r#"
+                    globalThis.iterChunks = [];
+                    globalThis.iterDone = false;
+                    globalThis.iterErr = null;
+                    (async () => {
+                        try {
+                            const stream = pi.exec("sh", ["-c", "printf 'a\n'; printf 'b\n'"], { stream: true });
+                            for await (const chunk of stream) {
+                                globalThis.iterChunks.push(chunk);
+                            }
+                            globalThis.iterDone = true;
+                        } catch (e) {
+                            globalThis.iterErr = e.message || String(e);
+                        }
+                    })();
+                "#,
+                )
+                .await
+                .expect("eval");
+
+            for _ in 0..256 {
+                let has_pending = pump_js_runtime_once(&runtime, &host)
+                    .await
+                    .expect("pump_once");
+                if !has_pending {
+                    break;
+                }
+            }
+            assert!(
+                !runtime.has_pending(),
+                "runtime should have no pending tasks after streaming exec"
+            );
+
+            let iter_chunks = runtime
+                .read_global_json("iterChunks")
+                .await
+                .expect("read iterChunks");
+            let entries = iter_chunks.as_array().expect("iterChunks array");
+            assert!(
+                entries.len() >= 3,
+                "expected stdout/stdout/final chunks, got: {entries:?}"
+            );
+            assert_eq!(
+                entries[0].get("stdout"),
+                Some(&Value::String("a\n".to_string()))
+            );
+            assert_eq!(
+                entries[1].get("stdout"),
+                Some(&Value::String("b\n".to_string()))
+            );
+            let final_chunk = entries.last().expect("final chunk");
+            assert_eq!(final_chunk.get("code"), Some(&json!(0)));
+            assert_eq!(final_chunk.get("killed"), Some(&Value::Bool(false)));
+            assert_eq!(
+                runtime
+                    .read_global_json("iterDone")
+                    .await
+                    .expect("read iterDone"),
+                Value::Bool(true)
+            );
+            assert_eq!(
+                runtime
+                    .read_global_json("iterErr")
+                    .await
+                    .expect("read iterErr"),
+                Value::Null
+            );
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn js_runtime_pump_once_exec_streaming_timeout_sets_killed_final_chunk() {
+        futures::executor::block_on(async {
+            let dir = tempdir().expect("tempdir");
+            let manager = ExtensionManager::new();
+            let host = JsRuntimeHost {
+                tools: Arc::new(ToolRegistry::new(&[], dir.path(), None)),
+                manager_ref: Arc::downgrade(&manager.inner),
+                http: Arc::new(HttpConnector::with_defaults()),
+                policy: ExtensionPolicy {
+                    mode: ExtensionPolicyMode::Permissive,
+                    max_memory_mb: 256,
+                    default_caps: Vec::new(),
+                    deny_caps: Vec::new(),
+                },
+                interceptor: None,
+            };
+
+            let runtime = PiJsRuntime::new().await.expect("runtime");
+            runtime
+                .eval(
+                    r#"
+                    globalThis.timeoutChunks = [];
+                    globalThis.timeoutDone = false;
+                    globalThis.timeoutErr = null;
+                    (async () => {
+                        try {
+                            const stream = pi.exec("sh", ["-c", "sleep 0.25"], { stream: true, timeoutMs: 20 });
+                            for await (const chunk of stream) {
+                                globalThis.timeoutChunks.push(chunk);
+                            }
+                            globalThis.timeoutDone = true;
+                        } catch (e) {
+                            globalThis.timeoutErr = e.message || String(e);
+                        }
+                    })();
+                "#,
+                )
+                .await
+                .expect("eval");
+
+            for _ in 0..256 {
+                let has_pending = pump_js_runtime_once(&runtime, &host)
+                    .await
+                    .expect("pump_once");
+                if !has_pending {
+                    break;
+                }
+            }
+            assert!(
+                !runtime.has_pending(),
+                "runtime should have no pending tasks after timeout stream"
+            );
+
+            let timeout_chunks = runtime
+                .read_global_json("timeoutChunks")
+                .await
+                .expect("read timeoutChunks");
+            let entries = timeout_chunks.as_array().expect("timeoutChunks array");
+            assert!(!entries.is_empty(), "expected at least one final chunk");
+            let final_chunk = entries.last().expect("final chunk");
+            assert_eq!(final_chunk.get("killed"), Some(&Value::Bool(true)));
+            assert!(
+                final_chunk
+                    .get("code")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|code| code >= 0),
+                "expected numeric exit code in final chunk: {final_chunk:?}"
+            );
+            assert_eq!(
+                runtime
+                    .read_global_json("timeoutDone")
+                    .await
+                    .expect("read timeoutDone"),
+                Value::Bool(true)
+            );
+            assert_eq!(
+                runtime
+                    .read_global_json("timeoutErr")
+                    .await
+                    .expect("read timeoutErr"),
+                Value::Null
+            );
+        });
+    }
+
+    #[test]
     fn extension_protocol_schema_accepts_all_variants() {
         let schema = compiled_extension_protocol_schema();
         for (label, message) in sample_protocol_messages() {
@@ -9669,6 +10542,131 @@ mod tests {
                 .get("call_id")
                 .is_some_and(|value| value.contains("hostcall-strict-1"))
         );
+    }
+
+    #[test]
+    fn shared_dispatcher_logs_runtime_from_context() {
+        use std::sync::Arc;
+
+        let dir = tempdir().expect("tempdir");
+        let cwd = dir.path().to_path_buf();
+        let tools = Arc::new(crate::tools::ToolRegistry::new(&[], &cwd, None));
+        let http = Arc::new(crate::connectors::http::HttpConnector::with_defaults());
+        let policy = ExtensionPolicy {
+            mode: ExtensionPolicyMode::Permissive,
+            max_memory_mb: 256,
+            default_caps: Vec::new(),
+            deny_caps: Vec::new(),
+        };
+        let call = HostCallPayload {
+            call_id: "runtime-log-1".to_string(),
+            capability: "ui".to_string(),
+            method: "ui".to_string(),
+            params: serde_json::json!({ "op": "confirm" }),
+            timeout_ms: None,
+            cancel_token: None,
+            context: None,
+        };
+
+        let (_result, events) = capture_tracing_events(|| {
+            run_async(async {
+                let ctx = HostCallContext {
+                    runtime_name: "protocol",
+                    extension_id: Some("ext-log"),
+                    tools: &tools,
+                    http: &http,
+                    manager: None,
+                    policy: &policy,
+                    js_runtime: None,
+                    interceptor: None,
+                };
+                dispatch_host_call_shared(&ctx, call).await
+            })
+        });
+
+        let start = events.iter().find(|event| {
+            event
+                .fields
+                .get("event")
+                .is_some_and(|value| value.contains("host_call.start"))
+        });
+        let start = start.expect("host_call.start event");
+        assert_eq!(
+            start.fields.get("runtime").map(std::string::String::as_str),
+            Some("protocol")
+        );
+    }
+
+    #[test]
+    fn js_hostcall_ui_missing_op_is_invalid_request() {
+        use std::sync::Arc;
+
+        let dir = tempdir().expect("tempdir");
+        let cwd = dir.path().to_path_buf();
+        let manager = extension_manager_no_persisted_permissions();
+
+        let host = JsRuntimeHost {
+            tools: Arc::new(crate::tools::ToolRegistry::new(&[], &cwd, None)),
+            manager_ref: Arc::downgrade(&manager.inner),
+            http: Arc::new(crate::connectors::http::HttpConnector::with_defaults()),
+            policy: ExtensionPolicy {
+                mode: ExtensionPolicyMode::Strict,
+                max_memory_mb: 256,
+                default_caps: vec!["ui".to_string()],
+                deny_caps: Vec::new(),
+            },
+            interceptor: None,
+        };
+
+        let request = crate::extensions_js::HostcallRequest {
+            call_id: "hostcall-ui-missing-op".to_string(),
+            kind: crate::extensions_js::HostcallKind::Ui { op: String::new() },
+            payload: serde_json::json!({}),
+            trace_id: 0,
+            extension_id: Some("ext-ui".to_string()),
+        };
+
+        let outcome = run_async(async { super::dispatch_hostcall(&host, request).await });
+        assert!(
+            matches!(outcome, HostcallOutcome::Error { code, .. } if code == "invalid_request")
+        );
+    }
+
+    #[test]
+    fn js_hostcall_ui_timeout_maps_to_timeout_taxonomy() {
+        use std::sync::Arc;
+
+        let dir = tempdir().expect("tempdir");
+        let cwd = dir.path().to_path_buf();
+        let manager = extension_manager_no_persisted_permissions();
+        let (ui_tx, _ui_rx) = mpsc::channel(8);
+        manager.set_ui_sender(ui_tx);
+
+        let host = JsRuntimeHost {
+            tools: Arc::new(crate::tools::ToolRegistry::new(&[], &cwd, None)),
+            manager_ref: Arc::downgrade(&manager.inner),
+            http: Arc::new(crate::connectors::http::HttpConnector::with_defaults()),
+            policy: ExtensionPolicy {
+                mode: ExtensionPolicyMode::Strict,
+                max_memory_mb: 256,
+                default_caps: vec!["ui".to_string()],
+                deny_caps: Vec::new(),
+            },
+            interceptor: None,
+        };
+
+        let request = crate::extensions_js::HostcallRequest {
+            call_id: "hostcall-ui-timeout".to_string(),
+            kind: crate::extensions_js::HostcallKind::Ui {
+                op: "confirm".to_string(),
+            },
+            payload: serde_json::json!({ "timeout": 10 }),
+            trace_id: 0,
+            extension_id: Some("ext-ui".to_string()),
+        };
+
+        let outcome = run_async(async { super::dispatch_hostcall(&host, request).await });
+        assert!(matches!(outcome, HostcallOutcome::Error { code, .. } if code == "timeout"));
     }
 
     #[test]
@@ -13261,5 +14259,366 @@ mod tests {
                 });
             }
         }
+    }
+
+    // ========================================================================
+    // Shared dispatcher tests (bd-1uy.1.3)
+    // ========================================================================
+
+    /// Build a permissive `HostCallContext` for testing dispatch behaviour.
+    fn test_host_call_context<'a>(
+        tools: &'a ToolRegistry,
+        http: &'a HttpConnector,
+        policy: &'a ExtensionPolicy,
+    ) -> HostCallContext<'a>
+    where
+        'a: 'a,
+    {
+        HostCallContext {
+            runtime_name: "test",
+            extension_id: Some("ext.test"),
+            tools,
+            http,
+            manager: None,
+            policy,
+            js_runtime: None,
+            interceptor: None,
+        }
+    }
+
+    fn permissive_policy() -> ExtensionPolicy {
+        ExtensionPolicy {
+            mode: ExtensionPolicyMode::Permissive,
+            max_memory_mb: 256,
+            default_caps: Vec::new(),
+            deny_caps: Vec::new(),
+        }
+    }
+
+    fn deny_all_policy() -> ExtensionPolicy {
+        ExtensionPolicy {
+            mode: ExtensionPolicyMode::Strict,
+            max_memory_mb: 256,
+            default_caps: Vec::new(),
+            deny_caps: vec![
+                "read".to_string(),
+                "write".to_string(),
+                "exec".to_string(),
+                "http".to_string(),
+                "tool".to_string(),
+                "session".to_string(),
+                "ui".to_string(),
+                "events".to_string(),
+            ],
+        }
+    }
+
+    #[test]
+    fn shared_dispatch_unknown_tool_returns_invalid_request() {
+        let dir = tempdir().expect("tempdir");
+        let tools = ToolRegistry::new(&[], dir.path(), None);
+        let http = HttpConnector::with_defaults();
+        let policy = permissive_policy();
+        let ctx = test_host_call_context(&tools, &http, &policy);
+
+        let call = HostCallPayload {
+            call_id: "call-1".to_string(),
+            capability: "tool".to_string(),
+            method: "tool".to_string(),
+            params: json!({ "name": "nonexistent_tool", "input": {} }),
+            timeout_ms: None,
+            cancel_token: None,
+            context: None,
+        };
+
+        run_async(async {
+            let result = dispatch_host_call_shared(&ctx, call).await;
+            assert!(result.is_error, "expected error for unknown tool");
+            let err = result.error.expect("expected error payload");
+            assert_eq!(err.code, HostCallErrorCode::InvalidRequest);
+            assert!(
+                err.message.contains("Unknown tool"),
+                "message should mention unknown tool, got: {}",
+                err.message
+            );
+            // output must be object per spec (not null)
+            assert!(result.output.is_object(), "output must be {{}} on error");
+        });
+    }
+
+    #[test]
+    fn shared_dispatch_denied_by_policy() {
+        let dir = tempdir().expect("tempdir");
+        let tools = ToolRegistry::new(&[], dir.path(), None);
+        let http = HttpConnector::with_defaults();
+        let policy = deny_all_policy();
+        let ctx = test_host_call_context(&tools, &http, &policy);
+
+        let call = HostCallPayload {
+            call_id: "call-deny".to_string(),
+            capability: "read".to_string(),
+            method: "tool".to_string(),
+            params: json!({ "name": "read", "input": { "path": "/etc/passwd" } }),
+            timeout_ms: None,
+            cancel_token: None,
+            context: None,
+        };
+
+        run_async(async {
+            let result = dispatch_host_call_shared(&ctx, call).await;
+            assert!(result.is_error, "expected denial");
+            let err = result.error.expect("expected error payload");
+            assert_eq!(err.code, HostCallErrorCode::Denied);
+            assert!(
+                err.message.contains("denied"),
+                "message should mention denial, got: {}",
+                err.message
+            );
+        });
+    }
+
+    #[test]
+    fn shared_dispatch_unsupported_method_returns_invalid_request() {
+        let dir = tempdir().expect("tempdir");
+        let tools = ToolRegistry::new(&[], dir.path(), None);
+        let http = HttpConnector::with_defaults();
+        let policy = permissive_policy();
+        let ctx = test_host_call_context(&tools, &http, &policy);
+
+        let call = HostCallPayload {
+            call_id: "call-bad-method".to_string(),
+            capability: "unknown_cap".to_string(),
+            method: "nonsense_method".to_string(),
+            params: json!({}),
+            timeout_ms: None,
+            cancel_token: None,
+            context: None,
+        };
+
+        run_async(async {
+            let result = dispatch_host_call_shared(&ctx, call).await;
+            assert!(result.is_error);
+            let err = result.error.expect("expected error payload");
+            assert_eq!(err.code, HostCallErrorCode::InvalidRequest);
+            assert!(
+                err.message.contains("Unknown or invalid host call method")
+                    || err.message.contains("Unsupported hostcall method"),
+                "unexpected error message: {}",
+                err.message
+            );
+        });
+    }
+
+    #[test]
+    fn shared_dispatch_session_without_manager_returns_denied() {
+        let dir = tempdir().expect("tempdir");
+        let tools = ToolRegistry::new(&[], dir.path(), None);
+        let http = HttpConnector::with_defaults();
+        let policy = permissive_policy();
+        // ctx.manager is None → session/ui/events should return "denied"
+        let ctx = test_host_call_context(&tools, &http, &policy);
+
+        let call = HostCallPayload {
+            call_id: "call-session".to_string(),
+            capability: "session".to_string(),
+            method: "session".to_string(),
+            params: json!({ "op": "get_state" }),
+            timeout_ms: None,
+            cancel_token: None,
+            context: None,
+        };
+
+        run_async(async {
+            let result = dispatch_host_call_shared(&ctx, call).await;
+            assert!(result.is_error);
+            let err = result.error.expect("expected error payload");
+            assert_eq!(err.code, HostCallErrorCode::Denied);
+        });
+    }
+
+    #[test]
+    fn hostcall_request_to_payload_preserves_method_and_capability() {
+        let request = HostcallRequest {
+            call_id: "call-conv".to_string(),
+            kind: HostcallKind::Tool {
+                name: "read".to_string(),
+            },
+            payload: json!({ "path": "test.txt" }),
+            trace_id: 42,
+            extension_id: Some("ext.test".to_string()),
+        };
+
+        let payload = hostcall_request_to_payload(&request);
+        assert_eq!(payload.method, "tool");
+        assert_eq!(payload.capability, "read");
+        assert_eq!(payload.call_id, "call-conv");
+        assert_eq!(
+            payload.params,
+            json!({ "name": "read", "input": { "path": "test.txt" } })
+        );
+    }
+
+    #[test]
+    fn hostcall_request_to_payload_exec_shape() {
+        let request = HostcallRequest {
+            call_id: "call-exec".to_string(),
+            kind: HostcallKind::Exec {
+                cmd: "ls".to_string(),
+            },
+            payload: json!({ "args": ["-la"], "timeout": 30000 }),
+            trace_id: 1,
+            extension_id: None,
+        };
+
+        let payload = hostcall_request_to_payload(&request);
+        assert_eq!(payload.method, "exec");
+        assert_eq!(payload.capability, "exec");
+        // Params should have "cmd" injected
+        assert_eq!(payload.params.get("cmd").and_then(Value::as_str), Some("ls"));
+        assert!(payload.params.get("args").is_some());
+    }
+
+    #[test]
+    fn hostcall_request_to_payload_session_shape() {
+        let request = HostcallRequest {
+            call_id: "call-session".to_string(),
+            kind: HostcallKind::Session {
+                op: "get_state".to_string(),
+            },
+            payload: json!({ "key": "value" }),
+            trace_id: 1,
+            extension_id: None,
+        };
+
+        let payload = hostcall_request_to_payload(&request);
+        assert_eq!(payload.method, "session");
+        assert_eq!(payload.capability, "session");
+        // Params should have "op" injected
+        assert_eq!(
+            payload.params.get("op").and_then(Value::as_str),
+            Some("get_state")
+        );
+        assert_eq!(
+            payload.params.get("key").and_then(Value::as_str),
+            Some("value")
+        );
+    }
+
+    #[test]
+    fn params_hash_parity_request_vs_payload() {
+        let request = HostcallRequest {
+            call_id: "call-hash".to_string(),
+            kind: HostcallKind::Tool {
+                name: "read".to_string(),
+            },
+            payload: json!({ "path": "hello.txt", "offset": 0 }),
+            trace_id: 1,
+            extension_id: None,
+        };
+
+        let payload = hostcall_request_to_payload(&request);
+
+        // The params_hash from the request and from the payload must match,
+        // since both use the same canonical shape.
+        let request_hash = request.params_hash();
+        let payload_hash = hostcall_params_hash(&payload.method, &payload.params);
+        assert_eq!(
+            request_hash, payload_hash,
+            "params_hash must be identical for HostcallRequest and HostCallPayload"
+        );
+    }
+
+    #[test]
+    fn host_result_to_outcome_success_roundtrip() {
+        let result = HostResultPayload {
+            call_id: "call-ok".to_string(),
+            output: json!({"data": "hello"}),
+            is_error: false,
+            error: None,
+            chunk: None,
+        };
+
+        let outcome = host_result_to_outcome(result);
+        assert!(matches!(outcome, HostcallOutcome::Success(ref v) if v == &json!({"data": "hello"})));
+    }
+
+    #[test]
+    fn host_result_to_outcome_error_roundtrip() {
+        let result = HostResultPayload {
+            call_id: "call-err".to_string(),
+            output: json!({}),
+            is_error: true,
+            error: Some(HostCallError {
+                code: HostCallErrorCode::Io,
+                message: "disk full".to_string(),
+                details: None,
+                retryable: Some(true),
+            }),
+            chunk: None,
+        };
+
+        let outcome = host_result_to_outcome(result);
+        match outcome {
+            HostcallOutcome::Error { code, message } => {
+                assert_eq!(code, "io");
+                assert_eq!(message, "disk full");
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn host_result_to_outcome_stream_chunk() {
+        let result = HostResultPayload {
+            call_id: "call-stream".to_string(),
+            output: json!("line 1\n"),
+            is_error: false,
+            error: None,
+            chunk: Some(HostStreamChunk {
+                index: 5,
+                is_last: false,
+                backpressure: None,
+            }),
+        };
+
+        let outcome = host_result_to_outcome(result);
+        match outcome {
+            HostcallOutcome::StreamChunk {
+                sequence,
+                chunk,
+                is_final,
+            } => {
+                assert_eq!(sequence, 5);
+                assert_eq!(chunk, json!("line 1\n"));
+                assert!(!is_final);
+            }
+            other => panic!("expected StreamChunk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn outcome_to_host_result_preserves_taxonomy() {
+        let outcome = HostcallOutcome::Error {
+            code: "timeout".to_string(),
+            message: "timed out".to_string(),
+        };
+        let result = outcome_to_host_result("call-t", &outcome);
+        assert!(result.is_error);
+        assert_eq!(result.output, json!({}));
+        let err = result.error.unwrap();
+        assert_eq!(err.code, HostCallErrorCode::Timeout);
+        assert_eq!(err.message, "timed out");
+    }
+
+    #[test]
+    fn outcome_to_host_result_unknown_code_maps_to_internal() {
+        let outcome = HostcallOutcome::Error {
+            code: "some_weird_code".to_string(),
+            message: "surprise".to_string(),
+        };
+        let result = outcome_to_host_result("call-x", &outcome);
+        assert!(result.is_error);
+        let err = result.error.unwrap();
+        assert_eq!(err.code, HostCallErrorCode::Internal);
     }
 }
