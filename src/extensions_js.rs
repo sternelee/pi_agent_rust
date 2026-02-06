@@ -10341,6 +10341,131 @@ mod tests {
     }
 
     #[test]
+    fn pijs_stream_concurrent_exec_calls_have_independent_lifecycle() {
+        futures::executor::block_on(async {
+            let runtime = PiJsRuntime::with_clock(DeterministicClock::new(0))
+                .await
+                .expect("create runtime");
+
+            runtime
+                .eval(
+                    r#"
+            globalThis.streamA = [];
+            globalThis.streamB = [];
+            globalThis.doneA = false;
+            globalThis.doneB = false;
+            (async () => {
+                const stream = pi.exec("cmd-a", [], { stream: true });
+                for await (const chunk of stream) {
+                    globalThis.streamA.push(chunk);
+                }
+                globalThis.doneA = true;
+            })();
+            (async () => {
+                const stream = pi.exec("cmd-b", [], { stream: true });
+                for await (const chunk of stream) {
+                    globalThis.streamB.push(chunk);
+                }
+                globalThis.doneB = true;
+            })();
+            "#,
+                )
+                .await
+                .expect("eval");
+
+            let requests = runtime.drain_hostcall_requests();
+            assert_eq!(requests.len(), 2, "expected two streaming exec requests");
+
+            let mut call_a: Option<String> = None;
+            let mut call_b: Option<String> = None;
+            for request in &requests {
+                match &request.kind {
+                    HostcallKind::Exec { cmd } if cmd == "cmd-a" => {
+                        call_a = Some(request.call_id.clone());
+                    }
+                    HostcallKind::Exec { cmd } if cmd == "cmd-b" => {
+                        call_b = Some(request.call_id.clone());
+                    }
+                    _ => {}
+                }
+            }
+
+            let call_a = call_a.expect("call_id for cmd-a");
+            let call_b = call_b.expect("call_id for cmd-b");
+            assert_ne!(call_a, call_b, "concurrent calls must have distinct ids");
+            assert_eq!(runtime.pending_hostcall_count(), 2);
+
+            runtime.complete_hostcall(
+                call_a.clone(),
+                HostcallOutcome::StreamChunk {
+                    sequence: 0,
+                    chunk: serde_json::json!("a0"),
+                    is_final: false,
+                },
+            );
+            runtime.tick().await.expect("tick a0");
+
+            runtime.complete_hostcall(
+                call_b.clone(),
+                HostcallOutcome::StreamChunk {
+                    sequence: 0,
+                    chunk: serde_json::json!("b0"),
+                    is_final: false,
+                },
+            );
+            runtime.tick().await.expect("tick b0");
+            assert_eq!(runtime.pending_hostcall_count(), 2);
+
+            runtime.complete_hostcall(
+                call_b.clone(),
+                HostcallOutcome::StreamChunk {
+                    sequence: 1,
+                    chunk: serde_json::json!("b1"),
+                    is_final: true,
+                },
+            );
+            runtime.tick().await.expect("tick b1");
+            assert_eq!(runtime.pending_hostcall_count(), 1);
+            assert!(runtime.is_hostcall_pending(&call_a));
+            assert!(!runtime.is_hostcall_pending(&call_b));
+
+            runtime.complete_hostcall(
+                call_a.clone(),
+                HostcallOutcome::StreamChunk {
+                    sequence: 1,
+                    chunk: serde_json::json!("a1"),
+                    is_final: true,
+                },
+            );
+            runtime.tick().await.expect("tick a1");
+            assert_eq!(runtime.pending_hostcall_count(), 0);
+            assert!(!runtime.is_hostcall_pending(&call_a));
+
+            runtime.tick().await.expect("tick settle 1");
+            runtime.tick().await.expect("tick settle 2");
+
+            let stream_a = get_global_json(&runtime, "streamA").await;
+            let stream_b = get_global_json(&runtime, "streamB").await;
+            assert_eq!(
+                stream_a.as_array().expect("streamA array"),
+                &vec![serde_json::json!("a0"), serde_json::json!("a1")]
+            );
+            assert_eq!(
+                stream_b.as_array().expect("streamB array"),
+                &vec![serde_json::json!("b0"), serde_json::json!("b1")]
+            );
+            assert_eq!(
+                get_global_json(&runtime, "doneA").await,
+                serde_json::json!(true)
+            );
+            assert_eq!(
+                get_global_json(&runtime, "doneB").await,
+                serde_json::json!(true)
+            );
+        });
+    }
+
+    #[test]
     fn pijs_stream_chunk_ignored_after_hostcall_completed() {
         futures::executor::block_on(async {
             let runtime = PiJsRuntime::with_clock(DeterministicClock::new(0))

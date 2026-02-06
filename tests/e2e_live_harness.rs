@@ -53,6 +53,8 @@ const LIVE_TARGETS: [LiveProviderTarget; 6] = [
 const LIVE_PROVIDER_RESULT_SCHEMA: &str = "pi.test.live.result.v1";
 const LIVE_PROVIDER_COST_SCHEMA: &str = "pi.test.live.cost.v1";
 const REDACTED_VALUE: &str = "[REDACTED]";
+const LIVE_PROVIDER_FILTER_ENV: &str = "PI_LIVE_E2E_PROVIDER";
+const LIVE_EXPORT_DIR_ENV: &str = "PI_E2E_EXPORT_DIR";
 
 const SENSITIVE_KEY_FRAGMENTS: [&str; 10] = [
     "api_key",
@@ -366,12 +368,38 @@ fn e2e_live_provider_harness_smoke() {
         let harness_ref = &harness;
         let registry = registry.clone();
         async move {
+            let provider_filter = std::env::var(LIVE_PROVIDER_FILTER_ENV)
+                .ok()
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| !value.is_empty());
+            let filtered_targets: Vec<_> = LIVE_TARGETS
+                .iter()
+                .copied()
+                .filter(|target| {
+                    provider_filter
+                        .as_deref()
+                        .is_none_or(|filter| target.provider == filter)
+                })
+                .collect();
+
+            if let Some(filter) = provider_filter.as_deref() {
+                assert!(
+                    !filtered_targets.is_empty(),
+                    "invalid {LIVE_PROVIDER_FILTER_ENV}='{filter}'; expected one of: {}",
+                    LIVE_TARGETS
+                        .iter()
+                        .map(|target| target.provider)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+
             let vcr_dir = harness_ref.temp_path("live_provider_vcr");
             std::fs::create_dir_all(&vcr_dir)
                 .unwrap_or_else(|err| panic!("create live provider vcr dir: {err}"));
 
-            let mut runs = Vec::with_capacity(LIVE_TARGETS.len());
-            for target in LIVE_TARGETS {
+            let mut runs = Vec::with_capacity(filtered_targets.len());
+            for target in filtered_targets.iter().copied() {
                 let run = run_live_provider_target(harness_ref, &registry, &target, &vcr_dir).await;
                 runs.push(run);
             }
@@ -551,6 +579,36 @@ fn e2e_live_provider_harness_smoke() {
                 &normalized_artifact_path,
             );
 
+            if let Ok(export_dir) = std::env::var(LIVE_EXPORT_DIR_ENV) {
+                let export_root = PathBuf::from(export_dir);
+                std::fs::create_dir_all(&export_root)
+                    .unwrap_or_else(|err| panic!("create {LIVE_EXPORT_DIR_ENV} dir: {err}"));
+
+                let export_pairs = [
+                    ("live_provider_results.raw.jsonl", &raw_results_path),
+                    ("live_provider_results.contract.jsonl", &run_contract_path),
+                    ("live_provider_costs.jsonl", &cost_path),
+                    ("live_provider_log.jsonl", &log_path),
+                    ("live_provider_log.normalized.jsonl", &normalized_log_path),
+                    ("live_provider_artifacts.jsonl", &artifact_path),
+                    (
+                        "live_provider_artifacts.normalized.jsonl",
+                        &normalized_artifact_path,
+                    ),
+                ];
+
+                for (name, source_path) in export_pairs {
+                    let destination = export_root.join(name);
+                    std::fs::copy(source_path, &destination).unwrap_or_else(|err| {
+                        panic!(
+                            "export {name} to {} via {LIVE_EXPORT_DIR_ENV}: {err}",
+                            destination.display()
+                        )
+                    });
+                    harness_ref.record_artifact(format!("export/{name}"), &destination);
+                }
+            }
+
             let log_content = std::fs::read_to_string(&log_path).unwrap_or_else(|err| {
                 panic!("read live provider log {}: {err}", log_path.display())
             });
@@ -680,12 +738,19 @@ fn e2e_live_provider_harness_smoke() {
             harness_ref
                 .log()
                 .info_ctx("live_e2e", "Live harness suite summary", |ctx| {
-                    ctx.push(("targets".into(), LIVE_TARGETS.len().to_string()));
+                    ctx.push(("targets".into(), filtered_targets.len().to_string()));
                     ctx.push(("attempted".into(), attempted.to_string()));
                     ctx.push(("passed".into(), passed.to_string()));
                     ctx.push(("skipped".into(), skipped.to_string()));
                     ctx.push(("failed".into(), failed.len().to_string()));
                 });
+
+            if let Some(filter) = provider_filter.as_deref() {
+                assert!(
+                    runs.iter().all(|run| run.provider == filter),
+                    "provider filter '{filter}' did not constrain all runs"
+                );
+            }
 
             assert!(
                 attempted > 0,

@@ -683,6 +683,98 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_stream_chunk_sequence_and_finality_invariants() {
+        let clock = DeterministicClock::new(0);
+        let mut sched = Scheduler::with_clock(clock);
+
+        sched.enqueue_stream_chunk(
+            "call-stream".to_string(),
+            0,
+            serde_json::json!({ "part": "a" }),
+            false,
+        );
+        sched.enqueue_stream_chunk(
+            "call-stream".to_string(),
+            1,
+            serde_json::json!({ "part": "b" }),
+            false,
+        );
+        sched.enqueue_stream_chunk(
+            "call-stream".to_string(),
+            2,
+            serde_json::json!({ "part": "c" }),
+            true,
+        );
+
+        let mut seen = Vec::new();
+        while let Some(task) = sched.tick() {
+            let MacrotaskKind::HostcallComplete { call_id, outcome } = task.kind else {
+                unreachable!("expected hostcall completion task");
+            };
+            let HostcallOutcome::StreamChunk {
+                sequence,
+                chunk,
+                is_final,
+            } = outcome
+            else {
+                unreachable!("expected stream chunk outcome");
+            };
+            seen.push((call_id, sequence, chunk, is_final));
+        }
+
+        assert_eq!(seen.len(), 3);
+        assert!(
+            seen.iter()
+                .all(|(call_id, _, _, _)| call_id == "call-stream")
+        );
+        assert_eq!(seen[0].1, 0);
+        assert_eq!(seen[1].1, 1);
+        assert_eq!(seen[2].1, 2);
+        assert_eq!(seen[0].2, serde_json::json!({ "part": "a" }));
+        assert_eq!(seen[1].2, serde_json::json!({ "part": "b" }));
+        assert_eq!(seen[2].2, serde_json::json!({ "part": "c" }));
+
+        let final_count = seen.iter().filter(|(_, _, _, is_final)| *is_final).count();
+        assert_eq!(final_count, 1, "expected exactly one final chunk");
+        assert!(seen[2].3, "final chunk must be last");
+    }
+
+    #[test]
+    fn scheduler_stream_chunks_multi_call_interleaving_is_deterministic() {
+        let clock = DeterministicClock::new(0);
+        let mut sched = Scheduler::with_clock(clock);
+
+        sched.enqueue_stream_chunk("call-a".to_string(), 0, serde_json::json!("a0"), false);
+        sched.enqueue_stream_chunk("call-b".to_string(), 0, serde_json::json!("b0"), false);
+        sched.enqueue_stream_chunk("call-a".to_string(), 1, serde_json::json!("a1"), true);
+        sched.enqueue_stream_chunk("call-b".to_string(), 1, serde_json::json!("b1"), true);
+
+        let mut trace = Vec::new();
+        while let Some(task) = sched.tick() {
+            let MacrotaskKind::HostcallComplete { call_id, outcome } = task.kind else {
+                unreachable!("expected hostcall completion task");
+            };
+            let HostcallOutcome::StreamChunk {
+                sequence, is_final, ..
+            } = outcome
+            else {
+                unreachable!("expected stream chunk outcome");
+            };
+            trace.push((call_id, sequence, is_final));
+        }
+
+        assert_eq!(
+            trace,
+            vec![
+                ("call-a".to_string(), 0, false),
+                ("call-b".to_string(), 0, false),
+                ("call-a".to_string(), 1, true),
+                ("call-b".to_string(), 1, true),
+            ]
+        );
+    }
+
+    #[test]
     fn scheduler_event_ordering() {
         let clock = DeterministicClock::new(0);
         let mut sched = Scheduler::with_clock(clock);

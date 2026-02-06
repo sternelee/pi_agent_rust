@@ -149,3 +149,71 @@ impl AgentProcess<'_> {
         std::process::Command::new(program)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn for_request_creates_valid_context() {
+        let cx = AgentCx::for_request();
+        // Verify the inner Cx is accessible.
+        let _ = cx.cx();
+    }
+
+    #[test]
+    fn for_testing_creates_valid_context() {
+        let cx = AgentCx::for_testing();
+        let _ = cx.cx();
+    }
+
+    #[test]
+    fn for_testing_with_io_creates_valid_context() {
+        let cx = AgentCx::for_testing_with_io();
+        let _ = cx.cx();
+    }
+
+    #[test]
+    fn for_request_with_budget_creates_valid_context() {
+        let budget = Budget::new(100);
+        let cx = AgentCx::for_request_with_budget(budget);
+        let _ = cx.cx();
+    }
+
+    #[test]
+    fn fs_accessor_returns_agent_fs() {
+        let cx = AgentCx::for_testing();
+        let _fs = cx.fs();
+    }
+
+    #[test]
+    fn time_accessor_returns_agent_time() {
+        let cx = AgentCx::for_testing();
+        let _time = cx.time();
+    }
+
+    #[test]
+    fn http_accessor_returns_agent_http() {
+        let cx = AgentCx::for_testing();
+        let _http = cx.http();
+    }
+
+    #[test]
+    fn process_accessor_returns_agent_process() {
+        let cx = AgentCx::for_testing();
+        let _proc = cx.process();
+    }
+
+    #[test]
+    fn process_command_creates_command() {
+        let cx = AgentCx::for_testing();
+        let cmd = cx.process().command("echo");
+        assert_eq!(cmd.get_program(), "echo");
+    }
+
+    #[test]
+    fn agent_cx_is_clone() {
+        let cx = AgentCx::for_testing();
+        let _cx2 = cx.clone();
+    }
+}

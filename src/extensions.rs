@@ -5807,7 +5807,7 @@ fn log_js_hostcall_end(
     outcome: &HostcallOutcome,
 ) {
     let (is_error, error_code) = match outcome {
-        HostcallOutcome::Success(_) => (false, None),
+        HostcallOutcome::Success(_) | HostcallOutcome::StreamChunk { .. } => (false, None),
         HostcallOutcome::Error { code, .. } => (true, Some(code.as_str())),
     };
 

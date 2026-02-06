@@ -322,153 +322,188 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
     }
 
     #[allow(clippy::future_not_send, clippy::too_many_lines)]
-    async fn dispatch_session(&self, _call_id: &str, op: &str, payload: Value) -> HostcallOutcome {
+    async fn dispatch_session(&self, call_id: &str, op: &str, payload: Value) -> HostcallOutcome {
+        use crate::connectors::HostCallErrorCode;
+
         let op_norm = op.trim().to_ascii_lowercase();
-        let result: std::result::Result<Value, String> = match op_norm.as_str() {
-            "get_state" | "getstate" => Ok(self.session.get_state().await),
-            "get_messages" | "getmessages" => {
-                serde_json::to_value(self.session.get_messages().await)
-                    .map_err(|err| format!("Serialize messages: {err}"))
-            }
-            "get_entries" | "getentries" => serde_json::to_value(self.session.get_entries().await)
-                .map_err(|err| format!("Serialize entries: {err}")),
-            "get_branch" | "getbranch" => serde_json::to_value(self.session.get_branch().await)
-                .map_err(|err| format!("Serialize branch: {err}")),
-            "get_file" | "getfile" => {
-                let state = self.session.get_state().await;
-                let file = state
-                    .get("sessionFile")
-                    .or_else(|| state.get("session_file"))
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                Ok(file)
-            }
-            "get_name" | "getname" => {
-                let state = self.session.get_state().await;
-                let name = state
-                    .get("sessionName")
-                    .or_else(|| state.get("session_name"))
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                Ok(name)
-            }
-            "set_name" | "setname" => {
-                let name = payload
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                self.session
-                    .set_name(name)
-                    .await
-                    .map(|()| Value::Null)
-                    .map_err(|err| err.to_string())
-            }
-            "append_entry" | "appendentry" => {
-                let custom_type = payload
-                    .get("customType")
-                    .and_then(Value::as_str)
-                    .or_else(|| payload.get("custom_type").and_then(Value::as_str))
-                    .unwrap_or_default()
-                    .to_string();
-                let data = payload.get("data").cloned();
-                self.session
-                    .append_custom_entry(custom_type, data)
-                    .await
-                    .map(|()| Value::Null)
-                    .map_err(|err| err.to_string())
-            }
-            "append_message" | "appendmessage" => {
-                let message_value = payload.get("message").cloned().unwrap_or(payload);
-                match serde_json::from_value(message_value) {
-                    Ok(message) => self
-                        .session
-                        .append_message(message)
-                        .await
-                        .map(|()| Value::Null)
-                        .map_err(|err| err.to_string()),
-                    Err(err) => Err(format!("Parse message: {err}")),
-                }
-            }
-            "set_model" | "setmodel" => {
-                let provider = payload
-                    .get("provider")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                let model_id = payload
-                    .get("modelId")
-                    .and_then(Value::as_str)
-                    .or_else(|| payload.get("model_id").and_then(Value::as_str))
-                    .unwrap_or_default()
-                    .to_string();
-                if provider.is_empty() || model_id.is_empty() {
-                    Err("set_model requires 'provider' and 'modelId' fields".to_string())
-                } else {
-                    self.session
-                        .set_model(provider, model_id)
-                        .await
-                        .map(|()| Value::Bool(true))
-                        .map_err(|err| err.to_string())
-                }
-            }
-            "get_model" | "getmodel" => {
-                let (provider, model_id) = self.session.get_model().await;
-                Ok(serde_json::json!({
-                    "provider": provider,
-                    "modelId": model_id,
-                }))
-            }
-            "set_thinking_level" | "setthinkinglevel" => {
-                let level = payload
-                    .get("level")
-                    .and_then(Value::as_str)
-                    .or_else(|| payload.get("thinkingLevel").and_then(Value::as_str))
-                    .or_else(|| payload.get("thinking_level").and_then(Value::as_str))
-                    .unwrap_or_default()
-                    .to_string();
-                if level.is_empty() {
-                    Err("set_thinking_level requires 'level' field".to_string())
-                } else {
-                    self.session
-                        .set_thinking_level(level)
-                        .await
-                        .map(|()| Value::Null)
-                        .map_err(|err| err.to_string())
-                }
-            }
-            "get_thinking_level" | "getthinkinglevel" => {
-                let level = self.session.get_thinking_level().await;
-                Ok(level.map_or(Value::Null, Value::String))
-            }
-            "set_label" | "setlabel" => {
-                let target_id = payload
-                    .get("targetId")
-                    .and_then(Value::as_str)
-                    .or_else(|| payload.get("target_id").and_then(Value::as_str))
-                    .unwrap_or_default()
-                    .to_string();
-                let label = payload
-                    .get("label")
-                    .and_then(Value::as_str)
-                    .map(String::from);
-                if target_id.is_empty() {
-                    Err("set_label requires 'targetId' field".to_string())
-                } else {
-                    self.session
-                        .set_label(target_id, label)
-                        .await
-                        .map(|()| Value::Null)
-                        .map_err(|err| err.to_string())
-                }
-            }
-            _ => Err(format!("Unknown session op: {op}")),
+
+        // Build canonical HostCallPayload for the session capability.
+        let _call = HostCallPayload {
+            call_id: call_id.to_string(),
+            capability: "session".to_string(),
+            method: op_norm.clone(),
+            params: payload.clone(),
+            timeout_ms: None,
+            cancel_token: None,
+            context: None,
         };
+
+        // Categorised result: (Value, error_code) where error_code distinguishes taxonomy.
+        let result: std::result::Result<Value, (HostCallErrorCode, String)> =
+            match op_norm.as_str() {
+                "get_state" | "getstate" => Ok(self.session.get_state().await),
+                "get_messages" | "getmessages" => {
+                    serde_json::to_value(self.session.get_messages().await)
+                        .map_err(|err| (HostCallErrorCode::Internal, format!("Serialize messages: {err}")))
+                }
+                "get_entries" | "getentries" => {
+                    serde_json::to_value(self.session.get_entries().await)
+                        .map_err(|err| (HostCallErrorCode::Internal, format!("Serialize entries: {err}")))
+                }
+                "get_branch" | "getbranch" => {
+                    serde_json::to_value(self.session.get_branch().await)
+                        .map_err(|err| (HostCallErrorCode::Internal, format!("Serialize branch: {err}")))
+                }
+                "get_file" | "getfile" => {
+                    let state = self.session.get_state().await;
+                    let file = state
+                        .get("sessionFile")
+                        .or_else(|| state.get("session_file"))
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    Ok(file)
+                }
+                "get_name" | "getname" => {
+                    let state = self.session.get_state().await;
+                    let name = state
+                        .get("sessionName")
+                        .or_else(|| state.get("session_name"))
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    Ok(name)
+                }
+                "set_name" | "setname" => {
+                    let name = payload
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    self.session
+                        .set_name(name)
+                        .await
+                        .map(|()| Value::Null)
+                        .map_err(|err| (HostCallErrorCode::Io, err.to_string()))
+                }
+                "append_entry" | "appendentry" => {
+                    let custom_type = payload
+                        .get("customType")
+                        .and_then(Value::as_str)
+                        .or_else(|| payload.get("custom_type").and_then(Value::as_str))
+                        .unwrap_or_default()
+                        .to_string();
+                    let data = payload.get("data").cloned();
+                    self.session
+                        .append_custom_entry(custom_type, data)
+                        .await
+                        .map(|()| Value::Null)
+                        .map_err(|err| (HostCallErrorCode::Io, err.to_string()))
+                }
+                "append_message" | "appendmessage" => {
+                    let message_value = payload.get("message").cloned().unwrap_or(payload);
+                    match serde_json::from_value(message_value) {
+                        Ok(message) => self
+                            .session
+                            .append_message(message)
+                            .await
+                            .map(|()| Value::Null)
+                            .map_err(|err| (HostCallErrorCode::Io, err.to_string())),
+                        Err(err) => Err((
+                            HostCallErrorCode::InvalidRequest,
+                            format!("Parse message: {err}"),
+                        )),
+                    }
+                }
+                "set_model" | "setmodel" => {
+                    let provider = payload
+                        .get("provider")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let model_id = payload
+                        .get("modelId")
+                        .and_then(Value::as_str)
+                        .or_else(|| payload.get("model_id").and_then(Value::as_str))
+                        .unwrap_or_default()
+                        .to_string();
+                    if provider.is_empty() || model_id.is_empty() {
+                        Err((
+                            HostCallErrorCode::InvalidRequest,
+                            "set_model requires 'provider' and 'modelId' fields".to_string(),
+                        ))
+                    } else {
+                        self.session
+                            .set_model(provider, model_id)
+                            .await
+                            .map(|()| Value::Bool(true))
+                            .map_err(|err| (HostCallErrorCode::Io, err.to_string()))
+                    }
+                }
+                "get_model" | "getmodel" => {
+                    let (provider, model_id) = self.session.get_model().await;
+                    Ok(serde_json::json!({
+                        "provider": provider,
+                        "modelId": model_id,
+                    }))
+                }
+                "set_thinking_level" | "setthinkinglevel" => {
+                    let level = payload
+                        .get("level")
+                        .and_then(Value::as_str)
+                        .or_else(|| payload.get("thinkingLevel").and_then(Value::as_str))
+                        .or_else(|| payload.get("thinking_level").and_then(Value::as_str))
+                        .unwrap_or_default()
+                        .to_string();
+                    if level.is_empty() {
+                        Err((
+                            HostCallErrorCode::InvalidRequest,
+                            "set_thinking_level requires 'level' field".to_string(),
+                        ))
+                    } else {
+                        self.session
+                            .set_thinking_level(level)
+                            .await
+                            .map(|()| Value::Null)
+                            .map_err(|err| (HostCallErrorCode::Io, err.to_string()))
+                    }
+                }
+                "get_thinking_level" | "getthinkinglevel" => {
+                    let level = self.session.get_thinking_level().await;
+                    Ok(level.map_or(Value::Null, Value::String))
+                }
+                "set_label" | "setlabel" => {
+                    let target_id = payload
+                        .get("targetId")
+                        .and_then(Value::as_str)
+                        .or_else(|| payload.get("target_id").and_then(Value::as_str))
+                        .unwrap_or_default()
+                        .to_string();
+                    let label = payload
+                        .get("label")
+                        .and_then(Value::as_str)
+                        .map(String::from);
+                    if target_id.is_empty() {
+                        Err((
+                            HostCallErrorCode::InvalidRequest,
+                            "set_label requires 'targetId' field".to_string(),
+                        ))
+                    } else {
+                        self.session
+                            .set_label(target_id, label)
+                            .await
+                            .map(|()| Value::Null)
+                            .map_err(|err| (HostCallErrorCode::Io, err.to_string()))
+                    }
+                }
+                _ => Err((
+                    HostCallErrorCode::InvalidRequest,
+                    format!("Unknown session op: {op}"),
+                )),
+            };
 
         match result {
             Ok(value) => HostcallOutcome::Success(value),
-            Err(message) => HostcallOutcome::Error {
-                code: "invalid_request".to_string(),
+            Err((code, message)) => HostcallOutcome::Error {
+                code: hostcall_code_to_str(code).to_string(),
                 message,
             },
         }
@@ -6266,6 +6301,360 @@ mod tests {
                 )
                 .await
                 .expect("verify read tool");
+        });
+    }
+
+    // ======================================================================
+    // bd-321a.4: Session dispatcher taxonomy tests
+    // ======================================================================
+    // Table-driven tests proving dispatch_session returns taxonomy-correct
+    // error codes (timeout|denied|io|invalid_request|internal).
+
+    /// Direct unit test of dispatch_session error taxonomy without JS runtime.
+    /// Uses TestSession to verify error code classification for each operation.
+    #[test]
+    fn session_dispatch_taxonomy_unknown_op_is_invalid_request() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+            let dispatcher = build_dispatcher(Rc::clone(&runtime));
+            let outcome = dispatcher
+                .dispatch_session("c1", "nonexistent_op", serde_json::json!({}))
+                .await;
+            match outcome {
+                HostcallOutcome::Error { code, .. } => {
+                    assert_eq!(code, "invalid_request", "unknown op must be invalid_request");
+                }
+                HostcallOutcome::Success(_) => {
+                    panic!("unknown op should not succeed");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn session_dispatch_taxonomy_set_model_missing_provider_is_invalid_request() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+            let dispatcher = build_dispatcher(Rc::clone(&runtime));
+            let outcome = dispatcher
+                .dispatch_session(
+                    "c2",
+                    "set_model",
+                    serde_json::json!({"modelId": "gpt-4o"}),
+                )
+                .await;
+            match outcome {
+                HostcallOutcome::Error { code, .. } => {
+                    assert_eq!(
+                        code, "invalid_request",
+                        "set_model missing provider must be invalid_request"
+                    );
+                }
+                HostcallOutcome::Success(_) => {
+                    panic!("set_model with missing provider should not succeed");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn session_dispatch_taxonomy_set_model_missing_model_id_is_invalid_request() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+            let dispatcher = build_dispatcher(Rc::clone(&runtime));
+            let outcome = dispatcher
+                .dispatch_session(
+                    "c3",
+                    "set_model",
+                    serde_json::json!({"provider": "anthropic"}),
+                )
+                .await;
+            match outcome {
+                HostcallOutcome::Error { code, .. } => {
+                    assert_eq!(code, "invalid_request");
+                }
+                HostcallOutcome::Success(_) => {
+                    panic!("set_model with missing modelId should not succeed");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn session_dispatch_taxonomy_set_thinking_level_empty_is_invalid_request() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+            let dispatcher = build_dispatcher(Rc::clone(&runtime));
+            let outcome = dispatcher
+                .dispatch_session("c4", "set_thinking_level", serde_json::json!({}))
+                .await;
+            match outcome {
+                HostcallOutcome::Error { code, .. } => {
+                    assert_eq!(code, "invalid_request");
+                }
+                HostcallOutcome::Success(_) => {
+                    panic!("set_thinking_level with no level should not succeed");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn session_dispatch_taxonomy_set_label_empty_target_is_invalid_request() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+            let dispatcher = build_dispatcher(Rc::clone(&runtime));
+            let outcome = dispatcher
+                .dispatch_session("c5", "set_label", serde_json::json!({}))
+                .await;
+            match outcome {
+                HostcallOutcome::Error { code, .. } => {
+                    assert_eq!(code, "invalid_request");
+                }
+                HostcallOutcome::Success(_) => {
+                    panic!("set_label with no targetId should not succeed");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn session_dispatch_taxonomy_append_message_invalid_is_invalid_request() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+            let dispatcher = build_dispatcher(Rc::clone(&runtime));
+            let outcome = dispatcher
+                .dispatch_session(
+                    "c6",
+                    "append_message",
+                    serde_json::json!({"message": {"not_a_valid_message": true}}),
+                )
+                .await;
+            match outcome {
+                HostcallOutcome::Error { code, .. } => {
+                    assert_eq!(
+                        code, "invalid_request",
+                        "malformed message must be invalid_request"
+                    );
+                }
+                HostcallOutcome::Success(_) => {
+                    panic!("invalid message should not succeed");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn session_dispatch_taxonomy_io_error_from_session_trait() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+
+            // Use a session impl that returns IO errors
+            struct FailSession;
+
+            #[async_trait]
+            impl ExtensionSession for FailSession {
+                async fn get_state(&self) -> Value {
+                    Value::Null
+                }
+                async fn get_messages(&self) -> Vec<SessionMessage> {
+                    Vec::new()
+                }
+                async fn get_entries(&self) -> Vec<Value> {
+                    Vec::new()
+                }
+                async fn get_branch(&self) -> Vec<Value> {
+                    Vec::new()
+                }
+                async fn set_name(&self, _name: String) -> Result<()> {
+                    Err(crate::error::PiError::Io(std::io::Error::other("disk full")))
+                }
+                async fn append_message(&self, _message: SessionMessage) -> Result<()> {
+                    Err(crate::error::PiError::Io(std::io::Error::other("disk full")))
+                }
+                async fn append_custom_entry(
+                    &self,
+                    _custom_type: String,
+                    _data: Option<Value>,
+                ) -> Result<()> {
+                    Err(crate::error::PiError::Io(std::io::Error::other("disk full")))
+                }
+                async fn set_model(&self, _provider: String, _model_id: String) -> Result<()> {
+                    Err(crate::error::PiError::Io(std::io::Error::other("disk full")))
+                }
+                async fn get_model(&self) -> (Option<String>, Option<String>) {
+                    (None, None)
+                }
+                async fn set_thinking_level(&self, _level: String) -> Result<()> {
+                    Err(crate::error::PiError::Io(std::io::Error::other("disk full")))
+                }
+                async fn get_thinking_level(&self) -> Option<String> {
+                    None
+                }
+                async fn set_label(
+                    &self,
+                    _target_id: String,
+                    _label: Option<String>,
+                ) -> Result<()> {
+                    Err(crate::error::PiError::Io(std::io::Error::other("disk full")))
+                }
+            }
+
+            let dispatcher = ExtensionDispatcher::new(
+                Rc::clone(&runtime),
+                Arc::new(ToolRegistry::new(&[], Path::new("."), None)),
+                Arc::new(HttpConnector::with_defaults()),
+                Arc::new(FailSession),
+                Arc::new(NullUiHandler),
+                PathBuf::from("."),
+            );
+
+            // Table of ops that call session trait mutators (which will fail with IO error)
+            let io_cases = [
+                ("set_name", serde_json::json!({"name": "test"})),
+                (
+                    "set_model",
+                    serde_json::json!({"provider": "a", "modelId": "b"}),
+                ),
+                (
+                    "set_thinking_level",
+                    serde_json::json!({"level": "high"}),
+                ),
+                (
+                    "set_label",
+                    serde_json::json!({"targetId": "abc", "label": "x"}),
+                ),
+                (
+                    "append_entry",
+                    serde_json::json!({"customType": "note", "data": null}),
+                ),
+                (
+                    "append_message",
+                    serde_json::json!({"message": {"role": "custom", "customType": "x", "content": "y", "display": true}}),
+                ),
+            ];
+
+            for (op, params) in &io_cases {
+                let outcome = dispatcher.dispatch_session("cx", op, params.clone()).await;
+                match outcome {
+                    HostcallOutcome::Error { code, .. } => {
+                        assert_eq!(code, "io", "session IO error for op '{op}' must be 'io'");
+                    }
+                    HostcallOutcome::Success(_) => {
+                        panic!("op '{op}' with failing session should not succeed");
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn session_dispatch_taxonomy_read_ops_succeed_with_null_session() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+            let dispatcher = build_dispatcher(Rc::clone(&runtime));
+
+            let read_ops = [
+                "get_state",
+                "getState",
+                "get_messages",
+                "getMessages",
+                "get_entries",
+                "getEntries",
+                "get_branch",
+                "getBranch",
+                "get_file",
+                "getFile",
+                "get_name",
+                "getName",
+                "get_model",
+                "getModel",
+                "get_thinking_level",
+                "getThinkingLevel",
+            ];
+
+            for op in &read_ops {
+                let outcome = dispatcher
+                    .dispatch_session("cr", op, serde_json::json!({}))
+                    .await;
+                assert!(
+                    matches!(outcome, HostcallOutcome::Success(_)),
+                    "read op '{op}' should succeed"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn session_dispatch_taxonomy_case_insensitive_aliases() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+            let dispatcher = build_dispatcher(Rc::clone(&runtime));
+
+            // Each alias pair should produce the same result
+            let alias_pairs = [
+                ("get_state", "getstate"),
+                ("get_messages", "getmessages"),
+                ("get_entries", "getentries"),
+                ("get_branch", "getbranch"),
+                ("get_file", "getfile"),
+                ("get_name", "getname"),
+                ("get_model", "getmodel"),
+                ("get_thinking_level", "getthinkinglevel"),
+            ];
+
+            for (snake, camel) in &alias_pairs {
+                let outcome_a = dispatcher
+                    .dispatch_session("ca", snake, serde_json::json!({}))
+                    .await;
+                let outcome_b = dispatcher
+                    .dispatch_session("cb", camel, serde_json::json!({}))
+                    .await;
+                match (&outcome_a, &outcome_b) {
+                    (HostcallOutcome::Success(a), HostcallOutcome::Success(b)) => {
+                        assert_eq!(a, b, "alias pair ({snake}, {camel}) should produce same output");
+                    }
+                    _ => panic!(
+                        "alias pair ({snake}, {camel}) should both succeed"
+                    ),
+                }
+            }
         });
     }
 }

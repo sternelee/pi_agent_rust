@@ -112,16 +112,17 @@ impl Error {
     ///
     /// The hostcall ABI requires every error to be one of:
     /// `timeout`, `denied`, `io`, `invalid_request`, or `internal`.
-    pub fn hostcall_error_code(&self) -> &'static str {
+    pub const fn hostcall_error_code(&self) -> &'static str {
         match self {
             Self::Validation(_) => "invalid_request",
-            Self::Io(_) => "io",
-            Self::Json(_) => "internal",
-            Self::Session(_) | Self::SessionNotFound { .. } => "io",
-            Self::Sqlite(_) => "io",
+            Self::Io(_)
+            | Self::Session(_)
+            | Self::SessionNotFound { .. }
+            | Self::Sqlite(_) => "io",
             Self::Auth(_) => "denied",
             Self::Aborted => "timeout",
-            Self::Extension(_)
+            Self::Json(_)
+            | Self::Extension(_)
             | Self::Config(_)
             | Self::Provider { .. }
             | Self::Tool { .. }

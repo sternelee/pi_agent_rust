@@ -180,6 +180,88 @@ pub async fn load_session_meta(path: &Path) -> Result<SqliteSessionMeta> {
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::UserContent;
+    use crate::session::{EntryBase, MessageEntry, SessionInfoEntry, SessionMessage};
+
+    fn dummy_base() -> EntryBase {
+        EntryBase {
+            id: Some("test-id".to_string()),
+            parent_id: None,
+            timestamp: "2026-01-01T00:00:00.000Z".to_string(),
+        }
+    }
+
+    fn message_entry() -> SessionEntry {
+        SessionEntry::Message(MessageEntry {
+            base: dummy_base(),
+            message: SessionMessage::User {
+                content: UserContent::Text("hello".to_string()),
+                timestamp: None,
+            },
+        })
+    }
+
+    fn session_info_entry(name: Option<String>) -> SessionEntry {
+        SessionEntry::SessionInfo(SessionInfoEntry {
+            base: dummy_base(),
+            name,
+        })
+    }
+
+    #[test]
+    fn compute_counts_empty() {
+        let (count, name) = compute_message_count_and_name(&[]);
+        assert_eq!(count, 0);
+        assert!(name.is_none());
+    }
+
+    #[test]
+    fn compute_counts_messages_only() {
+        let entries = vec![message_entry(), message_entry(), message_entry()];
+        let (count, name) = compute_message_count_and_name(&entries);
+        assert_eq!(count, 3);
+        assert!(name.is_none());
+    }
+
+    #[test]
+    fn compute_counts_session_info_with_name() {
+        let entries = vec![
+            message_entry(),
+            session_info_entry(Some("My Session".to_string())),
+            message_entry(),
+        ];
+        let (count, name) = compute_message_count_and_name(&entries);
+        assert_eq!(count, 2);
+        assert_eq!(name, Some("My Session".to_string()));
+    }
+
+    #[test]
+    fn compute_counts_session_info_none_name_ignored() {
+        let entries = vec![
+            session_info_entry(Some("First".to_string())),
+            session_info_entry(None),
+            message_entry(),
+        ];
+        let (count, name) = compute_message_count_and_name(&entries);
+        assert_eq!(count, 1);
+        // The second SessionInfo has name=None, so it doesn't overwrite.
+        assert_eq!(name, Some("First".to_string()));
+    }
+
+    #[test]
+    fn compute_counts_latest_name_wins() {
+        let entries = vec![
+            session_info_entry(Some("First".to_string())),
+            session_info_entry(Some("Second".to_string())),
+        ];
+        let (_, name) = compute_message_count_and_name(&entries);
+        assert_eq!(name, Some("Second".to_string()));
+    }
+}
+
 pub async fn save_session(
     path: &Path,
     header: &SessionHeader,
