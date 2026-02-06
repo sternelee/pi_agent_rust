@@ -1020,11 +1020,7 @@ pub fn find_unredacted_keys(value: &serde_json::Value) -> Vec<String> {
     unredacted
 }
 
-fn find_unredacted_keys_inner(
-    value: &serde_json::Value,
-    path: &str,
-    unredacted: &mut Vec<String>,
-) {
+fn find_unredacted_keys_inner(value: &serde_json::Value, path: &str, unredacted: &mut Vec<String>) {
     match value {
         serde_json::Value::Object(map) => {
             for (key, val) in map {
@@ -1677,7 +1673,14 @@ mod tests {
     #[test]
     fn default_cost_thresholds_covers_all_live_providers() {
         let thresholds = default_cost_thresholds();
-        let expected = ["anthropic", "openai", "google", "openrouter", "xai", "deepseek"];
+        let expected = [
+            "anthropic",
+            "openai",
+            "google",
+            "openrouter",
+            "xai",
+            "deepseek",
+        ];
         for provider in &expected {
             assert!(
                 thresholds.iter().any(|t| t.provider == *provider),

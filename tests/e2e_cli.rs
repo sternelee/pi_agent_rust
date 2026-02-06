@@ -680,6 +680,34 @@ fn e2e_cli_config_subcommand_prints_paths() {
     assert_contains(&harness.harness, &result.stdout, "Global:");
     assert_contains(&harness.harness, &result.stdout, "Project:");
     assert_contains(&harness.harness, &result.stdout, "Sessions:");
+    assert_contains(&harness.harness, &result.stdout, "Packages:");
+    assert_contains(&harness.harness, &result.stdout, "Settings precedence:");
+    assert_contains(&harness.harness, &result.stdout, "1) CLI flags");
+    assert_contains(&harness.harness, &result.stdout, "2) Environment variables");
+    assert_contains(&harness.harness, &result.stdout, "3) Project settings");
+    assert_contains(&harness.harness, &result.stdout, "4) Global settings");
+    assert_contains(&harness.harness, &result.stdout, "5) Built-in defaults");
+
+    let order = [
+        "1) CLI flags",
+        "2) Environment variables",
+        "3) Project settings",
+        "4) Global settings",
+        "5) Built-in defaults",
+    ];
+    let mut last_idx = 0usize;
+    for item in order {
+        let idx = result
+            .stdout
+            .find(item)
+            .expect("precedence marker should exist");
+        assert!(
+            idx >= last_idx,
+            "precedence marker out of order: {item} in output:\n{}",
+            result.stdout
+        );
+        last_idx = idx;
+    }
 }
 
 #[test]
@@ -844,6 +872,11 @@ fn e2e_cli_config_paths_honor_env_overrides() {
         &result.stdout,
         &format!("Auth:     {}", agent_dir.join("auth.json").display()),
     );
+    assert_contains(
+        &harness.harness,
+        &result.stdout,
+        &format!("Packages: {}", packages_dir.display()),
+    );
 }
 
 #[test]
@@ -885,6 +918,11 @@ fn e2e_cli_config_paths_fallback_to_agent_dir() {
         &harness.harness,
         &result.stdout,
         &format!("Auth:     {}", agent_dir.join("auth.json").display()),
+    );
+    assert_contains(
+        &harness.harness,
+        &result.stdout,
+        &format!("Packages: {}", agent_dir.join("packages").display()),
     );
 }
 

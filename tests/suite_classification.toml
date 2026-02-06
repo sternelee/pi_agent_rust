@@ -89,6 +89,7 @@ files = [
     "e2e_cli",
     "e2e_tui",
     "e2e_tools",
+    "e2e_cross_provider_parity",
     "e2e_provider_streaming",
     "e2e_library_integration",
     "e2e_extension_registration",

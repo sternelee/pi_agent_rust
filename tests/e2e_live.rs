@@ -1,6 +1,7 @@
 //! **Live E2E integration tests** — hit real provider APIs.
 //!
-//! These tests are gated behind `PI_E2E_TESTS=1` so they never run in normal
+//! These tests are gated behind `PI_E2E_TESTS=1` (or `CI_E2E_TESTS=1`) so they
+//! never run in normal
 //! `cargo test`.  They exercise the full streaming pipeline using real API keys
 //! from `~/.pi/agent/models.json`.
 //!
@@ -8,107 +9,560 @@
 //!
 //! ```bash
 //! PI_E2E_TESTS=1 cargo test e2e_live -- --nocapture
-//! PI_E2E_TESTS=1 cargo test e2e_live::anthropic -- --nocapture   # single provider
+//! CI_E2E_TESTS=1 cargo test e2e_live::azure_openai -- --nocapture # CI lane
 //! ```
 //!
 //! # Cost control
 //!
 //! Every prompt is deliberately tiny ("Say just the word hello") so each call
 //! uses ≈20–50 tokens.  Estimated total cost for running the full suite once
-//! against all six providers: < $0.01.
+//! against all seven providers: < $0.01.
 
 mod common;
 
 use common::TestHarness;
 use futures::StreamExt;
+use pi::auth::AuthStorage;
+use pi::config::Config;
 use pi::model::{Message, StopReason, StreamEvent, UserContent, UserMessage};
+use pi::models::{ModelEntry, ModelRegistry, default_models_path};
 use pi::provider::{Context, Provider, StreamOptions};
-use pi::providers::normalize_openai_base;
+use pi::providers::anthropic::AnthropicProvider;
+use pi::providers::azure::AzureOpenAIProvider;
+use pi::providers::gemini::GeminiProvider;
+use pi::providers::openai::OpenAIProvider;
+use pi::providers::openai_responses::OpenAIResponsesProvider;
+use pi::providers::{normalize_openai_base, normalize_openai_responses_base};
+use serde::Serialize;
+use std::collections::BTreeMap;
 use std::env;
+use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Instant;
+use url::Url;
 
 // ---------------------------------------------------------------------------
-// Gate: skip entire module unless PI_E2E_TESTS=1
+// Gate: skip entire module unless PI_E2E_TESTS=1 or CI_E2E_TESTS=1
 // ---------------------------------------------------------------------------
 
 fn e2e_enabled() -> bool {
-    env::var("PI_E2E_TESTS").is_ok_and(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+    fn enabled_from(name: &str) -> bool {
+        env::var(name)
+            .is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+    }
+
+    enabled_from("PI_E2E_TESTS") || enabled_from("CI_E2E_TESTS")
 }
 
 macro_rules! skip_unless_e2e {
     () => {
         if !e2e_enabled() {
-            eprintln!("SKIPPED (set PI_E2E_TESTS=1 to run)");
+            eprintln!("SKIPPED (set PI_E2E_TESTS=1 or CI_E2E_TESTS=1 to run)");
             return;
         }
     };
 }
 
-// ---------------------------------------------------------------------------
-// API key loading from ~/.pi/agent/models.json
-// ---------------------------------------------------------------------------
+const LIVE_PROVIDER_ORDER: [&str; 7] = [
+    "anthropic",
+    "openai",
+    "azure-openai",
+    "google",
+    "openrouter",
+    "xai",
+    "deepseek",
+];
 
-#[derive(Debug, Default)]
-struct ApiKeys {
-    anthropic: Option<String>,
-    openai: Option<String>,
-    google: Option<String>,
-    openrouter: Option<String>,
-    xai: Option<String>,
-    deepseek: Option<String>,
+#[derive(Debug, Clone)]
+struct LiveProviderConfig {
+    provider: String,
+    model_id: String,
+    api: String,
+    base_url: String,
+    api_key: String,
+    auth_source: String,
 }
 
-fn load_api_keys() -> ApiKeys {
-    let path = models_json_path();
-    let mut keys = ApiKeys::default();
+#[derive(Debug, Clone, Serialize)]
+struct ProviderDiscoveryRow {
+    provider: String,
+    model_id: Option<String>,
+    api: Option<String>,
+    base_url: Option<String>,
+    auth_source: String,
+    required_fields: Vec<String>,
+    enabled: bool,
+    disabled_reason: Option<String>,
+}
 
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        eprintln!("  models.json not found at {}", path.display());
-        return keys;
-    };
+#[derive(Debug, Clone)]
+struct ProviderDiscovery {
+    models_path: PathBuf,
+    auth_path: PathBuf,
+    rows: Vec<ProviderDiscoveryRow>,
+    configs: BTreeMap<String, LiveProviderConfig>,
+}
 
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
-        eprintln!("  models.json: invalid JSON");
-        return keys;
-    };
+static DISCOVERY_CACHE: OnceLock<Result<ProviderDiscovery, String>> = OnceLock::new();
 
-    let providers = json.get("providers").and_then(|p| p.as_object());
-    let Some(providers) = providers else {
-        return keys;
-    };
+fn provider_discovery() -> Result<ProviderDiscovery, String> {
+    DISCOVERY_CACHE.get_or_init(load_provider_discovery).clone()
+}
 
-    fn extract_key(
-        providers: &serde_json::Map<String, serde_json::Value>,
-        name: &str,
-    ) -> Option<String> {
-        providers
-            .get(name)
-            .and_then(|p| p.get("apiKey"))
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string)
+#[allow(clippy::too_many_lines)]
+fn load_provider_discovery() -> Result<ProviderDiscovery, String> {
+    let agent_dir = Config::global_dir();
+    let models_path = default_models_path(&agent_dir);
+    if !models_path.exists() {
+        return Err(format!(
+            "models.json is required for live E2E discovery but was not found at {}",
+            models_path.display()
+        ));
     }
 
-    keys.anthropic = extract_key(providers, "anthropic");
-    keys.openai = extract_key(providers, "openai");
-    keys.google = extract_key(providers, "google");
-    keys.openrouter = extract_key(providers, "openrouter");
-    keys.xai = extract_key(providers, "xai");
-    keys.deepseek = extract_key(providers, "deepseek");
+    let models_content = std::fs::read_to_string(&models_path).map_err(|err| {
+        format!(
+            "failed to read models.json at {}: {err}",
+            models_path.display()
+        )
+    })?;
+    let models_json: serde_json::Value = serde_json::from_str(&models_content)
+        .map_err(|err| format!("invalid models.json at {}: {err}", models_path.display()))?;
+    let providers_obj = models_json
+        .get("providers")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            format!(
+                "models.json at {} must contain a top-level `providers` object",
+                models_path.display()
+            )
+        })?;
 
-    keys
+    let auth_path = Config::auth_path();
+    let auth = AuthStorage::load(auth_path.clone())
+        .map_err(|err| format!("failed to load auth store {}: {err}", auth_path.display()))?;
+    let registry = ModelRegistry::load(&auth, Some(models_path.clone()));
+    if let Some(err) = registry.error() {
+        return Err(format!(
+            "failed to load model registry from {}: {err}",
+            models_path.display()
+        ));
+    }
+
+    let mut rows = Vec::new();
+    let mut configs = BTreeMap::new();
+    let mut provider_ids: Vec<String> = providers_obj.keys().cloned().collect();
+    provider_ids.sort_unstable();
+
+    for provider_id in provider_ids {
+        let selection = select_model_entry_for_provider(&registry, &provider_id);
+        let required_fields = match &selection {
+            ModelSelection::Selected(entry) => {
+                required_fields_for_provider_api(&provider_id, &entry.model.api)
+            }
+            ModelSelection::RequestedModelMissing(_) | ModelSelection::NoModels => Vec::new(),
+        };
+
+        let row = match selection {
+            ModelSelection::Selected(entry) => {
+                let (api_key, auth_source) =
+                    resolve_api_key_with_source(&auth, &provider_id, &entry);
+                if let Some(key) = api_key {
+                    let config = LiveProviderConfig {
+                        provider: provider_id.clone(),
+                        model_id: entry.model.id.clone(),
+                        api: entry.model.api.clone(),
+                        base_url: entry.model.base_url.clone(),
+                        api_key: key,
+                        auth_source: auth_source.clone(),
+                    };
+                    configs.insert(provider_id.clone(), config);
+                    ProviderDiscoveryRow {
+                        provider: provider_id,
+                        model_id: Some(entry.model.id),
+                        api: Some(entry.model.api),
+                        base_url: Some(entry.model.base_url),
+                        auth_source,
+                        required_fields,
+                        enabled: true,
+                        disabled_reason: None,
+                    }
+                } else {
+                    let env_hint = provider_env_var_names(&provider_id).join(" or ");
+                    ProviderDiscoveryRow {
+                        provider: provider_id,
+                        model_id: Some(entry.model.id),
+                        api: Some(entry.model.api),
+                        base_url: Some(entry.model.base_url),
+                        auth_source: "missing".to_string(),
+                        required_fields,
+                        enabled: false,
+                        disabled_reason: Some(format!(
+                            "no credentials found in env/auth/models (set {env_hint} or configure auth/models)"
+                        )),
+                    }
+                }
+            }
+            ModelSelection::RequestedModelMissing(requested) => ProviderDiscoveryRow {
+                provider: provider_id,
+                model_id: Some(requested.clone()),
+                api: None,
+                base_url: None,
+                auth_source: "unknown".to_string(),
+                required_fields,
+                enabled: false,
+                disabled_reason: Some(format!(
+                    "requested model override '{requested}' not found for this provider"
+                )),
+            },
+            ModelSelection::NoModels => ProviderDiscoveryRow {
+                provider: provider_id,
+                model_id: None,
+                api: None,
+                base_url: None,
+                auth_source: "missing".to_string(),
+                required_fields,
+                enabled: false,
+                disabled_reason: Some("no models registered for provider".to_string()),
+            },
+        };
+
+        rows.push(row);
+    }
+
+    Ok(ProviderDiscovery {
+        models_path,
+        auth_path,
+        rows,
+        configs,
+    })
 }
 
-fn models_json_path() -> PathBuf {
-    // Respect PI_CODING_AGENT_DIR if set, else ~/.pi/agent
-    let agent_dir = env::var("PI_CODING_AGENT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
-                .join(".pi/agent")
-        });
-    agent_dir.join("models.json")
+fn write_discovery_artifacts(
+    harness: &TestHarness,
+    discovery: &ProviderDiscovery,
+) -> std::io::Result<()> {
+    let json_path = harness.temp_path("e2e_live_provider_discovery.json");
+    let json_content =
+        serde_json::to_string_pretty(&discovery.rows).unwrap_or_else(|_| "[]".to_string());
+    std::fs::write(&json_path, json_content)?;
+    harness.record_artifact("e2e_live_provider_discovery.json", &json_path);
+
+    let mut markdown = String::new();
+    markdown.push_str("# Live E2E Provider Discovery\n\n");
+    let _ = write!(
+        markdown,
+        "- models: `{}`\n- auth: `{}`\n\n",
+        discovery.models_path.display(),
+        discovery.auth_path.display()
+    );
+    markdown.push_str("| provider | model | api | auth_source | enabled | reason |\n");
+    markdown.push_str("| --- | --- | --- | --- | --- | --- |\n");
+    for row in &discovery.rows {
+        let model = row.model_id.as_deref().unwrap_or("-");
+        let api = row.api.as_deref().unwrap_or("-");
+        let reason = row.disabled_reason.as_deref().unwrap_or("-");
+        let _ = writeln!(
+            markdown,
+            "| {} | {} | {} | {} | {} | {} |",
+            row.provider,
+            model,
+            api,
+            row.auth_source,
+            if row.enabled { "yes" } else { "no" },
+            reason.replace('|', "\\|")
+        );
+    }
+    let markdown_path = harness.temp_path("e2e_live_provider_discovery.md");
+    std::fs::write(&markdown_path, markdown)?;
+    harness.record_artifact("e2e_live_provider_discovery.md", &markdown_path);
+    Ok(())
+}
+
+fn provider_config_or_skip(provider: &str, harness: &TestHarness) -> Option<LiveProviderConfig> {
+    let discovery = match provider_discovery() {
+        Ok(discovery) => discovery,
+        Err(err) => panic!("live provider discovery failed: {err}"),
+    };
+    if let Err(err) = write_discovery_artifacts(harness, &discovery) {
+        panic!("failed to write discovery artifacts: {err}");
+    }
+
+    let Some(row) = discovery.rows.iter().find(|row| row.provider == provider) else {
+        eprintln!("SKIPPED: provider '{provider}' not present in models.json");
+        return None;
+    };
+    if !row.enabled {
+        eprintln!(
+            "SKIPPED: provider '{provider}' disabled ({})",
+            row.disabled_reason
+                .as_deref()
+                .unwrap_or("unknown discovery reason")
+        );
+        return None;
+    }
+
+    let config = discovery.configs.get(provider).cloned()?;
+    if provider == "azure-openai" {
+        if let Err(reason) = resolve_azure_runtime_config(&config) {
+            eprintln!("SKIPPED: provider 'azure-openai' disabled ({reason})");
+            return None;
+        }
+    }
+    Some(config)
+}
+
+fn required_fields_for_provider_api(provider: &str, api: &str) -> Vec<String> {
+    if provider == "azure-openai" {
+        return vec![
+            "model_id".to_string(),
+            "api_key".to_string(),
+            "api".to_string(),
+            "base_url".to_string(),
+            "AZURE_OPENAI_RESOURCE".to_string(),
+            "AZURE_OPENAI_DEPLOYMENT".to_string(),
+        ];
+    }
+
+    match api {
+        "anthropic-messages"
+        | "google-generative-ai"
+        | "openai-completions"
+        | "openai-responses" => vec![
+            "model_id".to_string(),
+            "api_key".to_string(),
+            "api".to_string(),
+            "base_url".to_string(),
+        ],
+        _ => vec!["model_id".to_string(), "api_key".to_string()],
+    }
+}
+
+fn provider_env_var_names(provider: &str) -> &'static [&'static str] {
+    match provider {
+        "anthropic" => &["ANTHROPIC_API_KEY"],
+        "openai" => &["OPENAI_API_KEY"],
+        "google" => &["GOOGLE_API_KEY"],
+        "openrouter" => &["OPENROUTER_API_KEY"],
+        "xai" => &["XAI_API_KEY"],
+        "deepseek" => &["DEEPSEEK_API_KEY"],
+        "azure-openai" => &["AZURE_OPENAI_API_KEY"],
+        _ => &[],
+    }
+}
+
+fn resolve_api_key_with_source(
+    auth: &AuthStorage,
+    provider: &str,
+    entry: &ModelEntry,
+) -> (Option<String>, String) {
+    for env_var in provider_env_var_names(provider) {
+        if let Ok(value) = env::var(env_var) {
+            if !value.trim().is_empty() {
+                return (Some(value), format!("env:{env_var}"));
+            }
+        }
+    }
+
+    if let Some(value) = auth.api_key(provider) {
+        return (Some(value), "auth_store".to_string());
+    }
+
+    if let Some(value) = entry.api_key.clone() {
+        if !value.trim().is_empty() {
+            return (Some(value), "models_json".to_string());
+        }
+    }
+
+    (None, "missing".to_string())
+}
+
+fn provider_model_override_var(provider: &str) -> Option<&'static str> {
+    match provider {
+        "anthropic" => Some("ANTHROPIC_TEST_MODEL"),
+        "openai" => Some("OPENAI_TEST_MODEL"),
+        "azure-openai" => Some("AZURE_OPENAI_DEPLOYMENT"),
+        "google" => Some("GOOGLE_TEST_MODEL"),
+        "openrouter" => Some("OPENROUTER_TEST_MODEL"),
+        "xai" => Some("XAI_TEST_MODEL"),
+        "deepseek" => Some("DEEPSEEK_TEST_MODEL"),
+        _ => None,
+    }
+}
+
+fn provider_preferred_models(provider: &str) -> &'static [&'static str] {
+    match provider {
+        "anthropic" => &[
+            "claude-haiku-4-5",
+            "claude-3-5-haiku-20241022",
+            "claude-sonnet-4-5",
+        ],
+        "openai" => &["gpt-4o-mini", "gpt-4o", "gpt-5.1-codex"],
+        "azure-openai" => &[],
+        "google" => &["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"],
+        "openrouter" => &["anthropic/claude-sonnet-4", "deepseek/deepseek-chat"],
+        "xai" => &["grok-3-mini", "grok-2-1212"],
+        "deepseek" => &["deepseek-chat", "deepseek-coder"],
+        _ => &[],
+    }
+}
+
+enum ModelSelection {
+    Selected(Box<ModelEntry>),
+    RequestedModelMissing(String),
+    NoModels,
+}
+
+fn select_model_entry_for_provider(registry: &ModelRegistry, provider: &str) -> ModelSelection {
+    if let Some(override_var) = provider_model_override_var(provider) {
+        if let Ok(override_model) = env::var(override_var) {
+            let override_model = override_model.trim().to_string();
+            if !override_model.is_empty() {
+                return registry.find(provider, &override_model).map_or(
+                    ModelSelection::RequestedModelMissing(override_model),
+                    |entry| ModelSelection::Selected(Box::new(entry)),
+                );
+            }
+        }
+    }
+
+    for preferred in provider_preferred_models(provider) {
+        if let Some(entry) = registry.find(provider, preferred) {
+            return ModelSelection::Selected(Box::new(entry));
+        }
+    }
+
+    registry
+        .models()
+        .iter()
+        .find(|entry| entry.model.provider == provider)
+        .cloned()
+        .map_or(ModelSelection::NoModels, |entry| {
+            ModelSelection::Selected(Box::new(entry))
+        })
+}
+
+fn build_provider(config: &LiveProviderConfig) -> Box<dyn Provider> {
+    match config.api.as_str() {
+        "openai-completions" if config.provider == "azure-openai" => {
+            let runtime = resolve_azure_runtime_config(config).unwrap_or_else(|err| {
+                panic!("azure-openai config resolution failed for live e2e: {err}")
+            });
+            let mut provider = AzureOpenAIProvider::new(runtime.resource, runtime.deployment);
+            if let Some(api_version) = runtime.api_version {
+                provider = provider.with_api_version(api_version);
+            }
+            Box::new(provider)
+        }
+        "anthropic-messages" => Box::new(
+            AnthropicProvider::new(config.model_id.clone()).with_base_url(config.base_url.clone()),
+        ),
+        "google-generative-ai" => Box::new(
+            GeminiProvider::new(config.model_id.clone()).with_base_url(config.base_url.clone()),
+        ),
+        "openai-responses" => Box::new(
+            OpenAIResponsesProvider::new(config.model_id.clone())
+                .with_provider_name(config.provider.clone())
+                .with_base_url(normalize_openai_responses_base(&config.base_url)),
+        ),
+        "openai-completions" => Box::new(
+            OpenAIProvider::new(config.model_id.clone())
+                .with_provider_name(config.provider.clone())
+                .with_base_url(normalize_openai_base(&config.base_url)),
+        ),
+        other => panic!(
+            "unsupported API '{}' for provider '{}' model '{}'",
+            other, config.provider, config.model_id
+        ),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AzureRuntimeConfig {
+    resource: String,
+    deployment: String,
+    api_version: Option<String>,
+}
+
+fn optional_env(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn parse_azure_base_url_details(
+    base_url: &str,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let Ok(url) = Url::parse(base_url) else {
+        return (None, None, None);
+    };
+
+    let resource = url
+        .host_str()
+        .and_then(|host| host.strip_suffix(".openai.azure.com"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+
+    let mut deployment = None;
+    if let Some(segments) = url.path_segments() {
+        let mut iter = segments;
+        while let Some(segment) = iter.next() {
+            if segment == "deployments" {
+                deployment = iter
+                    .next()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string);
+                break;
+            }
+        }
+    }
+
+    let api_version = url
+        .query_pairs()
+        .find(|(key, _)| key == "api-version")
+        .map(|(_, value)| value.into_owned())
+        .filter(|value| !value.trim().is_empty());
+
+    (resource, deployment, api_version)
+}
+
+fn resolve_azure_runtime_config(config: &LiveProviderConfig) -> Result<AzureRuntimeConfig, String> {
+    let (base_resource, base_deployment, base_api_version) =
+        parse_azure_base_url_details(&config.base_url);
+
+    let resource = optional_env("AZURE_OPENAI_RESOURCE")
+        .or(base_resource)
+        .ok_or_else(|| {
+            format!(
+                "missing Azure resource: set AZURE_OPENAI_RESOURCE or use a parseable base_url (got '{}')",
+                config.base_url
+            )
+        })?;
+
+    let deployment = optional_env("AZURE_OPENAI_DEPLOYMENT")
+        .or_else(|| {
+            let deployment = config.model_id.trim();
+            (!deployment.is_empty()).then(|| deployment.to_string())
+        })
+        .or(base_deployment)
+        .ok_or_else(|| {
+            format!(
+                "missing Azure deployment: set AZURE_OPENAI_DEPLOYMENT or configure model_id/base_url (model_id='{}', base_url='{}')",
+                config.model_id, config.base_url
+            )
+        })?;
+
+    let api_version = optional_env("AZURE_OPENAI_API_VERSION").or(base_api_version);
+
+    Ok(AzureRuntimeConfig {
+        resource,
+        deployment,
+        api_version,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -194,10 +648,7 @@ async fn collect_stream(
                         harness.log().info_ctx("stream", "Stream done", |ctx| {
                             ctx.push(("stop_reason".into(), format!("{reason:?}")));
                             ctx.push(("input_tokens".into(), format!("{}", message.usage.input)));
-                            ctx.push((
-                                "output_tokens".into(),
-                                format!("{}", message.usage.output),
-                            ));
+                            ctx.push(("output_tokens".into(), format!("{}", message.usage.output)));
                         });
                     }
                     _ => {}
@@ -206,7 +657,7 @@ async fn collect_stream(
             }
             Err(e) => {
                 stream_error = Some(format!("{e}"));
-                harness.log().error("stream", format!("Event error: {}", e));
+                harness.log().error("stream", format!("Event error: {e}"));
                 break;
             }
         }
@@ -229,7 +680,7 @@ async fn collect_stream(
 /// Assert basic streaming success: got events, no error, non-empty text.
 fn assert_basic_stream_success(
     events: &[StreamEvent],
-    stream_error: &Option<String>,
+    stream_error: Option<&str>,
     harness: &TestHarness,
     test_name: &str,
 ) {
@@ -272,25 +723,31 @@ fn assert_basic_stream_success(
 
 mod anthropic {
     use super::*;
-    use pi::providers::anthropic::AnthropicProvider;
 
     #[test]
     fn basic_message() {
         skip_unless_e2e!();
-        let keys = load_api_keys();
-        let Some(api_key) = keys.anthropic else {
-            eprintln!("SKIPPED: no Anthropic API key");
+        let harness = TestHarness::new("e2e_anthropic_basic_message");
+        let Some(config) = provider_config_or_skip("anthropic", &harness) else {
             return;
         };
-        let harness = TestHarness::new("e2e_anthropic_basic_message");
+        harness
+            .log()
+            .info_ctx("discovery", "Using resolved provider config", |ctx| {
+                ctx.push(("provider".into(), config.provider.clone()));
+                ctx.push(("model".into(), config.model_id.clone()));
+                ctx.push(("api".into(), config.api.clone()));
+                ctx.push(("auth_source".into(), config.auth_source.clone()));
+            });
 
         common::run_async(async move {
-            let provider = AnthropicProvider::new("claude-haiku-4-5-20251001");
+            let provider = build_provider(&config);
             let context = simple_context("Say just the word hello");
-            let options = simple_options(&api_key);
+            let options = simple_options(&config.api_key);
 
-            let (events, error) = collect_stream(&provider, &context, &options, &harness).await;
-            assert_basic_stream_success(&events, &error, &harness, "anthropic_basic");
+            let (events, error) =
+                collect_stream(provider.as_ref(), &context, &options, &harness).await;
+            assert_basic_stream_success(&events, error.as_deref(), &harness, "anthropic_basic");
 
             // Verify text contains "hello" (case-insensitive)
             let text: String = events
@@ -310,20 +767,19 @@ mod anthropic {
     #[test]
     fn streaming_event_order() {
         skip_unless_e2e!();
-        let keys = load_api_keys();
-        let Some(api_key) = keys.anthropic else {
-            eprintln!("SKIPPED: no Anthropic API key");
+        let harness = TestHarness::new("e2e_anthropic_streaming_order");
+        let Some(config) = provider_config_or_skip("anthropic", &harness) else {
             return;
         };
-        let harness = TestHarness::new("e2e_anthropic_streaming_order");
 
         common::run_async(async move {
-            let provider = AnthropicProvider::new("claude-haiku-4-5-20251001");
+            let provider = build_provider(&config);
             let context = simple_context("Say just the word hello");
-            let options = simple_options(&api_key);
+            let options = simple_options(&config.api_key);
 
-            let (events, error) = collect_stream(&provider, &context, &options, &harness).await;
-            assert_basic_stream_success(&events, &error, &harness, "anthropic_order");
+            let (events, error) =
+                collect_stream(provider.as_ref(), &context, &options, &harness).await;
+            assert_basic_stream_success(&events, error.as_deref(), &harness, "anthropic_order");
 
             // Verify Start comes first
             assert!(
@@ -354,19 +810,17 @@ mod anthropic {
     #[test]
     fn stop_reason_end_turn() {
         skip_unless_e2e!();
-        let keys = load_api_keys();
-        let Some(api_key) = keys.anthropic else {
-            eprintln!("SKIPPED: no Anthropic API key");
+        let harness = TestHarness::new("e2e_anthropic_stop_reason");
+        let Some(config) = provider_config_or_skip("anthropic", &harness) else {
             return;
         };
-        let harness = TestHarness::new("e2e_anthropic_stop_reason");
 
         common::run_async(async move {
-            let provider = AnthropicProvider::new("claude-haiku-4-5-20251001");
+            let provider = build_provider(&config);
             let context = simple_context("Say just the word hello");
-            let options = simple_options(&api_key);
+            let options = simple_options(&config.api_key);
 
-            let (events, _) = collect_stream(&provider, &context, &options, &harness).await;
+            let (events, _) = collect_stream(provider.as_ref(), &context, &options, &harness).await;
 
             let done = events.iter().find_map(|e| match e {
                 StreamEvent::Done { reason, message } => Some((reason, message)),
@@ -387,46 +841,43 @@ mod anthropic {
 
 mod openai {
     use super::*;
-    use pi::providers::openai_responses::OpenAIResponsesProvider;
 
     #[test]
     fn basic_message() {
         skip_unless_e2e!();
-        let keys = load_api_keys();
-        let Some(api_key) = keys.openai else {
-            eprintln!("SKIPPED: no OpenAI API key");
+        let harness = TestHarness::new("e2e_openai_basic_message");
+        let Some(config) = provider_config_or_skip("openai", &harness) else {
             return;
         };
-        let harness = TestHarness::new("e2e_openai_basic_message");
 
         common::run_async(async move {
-            let provider = OpenAIResponsesProvider::new("gpt-4o-mini");
+            let provider = build_provider(&config);
             let context = simple_context("Say just the word hello");
             // Use simple_options: provider reads api_key and builds Authorization header itself.
-            let options = simple_options(&api_key);
+            let options = simple_options(&config.api_key);
 
-            let (events, error) = collect_stream(&provider, &context, &options, &harness).await;
-            assert_basic_stream_success(&events, &error, &harness, "openai_basic");
+            let (events, error) =
+                collect_stream(provider.as_ref(), &context, &options, &harness).await;
+            assert_basic_stream_success(&events, error.as_deref(), &harness, "openai_basic");
         });
     }
 
     #[test]
     fn streaming_events() {
         skip_unless_e2e!();
-        let keys = load_api_keys();
-        let Some(api_key) = keys.openai else {
-            eprintln!("SKIPPED: no OpenAI API key");
+        let harness = TestHarness::new("e2e_openai_streaming");
+        let Some(config) = provider_config_or_skip("openai", &harness) else {
             return;
         };
-        let harness = TestHarness::new("e2e_openai_streaming");
 
         common::run_async(async move {
-            let provider = OpenAIResponsesProvider::new("gpt-4o-mini");
+            let provider = build_provider(&config);
             let context = simple_context("Count from 1 to 5, one number per line");
-            let options = simple_options(&api_key);
+            let options = simple_options(&config.api_key);
 
-            let (events, error) = collect_stream(&provider, &context, &options, &harness).await;
-            assert_basic_stream_success(&events, &error, &harness, "openai_streaming");
+            let (events, error) =
+                collect_stream(provider.as_ref(), &context, &options, &harness).await;
+            assert_basic_stream_success(&events, error.as_deref(), &harness, "openai_streaming");
 
             let text: String = events
                 .iter()
@@ -443,52 +894,246 @@ mod openai {
 }
 
 // ---------------------------------------------------------------------------
-// Google Gemini E2E Tests
+// Azure OpenAI E2E Tests
 // ---------------------------------------------------------------------------
 
-mod gemini {
+mod azure_openai {
     use super::*;
-    use pi::providers::gemini::GeminiProvider;
+
+    fn azure_tool_context(prompt: &str) -> Context {
+        Context {
+            system_prompt: Some(
+                "You are a test harness assistant. Use tools when explicitly asked.".to_string(),
+            ),
+            messages: vec![user_text(prompt)],
+            tools: vec![pi::provider::ToolDef {
+                name: "list_dir".to_string(),
+                description: "List files in a directory".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" }
+                    },
+                    "required": ["path"],
+                    "additionalProperties": false
+                }),
+            }],
+        }
+    }
 
     #[test]
     fn basic_message() {
         skip_unless_e2e!();
-        let keys = load_api_keys();
-        let Some(api_key) = keys.google else {
-            eprintln!("SKIPPED: no Google API key");
+        let harness = TestHarness::new("e2e_azure_openai_basic_message");
+        let Some(config) = provider_config_or_skip("azure-openai", &harness) else {
             return;
         };
-        let harness = TestHarness::new("e2e_gemini_basic_message");
 
         common::run_async(async move {
-            // Use gemini-2.0-flash: the 2.5 models may emit thinking-only responses
-            // for simple prompts, which our harness correctly handles.
-            let provider = GeminiProvider::new("gemini-2.0-flash");
+            let provider = build_provider(&config);
             let context = simple_context("Say just the word hello");
-            let options = simple_options(&api_key);
+            let options = simple_options(&config.api_key);
 
-            let (events, error) = collect_stream(&provider, &context, &options, &harness).await;
-            assert_basic_stream_success(&events, &error, &harness, "gemini_basic");
+            let (events, error) =
+                collect_stream(provider.as_ref(), &context, &options, &harness).await;
+            assert_basic_stream_success(&events, error.as_deref(), &harness, "azure_openai_basic");
         });
     }
 
     #[test]
     fn streaming_events() {
         skip_unless_e2e!();
-        let keys = load_api_keys();
-        let Some(api_key) = keys.google else {
-            eprintln!("SKIPPED: no Google API key");
+        let harness = TestHarness::new("e2e_azure_openai_streaming");
+        let Some(config) = provider_config_or_skip("azure-openai", &harness) else {
             return;
         };
-        let harness = TestHarness::new("e2e_gemini_streaming");
 
         common::run_async(async move {
-            let provider = GeminiProvider::new("gemini-2.0-flash");
-            let context = simple_context("Say just the word hello");
-            let options = simple_options(&api_key);
+            let provider = build_provider(&config);
+            let context = simple_context("Count from 1 to 5, one number per line");
+            let options = simple_options(&config.api_key);
+
+            let (events, error) =
+                collect_stream(provider.as_ref(), &context, &options, &harness).await;
+            assert_basic_stream_success(
+                &events,
+                error.as_deref(),
+                &harness,
+                "azure_openai_streaming",
+            );
+
+            assert!(
+                matches!(events.first(), Some(StreamEvent::Start { .. })),
+                "Azure stream should start with Start event"
+            );
+            assert!(
+                matches!(events.last(), Some(StreamEvent::Done { .. })),
+                "Azure stream should end with Done event"
+            );
+        });
+    }
+
+    #[test]
+    fn tool_call_when_supported() {
+        skip_unless_e2e!();
+        let harness = TestHarness::new("e2e_azure_openai_tool_call");
+        let Some(config) = provider_config_or_skip("azure-openai", &harness) else {
+            return;
+        };
+
+        common::run_async(async move {
+            let provider = build_provider(&config);
+            let context = azure_tool_context(
+                "Use the list_dir tool with path '.' before answering. Do not answer without a tool call.",
+            );
+            let options = simple_options(&config.api_key);
+
+            let (events, error) =
+                collect_stream(provider.as_ref(), &context, &options, &harness).await;
+            assert_basic_stream_success(
+                &events,
+                error.as_deref(),
+                &harness,
+                "azure_openai_tool_call",
+            );
+
+            let tool_calls: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    StreamEvent::ToolCallEnd { tool_call, .. } => Some(tool_call.clone()),
+                    _ => None,
+                })
+                .collect();
+
+            if tool_calls.is_empty() {
+                harness.log().warn(
+                    "tool_use",
+                    format!(
+                        "Azure deployment '{}' did not emit tool calls; skipping tool-use assertion",
+                        config.model_id
+                    ),
+                );
+                eprintln!(
+                    "SKIPPED: azure deployment '{}' did not emit tool calls in this run",
+                    config.model_id
+                );
+                return;
+            }
+
+            assert!(
+                tool_calls
+                    .iter()
+                    .all(|tool_call| !tool_call.name.is_empty()),
+                "Expected non-empty tool names in tool call events"
+            );
+            assert!(
+                tool_calls
+                    .iter()
+                    .all(|tool_call| tool_call.arguments.is_object()),
+                "Expected tool call arguments to be JSON objects"
+            );
+
+            let done_reason = events.iter().find_map(|event| match event {
+                StreamEvent::Done { reason, .. } => Some(*reason),
+                _ => None,
+            });
+            assert!(
+                matches!(
+                    done_reason,
+                    Some(StopReason::ToolUse) | Some(StopReason::Stop)
+                ),
+                "Expected done reason to be ToolUse or Stop, got {:?}",
+                done_reason
+            );
+        });
+    }
+
+    #[test]
+    fn invalid_deployment_has_actionable_error() {
+        skip_unless_e2e!();
+        let harness = TestHarness::new("e2e_azure_openai_invalid_deployment");
+        let Some(config) = provider_config_or_skip("azure-openai", &harness) else {
+            return;
+        };
+
+        common::run_async(async move {
+            let azure = resolve_azure_runtime_config(&config)
+                .unwrap_or_else(|err| panic!("resolve azure runtime config: {err}"));
+            let invalid_deployment = "__pi_e2e_invalid_deployment__";
+            let provider = azure.api_version.as_ref().map_or_else(
+                || AzureOpenAIProvider::new(azure.resource.clone(), invalid_deployment),
+                |api_version| {
+                    AzureOpenAIProvider::new(azure.resource.clone(), invalid_deployment)
+                        .with_api_version(api_version.clone())
+                },
+            );
+
+            let context = simple_context("Say just hello.");
+            let options = simple_options(&config.api_key);
 
             let (events, error) = collect_stream(&provider, &context, &options, &harness).await;
-            assert_basic_stream_success(&events, &error, &harness, "gemini_streaming");
+            if let Some(err) = error {
+                let err_lower = err.to_ascii_lowercase();
+                assert!(
+                    err_lower.contains("deployment")
+                        || err_lower.contains("not found")
+                        || err_lower.contains("404")
+                        || err_lower.contains("invalid"),
+                    "expected actionable deployment error, got: {err}"
+                );
+                return;
+            }
+
+            panic!(
+                "expected invalid deployment to fail with actionable diagnostics, got {} events",
+                events.len()
+            );
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Google Gemini E2E Tests
+// ---------------------------------------------------------------------------
+
+mod gemini {
+    use super::*;
+
+    #[test]
+    fn basic_message() {
+        skip_unless_e2e!();
+        let harness = TestHarness::new("e2e_gemini_basic_message");
+        let Some(config) = provider_config_or_skip("google", &harness) else {
+            return;
+        };
+
+        common::run_async(async move {
+            let provider = build_provider(&config);
+            let context = simple_context("Say just the word hello");
+            let options = simple_options(&config.api_key);
+
+            let (events, error) =
+                collect_stream(provider.as_ref(), &context, &options, &harness).await;
+            assert_basic_stream_success(&events, error.as_deref(), &harness, "gemini_basic");
+        });
+    }
+
+    #[test]
+    fn streaming_events() {
+        skip_unless_e2e!();
+        let harness = TestHarness::new("e2e_gemini_streaming");
+        let Some(config) = provider_config_or_skip("google", &harness) else {
+            return;
+        };
+
+        common::run_async(async move {
+            let provider = build_provider(&config);
+            let context = simple_context("Say just the word hello");
+            let options = simple_options(&config.api_key);
+
+            let (events, error) =
+                collect_stream(provider.as_ref(), &context, &options, &harness).await;
+            assert_basic_stream_success(&events, error.as_deref(), &harness, "gemini_streaming");
 
             // Verify we got Start event
             let has_start = events
@@ -505,27 +1150,23 @@ mod gemini {
 
 mod openrouter {
     use super::*;
-    use pi::providers::openai::OpenAIProvider;
 
     #[test]
     fn basic_message() {
         skip_unless_e2e!();
-        let keys = load_api_keys();
-        let Some(api_key) = keys.openrouter else {
-            eprintln!("SKIPPED: no OpenRouter API key");
+        let harness = TestHarness::new("e2e_openrouter_basic_message");
+        let Some(config) = provider_config_or_skip("openrouter", &harness) else {
             return;
         };
-        let harness = TestHarness::new("e2e_openrouter_basic_message");
 
         common::run_async(async move {
-            // normalize_openai_base appends /chat/completions to the base URL
-            let provider = OpenAIProvider::new("deepseek/deepseek-chat")
-                .with_base_url(normalize_openai_base("https://openrouter.ai/api/v1"));
+            let provider = build_provider(&config);
             let context = simple_context("Say just the word hello");
-            let options = simple_options(&api_key);
+            let options = simple_options(&config.api_key);
 
-            let (events, error) = collect_stream(&provider, &context, &options, &harness).await;
-            assert_basic_stream_success(&events, &error, &harness, "openrouter_basic");
+            let (events, error) =
+                collect_stream(provider.as_ref(), &context, &options, &harness).await;
+            assert_basic_stream_success(&events, error.as_deref(), &harness, "openrouter_basic");
         });
     }
 }
@@ -536,26 +1177,23 @@ mod openrouter {
 
 mod xai {
     use super::*;
-    use pi::providers::openai::OpenAIProvider;
 
     #[test]
     fn basic_message() {
         skip_unless_e2e!();
-        let keys = load_api_keys();
-        let Some(api_key) = keys.xai else {
-            eprintln!("SKIPPED: no xAI API key");
+        let harness = TestHarness::new("e2e_xai_basic_message");
+        let Some(config) = provider_config_or_skip("xai", &harness) else {
             return;
         };
-        let harness = TestHarness::new("e2e_xai_basic_message");
 
         common::run_async(async move {
-            let provider = OpenAIProvider::new("grok-3-mini")
-                .with_base_url(normalize_openai_base("https://api.x.ai/v1"));
+            let provider = build_provider(&config);
             let context = simple_context("Say just the word hello");
-            let options = simple_options(&api_key);
+            let options = simple_options(&config.api_key);
 
-            let (events, error) = collect_stream(&provider, &context, &options, &harness).await;
-            assert_basic_stream_success(&events, &error, &harness, "xai_basic");
+            let (events, error) =
+                collect_stream(provider.as_ref(), &context, &options, &harness).await;
+            assert_basic_stream_success(&events, error.as_deref(), &harness, "xai_basic");
         });
     }
 }
@@ -566,26 +1204,23 @@ mod xai {
 
 mod deepseek {
     use super::*;
-    use pi::providers::openai::OpenAIProvider;
 
     #[test]
     fn basic_message() {
         skip_unless_e2e!();
-        let keys = load_api_keys();
-        let Some(api_key) = keys.deepseek else {
-            eprintln!("SKIPPED: no DeepSeek API key");
+        let harness = TestHarness::new("e2e_deepseek_basic_message");
+        let Some(config) = provider_config_or_skip("deepseek", &harness) else {
             return;
         };
-        let harness = TestHarness::new("e2e_deepseek_basic_message");
 
         common::run_async(async move {
-            let provider = OpenAIProvider::new("deepseek-chat")
-                .with_base_url(normalize_openai_base("https://api.deepseek.com/v1"));
+            let provider = build_provider(&config);
             let context = simple_context("Say just the word hello");
-            let options = simple_options(&api_key);
+            let options = simple_options(&config.api_key);
 
-            let (events, error) = collect_stream(&provider, &context, &options, &harness).await;
-            assert_basic_stream_success(&events, &error, &harness, "deepseek_basic");
+            let (events, error) =
+                collect_stream(provider.as_ref(), &context, &options, &harness).await;
+            assert_basic_stream_success(&events, error.as_deref(), &harness, "deepseek_basic");
         });
     }
 }
@@ -596,66 +1231,37 @@ mod deepseek {
 
 mod cross_provider {
     use super::*;
-    use pi::providers::anthropic::AnthropicProvider;
-    use pi::providers::gemini::GeminiProvider;
-    use pi::providers::openai_responses::OpenAIResponsesProvider;
 
     #[test]
     fn all_available_providers_respond() {
         skip_unless_e2e!();
-        let keys = load_api_keys();
         let harness = TestHarness::new("e2e_cross_provider_all_respond");
+        let discovery = provider_discovery()
+            .unwrap_or_else(|err| panic!("live provider discovery failed: {err}"));
+        if let Err(err) = write_discovery_artifacts(&harness, &discovery) {
+            panic!("failed to write discovery artifacts: {err}");
+        }
 
         common::run_async(async move {
             let prompt = "Say just the word hello";
-            let mut results: Vec<(&str, bool, u128)> = Vec::new();
+            let mut results: Vec<(String, bool, u128)> = Vec::new();
 
-            // Anthropic
-            if let Some(ref api_key) = keys.anthropic {
-                let provider = AnthropicProvider::new("claude-haiku-4-5-20251001");
+            for provider_name in LIVE_PROVIDER_ORDER {
+                let Some(config) = discovery.configs.get(provider_name).cloned() else {
+                    continue;
+                };
+                let provider = build_provider(&config);
                 let start = Instant::now();
                 let (events, error) = collect_stream(
-                    &provider,
+                    provider.as_ref(),
                     &simple_context(prompt),
-                    &simple_options(api_key),
+                    &simple_options(&config.api_key),
                     &harness,
                 )
                 .await;
                 let ms = start.elapsed().as_millis();
                 let ok = error.is_none() && !events.is_empty();
-                results.push(("anthropic", ok, ms));
-            }
-
-            // OpenAI
-            if let Some(ref api_key) = keys.openai {
-                let provider = OpenAIResponsesProvider::new("gpt-4o-mini");
-                let start = Instant::now();
-                let (events, error) = collect_stream(
-                    &provider,
-                    &simple_context(prompt),
-                    &simple_options(api_key),
-                    &harness,
-                )
-                .await;
-                let ms = start.elapsed().as_millis();
-                let ok = error.is_none() && !events.is_empty();
-                results.push(("openai", ok, ms));
-            }
-
-            // Gemini
-            if let Some(ref api_key) = keys.google {
-                let provider = GeminiProvider::new("gemini-2.0-flash");
-                let start = Instant::now();
-                let (events, error) = collect_stream(
-                    &provider,
-                    &simple_context(prompt),
-                    &simple_options(api_key),
-                    &harness,
-                )
-                .await;
-                let ms = start.elapsed().as_millis();
-                let ok = error.is_none() && !events.is_empty();
-                results.push(("gemini", ok, ms));
+                results.push((provider_name.to_string(), ok, ms));
             }
 
             // Log summary table
@@ -672,10 +1278,229 @@ mod cross_provider {
             }
 
             let all_passed = results.iter().all(|(_, ok, _)| *ok);
-            assert!(all_passed, "Not all providers succeeded: {:?}", results);
+            assert!(all_passed, "Not all providers succeeded: {results:?}");
             assert!(
                 !results.is_empty(),
                 "No providers were available for testing"
+            );
+        });
+    }
+
+    /// Verify all providers emit compatible StreamEvent sequences:
+    /// Start → (TextDelta|ThinkingDelta|TextEnd)+ → Done
+    /// Logs a comparison table of timing, token usage, and response lengths.
+    #[test]
+    fn streaming_event_parity() {
+        skip_unless_e2e!();
+        let harness = TestHarness::new("e2e_cross_provider_streaming_parity");
+        let discovery = provider_discovery()
+            .unwrap_or_else(|err| panic!("live provider discovery failed: {err}"));
+
+        common::run_async(async move {
+            let prompt = "Say just the word hello";
+            let mut summary: Vec<(String, String, bool, bool, bool, u64, u64, usize, u128)> =
+                Vec::new();
+
+            for provider_name in LIVE_PROVIDER_ORDER {
+                let Some(config) = discovery.configs.get(provider_name).cloned() else {
+                    continue;
+                };
+                let provider = build_provider(&config);
+                let start = Instant::now();
+                let (events, error) = collect_stream(
+                    provider.as_ref(),
+                    &simple_context(prompt),
+                    &simple_options(&config.api_key),
+                    &harness,
+                )
+                .await;
+                let ms = start.elapsed().as_millis();
+
+                if error.is_some() || events.is_empty() {
+                    harness.log().warn(
+                        "parity",
+                        format!(
+                            "{provider_name}: SKIPPED (error or empty): {:?}",
+                            error.as_deref().unwrap_or("no events")
+                        ),
+                    );
+                    continue;
+                }
+
+                let has_start = matches!(events.first(), Some(StreamEvent::Start { .. }));
+                let has_done = matches!(events.last(), Some(StreamEvent::Done { .. }));
+                let has_content = events.iter().any(|e| {
+                    matches!(
+                        e,
+                        StreamEvent::TextDelta { .. }
+                            | StreamEvent::TextEnd { .. }
+                            | StreamEvent::ThinkingDelta { .. }
+                    )
+                });
+
+                let _text_deltas = events
+                    .iter()
+                    .filter(|e| matches!(e, StreamEvent::TextDelta { .. }))
+                    .count() as u32;
+
+                // Extract token usage and text length from Done event
+                let (input_tok, output_tok, text_len) = events
+                    .iter()
+                    .find_map(|e| match e {
+                        StreamEvent::Done { message, .. } => {
+                            let text: String = message
+                                .content
+                                .iter()
+                                .filter_map(|c| match c {
+                                    pi::model::ContentBlock::Text(tc) => Some(tc.text.as_str()),
+                                    _ => None,
+                                })
+                                .collect();
+                            Some((message.usage.input, message.usage.output, text.len()))
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or((0, 0, 0));
+
+                summary.push((
+                    provider_name.to_string(),
+                    config.model_id.clone(),
+                    has_start,
+                    has_content,
+                    has_done,
+                    input_tok,
+                    output_tok,
+                    text_len,
+                    ms,
+                ));
+            }
+
+            // Log comparison table
+            harness
+                .log()
+                .info("parity", "=== Streaming Event Parity ===");
+            harness.log().info(
+                "parity",
+                "provider | model | Start | Content | Done | in_tok | out_tok | text_len | ms",
+            );
+            for (name, model, start, content, done, in_t, out_t, tlen, ms) in &summary {
+                harness.log().info(
+                    "parity",
+                    format!(
+                        "{name:12} | {model:30} | {start:5} | {content:7} | {done:5} | {in_t:6} | {out_t:7} | {tlen:8} | {ms}ms"
+                    ),
+                );
+            }
+
+            // Every provider that responded must have Start → Content → Done
+            let mut failures = Vec::new();
+            for (name, _, has_start, has_content, has_done, _, _, _, _) in &summary {
+                if !has_start {
+                    failures.push(format!("{name}: missing Start event"));
+                }
+                if !has_content {
+                    failures.push(format!("{name}: missing content events"));
+                }
+                if !has_done {
+                    failures.push(format!("{name}: missing Done event"));
+                }
+            }
+            assert!(
+                failures.is_empty(),
+                "Streaming event parity failures:\n{}",
+                failures.join("\n")
+            );
+            assert!(
+                !summary.is_empty(),
+                "No providers were available for parity testing"
+            );
+        });
+    }
+
+    /// Send an intentionally invalid model ID to each provider and verify all
+    /// return an error (either a stream error or an Error event).
+    #[test]
+    fn error_handling_parity() {
+        skip_unless_e2e!();
+        let harness = TestHarness::new("e2e_cross_provider_error_parity");
+        let discovery = provider_discovery()
+            .unwrap_or_else(|err| panic!("live provider discovery failed: {err}"));
+
+        common::run_async(async move {
+            let prompt = "Say hello";
+            let mut results: Vec<(String, bool, String)> = Vec::new();
+
+            for provider_name in LIVE_PROVIDER_ORDER {
+                let Some(config) = discovery.configs.get(provider_name).cloned() else {
+                    continue;
+                };
+
+                // Construct a provider with an invalid model ID to trigger an error
+                let bad_config = LiveProviderConfig {
+                    model_id: "__pi_e2e_nonexistent_model__".to_string(),
+                    ..config.clone()
+                };
+                let provider = build_provider(&bad_config);
+
+                let (events, stream_error) = collect_stream(
+                    provider.as_ref(),
+                    &simple_context(prompt),
+                    &simple_options(&config.api_key),
+                    &harness,
+                )
+                .await;
+
+                // Check if we got an error via stream_error or an Error event
+                let has_stream_error = stream_error.is_some();
+                let has_error_event = events
+                    .iter()
+                    .any(|e| matches!(e, StreamEvent::Error { .. }));
+                let got_error = has_stream_error || has_error_event;
+
+                let error_desc = if let Some(err) = &stream_error {
+                    format!("stream_error: {}", &err[..err.len().min(120)])
+                } else if has_error_event {
+                    "Error event in stream".to_string()
+                } else {
+                    "no error (unexpected success)".to_string()
+                };
+
+                harness.log().info_ctx(
+                    "error_parity",
+                    format!("{provider_name}: got_error={got_error}"),
+                    |ctx| {
+                        ctx.push(("error_desc".into(), error_desc.clone()));
+                    },
+                );
+
+                results.push((provider_name.to_string(), got_error, error_desc));
+            }
+
+            // Log summary
+            harness
+                .log()
+                .info("error_parity", "=== Error Handling Parity ===");
+            for (name, got_error, desc) in &results {
+                let status = if *got_error { "PASS" } else { "FAIL" };
+                harness
+                    .log()
+                    .info("error_parity", format!("{name:12}: {status} — {desc}"));
+            }
+
+            // All providers should return an error for a nonexistent model
+            let failures: Vec<_> = results
+                .iter()
+                .filter(|(_, got_error, _)| !got_error)
+                .map(|(name, _, desc)| format!("{name}: {desc}"))
+                .collect();
+            assert!(
+                failures.is_empty(),
+                "Error handling parity failures (expected error for invalid model):\n{}",
+                failures.join("\n")
+            );
+            assert!(
+                !results.is_empty(),
+                "No providers were available for error parity testing"
             );
         });
     }
