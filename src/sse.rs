@@ -37,6 +37,8 @@ pub struct SseParser {
     buffer: String,
     current: SseEvent,
     has_data: bool,
+    /// Whether we've already stripped the BOM from the first feed.
+    bom_checked: bool,
 }
 
 impl SseParser {
@@ -86,15 +88,47 @@ impl SseParser {
         let mut events = Vec::new();
 
         let mut buffer = std::mem::take(&mut self.buffer);
-        let mut start = 0usize;
-        // Use memchr for ~4x faster newline scanning vs str::find.
-        while let Some(rel_newline) = memchr::memchr(b'\n', &buffer.as_bytes()[start..]) {
-            let newline_pos = start + rel_newline;
-            let mut line = &buffer[start..newline_pos];
-            if let Some(stripped) = line.strip_suffix('\r') {
-                line = stripped;
+
+        // Strip UTF-8 BOM from the beginning of the stream (SSE spec compliance).
+        if !self.bom_checked {
+            self.bom_checked = true;
+            if let Some(stripped) = buffer.strip_prefix('\u{FEFF}') {
+                buffer = stripped.to_string();
             }
-            start = newline_pos + 1;
+        }
+        let mut start = 0usize;
+
+        // Use memchr2 to find either \r or \n
+        while let Some(rel_pos) = memchr::memchr2(b'\r', b'\n', &buffer.as_bytes()[start..]) {
+            let pos = start + rel_pos;
+            let b = buffer.as_bytes()[pos];
+
+            let line_end;
+            let next_start;
+
+            if b == b'\n' {
+                // Bare LF
+                line_end = pos;
+                next_start = pos + 1;
+            } else {
+                // Found \r
+                if pos + 1 < buffer.len() {
+                    line_end = pos;
+                    next_start = if buffer.as_bytes()[pos + 1] == b'\n' {
+                        // CRLF
+                        pos + 2
+                    } else {
+                        // Bare CR
+                        pos + 1
+                    };
+                } else {
+                    // CR at end of buffer - wait for more data to check for \n
+                    break;
+                }
+            }
+
+            let line = &buffer[start..line_end];
+            start = next_start;
 
             if line.is_empty() {
                 // Blank line = event boundary
