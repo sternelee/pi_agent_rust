@@ -17,6 +17,7 @@ mod common;
 use clap::Parser as _;
 use common::run_async;
 use common::tmux::TuiSession;
+use fs4::fs_std::FileExt as _;
 use pi::app::build_system_prompt;
 use pi::cli;
 use pi::model::ContentBlock;
@@ -27,6 +28,7 @@ use pi::vcr::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -39,8 +41,6 @@ fn base_interactive_args() -> Vec<&'static str> {
         "openai",
         "--model",
         "gpt-4o-mini",
-        "--api-key",
-        "test-key-e2e",
         "--no-tools",
         "--no-skills",
         "--no-prompt-templates",
@@ -63,14 +63,47 @@ const SAMPLE_FILE_NAME: &str = "sample.txt";
 const SAMPLE_FILE_CONTENT: &str = "Hello\nWorld\n";
 const TOOL_CALL_ID: &str = "toolu_e2e_read_1";
 
+/// Cross-process lock to serialize tmux-based E2E tests.
+///
+/// tmux is typically stable, but running many tmux sessions in parallel during
+/// `cargo test --all-targets` can be flaky on contended CI machines.
+struct TmuxE2eLock(std::fs::File);
+
+impl TmuxE2eLock {
+    fn acquire() -> Self {
+        let path = std::env::temp_dir().join("pi_agent_rust.tmux-e2e.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            // Avoid Clippy warning: we do not want to truncate an existing lock file.
+            .truncate(false)
+            .open(&path)
+            .expect("open tmux e2e lock file");
+        file.lock_exclusive().expect("lock tmux e2e lock file");
+        Self(file)
+    }
+}
+
+impl Drop for TmuxE2eLock {
+    fn drop(&mut self) {
+        // Call the fs4 trait explicitly so we don't depend on std's newer `File::unlock()`.
+        let _ = fs4::fs_std::FileExt::unlock(&self.0);
+    }
+}
+
+fn new_locked_tui_session(name: &str) -> Option<(TmuxE2eLock, TuiSession)> {
+    let lock = TmuxE2eLock::acquire();
+    let session = TuiSession::new(name)?;
+    Some((lock, session))
+}
+
 fn vcr_interactive_args() -> Vec<&'static str> {
     vec![
         "--provider",
         "anthropic",
         "--model",
         VCR_MODEL,
-        "--api-key",
-        "test-key-e2e",
         "--tools",
         "read",
         "--no-skills",
@@ -90,8 +123,6 @@ fn vcr_interactive_args_no_tools() -> Vec<&'static str> {
         "anthropic",
         "--model",
         VCR_MODEL,
-        "--api-key",
-        "test-key-e2e",
         "--no-tools",
         "--no-skills",
         "--no-prompt-templates",
@@ -509,7 +540,7 @@ fn find_session_jsonl(path: &Path) -> Option<PathBuf> {
 /// Smoke test: launch interactive mode, verify welcome screen, exit cleanly.
 #[test]
 fn e2e_tui_startup_and_exit() {
-    let Some(mut session) = TuiSession::new("e2e_tui_startup_and_exit") else {
+    let Some((_lock, mut session)) = new_locked_tui_session("e2e_tui_startup_and_exit") else {
         eprintln!("Skipping: tmux not available");
         return;
     };
@@ -541,7 +572,7 @@ fn e2e_tui_startup_and_exit() {
 /// Test /help slash command: sends /help, verifies help output appears.
 #[test]
 fn e2e_tui_help_command() {
-    let Some(mut session) = TuiSession::new("e2e_tui_help_command") else {
+    let Some((_lock, mut session)) = new_locked_tui_session("e2e_tui_help_command") else {
         eprintln!("Skipping: tmux not available");
         return;
     };
@@ -593,7 +624,7 @@ fn e2e_tui_help_command() {
 /// Test /model slash command: sends /model, verifies model info appears.
 #[test]
 fn e2e_tui_model_command() {
-    let Some(mut session) = TuiSession::new("e2e_tui_model_command") else {
+    let Some((_lock, mut session)) = new_locked_tui_session("e2e_tui_model_command") else {
         eprintln!("Skipping: tmux not available");
         return;
     };
@@ -620,7 +651,8 @@ fn e2e_tui_model_command() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn e2e_tui_reload_resources_and_autocomplete_refresh() {
-    let Some(mut session) = TuiSession::new("e2e_tui_reload_resources_and_autocomplete_refresh")
+    let Some((_lock, mut session)) =
+        new_locked_tui_session("e2e_tui_reload_resources_and_autocomplete_refresh")
     else {
         eprintln!("Skipping: tmux not available");
         return;
@@ -631,8 +663,6 @@ fn e2e_tui_reload_resources_and_autocomplete_refresh() {
         "openai",
         "--model",
         "gpt-4o-mini",
-        "--api-key",
-        "test-key-e2e",
         "--no-tools",
         // We only need skills for this test; keep other resource categories empty for determinism.
         "--no-prompt-templates",
@@ -766,7 +796,7 @@ Invalid skill (missing description) to trigger diagnostics.
 /// Test /clear slash command: sends /clear, verifies screen is cleared.
 #[test]
 fn e2e_tui_clear_command() {
-    let Some(mut session) = TuiSession::new("e2e_tui_clear_command") else {
+    let Some((_lock, mut session)) = new_locked_tui_session("e2e_tui_clear_command") else {
         eprintln!("Skipping: tmux not available");
         return;
     };
@@ -813,7 +843,8 @@ fn e2e_tui_clear_command() {
 /// Test multiple sequential commands in one session.
 #[test]
 fn e2e_tui_multi_command_sequence() {
-    let Some(mut session) = TuiSession::new("e2e_tui_multi_command_sequence") else {
+    let Some((_lock, mut session)) = new_locked_tui_session("e2e_tui_multi_command_sequence")
+    else {
         eprintln!("Skipping: tmux not available");
         return;
     };
@@ -857,7 +888,7 @@ fn e2e_tui_multi_command_sequence() {
 /// Test Ctrl+D exits the session cleanly.
 #[test]
 fn e2e_tui_ctrl_d_exit() {
-    let Some(mut session) = TuiSession::new("e2e_tui_ctrl_d_exit") else {
+    let Some((_lock, mut session)) = new_locked_tui_session("e2e_tui_ctrl_d_exit") else {
         eprintln!("Skipping: tmux not available");
         return;
     };
@@ -896,7 +927,7 @@ fn e2e_tui_ctrl_d_exit() {
 /// Verify artifacts are deterministic (JSONL steps file is well-formed).
 #[test]
 fn e2e_tui_artifact_format() {
-    let Some(mut session) = TuiSession::new("e2e_tui_artifact_format") else {
+    let Some((_lock, mut session)) = new_locked_tui_session("e2e_tui_artifact_format") else {
         eprintln!("Skipping: tmux not available");
         return;
     };
@@ -971,7 +1002,7 @@ fn e2e_tui_artifact_format() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn e2e_tui_basic_chat_vcr() {
-    let Some(mut session) = TuiSession::new("e2e_tui_basic_chat_vcr") else {
+    let Some((_lock, mut session)) = new_locked_tui_session("e2e_tui_basic_chat_vcr") else {
         eprintln!("Skipping: tmux not available");
         return;
     };
@@ -1131,7 +1162,7 @@ fn e2e_tui_basic_chat_vcr() {
 /// E2E interactive: VCR playback tool call with deterministic artifacts.
 #[test]
 fn e2e_tui_vcr_tool_read() {
-    let Some(mut session) = TuiSession::new("e2e_tui_vcr_tool_read") else {
+    let Some((_lock, mut session)) = new_locked_tui_session("e2e_tui_vcr_tool_read") else {
         eprintln!("Skipping: tmux not available");
         return;
     };

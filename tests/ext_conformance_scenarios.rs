@@ -531,6 +531,7 @@ fn check_expectations_inner(
     manager: &ExtensionManager,
     interceptor: Option<&Arc<MockSpecInterceptor>>,
 ) -> Vec<String> {
+    let _ = &interceptor; // used below in mock-dependent matchers
     let mut diffs = Vec::new();
 
     // Check is_error expectation
@@ -672,7 +673,7 @@ fn check_expectations_inner(
         });
         if !has_env {
             diffs.push(format!(
-                "api_key_env: expected provider with apiKey='{expected_env}'"
+                "api_key_env: expected provider with apiKey: '{expected_env}'"
             ));
         }
     }
@@ -723,7 +724,210 @@ fn check_expectations_inner(
         }
     }
 
+    // ── Mock-dependent matchers ──────────────────────────────────────────
+
+    // Check ui_notify_contains: verify notifications captured by interceptor
+    if let Some(patterns) = &expect.ui_notify_contains {
+        if let Some(interceptor) = &interceptor {
+            let notifications = interceptor.ui_notifications.lock().unwrap();
+            let all_text: String = notifications
+                .iter()
+                .filter_map(|n| {
+                    n.get("message")
+                        .or_else(|| n.get("text"))
+                        .and_then(Value::as_str)
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            for pattern in patterns {
+                if !all_text.to_lowercase().contains(&pattern.to_lowercase()) {
+                    diffs.push(format!(
+                        "ui_notify_contains: expected '{pattern}' in notifications: {all_text}"
+                    ));
+                }
+            }
+        } else {
+            diffs.push("ui_notify_contains: no interceptor available".to_string());
+        }
+    }
+
+    // Check exec_called: verify exec calls logged by interceptor
+    if let Some(expected_calls) = &expect.exec_called {
+        if let Some(interceptor) = &interceptor {
+            let exec_log = interceptor.exec_log.lock().unwrap();
+            if let Some(expected_arr) = expected_calls.as_array() {
+                for (i, expected_call) in expected_arr.iter().enumerate() {
+                    if let Some(call_arr) = expected_call.as_array() {
+                        let expected_cmd = call_arr.first().and_then(Value::as_str).unwrap_or("");
+                        let expected_args: Vec<String> = call_arr
+                            .get(1)
+                            .and_then(Value::as_array)
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
+                        let found = exec_log.iter().any(|(cmd, payload)| {
+                            if cmd != expected_cmd {
+                                return false;
+                            }
+                            let actual_args: Vec<String> = payload
+                                .get("args")
+                                .and_then(Value::as_array)
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|v| v.as_str().map(String::from))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            actual_args == expected_args
+                        });
+
+                        if !found {
+                            diffs.push(format!(
+                                "exec_called[{i}]: expected ({expected_cmd}, {expected_args:?}) not found in exec log"
+                            ));
+                        }
+                    }
+                }
+            }
+        } else {
+            diffs.push("exec_called: no interceptor available".to_string());
+        }
+    }
+
+    // Check ui_status_key: verify status updates captured by interceptor
+    if let Some(expected_key) = &expect.ui_status_key {
+        if let Some(interceptor) = &interceptor {
+            let status_updates = interceptor.ui_status_updates.lock().unwrap();
+            let has_key = status_updates.iter().any(|s| {
+                s.get("key")
+                    .and_then(Value::as_str)
+                    .map_or(false, |k| k == expected_key)
+            });
+            if !has_key {
+                diffs.push(format!(
+                    "ui_status_key: expected key '{expected_key}' in status updates"
+                ));
+            }
+        } else {
+            diffs.push("ui_status_key: no interceptor available".to_string());
+        }
+    }
+
+    // Check ui_status_contains_sequence
+    if let Some(patterns) = &expect.ui_status_contains_sequence {
+        if let Some(interceptor) = &interceptor {
+            let status_updates = interceptor.ui_status_updates.lock().unwrap();
+            let all_values: Vec<String> = status_updates
+                .iter()
+                .filter_map(|s| {
+                    s.get("value")
+                        .or_else(|| s.get("text"))
+                        .and_then(Value::as_str)
+                        .map(String::from)
+                })
+                .collect();
+            let joined = all_values.join(" ");
+            for pattern in patterns {
+                if !joined.to_lowercase().contains(&pattern.to_lowercase()) {
+                    diffs.push(format!(
+                        "ui_status_contains_sequence: expected '{pattern}' in: {joined}"
+                    ));
+                }
+            }
+        } else {
+            diffs.push("ui_status_contains_sequence: no interceptor available".to_string());
+        }
+    }
+
+    // Check returns_contains: deep partial match on result JSON
+    if let Some(expected) = &expect.returns_contains {
+        if let Ok(actual) = result {
+            if !json_contains(actual, expected) {
+                diffs.push(format!(
+                    "returns_contains: expected {expected} to be contained in {actual}"
+                ));
+            }
+        }
+    }
+
+    // Check action: check result action field (for input transforms)
+    if let Some(expected_action) = &expect.action {
+        if let Ok(actual) = result {
+            let actual_action = actual.get("action").and_then(Value::as_str).unwrap_or("");
+            if actual_action != expected_action {
+                diffs.push(format!(
+                    "action: expected '{expected_action}' got '{actual_action}'"
+                ));
+            }
+        }
+    }
+
+    // Check text_contains: check result text field
+    if let Some(patterns) = &expect.text_contains {
+        if let Ok(actual) = result {
+            let text = actual.get("text").and_then(Value::as_str).unwrap_or("");
+            for pattern in patterns {
+                if !text.contains(pattern.as_str()) {
+                    diffs.push(format!(
+                        "text_contains: expected '{pattern}' in text: {text}"
+                    ));
+                }
+            }
+        }
+    }
+
+    // Check content_types: check content block types array
+    if let Some(expected_types) = &expect.content_types {
+        if let Ok(actual) = result {
+            let actual_types: Vec<String> = actual
+                .get("content")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|b| b.get("type").and_then(Value::as_str).map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            for expected_type in expected_types {
+                if !actual_types.iter().any(|t| t == expected_type) {
+                    diffs.push(format!(
+                        "content_types: expected type '{expected_type}' in {actual_types:?}"
+                    ));
+                }
+            }
+        }
+    }
+
+    // Check active_tools: check via manager.active_tools()
+    if let Some(expected_tools) = &expect.active_tools {
+        let actual_tools = manager.active_tools().unwrap_or_default();
+        for expected_tool in expected_tools {
+            if !actual_tools.iter().any(|t| t == expected_tool) {
+                diffs.push(format!(
+                    "active_tools: expected '{expected_tool}' in {actual_tools:?}"
+                ));
+            }
+        }
+    }
+
     diffs
+}
+
+/// Deep partial match: every key/value in `expected` must exist in `actual`.
+fn json_contains(actual: &Value, expected: &Value) -> bool {
+    match (actual, expected) {
+        (Value::Object(actual_map), Value::Object(expected_map)) => expected_map
+            .iter()
+            .all(|(k, v)| actual_map.get(k).map_or(false, |av| json_contains(av, v))),
+        (Value::Array(actual_arr), Value::Array(expected_arr)) => expected_arr
+            .iter()
+            .all(|ev| actual_arr.iter().any(|av| json_contains(av, ev))),
+        _ => actual == expected,
+    }
 }
 
 // ─── Mock Infrastructure ─────────────────────────────────────────────────────
@@ -1196,6 +1400,7 @@ fn load_extension_with_mocks(
 
     let spec = JsExtensionLoadSpec::from_entry_path(extension_path)
         .map_err(|e| format!("load spec: {e}"))?;
+    let extension_id = spec.extension_id.clone();
 
     let manager = ExtensionManager::new();
     let tools = Arc::new(ToolRegistry::new(&[], &cwd, None));
@@ -1268,7 +1473,7 @@ fn load_extension_with_mocks(
         .and_then(|s| s.get("flags"))
         .and_then(Value::as_object)
     {
-        let ext_id = spec.extension_id.clone();
+        let ext_id = extension_id.clone();
         for (flag_name, flag_value) in flags {
             common::run_async({
                 let manager = manager.clone();
@@ -1391,6 +1596,312 @@ fn needs_unsupported_setup(scenario: &Scenario) -> Option<String> {
 
 // ─── Main runner ────────────────────────────────────────────────────────────
 
+/// Check whether a scenario needs mock infrastructure (interceptor, session, etc.).
+fn needs_mock_loader(scenario: &Scenario) -> bool {
+    if let Some(setup) = &scenario.setup {
+        if setup.get("mock_exec").is_some()
+            || setup.get("mock_http").is_some()
+            || setup.get("mock_model_registry").is_some()
+            || setup.get("session_branch").is_some()
+            || setup.get("session_leaf_entry").is_some()
+            || setup.get("flags").is_some()
+        {
+            return true;
+        }
+    }
+    // Scenarios with UI interaction responses
+    if let Some(input) = &scenario.input {
+        if input
+            .pointer("/ctx/ui_responses")
+            .is_some_and(|v| !v.is_null())
+        {
+            return true;
+        }
+    }
+    // Multi-step scenarios
+    if scenario.steps.is_some() {
+        return true;
+    }
+    // Scenarios that check interceptor-dependent expectations
+    if let Some(expect) = &scenario.expect {
+        if expect.ui_notify_contains.is_some()
+            || expect.ui_status_key.is_some()
+            || expect.ui_status_contains_sequence.is_some()
+            || expect.exec_called.is_some()
+            || expect.active_tools.is_some()
+            || expect.returns_contains.is_some()
+            || expect.action.is_some()
+            || expect.content_types.is_some()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Load the default mock spec JSON.
+fn load_default_mock_spec() -> Value {
+    let path = project_root().join("tests/ext_conformance/mock_specs/mock_spec_default.json");
+    let data = fs::read_to_string(&path).expect("read mock_spec_default.json");
+    serde_json::from_str(&data).expect("parse mock_spec_default.json")
+}
+
+/// Execute a tool scenario using the mock-based loader.
+fn execute_tool_scenario_with_mocks(
+    loaded: &LoadedExtensionWithMocks,
+    scenario: &Scenario,
+    extension_path: &Path,
+) -> Result<Value, String> {
+    let tool_name = scenario
+        .tool_name
+        .as_deref()
+        .ok_or("tool scenario missing tool_name")?;
+    let input = scenario
+        .input
+        .as_ref()
+        .and_then(|v| v.get("arguments"))
+        .cloned()
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+
+    let settings = deterministic_settings_for(extension_path);
+    let default_spec = load_default_mock_spec();
+    let ctx = build_ctx_payload_with_mocks(
+        &settings,
+        scenario.input.as_ref(),
+        scenario.setup.as_ref(),
+        &default_spec,
+    );
+
+    common::run_async({
+        let runtime = loaded.runtime.clone();
+        let tool_name = tool_name.to_string();
+        let tool_call_id = format!("tc-{}", scenario.id);
+        async move {
+            runtime
+                .execute_tool(tool_name, tool_call_id, input, ctx, DEFAULT_TIMEOUT_MS)
+                .await
+                .map_err(|e| format!("execute_tool: {e}"))
+        }
+    })
+}
+
+/// Execute a command scenario using the mock-based loader.
+fn execute_command_scenario_with_mocks(
+    loaded: &LoadedExtensionWithMocks,
+    scenario: &Scenario,
+    extension_path: &Path,
+) -> Result<Value, String> {
+    let command_name = scenario
+        .command_name
+        .as_deref()
+        .ok_or("command scenario missing command_name")?;
+    let args = scenario
+        .input
+        .as_ref()
+        .and_then(|v| v.get("args"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let settings = deterministic_settings_for(extension_path);
+    let default_spec = load_default_mock_spec();
+    let ctx = build_ctx_payload_with_mocks(
+        &settings,
+        scenario.input.as_ref(),
+        scenario.setup.as_ref(),
+        &default_spec,
+    );
+
+    common::run_async({
+        let runtime = loaded.runtime.clone();
+        let command_name = command_name.to_string();
+        async move {
+            runtime
+                .execute_command(command_name, args, ctx, DEFAULT_TIMEOUT_MS)
+                .await
+                .map_err(|e| format!("execute_command: {e}"))
+        }
+    })
+}
+
+/// Execute an event scenario using the mock-based loader.
+fn execute_event_scenario_with_mocks(
+    loaded: &LoadedExtensionWithMocks,
+    scenario: &Scenario,
+    extension_path: &Path,
+) -> Result<Value, String> {
+    let event_name = scenario
+        .event_name
+        .as_deref()
+        .ok_or("event scenario missing event_name")?;
+    let event_payload = scenario
+        .input
+        .as_ref()
+        .and_then(|v| v.get("event"))
+        .cloned()
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+
+    let settings = deterministic_settings_for(extension_path);
+    let default_spec = load_default_mock_spec();
+    let ctx = build_ctx_payload_with_mocks(
+        &settings,
+        scenario.input.as_ref(),
+        scenario.setup.as_ref(),
+        &default_spec,
+    );
+
+    common::run_async({
+        let runtime = loaded.runtime.clone();
+        let event_name = event_name.to_string();
+        async move {
+            runtime
+                .dispatch_event(event_name, event_payload, ctx, DEFAULT_TIMEOUT_MS)
+                .await
+                .map_err(|e| format!("dispatch_event: {e}"))
+        }
+    })
+}
+
+/// Execute a multi-step scenario: run each step sequentially, return the last result.
+#[allow(clippy::too_many_lines)]
+fn execute_multi_step_scenario(
+    loaded: &LoadedExtensionWithMocks,
+    scenario: &Scenario,
+    extension_path: &Path,
+) -> Result<Value, String> {
+    let steps = scenario
+        .steps
+        .as_ref()
+        .ok_or("multi-step scenario missing steps")?;
+
+    let settings = deterministic_settings_for(extension_path);
+    let default_spec = load_default_mock_spec();
+    let mut last_result = Ok(Value::Null);
+
+    for step in steps {
+        let step_type = step
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+
+        match step_type {
+            "emit_event" => {
+                let event_name = step
+                    .get("event_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let event_payload = step
+                    .get("event")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+
+                // Build ctx, merging step-level ctx overrides (e.g. ui_responses, has_ui)
+                let mut ctx = build_ctx_payload_with_mocks(
+                    &settings,
+                    scenario.input.as_ref(),
+                    scenario.setup.as_ref(),
+                    &default_spec,
+                );
+                // Merge step-level ctx into the payload
+                if let Some(step_ctx) = step.get("ctx").and_then(Value::as_object) {
+                    let ctx_obj = ctx.as_object_mut().unwrap();
+                    if let Some(has_ui) = step_ctx.get("has_ui") {
+                        ctx_obj.insert("hasUI".to_string(), has_ui.clone());
+                    }
+                    if let Some(ui_resp) = step_ctx.get("ui_responses") {
+                        // Update the interceptor's UI responses for this step
+                        if let Some(obj) = ui_resp.as_object() {
+                            for (k, v) in obj {
+                                loaded
+                                    .interceptor
+                                    .ui_responses
+                                    .get(k)
+                                    .cloned()
+                                    .unwrap_or(Value::Null);
+                                // We can't mutate the interceptor's HashMap since it's behind Arc.
+                                // Instead pass responses via ctx payload.
+                                ctx_obj.insert("uiResponses".to_string(), ui_resp.clone());
+                            }
+                        }
+                    }
+                }
+
+                last_result = common::run_async({
+                    let runtime = loaded.runtime.clone();
+                    async move {
+                        runtime
+                            .dispatch_event(event_name, event_payload, ctx, DEFAULT_TIMEOUT_MS)
+                            .await
+                            .map_err(|e| format!("dispatch_event: {e}"))
+                    }
+                });
+            }
+            "invoke_tool" => {
+                let tool_name = step
+                    .get("tool_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let input = step
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+                let ctx = build_ctx_payload_with_mocks(
+                    &settings,
+                    scenario.input.as_ref(),
+                    scenario.setup.as_ref(),
+                    &default_spec,
+                );
+
+                last_result = common::run_async({
+                    let runtime = loaded.runtime.clone();
+                    let tool_call_id = format!("tc-{}-step", scenario.id);
+                    async move {
+                        runtime
+                            .execute_tool(tool_name, tool_call_id, input, ctx, DEFAULT_TIMEOUT_MS)
+                            .await
+                            .map_err(|e| format!("execute_tool: {e}"))
+                    }
+                });
+            }
+            "invoke_command" => {
+                let command_name = step
+                    .get("command_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let args = step
+                    .get("args")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let ctx = build_ctx_payload_with_mocks(
+                    &settings,
+                    scenario.input.as_ref(),
+                    scenario.setup.as_ref(),
+                    &default_spec,
+                );
+
+                last_result = common::run_async({
+                    let runtime = loaded.runtime.clone();
+                    async move {
+                        runtime
+                            .execute_command(command_name, args, ctx, DEFAULT_TIMEOUT_MS)
+                            .await
+                            .map_err(|e| format!("execute_command: {e}"))
+                    }
+                });
+            }
+            other => {
+                return Err(format!("unknown step type: {other}"));
+            }
+        }
+    }
+
+    last_result
+}
+
 /// Run a single scenario and return the result.
 #[allow(clippy::too_many_lines)]
 fn run_scenario(
@@ -1438,7 +1949,12 @@ fn run_scenario(
         };
     };
 
-    // Load extension
+    // Decide whether to use mock-based or plain loader
+    if needs_mock_loader(scenario) {
+        return run_scenario_with_mocks(ext, scenario, &ext_path, start, base);
+    }
+
+    // Load extension (plain path - no mocks needed)
     let loaded = match load_extension(&ext_path) {
         Ok(loaded) => loaded,
         Err(err) => {
@@ -1522,6 +2038,138 @@ fn run_scenario(
     // Check expectations
     let diffs = scenario.expect.as_ref().map_or_else(Vec::new, |expect| {
         check_expectations(expect, &result, &loaded)
+    });
+
+    ScenarioResult {
+        status: if diffs.is_empty() {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        diffs,
+        error: result.as_ref().err().cloned(),
+        skip_reason: None,
+        output,
+        duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+        ..base
+    }
+}
+
+/// Run a scenario using mock-based extension loading.
+#[allow(clippy::too_many_lines)]
+fn run_scenario_with_mocks(
+    ext: &ScenarioExtension,
+    scenario: &Scenario,
+    ext_path: &Path,
+    start: Instant,
+    base: ScenarioResult,
+) -> ScenarioResult {
+    let default_spec = load_default_mock_spec();
+
+    // Load with mocks
+    let loaded = match load_extension_with_mocks(ext_path, scenario.setup.as_ref(), &default_spec) {
+        Ok(loaded) => loaded,
+        Err(err) => {
+            return ScenarioResult {
+                status: "error".to_string(),
+                error: Some(format!("load_extension_with_mocks: {err}")),
+                duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                ..base
+            };
+        }
+    };
+
+    // Multi-step scenarios
+    if scenario.steps.is_some() {
+        let result = execute_multi_step_scenario(&loaded, scenario, ext_path);
+        let output = match &result {
+            Ok(val) => Some(val.clone()),
+            Err(err) => Some(Value::String(err.clone())),
+        };
+        let diffs = scenario.expect.as_ref().map_or_else(Vec::new, |expect| {
+            check_expectations_with_mocks(expect, &result, &loaded)
+        });
+        return ScenarioResult {
+            status: if diffs.is_empty() {
+                "pass".to_string()
+            } else {
+                "fail".to_string()
+            },
+            diffs,
+            error: result.as_ref().err().cloned(),
+            output,
+            duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+            ..base
+        };
+    }
+
+    // Single-step execution by kind
+    let result = match scenario.kind.as_str() {
+        "tool" => {
+            if scenario.tool_name.is_none() {
+                if let Some(expect) = &scenario.expect {
+                    let diffs = check_expectations_with_mocks(expect, &Ok(Value::Null), &loaded);
+                    return ScenarioResult {
+                        status: if diffs.is_empty() {
+                            "pass".to_string()
+                        } else {
+                            "fail".to_string()
+                        },
+                        diffs,
+                        duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                        ..base
+                    };
+                }
+                return ScenarioResult {
+                    status: "skip".to_string(),
+                    skip_reason: Some(
+                        "tool scenario with no tool_name and no expectations".to_string(),
+                    ),
+                    duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    ..base
+                };
+            }
+            execute_tool_scenario_with_mocks(&loaded, scenario, ext_path)
+        }
+        "command" => execute_command_scenario_with_mocks(&loaded, scenario, ext_path),
+        "event" => execute_event_scenario_with_mocks(&loaded, scenario, ext_path),
+        "provider" => {
+            if let Some(expect) = &scenario.expect {
+                let diffs = check_expectations_with_mocks(expect, &Ok(Value::Null), &loaded);
+                return ScenarioResult {
+                    status: if diffs.is_empty() {
+                        "pass".to_string()
+                    } else {
+                        "fail".to_string()
+                    },
+                    diffs,
+                    duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    ..base
+                };
+            }
+            return ScenarioResult {
+                status: "pass".to_string(),
+                duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                ..base
+            };
+        }
+        other => {
+            return ScenarioResult {
+                status: "skip".to_string(),
+                skip_reason: Some(format!("unsupported scenario kind: {other}")),
+                duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                ..base
+            };
+        }
+    };
+
+    let output = match &result {
+        Ok(val) => Some(val.clone()),
+        Err(err) => Some(Value::String(err.clone())),
+    };
+
+    let diffs = scenario.expect.as_ref().map_or_else(Vec::new, |expect| {
+        check_expectations_with_mocks(expect, &result, &loaded)
     });
 
     ScenarioResult {

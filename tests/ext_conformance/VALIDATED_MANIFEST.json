@@ -6604,7 +6604,7 @@
       "source_tier": "third-party-github",
       "capabilities": {
         "registers_tools": true,
-        "registers_commands": false,
+        "registers_commands": true,
         "registers_flags": false,
         "registers_providers": false,
         "subscribes_events": [
@@ -6635,7 +6635,11 @@
         "tools": [
           "apply_patch"
         ],
-        "commands": [],
+        "commands": [
+          "assistant",
+          "codemap",
+          "skill"
+        ],
         "flags": [],
         "event_handlers": [
           "SIGINT",

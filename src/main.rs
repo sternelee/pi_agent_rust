@@ -64,18 +64,34 @@ fn main_impl() -> Result<()> {
         return Ok(());
     }
 
-    // List-models is an offline query; avoid loading resources or booting the runtime.
-    // Note: we intentionally skip OAuth refresh here to keep this path fast and offline.
+    // List-models is an offline query; avoid loading resources or booting the runtime when possible.
+    //
+    // IMPORTANT: if extension compat scanning is enabled, or explicit CLI extensions are provided,
+    // we must boot the normal startup path so the compat ledger can be emitted deterministically.
     if cli.command.is_none() {
         if let Some(pattern) = &cli.list_models {
-            let auth = AuthStorage::load(Config::auth_path())?;
-            let models_path = default_models_path(&Config::global_dir());
-            let registry = ModelRegistry::load(&auth, Some(models_path));
-            if let Some(error) = registry.error() {
-                eprintln!("Warning: models.json error: {error}");
+            let compat_scan_enabled =
+                std::env::var("PI_EXT_COMPAT_SCAN")
+                    .ok()
+                    .is_some_and(|value| {
+                        matches!(
+                            value.trim().to_ascii_lowercase().as_str(),
+                            "1" | "true" | "yes" | "on"
+                        )
+                    });
+            let has_cli_extensions = !cli.extension.is_empty();
+
+            if !compat_scan_enabled && !has_cli_extensions {
+                // Note: we intentionally skip OAuth refresh here to keep this path fast and offline.
+                let auth = AuthStorage::load(Config::auth_path())?;
+                let models_path = default_models_path(&Config::global_dir());
+                let registry = ModelRegistry::load(&auth, Some(models_path));
+                if let Some(error) = registry.error() {
+                    eprintln!("Warning: models.json error: {error}");
+                }
+                list_models(&registry, pattern.as_deref());
+                return Ok(());
             }
-            list_models(&registry, pattern.as_deref());
-            return Ok(());
         }
     }
 

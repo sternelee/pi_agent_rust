@@ -1,7 +1,7 @@
 # Feature Parity: pi_agent_rust vs Pi Agent (TypeScript)
 
 > **Purpose:** Authoritative single-source-of-truth for implementation status.
-> **Last Updated:** 2026-02-04 (Extensions runtime audit; docs refreshed)
+> **Last Updated:** 2026-02-06 (Extensions runtime parity + docs refreshed)
 
 ## Status Legend
 
@@ -24,11 +24,11 @@
 | **Agent Runtime** | 7 | 0 | 0 | 0 | 7 |
 | **Session Management** | 10 | 0 | 0 | 0 | 10 |
 | **CLI** | 10 | 0 | 0 | 0 | 10 |
-| **Resources & Customization** | 6 | 1 | 1 | 0 | 8 |
-| **Extensions Runtime** | 8 | 3 | 1 | 0 | 12 |
+| **Resources & Customization** | 8 | 0 | 0 | 0 | 8 |
+| **Extensions Runtime** | 9 | 3 | 0 | 0 | 12 |
 | **TUI** | 18 | 0 | 0 | 2 | 20 |
-| **Configuration** | 2 | 0 | 0 | 0 | 2 |
-| **Authentication** | 6 | 1 | 1 | 0 | 8 |
+| **Configuration** | 9 | 0 | 0 | 0 | 9 |
+| **Authentication** | 6 | 2 | 0 | 0 | 8 |
 
 ---
 
@@ -205,7 +205,7 @@
 | Hostcall ABI (host_call/host_result protocol) | 🔶 | `src/extensions.rs` | Unit | Protocol types + validation exist; end-to-end dispatch wiring still pending |
 | Extension UI bridge (select/confirm/input/editor) | 🔶 | `src/extensions.rs`, `src/interactive.rs`, `src/rpc.rs` | Unit | UI request/response plumbing exists; runtime dispatch still pending |
 | Extension session API (get_state/messages/set_name) | 🔶 | `src/extensions.rs`, `src/interactive.rs` | - | Trait + interactive impl exist; runtime dispatch still pending |
-| JS extension execution + registration (tools/commands/hooks) | ❌ | - | - | Loader + `registerTool`/slash command execution/event hooks not implemented yet |
+| JS extension execution + registration (tools/commands/hooks) | ✅ | `src/extensions_js.rs`, `src/extension_dispatcher.rs`, `src/agent.rs`, `src/interactive.rs` | Unit + E2E | QuickJS runtime loads JS/TS extensions and supports tool/command registration + execution + event hooks |
 
 ---
 
