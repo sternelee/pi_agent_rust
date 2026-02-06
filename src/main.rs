@@ -606,6 +606,7 @@ fn handle_config(cwd: &Path) -> Result<()> {
     println!("Other paths:");
     println!("  Auth:     {}", Config::auth_path().display());
     println!("  Sessions: {}", Config::sessions_dir().display());
+    println!("  Packages: {}", Config::package_dir().display());
     println!();
     println!("Settings precedence:");
     println!("  1) CLI flags");

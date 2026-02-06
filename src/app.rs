@@ -898,7 +898,40 @@ pub fn render_session_html(session: &Session) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use clap::Parser;
+
     use super::*;
+    use crate::provider::{InputType, Model, ModelCost};
+
+    fn test_model_entry(id: &str, provider: &str, reasoning: bool) -> ModelEntry {
+        ModelEntry {
+            model: Model {
+                id: id.to_string(),
+                name: id.to_string(),
+                api: "openai-responses".to_string(),
+                provider: provider.to_string(),
+                base_url: "https://example.test/v1".to_string(),
+                reasoning,
+                input: vec![InputType::Text],
+                cost: ModelCost {
+                    input: 0.0,
+                    output: 0.0,
+                    cache_read: 0.0,
+                    cache_write: 0.0,
+                },
+                context_window: 128_000,
+                max_tokens: 8_192,
+                headers: HashMap::new(),
+            },
+            api_key: Some("test-key".to_string()),
+            headers: HashMap::new(),
+            auth_header: true,
+            compat: None,
+            oauth_config: None,
+        }
+    }
 
     #[test]
     fn parse_models_arg_splits_and_trims() {
@@ -906,5 +939,132 @@ mod tests {
             parse_models_arg("gpt-4*, claude* ,,"),
             vec!["gpt-4*".to_string(), "claude*".to_string()]
         );
+    }
+
+    #[test]
+    fn apply_piped_stdin_trims_newlines_and_prepends_message() {
+        let mut cli = cli::Cli::parse_from(["pi", "existing-message"]);
+        apply_piped_stdin(&mut cli, Some("from-stdin\n".to_string()));
+
+        assert!(cli.print);
+        assert_eq!(
+            cli.args,
+            vec!["from-stdin".to_string(), "existing-message".to_string()]
+        );
+    }
+
+    #[test]
+    fn apply_piped_stdin_ignores_empty_input() {
+        let mut cli = cli::Cli::parse_from(["pi", "existing-message"]);
+        apply_piped_stdin(&mut cli, Some("\n".to_string()));
+
+        assert!(!cli.print);
+        assert_eq!(cli.args, vec!["existing-message".to_string()]);
+    }
+
+    #[test]
+    fn normalize_cli_enables_no_session_for_print_and_lowercases_provider() {
+        let mut cli = cli::Cli::parse_from(["pi", "--provider", "OpenAI", "--print", "hello"]);
+        assert!(!cli.no_session);
+        assert_eq!(cli.provider.as_deref(), Some("OpenAI"));
+
+        normalize_cli(&mut cli);
+
+        assert!(cli.no_session);
+        assert_eq!(cli.provider.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn validate_rpc_args_rejects_file_arguments() {
+        let cli = cli::Cli::parse_from(["pi", "--mode", "rpc", "@src/main.rs", "hello"]);
+
+        let err = validate_rpc_args(&cli).expect_err("rpc mode should reject @file args");
+        assert!(
+            err.to_string()
+                .contains("@file arguments are not supported in RPC mode")
+        );
+    }
+
+    #[test]
+    fn validate_rpc_args_allows_non_rpc_file_arguments() {
+        let cli = cli::Cli::parse_from(["pi", "--mode", "json", "@src/main.rs", "hello"]);
+        assert!(validate_rpc_args(&cli).is_ok());
+    }
+
+    #[test]
+    fn parse_model_pattern_prefers_alias_when_alias_and_dated_match() {
+        let available = vec![
+            test_model_entry("gpt-5.1-codex-20250101", "openai", true),
+            test_model_entry("gpt-5.1-codex-latest", "openai", true),
+        ];
+
+        let parsed = parse_model_pattern("gpt-5.1-codex", &available);
+        let model = parsed.model.expect("model should match");
+
+        assert_eq!(model.model.id, "gpt-5.1-codex-latest");
+        assert!(parsed.thinking_level.is_none());
+        assert!(parsed.warning.is_none());
+    }
+
+    #[test]
+    fn parse_model_pattern_picks_latest_dated_when_no_alias_exists() {
+        let available = vec![
+            test_model_entry("gpt-5.1-codex-20250101", "openai", true),
+            test_model_entry("gpt-5.1-codex-20250601", "openai", true),
+        ];
+
+        let parsed = parse_model_pattern("gpt-5.1-codex", &available);
+        let model = parsed.model.expect("model should match");
+
+        assert_eq!(model.model.id, "gpt-5.1-codex-20250601");
+        assert!(parsed.thinking_level.is_none());
+        assert!(parsed.warning.is_none());
+    }
+
+    #[test]
+    fn parse_model_pattern_parses_thinking_suffix() {
+        let available = vec![test_model_entry("gpt-5.1-codex", "openai", true)];
+        let parsed = parse_model_pattern("openai/gpt-5.1-codex:high", &available);
+
+        let model = parsed.model.expect("model should match");
+        assert_eq!(model.model.id, "gpt-5.1-codex");
+        assert_eq!(parsed.thinking_level, Some(model::ThinkingLevel::High));
+        assert!(parsed.warning.is_none());
+    }
+
+    #[test]
+    fn parse_model_pattern_warns_for_invalid_thinking_suffix() {
+        let available = vec![test_model_entry("gpt-5.1-codex", "openai", true)];
+        let parsed = parse_model_pattern("gpt-5.1-codex:extreme", &available);
+
+        assert!(parsed.model.is_some());
+        assert!(parsed.thinking_level.is_none());
+        assert!(
+            parsed
+                .warning
+                .expect("warning should be present")
+                .contains("Invalid thinking level")
+        );
+    }
+
+    #[test]
+    fn clamp_thinking_level_returns_off_for_non_reasoning_models() {
+        let model_entry = test_model_entry("gpt-4o-mini", "openai", false);
+        let clamped = clamp_thinking_level(model::ThinkingLevel::High, &model_entry);
+        assert_eq!(clamped, model::ThinkingLevel::Off);
+    }
+
+    #[test]
+    fn clamp_thinking_level_clamps_xhigh_for_unsupported_models() {
+        let model_entry = test_model_entry("gpt-4o", "openai", true);
+        let clamped = clamp_thinking_level(model::ThinkingLevel::XHigh, &model_entry);
+        assert_eq!(clamped, model::ThinkingLevel::High);
+    }
+
+    #[test]
+    fn clamp_thinking_level_keeps_xhigh_for_supported_models() {
+        let model_entry = test_model_entry("gpt-5.2", "openai", true);
+        let clamped = clamp_thinking_level(model::ThinkingLevel::XHigh, &model_entry);
+        assert_eq!(clamped, model::ThinkingLevel::XHigh);
     }
 }

@@ -158,8 +158,10 @@ pub struct Cli {
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
+    use super::{Cli, Commands};
     use clap::Parser;
+
+    // ── 1. Basic flag parsing ────────────────────────────────────────
 
     #[test]
     fn parse_resource_flags_and_mode() {
@@ -193,10 +195,455 @@ mod tests {
     }
 
     #[test]
+    fn parse_continue_short_flag() {
+        let cli = Cli::parse_from(["pi", "-c"]);
+        assert!(cli.r#continue);
+        assert!(!cli.resume);
+        assert!(!cli.print);
+    }
+
+    #[test]
+    fn parse_continue_long_flag() {
+        let cli = Cli::parse_from(["pi", "--continue"]);
+        assert!(cli.r#continue);
+    }
+
+    #[test]
+    fn parse_resume_short_flag() {
+        let cli = Cli::parse_from(["pi", "-r"]);
+        assert!(cli.resume);
+        assert!(!cli.r#continue);
+    }
+
+    #[test]
+    fn parse_session_path() {
+        let cli = Cli::parse_from(["pi", "--session", "/tmp/session.jsonl"]);
+        assert_eq!(cli.session.as_deref(), Some("/tmp/session.jsonl"));
+    }
+
+    #[test]
+    fn parse_session_dir() {
+        let cli = Cli::parse_from(["pi", "--session-dir", "/tmp/sessions"]);
+        assert_eq!(cli.session_dir.as_deref(), Some("/tmp/sessions"));
+    }
+
+    #[test]
+    fn parse_no_session() {
+        let cli = Cli::parse_from(["pi", "--no-session"]);
+        assert!(cli.no_session);
+    }
+
+    #[test]
+    fn parse_print_short_flag() {
+        let cli = Cli::parse_from(["pi", "-p", "what is 2+2"]);
+        assert!(cli.print);
+        assert_eq!(cli.message_args(), vec!["what is 2+2"]);
+    }
+
+    #[test]
+    fn parse_print_long_flag() {
+        let cli = Cli::parse_from(["pi", "--print", "question"]);
+        assert!(cli.print);
+    }
+
+    #[test]
+    fn parse_model_flag() {
+        let cli = Cli::parse_from(["pi", "--model", "claude-opus-4"]);
+        assert_eq!(cli.model.as_deref(), Some("claude-opus-4"));
+    }
+
+    #[test]
+    fn parse_provider_flag() {
+        let cli = Cli::parse_from(["pi", "--provider", "openai"]);
+        assert_eq!(cli.provider.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn parse_api_key_flag() {
+        let cli = Cli::parse_from(["pi", "--api-key", "sk-ant-test123"]);
+        assert_eq!(cli.api_key.as_deref(), Some("sk-ant-test123"));
+    }
+
+    #[test]
+    fn parse_version_short_flag() {
+        let cli = Cli::parse_from(["pi", "-v"]);
+        assert!(cli.version);
+    }
+
+    #[test]
+    fn parse_version_long_flag() {
+        let cli = Cli::parse_from(["pi", "--version"]);
+        assert!(cli.version);
+    }
+
+    #[test]
+    fn parse_verbose_flag() {
+        let cli = Cli::parse_from(["pi", "--verbose"]);
+        assert!(cli.verbose);
+    }
+
+    #[test]
+    fn parse_system_prompt_flags() {
+        let cli = Cli::parse_from([
+            "pi",
+            "--system-prompt",
+            "You are a helper",
+            "--append-system-prompt",
+            "Be concise",
+        ]);
+        assert_eq!(cli.system_prompt.as_deref(), Some("You are a helper"));
+        assert_eq!(cli.append_system_prompt.as_deref(), Some("Be concise"));
+    }
+
+    #[test]
+    fn parse_export_flag() {
+        let cli = Cli::parse_from(["pi", "--export", "output.html"]);
+        assert_eq!(cli.export.as_deref(), Some("output.html"));
+    }
+
+    // ── 2. Thinking level parsing ────────────────────────────────────
+
+    #[test]
+    fn parse_all_thinking_levels() {
+        for level in &["off", "minimal", "low", "medium", "high", "xhigh"] {
+            let cli = Cli::parse_from(["pi", "--thinking", level]);
+            assert_eq!(cli.thinking.as_deref(), Some(*level));
+        }
+    }
+
+    #[test]
+    fn invalid_thinking_level_rejected() {
+        let result = Cli::try_parse_from(["pi", "--thinking", "ultra"]);
+        assert!(result.is_err());
+    }
+
+    // ── 3. @file expansion ───────────────────────────────────────────
+
+    #[test]
     fn file_and_message_args_split() {
         let cli = Cli::parse_from(["pi", "@a.txt", "hello", "@b.md", "world"]);
         assert_eq!(cli.file_args(), vec!["a.txt", "b.md"]);
         assert_eq!(cli.message_args(), vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn file_args_empty_when_none() {
+        let cli = Cli::parse_from(["pi", "hello", "world"]);
+        assert!(cli.file_args().is_empty());
+        assert_eq!(cli.message_args(), vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn message_args_empty_when_only_files() {
+        let cli = Cli::parse_from(["pi", "@src/main.rs", "@Cargo.toml"]);
+        assert_eq!(cli.file_args(), vec!["src/main.rs", "Cargo.toml"]);
+        assert!(cli.message_args().is_empty());
+    }
+
+    #[test]
+    fn no_positional_args_yields_empty() {
+        let cli = Cli::parse_from(["pi"]);
+        assert!(cli.file_args().is_empty());
+        assert!(cli.message_args().is_empty());
+    }
+
+    #[test]
+    fn at_prefix_stripped_from_file_paths() {
+        let cli = Cli::parse_from(["pi", "@/absolute/path.rs"]);
+        assert_eq!(cli.file_args(), vec!["/absolute/path.rs"]);
+    }
+
+    // ── 4. Subcommand parsing ────────────────────────────────────────
+
+    #[test]
+    fn parse_install_subcommand() {
+        let cli = Cli::parse_from(["pi", "install", "npm:@org/pkg"]);
+        match cli.command {
+            Some(Commands::Install { source, local }) => {
+                assert_eq!(source, "npm:@org/pkg");
+                assert!(!local);
+            }
+            other => panic!("expected Install, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_install_local_flag() {
+        let cli = Cli::parse_from(["pi", "install", "--local", "git:https://example.com"]);
+        match cli.command {
+            Some(Commands::Install { source, local }) => {
+                assert_eq!(source, "git:https://example.com");
+                assert!(local);
+            }
+            other => panic!("expected Install --local, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_install_local_short_flag() {
+        let cli = Cli::parse_from(["pi", "install", "-l", "./local-ext"]);
+        match cli.command {
+            Some(Commands::Install { local, .. }) => assert!(local),
+            other => panic!("expected Install -l, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_remove_subcommand() {
+        let cli = Cli::parse_from(["pi", "remove", "npm:pkg"]);
+        match cli.command {
+            Some(Commands::Remove { source, local }) => {
+                assert_eq!(source, "npm:pkg");
+                assert!(!local);
+            }
+            other => panic!("expected Remove, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_remove_local_flag() {
+        let cli = Cli::parse_from(["pi", "remove", "--local", "npm:pkg"]);
+        match cli.command {
+            Some(Commands::Remove { local, .. }) => assert!(local),
+            other => panic!("expected Remove --local, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_update_with_source() {
+        let cli = Cli::parse_from(["pi", "update", "npm:pkg"]);
+        match cli.command {
+            Some(Commands::Update { source }) => {
+                assert_eq!(source.as_deref(), Some("npm:pkg"));
+            }
+            other => panic!("expected Update with source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_update_all() {
+        let cli = Cli::parse_from(["pi", "update"]);
+        match cli.command {
+            Some(Commands::Update { source }) => assert!(source.is_none()),
+            other => panic!("expected Update (all), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_list_subcommand() {
+        let cli = Cli::parse_from(["pi", "list"]);
+        assert!(matches!(cli.command, Some(Commands::List)));
+    }
+
+    #[test]
+    fn parse_config_subcommand() {
+        let cli = Cli::parse_from(["pi", "config"]);
+        assert!(matches!(cli.command, Some(Commands::Config)));
+    }
+
+    #[test]
+    fn no_subcommand_when_only_message() {
+        let cli = Cli::parse_from(["pi", "hello"]);
+        assert!(cli.command.is_none());
+        assert_eq!(cli.message_args(), vec!["hello"]);
+    }
+
+    // ── 5. --list-models (Option<Option<String>>) ────────────────────
+
+    #[test]
+    fn list_models_not_set() {
+        let cli = Cli::parse_from(["pi"]);
+        assert!(cli.list_models.is_none());
+    }
+
+    #[test]
+    fn list_models_without_pattern() {
+        let cli = Cli::parse_from(["pi", "--list-models"]);
+        assert!(matches!(cli.list_models, Some(None)));
+    }
+
+    #[test]
+    fn list_models_with_pattern() {
+        let cli = Cli::parse_from(["pi", "--list-models", "claude*"]);
+        match cli.list_models {
+            Some(Some(ref pat)) => assert_eq!(pat, "claude*"),
+            other => panic!("expected Some(Some(\"claude*\")), got {other:?}"),
+        }
+    }
+
+    // ── 6. enabled_tools() method ────────────────────────────────────
+
+    #[test]
+    fn default_tools() {
+        let cli = Cli::parse_from(["pi"]);
+        assert_eq!(cli.enabled_tools(), vec!["read", "bash", "edit", "write"]);
+    }
+
+    #[test]
+    fn custom_tools_list() {
+        let cli = Cli::parse_from(["pi", "--tools", "read,grep,find,ls"]);
+        assert_eq!(cli.enabled_tools(), vec!["read", "grep", "find", "ls"]);
+    }
+
+    #[test]
+    fn no_tools_flag_returns_empty() {
+        let cli = Cli::parse_from(["pi", "--no-tools"]);
+        assert!(cli.enabled_tools().is_empty());
+    }
+
+    #[test]
+    fn tools_with_spaces_trimmed() {
+        let cli = Cli::parse_from(["pi", "--tools", "read, bash, edit"]);
+        assert_eq!(cli.enabled_tools(), vec!["read", "bash", "edit"]);
+    }
+
+    // ── 7. Invalid inputs ────────────────────────────────────────────
+
+    #[test]
+    fn unknown_flag_rejected() {
+        let result = Cli::try_parse_from(["pi", "--nonexistent"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invalid_mode_rejected() {
+        let result = Cli::try_parse_from(["pi", "--mode", "xml"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn install_without_source_rejected() {
+        let result = Cli::try_parse_from(["pi", "install"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn remove_without_source_rejected() {
+        let result = Cli::try_parse_from(["pi", "remove"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invalid_subcommand_option_rejected() {
+        let result = Cli::try_parse_from(["pi", "install", "--bogus", "npm:pkg"]);
+        assert!(result.is_err());
+    }
+
+    // ── 8. Multiple append flags ─────────────────────────────────────
+
+    #[test]
+    fn multiple_extensions() {
+        let cli = Cli::parse_from([
+            "pi",
+            "--extension",
+            "ext1.js",
+            "-e",
+            "ext2.js",
+            "--extension",
+            "ext3.js",
+        ]);
+        assert_eq!(
+            cli.extension,
+            vec!["ext1.js", "ext2.js", "ext3.js"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn multiple_skills() {
+        let cli = Cli::parse_from(["pi", "--skill", "a.md", "--skill", "b.md"]);
+        assert_eq!(
+            cli.skill,
+            vec!["a.md", "b.md"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn multiple_theme_paths() {
+        let cli = Cli::parse_from(["pi", "--theme-path", "a/", "--theme-path", "b/"]);
+        assert_eq!(
+            cli.theme_path,
+            vec!["a/", "b/"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // ── 9. Disable-discovery flags ───────────────────────────────────
+
+    #[test]
+    fn no_extensions_flag() {
+        let cli = Cli::parse_from(["pi", "--no-extensions"]);
+        assert!(cli.no_extensions);
+    }
+
+    #[test]
+    fn no_skills_flag() {
+        let cli = Cli::parse_from(["pi", "--no-skills"]);
+        assert!(cli.no_skills);
+    }
+
+    #[test]
+    fn no_prompt_templates_flag() {
+        let cli = Cli::parse_from(["pi", "--no-prompt-templates"]);
+        assert!(cli.no_prompt_templates);
+    }
+
+    // ── 10. Defaults ─────────────────────────────────────────────────
+
+    #[test]
+    fn bare_invocation_defaults() {
+        let cli = Cli::parse_from(["pi"]);
+        assert!(!cli.version);
+        assert!(!cli.r#continue);
+        assert!(!cli.resume);
+        assert!(!cli.print);
+        assert!(!cli.verbose);
+        assert!(!cli.no_session);
+        assert!(!cli.no_tools);
+        assert!(!cli.no_extensions);
+        assert!(!cli.no_skills);
+        assert!(!cli.no_prompt_templates);
+        assert!(!cli.no_themes);
+        assert!(cli.provider.is_none());
+        assert!(cli.model.is_none());
+        assert!(cli.api_key.is_none());
+        assert!(cli.thinking.is_none());
+        assert!(cli.session.is_none());
+        assert!(cli.session_dir.is_none());
+        assert!(cli.mode.is_none());
+        assert!(cli.export.is_none());
+        assert!(cli.system_prompt.is_none());
+        assert!(cli.append_system_prompt.is_none());
+        assert!(cli.list_models.is_none());
+        assert!(cli.command.is_none());
+        assert!(cli.args.is_empty());
+        assert_eq!(cli.tools, "read,bash,edit,write");
+    }
+
+    // ── 11. Combined flags ───────────────────────────────────────────
+
+    #[test]
+    fn print_mode_with_model_and_thinking() {
+        let cli = Cli::parse_from([
+            "pi",
+            "-p",
+            "--model",
+            "gpt-4o",
+            "--thinking",
+            "high",
+            "solve this problem",
+        ]);
+        assert!(cli.print);
+        assert_eq!(cli.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(cli.thinking.as_deref(), Some("high"));
+        assert_eq!(cli.message_args(), vec!["solve this problem"]);
     }
 }
 

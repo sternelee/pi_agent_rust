@@ -449,18 +449,14 @@ fn sessions_dir_from_env<F>(get_env: F, global_dir: &Path) -> PathBuf
 where
     F: Fn(&str) -> Option<String>,
 {
-    get_env("PI_SESSIONS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| global_dir.join("sessions"))
+    get_env("PI_SESSIONS_DIR").map_or_else(|| global_dir.join("sessions"), PathBuf::from)
 }
 
 fn package_dir_from_env<F>(get_env: F, global_dir: &Path) -> PathBuf
 where
     F: Fn(&str) -> Option<String>,
 {
-    get_env("PI_PACKAGE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| global_dir.join("packages"))
+    get_env("PI_PACKAGE_DIR").map_or_else(|| global_dir.join("packages"), PathBuf::from)
 }
 
 fn parse_queue_mode(mode: Option<&str>) -> Option<QueueMode> {
