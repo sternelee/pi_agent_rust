@@ -188,6 +188,13 @@ async fn run(mut cli: cli::Cli, runtime_handle: RuntimeHandle) -> Result<()> {
         let stdin_content = read_piped_stdin()?;
         pi::app::apply_piped_stdin(&mut cli, stdin_content);
     }
+
+    // Auto-detect print mode: if the user passed positional message args (e.g. `pi "hello"`)
+    // or stdin was piped, run in non-interactive print mode automatically.
+    if !cli.print && cli.mode.is_none() && !cli.message_args().is_empty() {
+        cli.print = true;
+    }
+
     pi::app::normalize_cli(&mut cli);
 
     if let Some(export_path) = cli.export.clone() {

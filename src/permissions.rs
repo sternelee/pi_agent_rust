@@ -134,12 +134,7 @@ impl PermissionStore {
     }
 
     /// Record a decision and persist to disk.
-    pub fn record(
-        &mut self,
-        extension_id: &str,
-        capability: &str,
-        allow: bool,
-    ) -> Result<()> {
+    pub fn record(&mut self, extension_id: &str, capability: &str, allow: bool) -> Result<()> {
         let decision = PersistedDecision {
             capability: capability.to_string(),
             allow,
@@ -193,7 +188,7 @@ impl PermissionStore {
     }
 
     /// List all persisted decisions grouped by extension.
-    pub fn list(&self) -> &HashMap<String, HashMap<String, PersistedDecision>> {
+    pub const fn list(&self) -> &HashMap<String, HashMap<String, PersistedDecision>> {
         &self.decisions
     }
 
@@ -208,11 +203,7 @@ impl PermissionStore {
             .map(|(ext_id, by_cap)| {
                 let filtered: HashMap<String, bool> = by_cap
                     .iter()
-                    .filter(|(_, dec)| {
-                        dec.expires_at
-                            .as_ref()
-                            .map_or(true, |exp| now <= *exp)
-                    })
+                    .filter(|(_, dec)| dec.expires_at.as_ref().is_none_or(|exp| now <= *exp))
                     .map(|(cap, dec)| (cap.clone(), dec.allow))
                     .collect();
                 (ext_id.clone(), filtered)
@@ -298,7 +289,7 @@ fn now_iso8601() -> String {
 }
 
 /// Convert days since Unix epoch to (year, month, day).
-fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+const fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     // Algorithm from Howard Hinnant's `chrono`-compatible date library.
     let z = days + 719_468;
     let era = z / 146_097;
@@ -487,5 +478,66 @@ mod tests {
         assert_eq!(ts.as_bytes()[10], b'T');
         assert_eq!(ts.as_bytes()[13], b':');
         assert_eq!(ts.as_bytes()[16], b':');
+    }
+
+    #[test]
+    fn corrupt_file_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.json");
+
+        // Write invalid JSON.
+        std::fs::write(&path, b"not valid json {{{").unwrap();
+
+        let result = PermissionStore::open(&path);
+        assert!(result.is_err(), "Should fail on corrupt JSON");
+    }
+
+    #[test]
+    fn list_returns_all_decisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.json");
+
+        let mut store = PermissionStore::open(&path).unwrap();
+        store.record("ext-a", "exec", true).unwrap();
+        store.record("ext-a", "http", false).unwrap();
+        store.record("ext-b", "fs", true).unwrap();
+
+        let listing = store.list();
+        assert_eq!(listing.len(), 2, "Two extensions with decisions");
+        assert!(listing.contains_key("ext-a"));
+        assert!(listing.contains_key("ext-b"));
+
+        let ext_a = &listing["ext-a"];
+        assert_eq!(ext_a.len(), 2, "ext-a has two capabilities");
+    }
+
+    #[test]
+    fn concurrent_open_does_not_lose_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.json");
+
+        // First writer.
+        let mut s1 = PermissionStore::open(&path).unwrap();
+        s1.record("ext-a", "exec", true).unwrap();
+
+        // Second writer opens after first save.
+        let mut s2 = PermissionStore::open(&path).unwrap();
+        assert_eq!(s2.lookup("ext-a", "exec"), Some(true));
+        s2.record("ext-b", "http", false).unwrap();
+
+        // Verify both decisions present after last save.
+        let s3 = PermissionStore::open(&path).unwrap();
+        assert_eq!(s3.lookup("ext-a", "exec"), Some(true));
+        assert_eq!(s3.lookup("ext-b", "http"), Some(false));
+    }
+
+    #[test]
+    fn empty_extension_id_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.json");
+
+        let mut store = PermissionStore::open(&path).unwrap();
+        store.record("", "exec", true).unwrap();
+        assert_eq!(store.lookup("", "exec"), Some(true));
     }
 }

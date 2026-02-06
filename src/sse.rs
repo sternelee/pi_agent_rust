@@ -224,40 +224,44 @@ where
                     self.utf8_buffer.extend_from_slice(&bytes);
 
                     // Determine how much of the buffer is valid UTF-8.
-                    // Common path: the entire buffer is valid (no intermediate String copy).
-                    let valid_len = match std::str::from_utf8(&self.utf8_buffer) {
-                        Ok(_) => self.utf8_buffer.len(),
+                    // Take the bytes out so we can borrow self.parser mutably without fighting
+                    // the borrow checker over self.utf8_buffer.
+                    let mut utf8_buffer = std::mem::take(&mut self.utf8_buffer);
+
+                    let parsed = match std::str::from_utf8(&utf8_buffer) {
+                        Ok(s) => Some((utf8_buffer.len(), self.parser.feed(s))),
                         Err(e) => {
                             if e.error_len().is_some() {
+                                // Restore buffer so callers can inspect state if they want.
+                                self.utf8_buffer = utf8_buffer;
                                 return Poll::Ready(Some(Err(std::io::Error::new(
                                     std::io::ErrorKind::InvalidData,
                                     e,
                                 ))));
                             }
-                            e.valid_up_to()
+                            let valid_len = e.valid_up_to();
+                            if valid_len == 0 {
+                                None
+                            } else {
+                                let s = std::str::from_utf8(&utf8_buffer[..valid_len]).unwrap();
+                                Some((valid_len, self.parser.feed(s)))
+                            }
                         }
                     };
 
-                    // Feed valid portion to the parser.
-                    if valid_len > 0 {
-                        // Convert to owned String to avoid borrow conflict with self.parser.
-                        let valid_str = std::str::from_utf8(&self.utf8_buffer[..valid_len])
-                            .unwrap()
-                            .to_string();
-                        let events = self.parser.feed(&valid_str);
-                        if !events.is_empty() {
-                            self.pending_events = events.into_iter().collect();
-                        }
+                    if let Some((valid_len, events)) = parsed {
+                        self.pending_events.extend(events);
 
                         // Remove the consumed bytes efficiently.
-                        if valid_len == self.utf8_buffer.len() {
-                            self.utf8_buffer.clear();
+                        if valid_len == utf8_buffer.len() {
+                            utf8_buffer.clear();
                         } else {
-                            // Keep only the trailing incomplete UTF-8 bytes.
-                            let remaining = self.utf8_buffer[valid_len..].to_vec();
-                            self.utf8_buffer = remaining;
+                            // Keep only the trailing incomplete UTF-8 bytes (no allocation).
+                            utf8_buffer.drain(..valid_len);
                         }
                     }
+
+                    self.utf8_buffer = utf8_buffer;
 
                     // If we have pending events, return the first one
                     if let Some(event) = self.pending_events.pop_front() {

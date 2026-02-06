@@ -53,9 +53,11 @@ fn test_compaction_usage_double_counting_bug() {
     });
 
     let entries = vec![user1, assistant_entry, user2];
-    let mut settings = ResolvedCompactionSettings::default();
     // Force a non-empty `messages_to_summarize` so `prepare_compaction` returns `Some(...)`.
-    settings.keep_recent_tokens = 0;
+    let settings = ResolvedCompactionSettings {
+        keep_recent_tokens: 0,
+        ..Default::default()
+    };
 
     // prepare_compaction calculates tokens_before using estimate_context_tokens
     // which uses calculate_context_tokens

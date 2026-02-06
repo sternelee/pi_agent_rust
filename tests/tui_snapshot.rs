@@ -213,6 +213,7 @@ fn user_msg(text: &str) -> ConversationMessage {
         role: MessageRole::User,
         content: text.to_string(),
         thinking: None,
+        collapsed: false,
     }
 }
 
@@ -221,6 +222,7 @@ fn assistant_msg(text: &str, thinking: Option<&str>) -> ConversationMessage {
         role: MessageRole::Assistant,
         content: text.to_string(),
         thinking: thinking.map(str::to_string),
+        collapsed: false,
     }
 }
 
@@ -229,6 +231,7 @@ fn system_msg(text: &str) -> ConversationMessage {
         role: MessageRole::System,
         content: text.to_string(),
         thinking: None,
+        collapsed: false,
     }
 }
 
