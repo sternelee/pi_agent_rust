@@ -15,23 +15,21 @@ use pi::extensions::{ExtensionManager, JsExtensionLoadSpec, JsExtensionRuntimeHa
 #[cfg(unix)]
 use pi::extensions_js::PiJsRuntimeConfig;
 #[cfg(unix)]
-use pi::package_manager::{PackageManager, ResolveRoots};
+use pi::package_manager::{PackageManager, PackageScope, ResolveRoots};
 use pi::tools::ToolRegistry;
-use serde::Deserialize;
 use serde_json::json;
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Write as _;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 #[cfg(unix)]
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 
 struct CliResult {
     exit_code: i32,
@@ -47,25 +45,6 @@ struct CliTestHarness {
     env_root: PathBuf,
     env: BTreeMap<String, String>,
     run_seq: Cell<usize>,
-}
-
-#[cfg(unix)]
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-struct PackageCommandStubs {
-    npm_log: PathBuf,
-    git_log: PathBuf,
-    #[allow(dead_code)]
-    npm_global_root: PathBuf,
-}
-
-#[cfg(unix)]
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct CommandInvocation {
-    argv: Vec<String>,
-    #[allow(dead_code)]
-    cwd: String,
 }
 
 impl CliTestHarness {
@@ -94,6 +73,24 @@ impl CliTestHarness {
         env.insert(
             "PI_PACKAGE_DIR".to_string(),
             env_root.join("packages").display().to_string(),
+        );
+
+        // Make npm deterministic and offline-friendly for tests:
+        // - disable audit/fund network calls
+        // - isolate cache and global prefix inside the harness temp dir
+        env.insert("npm_config_audit".to_string(), "false".to_string());
+        env.insert("npm_config_fund".to_string(), "false".to_string());
+        env.insert(
+            "npm_config_update_notifier".to_string(),
+            "false".to_string(),
+        );
+        env.insert(
+            "npm_config_cache".to_string(),
+            env_root.join("npm-cache").display().to_string(),
+        );
+        env.insert(
+            "npm_config_prefix".to_string(),
+            env_root.join("npm-prefix").display().to_string(),
         );
 
         Self {
@@ -135,166 +132,6 @@ impl CliTestHarness {
             &self.project_settings_path(),
             &format!("settings.project.{label}.json"),
         );
-    }
-
-    #[allow(clippy::too_many_lines)]
-    #[cfg(unix)]
-    fn enable_offline_package_stubs(&mut self) -> PackageCommandStubs {
-        let bin_dir = self.harness.temp_path("stub-bin");
-        std::fs::create_dir_all(&bin_dir).expect("create stub bin dir");
-
-        let npm_log = self.harness.temp_path("npm-invocations.jsonl");
-        let git_log = self.harness.temp_path("git-invocations.jsonl");
-        let _ = std::fs::write(&npm_log, "");
-        let _ = std::fs::write(&git_log, "");
-
-        let npm_global_root = self.env_root.join("npm-global").join("node_modules");
-        std::fs::create_dir_all(&npm_global_root).expect("create npm global root");
-
-        let npm_path = bin_dir.join("npm");
-        fs::write(
-            &npm_path,
-            r#"#!/usr/bin/env python3
-import json
-import os
-import sys
-from pathlib import Path
-
-def log_invocation():
-    log_path = os.environ.get("PI_E2E_NPM_LOG")
-    if not log_path:
-        return
-    entry = {"argv": sys.argv[1:], "cwd": os.getcwd()}
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, sort_keys=True))
-        f.write("\n")
-
-def parse_name(spec: str) -> str:
-    spec = spec.strip()
-    if spec.startswith("@"):
-        pos = spec.rfind("@")
-        return spec[:pos] if pos > 0 else spec
-    pos = spec.find("@")
-    return spec[:pos] if pos > 0 else spec
-
-def ensure_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-
-def main() -> int:
-    log_invocation()
-    args = sys.argv[1:]
-    if args == ["root", "-g"]:
-        root = os.environ.get("PI_E2E_NPM_GLOBAL_ROOT", "")
-        if not root:
-            print("npm stub: missing PI_E2E_NPM_GLOBAL_ROOT", file=sys.stderr)
-            return 2
-        print(root)
-        return 0
-
-    if not args:
-        print("npm stub: no args", file=sys.stderr)
-        return 2
-
-    cmd = args[0]
-    if cmd == "install":
-        if "-g" in args:
-            idx = args.index("-g")
-            if idx + 1 >= len(args):
-                print("npm stub: install -g missing spec", file=sys.stderr)
-                return 2
-            spec = args[idx + 1]
-            name = parse_name(spec)
-            root = os.environ.get("PI_E2E_NPM_GLOBAL_ROOT", "")
-            if not root:
-                print("npm stub: missing PI_E2E_NPM_GLOBAL_ROOT", file=sys.stderr)
-                return 2
-            ensure_dir(Path(root) / name)
-            return 0
-
-        if "--prefix" in args:
-            idx = args.index("--prefix")
-            if idx + 1 >= len(args):
-                print("npm stub: --prefix missing value", file=sys.stderr)
-                return 2
-            prefix = args[idx + 1]
-            spec = None
-            for candidate in args[1:]:
-                if candidate.startswith("-"):
-                    continue
-                spec = candidate
-                break
-            if spec:
-                name = parse_name(spec)
-                ensure_dir(Path(prefix) / "node_modules" / name)
-            return 0
-
-        ensure_dir(Path.cwd() / "node_modules")
-        return 0
-
-    if cmd == "uninstall":
-        return 0
-
-    print(f"npm stub: unsupported args: {args}", file=sys.stderr)
-    return 2
-
-if __name__ == "__main__":
-    sys.exit(main())
-"#,
-        )
-        .expect("write npm stub");
-
-        let mut perms = fs::metadata(&npm_path)
-            .expect("stat npm stub")
-            .permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&npm_path, perms).expect("chmod npm stub");
-
-        let git_path = bin_dir.join("git");
-        fs::write(
-            &git_path,
-            r#"#!/usr/bin/env python3
-import json
-import os
-import sys
-
-log_path = os.environ.get("PI_E2E_GIT_LOG")
-if log_path:
-    entry = {"argv": sys.argv[1:], "cwd": os.getcwd()}
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, sort_keys=True))
-        f.write("\n")
-
-print("git stub invoked unexpectedly", file=sys.stderr)
-sys.exit(2)
-"#,
-        )
-        .expect("write git stub");
-
-        let mut perms = fs::metadata(&git_path)
-            .expect("stat git stub")
-            .permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&git_path, perms).expect("chmod git stub");
-
-        let inherited_path = std::env::var("PATH").unwrap_or_default();
-        self.env.insert(
-            "PATH".to_string(),
-            format!("{}:{inherited_path}", bin_dir.display()),
-        );
-        self.env
-            .insert("PI_E2E_NPM_LOG".to_string(), npm_log.display().to_string());
-        self.env
-            .insert("PI_E2E_GIT_LOG".to_string(), git_log.display().to_string());
-        self.env.insert(
-            "PI_E2E_NPM_GLOBAL_ROOT".to_string(),
-            npm_global_root.display().to_string(),
-        );
-
-        PackageCommandStubs {
-            npm_log,
-            git_log,
-            npm_global_root,
-        }
     }
 
     fn run(&self, args: &[&str]) -> CliResult {
@@ -391,24 +228,6 @@ fn assert_contains_case_insensitive(harness: &TestHarness, haystack: &str, needl
 fn assert_exit_code(harness: &TestHarness, result: &CliResult, expected: i32) {
     harness.assert_log(format!("assert exit_code == {expected}").as_str());
     assert_eq!(result.exit_code, expected);
-}
-
-#[cfg(unix)]
-fn read_invocations(path: &Path) -> Vec<CommandInvocation> {
-    let Ok(content) = fs::read_to_string(path) else {
-        return Vec::new();
-    };
-
-    content
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            serde_json::from_str::<CommandInvocation>(trimmed).ok()
-        })
-        .collect()
 }
 
 fn read_json_value(path: &Path) -> serde_json::Value {
@@ -1023,14 +842,7 @@ fn e2e_cli_list_subcommand_works_offline() {
 #[cfg(unix)]
 #[test]
 fn e2e_cli_packages_install_list_remove_offline() {
-    let mut harness = CliTestHarness::new("e2e_cli_packages_install_list_remove_offline");
-    let stubs = harness.enable_offline_package_stubs();
-    harness
-        .harness
-        .record_artifact("npm-invocations.jsonl", &stubs.npm_log);
-    harness
-        .harness
-        .record_artifact("git-invocations.jsonl", &stubs.git_log);
+    let harness = CliTestHarness::new("e2e_cli_packages_install_list_remove_offline");
 
     harness.harness.section("install local (project)");
     harness.harness.create_dir("local-pkg");
@@ -1040,18 +852,40 @@ fn e2e_cli_packages_install_list_remove_offline() {
     )
     .expect("write local package marker");
 
+    harness
+        .harness
+        .record_artifact("local-pkg.dir", harness.harness.temp_path("local-pkg"));
+
     let result = harness.run(&["install", "local-pkg", "-l"]);
     assert_exit_code(&harness.harness, &result, 0);
     assert_contains(&harness.harness, &result.stdout, "Installed local-pkg");
     harness.snapshot_settings("after_install_local_project");
 
     harness.harness.section("install npm (project)");
-    let result = harness.run(&["install", "npm:demo-pkg@1.0.0", "-l"]);
+    let npm_source_root = harness.harness.create_dir("npm-fixtures/demo-pkg");
+    let npm_package = json!({
+        "name": "demo-pkg",
+        "version": "1.0.0",
+        "private": true
+    });
+    fs::write(
+        npm_source_root.join("package.json"),
+        serde_json::to_string_pretty(&npm_package).expect("serialize fixture package.json"),
+    )
+    .expect("write fixture package.json");
+    fs::write(npm_source_root.join("README.md"), "demo package\n").expect("write fixture README");
+
+    harness
+        .harness
+        .record_artifact("npm-fixture.demo-pkg.dir", &npm_source_root);
+
+    let npm_source = format!("npm:demo-pkg@file:{}", npm_source_root.display());
+    let result = harness.run(&["install", npm_source.as_str(), "-l"]);
     assert_exit_code(&harness.harness, &result, 0);
     assert_contains(
         &harness.harness,
         &result.stdout,
-        "Installed npm:demo-pkg@1.0.0",
+        &format!("Installed {npm_source}"),
     );
     harness.snapshot_settings("after_install_npm_project");
 
@@ -1060,7 +894,7 @@ fn e2e_cli_packages_install_list_remove_offline() {
     assert_exit_code(&harness.harness, &result, 0);
     assert_contains(&harness.harness, &result.stdout, "Project packages:");
     assert_contains(&harness.harness, &result.stdout, "local-pkg");
-    assert_contains(&harness.harness, &result.stdout, "npm:demo-pkg@1.0.0");
+    assert_contains(&harness.harness, &result.stdout, &npm_source);
 
     let local_path = harness.harness.temp_dir().join("local-pkg");
     assert_contains(
@@ -1075,6 +909,9 @@ fn e2e_cli_packages_install_list_remove_offline() {
         .join("npm")
         .join("node_modules")
         .join("demo-pkg");
+    harness
+        .harness
+        .record_artifact("npm-install.demo-pkg.dir", &npm_install_path);
     assert_contains(
         &harness.harness,
         &result.stdout,
@@ -1082,96 +919,151 @@ fn e2e_cli_packages_install_list_remove_offline() {
     );
     assert!(
         npm_install_path.exists(),
-        "stub npm should create install path"
+        "expected npm install root to exist for {npm_source}"
     );
 
     harness.harness.section("remove (project)");
     let result = harness.run(&["remove", "local-pkg", "-l"]);
     assert_exit_code(&harness.harness, &result, 0);
     assert_contains(&harness.harness, &result.stdout, "Removed local-pkg");
-    let result = harness.run(&["remove", "npm:demo-pkg@1.0.0", "-l"]);
+    let result = harness.run(&["remove", npm_source.as_str(), "-l"]);
     assert_exit_code(&harness.harness, &result, 0);
     assert_contains(
         &harness.harness,
         &result.stdout,
-        "Removed npm:demo-pkg@1.0.0",
+        &format!("Removed {npm_source}"),
     );
     harness.snapshot_settings("after_remove_project");
 
     let result = harness.run(&["list"]);
     assert_exit_code(&harness.harness, &result, 0);
     assert_contains(&harness.harness, &result.stdout, "No packages installed.");
+
+    write_jsonl_artifacts(
+        &harness.harness,
+        "packages-install-list-remove.log.jsonl",
+        "packages-install-list-remove.artifacts.jsonl",
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn e2e_cli_packages_update_respects_pinning_offline() {
-    let mut harness = CliTestHarness::new("e2e_cli_packages_update_respects_pinning_offline");
-    let stubs = harness.enable_offline_package_stubs();
+    let harness = CliTestHarness::new("e2e_cli_packages_update_respects_pinning_offline");
+
+    let git = |cwd: &Path, args: &[&str]| -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "pi-test")
+            .env("GIT_AUTHOR_EMAIL", "pi-test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "pi-test")
+            .env("GIT_COMMITTER_EMAIL", "pi-test@example.invalid")
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+
+    let pinned_repo = harness.harness.create_dir("git-fixtures/pinned-repo");
+    let unpinned_repo = harness.harness.create_dir("git-fixtures/unpinned-repo");
     harness
         .harness
-        .record_artifact("npm-invocations.jsonl", &stubs.npm_log);
+        .record_artifact("git-remote.pinned-repo.dir", &pinned_repo);
     harness
         .harness
-        .record_artifact("git-invocations.jsonl", &stubs.git_log);
+        .record_artifact("git-remote.unpinned-repo.dir", &unpinned_repo);
 
-    harness.harness.section("install pinned + unpinned (user)");
-    let result = harness.run(&["install", "npm:pinned@1.0.0"]);
-    assert_exit_code(&harness.harness, &result, 0);
-    let result = harness.run(&["install", "npm:unpinned"]);
-    assert_exit_code(&harness.harness, &result, 0);
-    harness.snapshot_settings("after_install_user");
+    harness.harness.section("init pinned repo (commit v1)");
+    git(&pinned_repo, &["init", "-b", "main"]);
+    fs::write(pinned_repo.join("marker.txt"), "pinned v1\n").expect("write marker");
+    git(&pinned_repo, &["add", "marker.txt"]);
+    git(&pinned_repo, &["commit", "-m", "v1"]);
+    let pinned_ref = git(&pinned_repo, &["rev-parse", "HEAD"]);
 
-    let settings_path = harness.global_settings_path();
+    harness.harness.section("init unpinned repo (commit v1)");
+    git(&unpinned_repo, &["init", "-b", "main"]);
+    fs::write(unpinned_repo.join("marker.txt"), "unpinned v1\n").expect("write marker");
+    git(&unpinned_repo, &["add", "marker.txt"]);
+    git(&unpinned_repo, &["commit", "-m", "v1"]);
+
+    let pinned_source = format!("git:./git-fixtures/pinned-repo@{pinned_ref}");
+    let unpinned_source = "git:./git-fixtures/unpinned-repo";
+
+    harness
+        .harness
+        .log()
+        .info("scenario", "install pinned + unpinned git repos (project)");
+    let result = harness.run(&["install", pinned_source.as_str(), "-l"]);
+    assert_exit_code(&harness.harness, &result, 0);
+    let result = harness.run(&["install", unpinned_source, "-l"]);
+    assert_exit_code(&harness.harness, &result, 0);
+    harness.snapshot_settings("after_install_git_repos_project");
+
+    let settings_path = harness.project_settings_path();
     let settings = read_json_value(&settings_path);
-    let packages = settings
-        .get("packages")
-        .and_then(|p| p.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let packages = packages
-        .iter()
-        .filter_map(|p| p.as_str())
-        .collect::<Vec<_>>();
-    assert!(packages.contains(&"npm:pinned@1.0.0"));
-    assert!(packages.contains(&"npm:unpinned"));
 
-    // Clear log so we only inspect the update stage.
-    fs::write(&stubs.npm_log, "").expect("truncate npm log");
+    // Mutate remotes to v2 (pinned should not update; unpinned should).
+    harness.harness.section("advance remotes to v2");
+    fs::write(pinned_repo.join("marker.txt"), "pinned v2\n").expect("write marker v2");
+    git(&pinned_repo, &["add", "marker.txt"]);
+    git(&pinned_repo, &["commit", "-m", "v2"]);
+
+    fs::write(unpinned_repo.join("marker.txt"), "unpinned v2\n").expect("write marker v2");
+    git(&unpinned_repo, &["add", "marker.txt"]);
+    git(&unpinned_repo, &["commit", "-m", "v2"]);
 
     harness.harness.section("update");
     let result = harness.run(&["update"]);
     assert_exit_code(&harness.harness, &result, 0);
     assert_contains(&harness.harness, &result.stdout, "Updated packages");
-    harness.snapshot_settings("after_update_user");
+    harness.snapshot_settings("after_update_git_repos_project");
 
-    let invocations = read_invocations(&stubs.npm_log);
-    let install_specs = invocations
-        .iter()
-        .filter_map(|inv| {
-            if inv.argv.first().map(String::as_str) != Some("install") {
-                return None;
-            }
-            let g_idx = inv.argv.iter().position(|arg| arg == "-g")?;
-            inv.argv.get(g_idx + 1).cloned()
-        })
-        .collect::<Vec<_>>();
+    let package_manager = PackageManager::new(harness.harness.temp_dir().to_path_buf());
+    let pinned_clone =
+        run_async(package_manager.installed_path(pinned_source.as_str(), PackageScope::Project))
+            .expect("lookup pinned clone path")
+            .expect("pinned clone path must exist");
+    let unpinned_clone =
+        run_async(package_manager.installed_path(unpinned_source, PackageScope::Project))
+            .expect("lookup unpinned clone path")
+            .expect("unpinned clone path must exist");
+    harness
+        .harness
+        .record_artifact("git-install.pinned-clone.dir", &pinned_clone);
+    harness
+        .harness
+        .record_artifact("git-install.unpinned-clone.dir", &unpinned_clone);
 
-    assert!(
-        install_specs.iter().any(|spec| spec == "unpinned"),
-        "expected update to reinstall unpinned package; installs={install_specs:?}"
+    let pinned_marker = fs::read_to_string(pinned_clone.join("marker.txt")).expect("read marker");
+    let unpinned_marker =
+        fs::read_to_string(unpinned_clone.join("marker.txt")).expect("read marker");
+    assert_eq!(
+        pinned_marker, "pinned v1\n",
+        "pinned repo should not update"
     );
-    assert!(
-        install_specs.iter().all(|spec| spec != "pinned@1.0.0"),
-        "expected pinned package to be skipped on update; installs={install_specs:?}"
+    assert_eq!(
+        unpinned_marker, "unpinned v2\n",
+        "unpinned repo should update"
     );
 
-    // Ensure the global settings file was not mutated by update.
+    // Ensure the project settings file was not mutated by update.
     let settings_after = read_json_value(&settings_path);
     assert_eq!(
         settings.get("packages"),
         settings_after.get("packages"),
-        "update should not rewrite settings.json"
+        "update should not rewrite .pi/settings.json"
+    );
+
+    write_jsonl_artifacts(
+        &harness.harness,
+        "packages-update-pinning.log.jsonl",
+        "packages-update-pinning.artifacts.jsonl",
     );
 }
 
@@ -1179,15 +1071,8 @@ fn e2e_cli_packages_update_respects_pinning_offline() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn e2e_cli_extensions_install_update_manifest_resolution_offline() {
-    let mut harness =
+    let harness =
         CliTestHarness::new("e2e_cli_extensions_install_update_manifest_resolution_offline");
-    let stubs = harness.enable_offline_package_stubs();
-    harness
-        .harness
-        .record_artifact("npm-invocations.jsonl", &stubs.npm_log);
-    harness
-        .harness
-        .record_artifact("git-invocations.jsonl", &stubs.git_log);
 
     let write_extension_package = |root: &Path,
                                    package_name: &str,
@@ -1251,10 +1136,23 @@ fn e2e_cli_extensions_install_update_manifest_resolution_offline() {
         &format!("Installed {local_source}"),
     );
 
-    let remote_source = "npm:remote-ext";
     let remote_extension_id = "remote-ext";
     let remote_version = "1.2.3";
     let remote_scenario_id = "remote_install_update_resolve_execute";
+
+    let remote_source_root = harness.harness.create_dir("npm-fixtures/remote-ext-src");
+    write_extension_package(
+        &remote_source_root,
+        remote_extension_id,
+        remote_version,
+        "remote-ext.js",
+        "remote-ext-status",
+        "remote-ext ok",
+    );
+    let remote_source = format!(
+        "npm:{remote_extension_id}@file:{}",
+        remote_source_root.display()
+    );
 
     harness.harness.log().info_ctx(
         "extension_workflow",
@@ -1262,12 +1160,12 @@ fn e2e_cli_extensions_install_update_manifest_resolution_offline() {
         |ctx| {
             ctx.push(("scenario_id".into(), remote_scenario_id.to_string()));
             ctx.push(("extension_id".into(), remote_extension_id.to_string()));
-            ctx.push(("install_source".into(), remote_source.to_string()));
+            ctx.push(("install_source".into(), remote_source.clone()));
             ctx.push(("version".into(), remote_version.to_string()));
         },
     );
 
-    let result = harness.run(&["install", remote_source, "-l"]);
+    let result = harness.run(&["install", remote_source.as_str(), "-l"]);
     assert_exit_code(&harness.harness, &result, 0);
     assert_contains(
         &harness.harness,
@@ -1287,19 +1185,17 @@ fn e2e_cli_extensions_install_update_manifest_resolution_offline() {
         "expected npm install root to exist for {remote_source}"
     );
 
-    write_extension_package(
-        &remote_pkg_root,
-        remote_extension_id,
-        remote_version,
-        "remote-ext.js",
-        "remote-ext-status",
-        "remote-ext ok",
+    assert!(
+        remote_pkg_root
+            .join("extensions")
+            .join("remote-ext.js")
+            .exists(),
+        "expected extension file to be installed for {remote_source}"
     );
 
     harness.snapshot_settings("after_extension_package_install");
 
-    fs::write(&stubs.npm_log, "").expect("truncate npm log before update stage");
-    let update_result = harness.run(&["update", remote_source]);
+    let update_result = harness.run(&["update", remote_source.as_str()]);
     assert_exit_code(&harness.harness, &update_result, 0);
     assert_contains(
         &harness.harness,
@@ -1307,45 +1203,6 @@ fn e2e_cli_extensions_install_update_manifest_resolution_offline() {
         &format!("Updated {remote_source}"),
     );
     harness.snapshot_settings("after_extension_package_update");
-
-    let npm_invocations = read_invocations(&stubs.npm_log);
-    let updated_specs = npm_invocations
-        .iter()
-        .filter_map(|invocation| {
-            if invocation.argv.first().map(String::as_str) != Some("install") {
-                return None;
-            }
-            if let Some(g_idx) = invocation.argv.iter().position(|arg| arg == "-g") {
-                return invocation.argv.get(g_idx + 1).cloned();
-            }
-
-            invocation
-                .argv
-                .iter()
-                .skip(1)
-                .enumerate()
-                .find_map(|(idx, arg)| {
-                    if arg.starts_with('-') {
-                        return None;
-                    }
-
-                    let prev = invocation
-                        .argv
-                        .get(idx)
-                        .map(String::as_str)
-                        .unwrap_or_default();
-                    if prev == "--prefix" {
-                        return None;
-                    }
-
-                    Some(arg.clone())
-                })
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        updated_specs.iter().any(|spec| spec == "remote-ext"),
-        "expected update to reinstall unpinned npm package; installs={updated_specs:?}"
-    );
 
     let package_manager = PackageManager::new(harness.harness.temp_dir().to_path_buf());
     let roots = resolve_roots_for_cli_harness(&harness);
@@ -1436,7 +1293,7 @@ fn e2e_cli_extensions_install_update_manifest_resolution_offline() {
         |ctx| {
             ctx.push(("scenario_id".into(), remote_scenario_id.to_string()));
             ctx.push(("extension_id".into(), remote_extension_id.to_string()));
-            ctx.push(("install_source".into(), remote_source.to_string()));
+            ctx.push(("install_source".into(), remote_source.clone()));
             ctx.push(("version".into(), remote_version.to_string()));
         },
     );

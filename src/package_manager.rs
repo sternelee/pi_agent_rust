@@ -710,6 +710,9 @@ impl PackageManager {
 
         let clone_url = if repo.starts_with("http://") || repo.starts_with("https://") {
             repo.to_string()
+        } else if looks_like_local_path(repo) {
+            // Allow offline installs from local repos: `git:./repo`, `git:/abs/repo`, `git:file:///repo`.
+            repo.to_string()
         } else {
             format!("https://{repo}")
         };
@@ -2102,12 +2105,12 @@ fn parse_source(source: &str, cwd: &Path) -> ParsedSource {
     }
 
     if let Some(rest) = source.strip_prefix("git:") {
-        return parse_git_source(rest.trim());
+        return parse_git_source(rest.trim(), cwd);
     }
 
     if looks_like_git_url(source) || source.starts_with("https://") || source.starts_with("http://")
     {
-        return parse_git_source(source);
+        return parse_git_source(source, cwd);
     }
 
     ParsedSource::Local {
@@ -2115,7 +2118,7 @@ fn parse_source(source: &str, cwd: &Path) -> ParsedSource {
     }
 }
 
-fn parse_git_source(spec: &str) -> ParsedSource {
+fn parse_git_source(spec: &str, cwd: &Path) -> ParsedSource {
     let mut parts = spec.split('@');
     let repo_raw = parts.next().unwrap_or("").trim();
     let r#ref = parts
@@ -2124,23 +2127,42 @@ fn parse_git_source(spec: &str) -> ParsedSource {
         .filter(|s| !s.is_empty());
     let pinned = r#ref.is_some();
 
-    let normalized = repo_raw
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .trim_end_matches(".git")
-        .to_string();
+    let (repo, host, path) = if looks_like_local_path(repo_raw) {
+        let repo_path = local_path_from_spec(repo_raw, cwd);
 
-    let mut segments = normalized.split('/').collect::<Vec<_>>();
-    let host = segments.first().copied().unwrap_or("").to_string();
-    let path = if segments.len() >= 2 {
-        segments.remove(0);
-        segments.join("/")
+        // Use a short stable hash for the on-disk install directory to avoid embedding absolute
+        // paths (slashes, drive letters) into `.pi/git/**` paths.
+        let mut hasher = Sha256::new();
+        hasher.update(repo_path.to_string_lossy().as_bytes());
+        let digest = hasher.finalize();
+        let key = hex_encode(&digest)[..16].to_string();
+
+        (
+            repo_path.to_string_lossy().to_string(),
+            "local".to_string(),
+            key,
+        )
     } else {
-        String::new()
+        let normalized = repo_raw
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches(".git")
+            .to_string();
+
+        let mut segments = normalized.split('/').collect::<Vec<_>>();
+        let host = segments.first().copied().unwrap_or("").to_string();
+        let path = if segments.len() >= 2 {
+            segments.remove(0);
+            segments.join("/")
+        } else {
+            String::new()
+        };
+
+        (normalized, host, path)
     };
 
     ParsedSource::Git {
-        repo: normalized,
+        repo,
         host,
         path,
         r#ref,
@@ -2156,6 +2178,26 @@ fn looks_like_git_url(source: &str) -> bool {
     HOSTS
         .iter()
         .any(|host| normalized.starts_with(&format!("{host}/")))
+}
+
+fn looks_like_local_path(spec: &str) -> bool {
+    let spec = spec.trim();
+    spec.starts_with("file://")
+        || spec.starts_with('/')
+        || spec.starts_with("./")
+        || spec.starts_with("../")
+        || spec.starts_with('~')
+}
+
+fn local_path_from_spec(spec: &str, cwd: &Path) -> PathBuf {
+    // `git clone` supports local paths and file:// URLs. We normalize both to a local PathBuf so
+    // tests can create deterministic offline git fixtures.
+    let spec = spec.trim();
+    if let Some(rest) = spec.strip_prefix("file://") {
+        // Keep the triple-slash form (`file:///abs/path`) working by stripping only the scheme.
+        return resolve_local_path(rest, cwd);
+    }
+    resolve_local_path(spec, cwd)
 }
 
 fn resolve_local_path(input: &str, cwd: &Path) -> PathBuf {
@@ -2649,6 +2691,34 @@ mod tests {
                 .join("git")
                 .join("github.com")
                 .join("user/repo")
+        );
+    }
+
+    #[test]
+    fn test_installed_path_project_scope_local_git_hashes_absolute_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = PackageManager::new(dir.path().to_path_buf());
+
+        let repo_path = dir.path().join("repo");
+        fs::create_dir_all(&repo_path).expect("create local repo dir");
+
+        let mut hasher = Sha256::new();
+        hasher.update(repo_path.to_string_lossy().as_bytes());
+        let digest = hasher.finalize();
+        let key = hex_encode(&digest)[..16].to_string();
+
+        let local = manager
+            .installed_path_sync("git:./repo", PackageScope::Project)
+            .expect("installed_path")
+            .expect("path");
+        assert_eq!(
+            local,
+            dir.path()
+                .join(Config::project_dir())
+                .join("git")
+                .join("local")
+                .join(key),
+            "local git sources should map to a stable hashed install directory",
         );
     }
 
