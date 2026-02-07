@@ -1,5 +1,5 @@
 #![cfg(feature = "ext-conformance")]
-//! Unified benchmark harness for extension startup/exec (bd-20s9).
+//! Unified benchmark harness for extension startup/exec (bd-20s9, bd-xs79).
 //!
 //! A single entry point that runs all extension benchmark scenarios
 //! and emits JSONL with environment fingerprint, statistics, and
@@ -99,7 +99,7 @@ fn iterations() -> usize {
         .and_then(|v| v.parse().ok())
         .unwrap_or_else(|| match bench_mode() {
             BenchMode::Pr => 10,
-            BenchMode::Nightly => 50,
+            BenchMode::Nightly => 100,
             BenchMode::Custom => 20,
         })
 }
@@ -815,6 +815,8 @@ struct HarnessReport {
     summary: HarnessSummary,
     by_scenario: BTreeMap<String, ScenarioSummary>,
     budget_checks: Vec<BudgetCheck>,
+    /// Per-extension scenario results for detailed per-extension reporting.
+    results: Vec<ScenarioResult>,
 }
 
 #[derive(Debug, Serialize)]
@@ -850,8 +852,12 @@ struct BudgetCheck {
     threshold_us: u64,
     actual_us: Option<u64>,
     status: String,
+    /// Extension that triggered the worst value (for per-extension budgets).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worst_extension: Option<String>,
 }
 
+#[allow(clippy::too_many_lines)]
 fn check_budgets(results: &[ScenarioResult]) -> Vec<BudgetCheck> {
     let mut checks = Vec::new();
 
@@ -877,6 +883,57 @@ fn check_budgets(results: &[ScenarioResult]) -> Vec<BudgetCheck> {
             || "NO_DATA".to_string(),
             |v| if v <= cold_threshold { "PASS" } else { "FAIL" }.to_string(),
         ),
+        worst_extension: None,
+    });
+
+    // Per-extension cold load P99 budget: 100ms — every extension must load
+    // within 100ms at P99 (bd-xs79). Report the worst offender.
+    let per_ext_threshold: u64 = 100_000;
+    let worst_cold_p99: Option<(u64, String)> = results
+        .iter()
+        .filter(|r| r.scenario == "cold_load" && r.success)
+        .map(|r| (r.stats.p99_us, r.extension.clone()))
+        .max_by_key(|(p99, _)| *p99);
+    checks.push(BudgetCheck {
+        budget_name: "ext_cold_load_per_ext_p99".to_string(),
+        threshold_us: per_ext_threshold,
+        actual_us: worst_cold_p99.as_ref().map(|(p99, _)| *p99),
+        status: worst_cold_p99.as_ref().map_or_else(
+            || "NO_DATA".to_string(),
+            |(p99, _)| {
+                if *p99 <= per_ext_threshold {
+                    "PASS"
+                } else {
+                    "FAIL"
+                }
+                .to_string()
+            },
+        ),
+        worst_extension: worst_cold_p99.as_ref().map(|(_, ext)| ext.clone()),
+    });
+
+    // Per-extension warm load P99 budget: 100ms — same per-extension gate for warm loads.
+    let worst_warm_p99: Option<(u64, String)> = results
+        .iter()
+        .filter(|r| r.scenario == "warm_load" && r.success)
+        .map(|r| (r.stats.p99_us, r.extension.clone()))
+        .max_by_key(|(p99, _)| *p99);
+    checks.push(BudgetCheck {
+        budget_name: "ext_warm_load_per_ext_p99".to_string(),
+        threshold_us: per_ext_threshold,
+        actual_us: worst_warm_p99.as_ref().map(|(p99, _)| *p99),
+        status: worst_warm_p99.as_ref().map_or_else(
+            || "NO_DATA".to_string(),
+            |(p99, _)| {
+                if *p99 <= per_ext_threshold {
+                    "PASS"
+                } else {
+                    "FAIL"
+                }
+                .to_string()
+            },
+        ),
+        worst_extension: worst_warm_p99.as_ref().map(|(_, ext)| ext.clone()),
     });
 
     // Event dispatch P99 budget: 5ms
@@ -892,6 +949,7 @@ fn check_budgets(results: &[ScenarioResult]) -> Vec<BudgetCheck> {
             || "NO_DATA".to_string(),
             |v| if v <= 5_000 { "PASS" } else { "FAIL" }.to_string(),
         ),
+        worst_extension: None,
     });
 
     // Warm load P95 budget: generous 100ms (cold path amortization)
@@ -915,6 +973,7 @@ fn check_budgets(results: &[ScenarioResult]) -> Vec<BudgetCheck> {
             || "NO_DATA".to_string(),
             |v| if v <= 100_000 { "PASS" } else { "FAIL" }.to_string(),
         ),
+        worst_extension: None,
     });
 
     checks
@@ -999,16 +1058,67 @@ fn generate_markdown(report: &HarnessReport) -> String {
     // Budget checks
     writeln!(md, "## Budget Checks").unwrap();
     writeln!(md).unwrap();
-    writeln!(md, "| Budget | Threshold | Actual | Status |").unwrap();
-    writeln!(md, "|--------|-----------|--------|--------|").unwrap();
+    writeln!(md, "| Budget | Threshold | Actual | Worst Ext | Status |").unwrap();
+    writeln!(md, "|--------|-----------|--------|-----------|--------|").unwrap();
     for check in &report.budget_checks {
         let actual_str = check
             .actual_us
             .map_or_else(|| "-".to_string(), |v| format!("{v}us"));
+        let ext_str = check
+            .worst_extension
+            .as_deref()
+            .unwrap_or("-");
         writeln!(
             md,
-            "| {} | {}us | {} | {} |",
-            check.budget_name, check.threshold_us, actual_str, check.status
+            "| {} | {}us | {} | {} | {} |",
+            check.budget_name, check.threshold_us, actual_str, ext_str, check.status
+        )
+        .unwrap();
+    }
+    writeln!(md).unwrap();
+
+    // Per-extension load times (bd-xs79: per-extension detail)
+    writeln!(md, "## Per-Extension Load Times").unwrap();
+    writeln!(md).unwrap();
+    writeln!(
+        md,
+        "| Extension | Tier | Cold P50 | Cold P95 | Cold P99 | Warm P50 | Warm P95 | Warm P99 |"
+    )
+    .unwrap();
+    writeln!(
+        md,
+        "|-----------|------|----------|----------|----------|----------|----------|----------|"
+    )
+    .unwrap();
+
+    // Collect per-extension cold and warm stats
+    let mut ext_cold: BTreeMap<&str, &Stats> = BTreeMap::new();
+    let mut ext_warm: BTreeMap<&str, &Stats> = BTreeMap::new();
+    let mut ext_tier: BTreeMap<&str, u32> = BTreeMap::new();
+    for r in &report.results {
+        if r.success {
+            if r.scenario == "cold_load" {
+                ext_cold.insert(&r.extension, &r.stats);
+                ext_tier.insert(&r.extension, r.tier);
+            } else if r.scenario == "warm_load" {
+                ext_warm.insert(&r.extension, &r.stats);
+            }
+        }
+    }
+    for (ext, cold) in &ext_cold {
+        let tier = ext_tier.get(ext).copied().unwrap_or(0);
+        let warm = ext_warm.get(ext);
+        writeln!(
+            md,
+            "| {} | {} | {}us | {}us | {}us | {} | {} | {} |",
+            ext,
+            tier,
+            cold.p50_us,
+            cold.p95_us,
+            cold.p99_us,
+            warm.map_or_else(|| "-".to_string(), |w| format!("{}us", w.p50_us)),
+            warm.map_or_else(|| "-".to_string(), |w| format!("{}us", w.p95_us)),
+            warm.map_or_else(|| "-".to_string(), |w| format!("{}us", w.p99_us)),
         )
         .unwrap();
     }
@@ -1198,6 +1308,7 @@ fn ext_bench_harness() {
         },
         by_scenario,
         budget_checks: budget_checks.clone(),
+        results: all_results.clone(),
     };
 
     // Write JSON report

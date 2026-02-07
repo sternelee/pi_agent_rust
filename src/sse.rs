@@ -62,7 +62,11 @@ impl SseParser {
                     current.data.push('\n');
                     *has_data = true;
                 }
-                "id" => current.id = Some(value.to_string()),
+                "id" => {
+                    if !value.contains('\0') {
+                        current.id = Some(value.to_string());
+                    }
+                }
                 "retry" => current.retry = value.parse().ok(),
                 _ => {} // Unknown field - ignore
             }

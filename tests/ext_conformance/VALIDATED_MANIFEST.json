@@ -8,7 +8,7 @@
       "source_tier": "agents-mikeastock",
       "capabilities": {
         "registers_tools": true,
-        "registers_commands": false,
+        "registers_commands": true,
         "registers_flags": false,
         "registers_providers": false,
         "subscribes_events": [
@@ -37,9 +37,12 @@
       ],
       "registrations": {
         "tools": [
-          "AskUserQuestion"
+          "AskUserQuestion",
+          "session_query"
         ],
-        "commands": [],
+        "commands": [
+          "handoff"
+        ],
         "flags": [],
         "event_handlers": [
           "SIGINT",
@@ -388,7 +391,7 @@
       "source_tier": "community",
       "capabilities": {
         "registers_tools": true,
-        "registers_commands": false,
+        "registers_commands": true,
         "registers_flags": false,
         "registers_providers": false,
         "subscribes_events": [
@@ -1464,7 +1467,9 @@
         "tools": [
           "lsp"
         ],
-        "commands": [],
+        "commands": [
+          "lsp"
+        ],
         "flags": [],
         "event_handlers": [
           "agent_end",
@@ -3222,7 +3227,7 @@
       "source_tier": "npm-registry",
       "capabilities": {
         "registers_tools": false,
-        "registers_commands": false,
+        "registers_commands": true,
         "registers_flags": false,
         "registers_providers": true,
         "subscribes_events": [
@@ -3239,7 +3244,9 @@
       "mock_requirements": [],
       "registrations": {
         "tools": [],
-        "commands": [],
+        "commands": [
+          "synthetic:quotas"
+        ],
         "flags": [],
         "event_handlers": [
           "session_start"
@@ -4013,7 +4020,12 @@
       "registrations": {
         "tools": [],
         "commands": [
-          "bash-confirm"
+          "bash-confirm",
+          "demo-bash-confirm",
+          "test-bash-confirm",
+          "test-edit-mode",
+          "test-safe-patterns",
+          "test-unsafe-patterns"
         ],
         "flags": [],
         "event_handlers": [
@@ -4305,9 +4317,9 @@
       "entry_path": "npm/pi-mcp-adapter/index.ts",
       "source_tier": "npm-registry",
       "capabilities": {
-        "registers_tools": false,
-        "registers_commands": false,
-        "registers_flags": false,
+        "registers_tools": true,
+        "registers_commands": true,
+        "registers_flags": true,
         "registers_providers": false,
         "subscribes_events": [
           "close",
@@ -4594,9 +4606,9 @@
       "entry_path": "npm/pi-package-test/extensions/confirm-destructive.ts",
       "source_tier": "npm-registry",
       "capabilities": {
-        "registers_tools": false,
-        "registers_commands": false,
-        "registers_flags": false,
+        "registers_tools": true,
+        "registers_commands": true,
+        "registers_flags": true,
         "registers_providers": false,
         "subscribes_events": [
           "agent_end",
@@ -4624,8 +4636,28 @@
       "conformance_tier": 3,
       "mock_requirements": [],
       "registrations": {
-        "tools": [],
-        "commands": [],
+        "tools": [
+          "signal_loop_success"
+        ],
+        "commands": [
+          "cost",
+          "flicker-corp",
+          "footer",
+          "fun-working",
+          "handoff",
+          "loop",
+          "mem",
+          "oracle",
+          "plan",
+          "remember",
+          "signature-flicker",
+          "speedread",
+          "status",
+          "status-refresh",
+          "todos",
+          "ultrathink",
+          "usage"
+        ],
         "flags": [],
         "event_handlers": [
           "agent_end",
@@ -5522,8 +5554,8 @@
       "source_tier": "npm-registry",
       "capabilities": {
         "registers_tools": true,
-        "registers_commands": false,
-        "registers_flags": false,
+        "registers_commands": true,
+        "registers_flags": true,
         "registers_providers": false,
         "subscribes_events": [
           "agent_end",
@@ -5548,9 +5580,28 @@
       ],
       "registrations": {
         "tools": [
-          "copy_to_clipboard"
+          "copy_to_clipboard",
+          "plan",
+          "signal_loop_success"
         ],
-        "commands": [],
+        "commands": [
+          "cost",
+          "flicker-corp",
+          "fun-working",
+          "handoff",
+          "loop",
+          "mem",
+          "oracle",
+          "plan",
+          "remember",
+          "resistance",
+          "signature-flicker",
+          "speedread",
+          "status",
+          "status-refresh",
+          "ultrathink",
+          "usage"
+        ],
         "flags": [],
         "event_handlers": [
           "agent_end",
@@ -5640,7 +5691,7 @@
       "source_tier": "npm-registry",
       "capabilities": {
         "registers_tools": true,
-        "registers_commands": false,
+        "registers_commands": true,
         "registers_flags": false,
         "registers_providers": false,
         "subscribes_events": [
@@ -7119,7 +7170,7 @@
       "source_tier": "third-party-github",
       "capabilities": {
         "registers_tools": true,
-        "registers_commands": false,
+        "registers_commands": true,
         "registers_flags": false,
         "registers_providers": false,
         "subscribes_events": [
@@ -7150,7 +7201,11 @@
         "tools": [
           "apply_patch"
         ],
-        "commands": [],
+        "commands": [
+          "assistant",
+          "codemap",
+          "skill"
+        ],
         "flags": [],
         "event_handlers": [
           "SIGINT",
@@ -7172,9 +7227,9 @@
       "entry_path": "third-party/limouren-agent-things/sandbox/index.ts",
       "source_tier": "third-party-github",
       "capabilities": {
-        "registers_tools": false,
-        "registers_commands": false,
-        "registers_flags": false,
+        "registers_tools": true,
+        "registers_commands": true,
+        "registers_flags": true,
         "registers_providers": false,
         "subscribes_events": [
           "agent_end",
@@ -7692,9 +7747,9 @@
       "entry_path": "third-party/w-winter-dot314/agentic-compaction/index.ts",
       "source_tier": "third-party-github",
       "capabilities": {
-        "registers_tools": false,
-        "registers_commands": false,
-        "registers_flags": false,
+        "registers_tools": true,
+        "registers_commands": true,
+        "registers_flags": true,
         "registers_providers": false,
         "subscribes_events": [
           "agent_end",
@@ -7738,8 +7793,49 @@
         "exec"
       ],
       "registrations": {
-        "tools": [],
-        "commands": [],
+        "tools": [
+          "brave_grounding",
+          "brave_search",
+          "questionnaire",
+          "rp",
+          "rp_bind",
+          "rp_exec",
+          "session_ask",
+          "session_lineage",
+          "todo"
+        ],
+        "commands": [
+          "ask",
+          "askwith",
+          "branch",
+          "code",
+          "command-center",
+          "end-review",
+          "ephemeral",
+          "files",
+          "followup",
+          "md",
+          "model-sysprompt-appendix",
+          "notify",
+          "oracle",
+          "plan",
+          "preset",
+          "review",
+          "rp",
+          "rp-tools-lock",
+          "rpbind",
+          "sandbox",
+          "session-ask",
+          "skill",
+          "speedread",
+          "steer",
+          "todos",
+          "tools",
+          "ultrathink",
+          "usage",
+          "vog",
+          "ws"
+        ],
         "flags": [],
         "event_handlers": [
           "agent_end",

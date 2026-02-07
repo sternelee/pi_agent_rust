@@ -1089,11 +1089,12 @@ impl Tool for ReadTool {
             });
         }
 
-        // Split on '\n' (preserving trailing empty line) to match conformance fixtures:
-        // a file ending with a newline has an extra final empty line.
-        //
-        // We still trim a trailing '\r' from each line on render to support CRLF.
-        let all_lines: Vec<&str> = text_content.split('\n').collect();
+        // Split on '\n'. If the file ends with a newline, split() creates an empty string
+        // at the end. We drop it to avoid showing a phantom empty line number.
+        let mut all_lines: Vec<&str> = text_content.split('\n').collect();
+        if all_lines.last().is_some_and(|l| l.is_empty()) && text_content.ends_with('\n') {
+            all_lines.pop();
+        }
         let total_file_lines = all_lines.len();
 
         let start_line: usize = match input.offset {
@@ -3394,6 +3395,14 @@ async fn get_file_lines_async<'a>(
     cache: &'a mut HashMap<PathBuf, Vec<String>>,
 ) -> &'a [String] {
     if !cache.contains_key(path) {
+        // Prevent OOM on huge files: skip reading if > 10MB
+        if let Ok(meta) = asupersync::fs::metadata(path).await {
+            if meta.len() > 10 * 1024 * 1024 {
+                cache.insert(path.to_path_buf(), Vec::new());
+                return &[];
+            }
+        }
+
         // Match Node's `readFileSync(..., "utf-8")` behavior: decode lossily rather than failing.
         let bytes = asupersync::fs::read(path).await.unwrap_or_default();
         let content = String::from_utf8_lossy(&bytes).to_string();

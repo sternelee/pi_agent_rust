@@ -1189,7 +1189,10 @@ fn mixed_event_types_rapid_dispatch() {
     }
 
     let elapsed = start.elapsed();
-    eprintln!("[mixed_events] Dispatched {dispatched} events across {} types in {elapsed:?}", event_types.len());
+    eprintln!(
+        "[mixed_events] Dispatched {dispatched} events across {} types in {elapsed:?}",
+        event_types.len()
+    );
     assert!(
         elapsed < Duration::from_secs(15),
         "Mixed event dispatch took too long: {elapsed:?}"
@@ -1278,14 +1281,20 @@ fn load_failure_then_good_load_succeeds() {
         async move { manager.load_js_extensions(vec![bad_spec]).await }
     });
     assert!(bad_result.is_err(), "Bad extension should fail to load");
-    eprintln!("[load_recovery] Bad load correctly failed: {}", bad_result.unwrap_err());
+    eprintln!(
+        "[load_recovery] Bad load correctly failed: {}",
+        bad_result.unwrap_err()
+    );
 
     // Now load good extension — should succeed.
     let good_result = common::run_async({
         let manager = manager.clone();
         async move { manager.load_js_extensions(vec![good_spec]).await }
     });
-    assert!(good_result.is_ok(), "Good extension should load after bad one failed");
+    assert!(
+        good_result.is_ok(),
+        "Good extension should load after bad one failed"
+    );
     eprintln!("[load_recovery] Good load succeeded after bad load");
 
     // Dispatch event to verify it works.
@@ -1300,7 +1309,10 @@ fn load_failure_then_good_load_succeeds() {
                 .await
         }
     });
-    assert!(dispatch_result.is_ok(), "Dispatch should work after recovery");
+    assert!(
+        dispatch_result.is_ok(),
+        "Dispatch should work after recovery"
+    );
 
     shutdown(&manager);
 }
