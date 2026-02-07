@@ -955,10 +955,7 @@ mod tests {
     fn build_request_bytes_post_with_body() {
         let parsed = ParsedUrl::parse("https://api.example.com/v1/messages").unwrap();
         let body = b"hello world";
-        let headers = vec![(
-            "Content-Type".to_string(),
-            "application/json".to_string(),
-        )];
+        let headers = vec![("Content-Type".to_string(), "application/json".to_string())];
         let bytes = build_request_bytes(Method::Post, &parsed, "pi/0.1", &headers, body);
         let text = String::from_utf8(bytes).unwrap();
         assert!(text.starts_with("POST /v1/messages HTTP/1.1\r\n"));
@@ -992,10 +989,7 @@ mod tests {
 
     #[test]
     fn build_recorded_request_json_body() {
-        let headers = vec![(
-            "Content-Type".to_string(),
-            "application/json".to_string(),
-        )];
+        let headers = vec![("Content-Type".to_string(), "application/json".to_string())];
         let body = serde_json::to_vec(&json!({"model": "test"})).unwrap();
         let req = build_recorded_request(Method::Post, "https://api.test.com/v1", &headers, &body);
         assert!(req.body.is_some());
@@ -1005,10 +999,7 @@ mod tests {
 
     #[test]
     fn build_recorded_request_text_body() {
-        let headers = vec![(
-            "Content-Type".to_string(),
-            "text/plain".to_string(),
-        )];
+        let headers = vec![("Content-Type".to_string(), "text/plain".to_string())];
         let body = b"hello world";
         let req = build_recorded_request(Method::Post, "https://api.test.com/v1", &headers, body);
         assert!(req.body.is_none());
@@ -1017,10 +1008,7 @@ mod tests {
 
     #[test]
     fn build_recorded_request_invalid_json_body_falls_back_to_text() {
-        let headers = vec![(
-            "Content-Type".to_string(),
-            "application/json".to_string(),
-        )];
+        let headers = vec![("Content-Type".to_string(), "application/json".to_string())];
         let body = b"not json {{{";
         let req = build_recorded_request(Method::Post, "https://api.test.com/v1", &headers, body);
         assert!(req.body.is_none());
@@ -1167,10 +1155,12 @@ mod tests {
             .unwrap();
         assert!(!builder.body.is_empty());
         // Should have auto-added Content-Type header
-        assert!(builder
-            .headers
-            .iter()
-            .any(|(k, v)| k == "Content-Type" && v == "application/json"));
+        assert!(
+            builder
+                .headers
+                .iter()
+                .any(|(k, v)| k == "Content-Type" && v == "application/json")
+        );
     }
 
     #[test]
@@ -1207,10 +1197,7 @@ mod tests {
     #[test]
     fn response_text() {
         asupersync::test_utils::run_test(|| async {
-            let chunks = vec![
-                Ok(b"hello ".to_vec()),
-                Ok(b"world".to_vec()),
-            ];
+            let chunks = vec![Ok(b"hello ".to_vec()), Ok(b"world".to_vec())];
             let response = Response {
                 status: 200,
                 headers: Vec::new(),
@@ -1350,10 +1337,7 @@ mod tests {
 
     #[test]
     fn build_recorded_request_content_type_case_insensitive() {
-        let headers = vec![(
-            "content-type".to_string(),
-            "APPLICATION/JSON".to_string(),
-        )];
+        let headers = vec![("content-type".to_string(), "APPLICATION/JSON".to_string())];
         let body = serde_json::to_vec(&json!({"test": true})).unwrap();
         let req = build_recorded_request(Method::Post, "https://test.com", &headers, &body);
         // Should detect JSON despite case differences
