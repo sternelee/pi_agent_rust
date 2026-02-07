@@ -479,4 +479,546 @@ mod tests {
         assert_eq!(ts.as_bytes()[13], b':');
         assert_eq!(ts.as_bytes()[16], b':');
     }
+
+    // -----------------------------------------------------------------------
+    // days_to_ymd tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn days_to_ymd_epoch() {
+        // Day 0 = 1970-01-01
+        assert_eq!(days_to_ymd(0), (1970, 1, 1));
+    }
+
+    #[test]
+    fn days_to_ymd_known_dates() {
+        // 2000-01-01 = day 10957
+        assert_eq!(days_to_ymd(10957), (2000, 1, 1));
+        // 2000-02-29 (leap year) = day 10957 + 31 (Jan) + 28 (Feb 1..28) = 11016
+        assert_eq!(days_to_ymd(11016), (2000, 2, 29));
+        // 2000-03-01 = day 11017
+        assert_eq!(days_to_ymd(11017), (2000, 3, 1));
+        // 2024-01-01 = day 19723
+        assert_eq!(days_to_ymd(19723), (2024, 1, 1));
+    }
+
+    #[test]
+    fn days_to_ymd_dec_31() {
+        // 1970-12-31 = day 364
+        assert_eq!(days_to_ymd(364), (1970, 12, 31));
+        // 1971-01-01 = day 365
+        assert_eq!(days_to_ymd(365), (1971, 1, 1));
+    }
+
+    #[test]
+    fn days_to_ymd_leap_year_boundary() {
+        // 1972 is a leap year: Feb 29 = day 789 (730 days for 1970-1971 + 31 + 28)
+        // 1970: 365, 1971: 365 = 730
+        // Jan 1972: 31 → 761, Feb 1-28: 28 → 789 = Feb 29
+        assert_eq!(days_to_ymd(789), (1972, 2, 29));
+        assert_eq!(days_to_ymd(790), (1972, 3, 1));
+    }
+
+    #[test]
+    fn days_to_ymd_far_future() {
+        // 2099-12-31 = day 47481, 2100-01-01 = day 47482
+        assert_eq!(days_to_ymd(47_481), (2099, 12, 31));
+        assert_eq!(days_to_ymd(47_482), (2100, 1, 1));
+    }
+
+    // -----------------------------------------------------------------------
+    // now_iso8601 additional tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn now_iso8601_lexicographic_order() {
+        let ts1 = now_iso8601();
+        let ts2 = now_iso8601();
+        // Second call should be >= first (same second or later)
+        assert!(ts2 >= ts1);
+    }
+
+    #[test]
+    fn now_iso8601_year_plausible() {
+        let ts = now_iso8601();
+        let year: u32 = ts[0..4].parse().unwrap();
+        assert!(year >= 2024);
+        assert!(year <= 2100);
+    }
+
+    // -----------------------------------------------------------------------
+    // PersistedDecision serde tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn persisted_decision_serde_minimal() {
+        // Optional fields should be omitted when None
+        let dec = PersistedDecision {
+            capability: "exec".to_string(),
+            allow: true,
+            decided_at: "2026-01-15T10:30:00Z".to_string(),
+            expires_at: None,
+            version_range: None,
+        };
+        let json = serde_json::to_string(&dec).unwrap();
+        assert!(!json.contains("expires_at"));
+        assert!(!json.contains("version_range"));
+
+        let roundtrip: PersistedDecision = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip, dec);
+    }
+
+    #[test]
+    fn persisted_decision_serde_full() {
+        let dec = PersistedDecision {
+            capability: "http".to_string(),
+            allow: false,
+            decided_at: "2026-01-15T10:30:00Z".to_string(),
+            expires_at: Some("2026-06-15T10:30:00Z".to_string()),
+            version_range: Some(">=2.0.0".to_string()),
+        };
+        let json = serde_json::to_string(&dec).unwrap();
+        assert!(json.contains("expires_at"));
+        assert!(json.contains("version_range"));
+
+        let roundtrip: PersistedDecision = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip, dec);
+    }
+
+    #[test]
+    fn persisted_decision_deserialize_missing_optionals() {
+        // JSON without optional fields should deserialize fine
+        let json = r#"{"capability":"exec","allow":true,"decided_at":"2026-01-01T00:00:00Z"}"#;
+        let dec: PersistedDecision = serde_json::from_str(json).unwrap();
+        assert_eq!(dec.capability, "exec");
+        assert!(dec.allow);
+        assert!(dec.expires_at.is_none());
+        assert!(dec.version_range.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // PermissionsFile serde tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn permissions_file_default_version() {
+        let file = PermissionsFile::default();
+        assert_eq!(file.version, CURRENT_VERSION);
+        assert!(file.decisions.is_empty());
+    }
+
+    #[test]
+    fn permissions_file_serde_roundtrip() {
+        let mut decisions = HashMap::new();
+        decisions.insert(
+            "ext-a".to_string(),
+            vec![PersistedDecision {
+                capability: "exec".to_string(),
+                allow: true,
+                decided_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                version_range: None,
+            }],
+        );
+        let file = PermissionsFile {
+            version: CURRENT_VERSION,
+            decisions,
+        };
+        let json = serde_json::to_string_pretty(&file).unwrap();
+        let roundtrip: PermissionsFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip.version, CURRENT_VERSION);
+        assert_eq!(roundtrip.decisions.len(), 1);
+        assert_eq!(roundtrip.decisions["ext-a"].len(), 1);
+        assert_eq!(roundtrip.decisions["ext-a"][0].capability, "exec");
+    }
+
+    // -----------------------------------------------------------------------
+    // PermissionStore edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn open_corrupt_file_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.json");
+        std::fs::write(&path, "not valid json!!!").unwrap();
+
+        let result = PermissionStore::open(&path);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("parse"));
+    }
+
+    #[test]
+    fn open_empty_json_object_returns_error() {
+        // An empty object {} is missing required fields
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.json");
+        std::fs::write(&path, "{}").unwrap();
+
+        let result = PermissionStore::open(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn open_valid_empty_decisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.json");
+        std::fs::write(&path, r#"{"version":1,"decisions":{}}"#).unwrap();
+
+        let store = PermissionStore::open(&path).unwrap();
+        assert!(store.list().is_empty());
+    }
+
+    #[test]
+    fn lookup_expired_decision_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.json");
+        let mut store = PermissionStore::open(&path).unwrap();
+
+        // Insert a decision that expired in the past
+        store
+            .decisions
+            .entry("ext".to_string())
+            .or_default()
+            .insert(
+                "exec".to_string(),
+                PersistedDecision {
+                    capability: "exec".to_string(),
+                    allow: true,
+                    decided_at: "2020-01-01T00:00:00Z".to_string(),
+                    expires_at: Some("2020-06-01T00:00:00Z".to_string()),
+                    version_range: None,
+                },
+            );
+
+        assert_eq!(store.lookup("ext", "exec"), None);
+    }
+
+    #[test]
+    fn lookup_future_expiry_returns_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.json");
+        let mut store = PermissionStore::open(&path).unwrap();
+
+        store
+            .decisions
+            .entry("ext".to_string())
+            .or_default()
+            .insert(
+                "exec".to_string(),
+                PersistedDecision {
+                    capability: "exec".to_string(),
+                    allow: false,
+                    decided_at: "2026-01-01T00:00:00Z".to_string(),
+                    expires_at: Some("2099-12-31T23:59:59Z".to_string()),
+                    version_range: None,
+                },
+            );
+
+        assert_eq!(store.lookup("ext", "exec"), Some(false));
+    }
+
+    #[test]
+    fn lookup_no_expiry_returns_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.json");
+        let mut store = PermissionStore::open(&path).unwrap();
+
+        store
+            .decisions
+            .entry("ext".to_string())
+            .or_default()
+            .insert(
+                "exec".to_string(),
+                PersistedDecision {
+                    capability: "exec".to_string(),
+                    allow: true,
+                    decided_at: "2026-01-01T00:00:00Z".to_string(),
+                    expires_at: None,
+                    version_range: None,
+                },
+            );
+
+        assert_eq!(store.lookup("ext", "exec"), Some(true));
+    }
+
+    #[test]
+    fn record_creates_parent_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("deep")
+            .join("nested")
+            .join("permissions.json");
+
+        let mut store = PermissionStore::open(&path).unwrap();
+        store.record("ext", "exec", true).unwrap();
+
+        assert!(path.exists());
+        let store2 = PermissionStore::open(&path).unwrap();
+        assert_eq!(store2.lookup("ext", "exec"), Some(true));
+    }
+
+    #[test]
+    fn multiple_capabilities_per_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.json");
+        let mut store = PermissionStore::open(&path).unwrap();
+
+        store.record("ext", "exec", true).unwrap();
+        store.record("ext", "http", false).unwrap();
+        store.record("ext", "env", true).unwrap();
+        store.record("ext", "fs", false).unwrap();
+
+        assert_eq!(store.lookup("ext", "exec"), Some(true));
+        assert_eq!(store.lookup("ext", "http"), Some(false));
+        assert_eq!(store.lookup("ext", "env"), Some(true));
+        assert_eq!(store.lookup("ext", "fs"), Some(false));
+
+        // All persist
+        let store2 = PermissionStore::open(&path).unwrap();
+        assert_eq!(store2.lookup("ext", "exec"), Some(true));
+        assert_eq!(store2.lookup("ext", "http"), Some(false));
+        assert_eq!(store2.lookup("ext", "env"), Some(true));
+        assert_eq!(store2.lookup("ext", "fs"), Some(false));
+    }
+
+    #[test]
+    fn record_with_version_stores_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.json");
+        let mut store = PermissionStore::open(&path).unwrap();
+
+        store
+            .record_with_version("ext", "exec", true, "^1.0.0")
+            .unwrap();
+        store
+            .record_with_version("ext", "http", false, ">=2.0.0 <3.0.0")
+            .unwrap();
+
+        let dec_exec = store.decisions["ext"].get("exec").unwrap();
+        assert_eq!(dec_exec.version_range.as_deref(), Some("^1.0.0"));
+        assert!(dec_exec.allow);
+
+        let dec_http = store.decisions["ext"].get("http").unwrap();
+        assert_eq!(dec_http.version_range.as_deref(), Some(">=2.0.0 <3.0.0"));
+        assert!(!dec_http.allow);
+    }
+
+    #[test]
+    fn record_with_version_overwrites_previous() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.json");
+        let mut store = PermissionStore::open(&path).unwrap();
+
+        store
+            .record_with_version("ext", "exec", true, "^1.0.0")
+            .unwrap();
+        store
+            .record_with_version("ext", "exec", false, "^2.0.0")
+            .unwrap();
+
+        let dec = store.decisions["ext"].get("exec").unwrap();
+        assert_eq!(dec.version_range.as_deref(), Some("^2.0.0"));
+        assert!(!dec.allow);
+    }
+
+    #[test]
+    fn list_returns_all_decisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.json");
+        let mut store = PermissionStore::open(&path).unwrap();
+
+        store.record("ext-a", "exec", true).unwrap();
+        store.record("ext-a", "http", false).unwrap();
+        store.record("ext-b", "env", true).unwrap();
+
+        let all = store.list();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all["ext-a"].len(), 2);
+        assert_eq!(all["ext-b"].len(), 1);
+    }
+
+    #[test]
+    fn revoke_nonexistent_extension_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.json");
+        let mut store = PermissionStore::open(&path).unwrap();
+
+        store.record("ext", "exec", true).unwrap();
+        // Revoking a non-existent extension should not fail
+        store.revoke_extension("nonexistent").unwrap();
+
+        assert_eq!(store.lookup("ext", "exec"), Some(true));
+    }
+
+    // -----------------------------------------------------------------------
+    // to_cache_map additional scenarios
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn to_cache_map_all_expired_removes_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.json");
+        let mut store = PermissionStore::open(&path).unwrap();
+
+        // All decisions for this extension are expired
+        store
+            .decisions
+            .entry("ext".to_string())
+            .or_default()
+            .insert(
+                "exec".to_string(),
+                PersistedDecision {
+                    capability: "exec".to_string(),
+                    allow: true,
+                    decided_at: "2020-01-01T00:00:00Z".to_string(),
+                    expires_at: Some("2020-06-01T00:00:00Z".to_string()),
+                    version_range: None,
+                },
+            );
+        store
+            .decisions
+            .entry("ext".to_string())
+            .or_default()
+            .insert(
+                "http".to_string(),
+                PersistedDecision {
+                    capability: "http".to_string(),
+                    allow: false,
+                    decided_at: "2020-01-01T00:00:00Z".to_string(),
+                    expires_at: Some("2020-06-01T00:00:00Z".to_string()),
+                    version_range: None,
+                },
+            );
+
+        let cache = store.to_cache_map();
+        // Extension should not appear at all since all entries are expired
+        assert!(!cache.contains_key("ext"));
+    }
+
+    #[test]
+    fn to_cache_map_no_expiry_always_included() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.json");
+        let mut store = PermissionStore::open(&path).unwrap();
+
+        store
+            .decisions
+            .entry("ext".to_string())
+            .or_default()
+            .insert(
+                "exec".to_string(),
+                PersistedDecision {
+                    capability: "exec".to_string(),
+                    allow: true,
+                    decided_at: "2026-01-01T00:00:00Z".to_string(),
+                    expires_at: None,
+                    version_range: None,
+                },
+            );
+
+        let cache = store.to_cache_map();
+        assert_eq!(cache.get("ext").and_then(|m| m.get("exec")), Some(&true));
+    }
+
+    #[test]
+    fn to_cache_map_multiple_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.json");
+        let mut store = PermissionStore::open(&path).unwrap();
+
+        store.record("ext-a", "exec", true).unwrap();
+        store.record("ext-a", "http", false).unwrap();
+        store.record("ext-b", "env", true).unwrap();
+
+        let cache = store.to_cache_map();
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.get("ext-a").and_then(|m| m.get("exec")), Some(&true));
+        assert_eq!(cache.get("ext-a").and_then(|m| m.get("http")), Some(&false));
+        assert_eq!(cache.get("ext-b").and_then(|m| m.get("env")), Some(&true));
+    }
+
+    // -----------------------------------------------------------------------
+    // File permissions test (Unix)
+    // -----------------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn save_sets_file_permissions_0o600() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.json");
+
+        let mut store = PermissionStore::open(&path).unwrap();
+        store.record("ext", "exec", true).unwrap();
+
+        let metadata = std::fs::metadata(&path).unwrap();
+        let mode = metadata.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    // -----------------------------------------------------------------------
+    // Disk persistence roundtrip tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn multiple_saves_and_reloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.json");
+
+        // First session
+        {
+            let mut store = PermissionStore::open(&path).unwrap();
+            store.record("ext-a", "exec", true).unwrap();
+            store.record("ext-b", "http", false).unwrap();
+        }
+
+        // Second session: modify and add
+        {
+            let mut store = PermissionStore::open(&path).unwrap();
+            store.record("ext-a", "exec", false).unwrap(); // overwrite
+            store.record("ext-c", "env", true).unwrap(); // new
+        }
+
+        // Third session: verify all state
+        {
+            let store = PermissionStore::open(&path).unwrap();
+            assert_eq!(store.lookup("ext-a", "exec"), Some(false)); // overwritten
+            assert_eq!(store.lookup("ext-b", "http"), Some(false)); // unchanged
+            assert_eq!(store.lookup("ext-c", "env"), Some(true)); // new
+        }
+    }
+
+    #[test]
+    fn reset_then_record_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.json");
+
+        let mut store = PermissionStore::open(&path).unwrap();
+        store.record("ext", "exec", true).unwrap();
+        store.reset().unwrap();
+        store.record("ext", "http", false).unwrap();
+
+        assert_eq!(store.lookup("ext", "exec"), None);
+        assert_eq!(store.lookup("ext", "http"), Some(false));
+
+        let store2 = PermissionStore::open(&path).unwrap();
+        assert_eq!(store2.lookup("ext", "exec"), None);
+        assert_eq!(store2.lookup("ext", "http"), Some(false));
+    }
+
+    #[test]
+    fn decided_at_is_recent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.json");
+
+        let mut store = PermissionStore::open(&path).unwrap();
+        store.record("ext", "exec", true).unwrap();
+
+        let dec = &store.decisions["ext"]["exec"];
+        // decided_at should be a recent timestamp (year >= 2024)
+        let year: u32 = dec.decided_at[0..4].parse().unwrap();
+        assert!(year >= 2024);
+    }
 }

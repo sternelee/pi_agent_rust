@@ -626,4 +626,488 @@ mod tests {
         assert_eq!(License::Apache2.to_string(), "Apache-2.0");
         assert_eq!(License::Custom("WTFPL".to_string()).to_string(), "WTFPL");
     }
+
+    // -----------------------------------------------------------------------
+    // detect_license_from_content — all license types
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn detect_mit_alt_path() {
+        // The second MIT detection path: "mit license" + "permission is hereby granted"
+        let content = "MIT License\n\nCopyright (c) 2025\n\nPermission is hereby granted...";
+        assert_eq!(detect_license_from_content(content), License::Mit);
+    }
+
+    #[test]
+    fn detect_isc_license_content() {
+        let content = "ISC License\n\nCopyright (c) 2025 Author\n\nPermission to use...";
+        assert_eq!(detect_license_from_content(content), License::Isc);
+    }
+
+    #[test]
+    fn detect_isc_alt_path() {
+        let content = "Permission to use, copy, modify, and distribute... ISC";
+        assert_eq!(detect_license_from_content(content), License::Isc);
+    }
+
+    #[test]
+    fn detect_bsd3_content() {
+        let content = "Redistribution and use in source and binary forms, with or without modification...\nNeither the name of the copyright holder...";
+        assert_eq!(detect_license_from_content(content), License::Bsd3);
+    }
+
+    #[test]
+    fn detect_bsd2_content() {
+        let content =
+            "Redistribution and use in source and binary forms, with or without modification...";
+        assert_eq!(detect_license_from_content(content), License::Bsd2);
+    }
+
+    #[test]
+    fn detect_gpl2_content() {
+        let content = "GNU General Public License\nVersion 2, June 1991";
+        assert_eq!(detect_license_from_content(content), License::Gpl2);
+    }
+
+    #[test]
+    fn detect_agpl3_content() {
+        let content = "GNU AFFERO GENERAL PUBLIC LICENSE\nVersion 3, 19 November 2007";
+        assert_eq!(detect_license_from_content(content), License::Agpl3);
+    }
+
+    #[test]
+    fn detect_lgpl21_content() {
+        let content = "GNU Lesser General Public License v2.1";
+        assert_eq!(detect_license_from_content(content), License::Lgpl21);
+    }
+
+    #[test]
+    fn detect_mpl2_content() {
+        let content = "Mozilla Public License Version 2.0";
+        assert_eq!(detect_license_from_content(content), License::Mpl2);
+    }
+
+    #[test]
+    fn detect_unlicense_content() {
+        let content = "This is free and unencumbered software released into the public domain.";
+        assert_eq!(detect_license_from_content(content), License::Unlicense);
+    }
+
+    #[test]
+    fn detect_cc0_content() {
+        let content = "Creative Commons Zero v1.0 Universal";
+        assert_eq!(detect_license_from_content(content), License::Cc0);
+    }
+
+    #[test]
+    fn detect_cc0_short() {
+        let content = "Licensed under CC0";
+        assert_eq!(detect_license_from_content(content), License::Cc0);
+    }
+
+    // -----------------------------------------------------------------------
+    // detect_license_from_spdx — all variants + case insensitivity
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn spdx_isc() {
+        assert_eq!(detect_license_from_spdx("ISC"), License::Isc);
+    }
+
+    #[test]
+    fn spdx_bsd2() {
+        assert_eq!(detect_license_from_spdx("BSD-2-Clause"), License::Bsd2);
+    }
+
+    #[test]
+    fn spdx_bsd3() {
+        assert_eq!(detect_license_from_spdx("BSD-3-Clause"), License::Bsd3);
+    }
+
+    #[test]
+    fn spdx_mpl2() {
+        assert_eq!(detect_license_from_spdx("MPL-2.0"), License::Mpl2);
+    }
+
+    #[test]
+    fn spdx_gpl2_variants() {
+        assert_eq!(detect_license_from_spdx("GPL-2.0"), License::Gpl2);
+        assert_eq!(detect_license_from_spdx("GPL-2.0-only"), License::Gpl2);
+        assert_eq!(detect_license_from_spdx("GPL-2.0-or-later"), License::Gpl2);
+    }
+
+    #[test]
+    fn spdx_gpl3_variants() {
+        assert_eq!(detect_license_from_spdx("GPL-3.0"), License::Gpl3);
+        assert_eq!(detect_license_from_spdx("GPL-3.0-only"), License::Gpl3);
+        assert_eq!(detect_license_from_spdx("GPL-3.0-or-later"), License::Gpl3);
+    }
+
+    #[test]
+    fn spdx_agpl3_variants() {
+        assert_eq!(detect_license_from_spdx("AGPL-3.0"), License::Agpl3);
+        assert_eq!(detect_license_from_spdx("AGPL-3.0-only"), License::Agpl3);
+        assert_eq!(
+            detect_license_from_spdx("AGPL-3.0-or-later"),
+            License::Agpl3
+        );
+    }
+
+    #[test]
+    fn spdx_lgpl21_variants() {
+        assert_eq!(detect_license_from_spdx("LGPL-2.1"), License::Lgpl21);
+        assert_eq!(detect_license_from_spdx("LGPL-2.1-only"), License::Lgpl21);
+        assert_eq!(
+            detect_license_from_spdx("LGPL-2.1-or-later"),
+            License::Lgpl21
+        );
+    }
+
+    #[test]
+    fn spdx_unlicense() {
+        assert_eq!(detect_license_from_spdx("Unlicense"), License::Unlicense);
+    }
+
+    #[test]
+    fn spdx_cc0_variants() {
+        assert_eq!(detect_license_from_spdx("CC0-1.0"), License::Cc0);
+        assert_eq!(detect_license_from_spdx("CC0"), License::Cc0);
+    }
+
+    #[test]
+    fn spdx_case_insensitive() {
+        assert_eq!(detect_license_from_spdx("mit"), License::Mit);
+        assert_eq!(detect_license_from_spdx("apache-2.0"), License::Apache2);
+        assert_eq!(detect_license_from_spdx("  MIT  "), License::Mit);
+    }
+
+    #[test]
+    fn spdx_apache_space_variant() {
+        assert_eq!(detect_license_from_spdx("Apache 2.0"), License::Apache2);
+    }
+
+    #[test]
+    fn spdx_unknown_explicit() {
+        assert_eq!(detect_license_from_spdx("UNKNOWN"), License::Unknown);
+    }
+
+    // -----------------------------------------------------------------------
+    // License::spdx() — all variants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn spdx_identifiers_all_variants() {
+        assert_eq!(License::Mit.spdx(), "MIT");
+        assert_eq!(License::Apache2.spdx(), "Apache-2.0");
+        assert_eq!(License::Isc.spdx(), "ISC");
+        assert_eq!(License::Bsd2.spdx(), "BSD-2-Clause");
+        assert_eq!(License::Bsd3.spdx(), "BSD-3-Clause");
+        assert_eq!(License::Mpl2.spdx(), "MPL-2.0");
+        assert_eq!(License::Gpl2.spdx(), "GPL-2.0");
+        assert_eq!(License::Gpl3.spdx(), "GPL-3.0");
+        assert_eq!(License::Agpl3.spdx(), "AGPL-3.0");
+        assert_eq!(License::Lgpl21.spdx(), "LGPL-2.1");
+        assert_eq!(License::Unlicense.spdx(), "Unlicense");
+        assert_eq!(License::Cc0.spdx(), "CC0-1.0");
+        assert_eq!(License::Unknown.spdx(), "UNKNOWN");
+        assert_eq!(License::Custom("WTFPL".to_string()).spdx(), "WTFPL");
+    }
+
+    // -----------------------------------------------------------------------
+    // redistributable — custom variant
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn redistributable_custom_is_unknown() {
+        assert_eq!(
+            redistributable(&License::Custom("proprietary".to_string())),
+            Redistributable::Unknown
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // scan_security — comprehensive pattern coverage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn security_scan_new_function() {
+        let findings = scan_security("const fn = new Function('return 1')");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, SecuritySeverity::Warning);
+        assert!(findings[0].pattern.contains("new Function("));
+    }
+
+    #[test]
+    fn security_scan_child_process() {
+        let findings = scan_security("const cp = require('child_process')");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, SecuritySeverity::Info);
+    }
+
+    #[test]
+    fn security_scan_crypto_hash() {
+        let findings = scan_security("crypto.createHash('sha256')");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, SecuritySeverity::Info);
+    }
+
+    #[test]
+    fn security_scan_env_file() {
+        let findings = scan_security("fs.readFileSync('.env')");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, SecuritySeverity::Info);
+    }
+
+    #[test]
+    fn security_scan_api_key_env() {
+        let findings = scan_security("const key = process.env.API_KEY;");
+        // Matches both ".env" and "process.env.API_KEY"
+        assert!(!findings.is_empty());
+        assert!(findings.iter().any(|f| f.pattern == "process.env.API_KEY"));
+    }
+
+    #[test]
+    fn security_scan_http_fetch() {
+        let findings = scan_security(r#"fetch("http://evil.com")"#);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, SecuritySeverity::Warning);
+    }
+
+    #[test]
+    fn security_scan_localstorage() {
+        let findings = scan_security("localStorage.setItem('key', 'value')");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, SecuritySeverity::Warning);
+    }
+
+    #[test]
+    fn security_scan_buffer_from() {
+        let findings = scan_security("const b = Buffer.from('hello')");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, SecuritySeverity::Info);
+    }
+
+    #[test]
+    fn security_scan_xmlhttprequest() {
+        let findings = scan_security("new XMLHttpRequest()");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, SecuritySeverity::Info);
+    }
+
+    #[test]
+    fn security_scan_multiple_findings() {
+        let content = "eval(x); document.cookie; localStorage.getItem('k')";
+        let findings = scan_security(content);
+        assert!(findings.len() >= 3);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.severity == SecuritySeverity::Critical)
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.severity == SecuritySeverity::Warning)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // screen_extensions — edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn screen_extensions_empty_input() {
+        let report = screen_extensions(&[], "empty-test");
+        assert_eq!(report.stats.total_screened, 0);
+        assert_eq!(report.stats.pass, 0);
+        assert!(report.verdicts.is_empty());
+        assert_eq!(report.task, "empty-test");
+    }
+
+    #[test]
+    fn screen_extensions_sorted_output() {
+        let inputs = vec![
+            ScreeningInput {
+                canonical_id: "zzz/ext".to_string(),
+                known_license: Some("MIT".to_string()),
+                source_tier: None,
+            },
+            ScreeningInput {
+                canonical_id: "aaa/ext".to_string(),
+                known_license: Some("MIT".to_string()),
+                source_tier: None,
+            },
+        ];
+        let report = screen_extensions(&inputs, "sort-test");
+        assert_eq!(report.verdicts[0].canonical_id, "aaa/ext");
+        assert_eq!(report.verdicts[1].canonical_id, "zzz/ext");
+    }
+
+    #[test]
+    fn screen_extensions_license_distribution() {
+        let inputs = vec![
+            ScreeningInput {
+                canonical_id: "a".to_string(),
+                known_license: Some("MIT".to_string()),
+                source_tier: None,
+            },
+            ScreeningInput {
+                canonical_id: "b".to_string(),
+                known_license: Some("MIT".to_string()),
+                source_tier: None,
+            },
+            ScreeningInput {
+                canonical_id: "c".to_string(),
+                known_license: Some("Apache-2.0".to_string()),
+                source_tier: None,
+            },
+        ];
+        let report = screen_extensions(&inputs, "dist-test");
+        assert_eq!(report.stats.license_distribution["MIT"], 2);
+        assert_eq!(report.stats.license_distribution["Apache-2.0"], 1);
+    }
+
+    #[test]
+    fn screen_extensions_notes_content() {
+        let inputs = vec![
+            ScreeningInput {
+                canonical_id: "a".to_string(),
+                known_license: Some("MIT".to_string()),
+                source_tier: None,
+            },
+            ScreeningInput {
+                canonical_id: "b".to_string(),
+                known_license: Some("GPL-3.0".to_string()),
+                source_tier: None,
+            },
+            ScreeningInput {
+                canonical_id: "c".to_string(),
+                known_license: None,
+                source_tier: None,
+            },
+        ];
+        let report = screen_extensions(&inputs, "notes-test");
+        let a = report
+            .verdicts
+            .iter()
+            .find(|v| v.canonical_id == "a")
+            .unwrap();
+        assert!(a.notes.contains("permissive"));
+        let b = report
+            .verdicts
+            .iter()
+            .find(|v| v.canonical_id == "b")
+            .unwrap();
+        assert!(b.notes.contains("copyleft"));
+        let c = report
+            .verdicts
+            .iter()
+            .find(|v| v.canonical_id == "c")
+            .unwrap();
+        assert!(c.notes.contains("manual review"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Serde round-trips for enums
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn redistributable_serde_roundtrip() {
+        for variant in &[
+            Redistributable::Yes,
+            Redistributable::Copyleft,
+            Redistributable::Unknown,
+            Redistributable::No,
+        ] {
+            let json = serde_json::to_string(variant).unwrap();
+            let back: Redistributable = serde_json::from_str(&json).unwrap();
+            assert_eq!(&back, variant);
+        }
+    }
+
+    #[test]
+    fn verdict_status_serde_roundtrip() {
+        for variant in &[
+            VerdictStatus::Pass,
+            VerdictStatus::PassWithWarnings,
+            VerdictStatus::Excluded,
+            VerdictStatus::NeedsReview,
+        ] {
+            let json = serde_json::to_string(variant).unwrap();
+            let back: VerdictStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(&back, variant);
+        }
+    }
+
+    #[test]
+    fn security_severity_serde_roundtrip() {
+        for variant in &[
+            SecuritySeverity::Info,
+            SecuritySeverity::Warning,
+            SecuritySeverity::Critical,
+        ] {
+            let json = serde_json::to_string(variant).unwrap();
+            let back: SecuritySeverity = serde_json::from_str(&json).unwrap();
+            assert_eq!(&back, variant);
+        }
+    }
+
+    #[test]
+    fn license_serde_roundtrip() {
+        let licenses = vec![
+            License::Mit,
+            License::Apache2,
+            License::Isc,
+            License::Bsd2,
+            License::Bsd3,
+            License::Mpl2,
+            License::Gpl2,
+            License::Gpl3,
+            License::Agpl3,
+            License::Lgpl21,
+            License::Unlicense,
+            License::Cc0,
+            License::Unknown,
+            License::Custom("WTFPL".to_string()),
+        ];
+        for lic in &licenses {
+            let json = serde_json::to_string(lic).unwrap();
+            let back: License = serde_json::from_str(&json).unwrap();
+            assert_eq!(&back, lic);
+        }
+    }
+
+    #[test]
+    fn screening_report_serde_roundtrip() {
+        let report = ScreeningReport {
+            generated_at: "2026-01-01T00:00:00Z".to_string(),
+            task: "test".to_string(),
+            stats: ScreeningStats {
+                total_screened: 1,
+                pass: 1,
+                pass_with_warnings: 0,
+                excluded: 0,
+                needs_review: 0,
+                license_distribution: std::iter::once(("MIT".to_string(), 1)).collect(),
+            },
+            verdicts: vec![PolicyVerdict {
+                canonical_id: "test/ext".to_string(),
+                license: "MIT".to_string(),
+                license_source: "candidate_pool".to_string(),
+                redistributable: Redistributable::Yes,
+                security_findings: vec![SecurityFinding {
+                    severity: SecuritySeverity::Info,
+                    pattern: "child_process".to_string(),
+                    description: "test".to_string(),
+                }],
+                verdict: VerdictStatus::Pass,
+                notes: "ok".to_string(),
+            }],
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let back: ScreeningReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.stats.total_screened, 1);
+        assert_eq!(back.verdicts.len(), 1);
+        assert_eq!(back.verdicts[0].security_findings.len(), 1);
+    }
 }

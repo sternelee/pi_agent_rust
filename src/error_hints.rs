@@ -673,4 +673,352 @@ mod tests {
         // Falls back to generic session error since it's not actually a Sqlite variant
         assert!(!hint.hints.is_empty());
     }
+
+    // -----------------------------------------------------------------------
+    // config_hints additional branches
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_config_models_json_hints() {
+        let error = Error::config("models.json parse error at line 5");
+        let hint = hints_for_error(&error);
+        assert_eq!(hint.summary, "Invalid models configuration");
+        assert!(hint.context_fields.contains(&"parse_error"));
+    }
+
+    #[test]
+    fn test_config_generic_fallback() {
+        let error = Error::config("some unknown config issue");
+        let hint = hints_for_error(&error);
+        assert_eq!(hint.summary, "Configuration error");
+    }
+
+    // -----------------------------------------------------------------------
+    // session_hints additional branches
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_session_corrupted_hints() {
+        let error = Error::session("file corrupted at line 42");
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("corrupted"));
+        assert!(hint.context_fields.contains(&"line_number"));
+    }
+
+    #[test]
+    fn test_session_invalid_hints() {
+        let error = Error::session("invalid session format");
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("corrupted") || hint.summary.contains("invalid"));
+    }
+
+    #[test]
+    fn test_session_locked_hints() {
+        let error = Error::session("session file locked by pid 1234");
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("locked"));
+        assert!(hint.hints.iter().any(|h| h.contains("Close")));
+    }
+
+    #[test]
+    fn test_session_generic_fallback() {
+        let error = Error::session("something went wrong");
+        let hint = hints_for_error(&error);
+        assert_eq!(hint.summary, "Session error");
+    }
+
+    // -----------------------------------------------------------------------
+    // auth_hints additional branches
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_auth_oauth_hints() {
+        let error = Error::auth("OAuth token expired for provider X");
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("OAuth"));
+        assert!(hint.hints.iter().any(|h| h.contains("pi login")));
+    }
+
+    #[test]
+    fn test_auth_refresh_hints() {
+        let error = Error::auth("failed to refresh token");
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("OAuth"));
+    }
+
+    #[test]
+    fn test_auth_lock_hints() {
+        let error = Error::auth("auth file lock contention");
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("locked"));
+    }
+
+    #[test]
+    fn test_auth_generic_fallback() {
+        let error = Error::auth("unknown auth issue");
+        let hint = hints_for_error(&error);
+        assert_eq!(hint.summary, "Authentication error");
+    }
+
+    // -----------------------------------------------------------------------
+    // provider_hints additional branches
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_provider_server_error_500_hints() {
+        let error = Error::provider("openai", "500 internal server error");
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("server error"));
+        assert!(hint.hints.iter().any(|h| h.contains("status page")));
+    }
+
+    #[test]
+    fn test_provider_server_error_text_hints() {
+        let error = Error::provider("anthropic", "server error: bad gateway");
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("server error"));
+    }
+
+    #[test]
+    fn test_provider_model_not_found_hints() {
+        let error = Error::provider("openai", "model gpt-99 not found");
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("Model not found"));
+        assert!(hint.hints.iter().any(|h| h.contains("--list-models")));
+    }
+
+    #[test]
+    fn test_provider_generic_fallback() {
+        let error = Error::provider("unknown", "something broke");
+        let hint = hints_for_error(&error);
+        assert_eq!(hint.summary, "Provider API error");
+    }
+
+    // -----------------------------------------------------------------------
+    // tool_hints additional branches
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_tool_write_permission_hints() {
+        let error = Error::tool("write", "permission denied: /etc/config");
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("Permission denied"));
+        assert!(hint.hints.iter().any(|h| h.contains("directory")));
+    }
+
+    #[test]
+    fn test_tool_edit_not_found_hints() {
+        let error = Error::tool("edit", "text not found in file");
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("not found"));
+        assert!(hint.hints.iter().any(|h| h.contains("old_text")));
+    }
+
+    #[test]
+    fn test_tool_bash_timeout_hints() {
+        let error = Error::tool("bash", "command timeout after 120s");
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("timed out"));
+        assert!(hint.context_fields.contains(&"timeout_seconds"));
+    }
+
+    #[test]
+    fn test_tool_bash_exit_code_hints() {
+        let error = Error::tool("bash", "exit code 1");
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("exit code"));
+        assert!(hint.context_fields.contains(&"stderr"));
+    }
+
+    #[test]
+    fn test_tool_grep_pattern_hints() {
+        let error = Error::tool("grep", "invalid regex pattern: [unterminated");
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("regex"));
+        assert!(hint.hints.iter().any(|h| h.contains("escaping")));
+    }
+
+    #[test]
+    fn test_tool_generic_fallback() {
+        let error = Error::tool("unknown_tool", "something went wrong");
+        let hint = hints_for_error(&error);
+        assert_eq!(hint.summary, "Tool execution error");
+    }
+
+    // -----------------------------------------------------------------------
+    // validation_hints branches
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_validation_required_hints() {
+        let error = Error::validation("field 'name' is required");
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("Required"));
+        assert!(hint.context_fields.contains(&"field_name"));
+    }
+
+    #[test]
+    fn test_validation_type_hints() {
+        let error = Error::validation("expected type string, got number");
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("type"));
+        assert!(hint.context_fields.contains(&"expected_type"));
+    }
+
+    #[test]
+    fn test_validation_generic_fallback() {
+        let error = Error::validation("value out of range");
+        let hint = hints_for_error(&error);
+        assert_eq!(hint.summary, "Validation error");
+    }
+
+    // -----------------------------------------------------------------------
+    // extension_hints additional branches
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extension_not_found_hints() {
+        let error = Error::extension("extension my-ext not found");
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("not found"));
+        assert!(hint.hints.iter().any(|h| h.contains("pi list")));
+    }
+
+    #[test]
+    fn test_extension_manifest_hints() {
+        let error = Error::extension("invalid manifest for extension foo");
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("manifest"));
+        assert!(hint.context_fields.contains(&"manifest_path"));
+    }
+
+    #[test]
+    fn test_extension_permission_hints() {
+        let error = Error::extension("permission denied for exec capability");
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("denied"));
+    }
+
+    #[test]
+    fn test_extension_generic_fallback() {
+        let error = Error::extension("runtime crashed");
+        let hint = hints_for_error(&error);
+        assert_eq!(hint.summary, "Extension error");
+    }
+
+    // -----------------------------------------------------------------------
+    // io_hints additional branches
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_io_not_found_hints() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let error = Error::Io(Box::new(io_err));
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("not found"));
+    }
+
+    #[test]
+    fn test_io_already_exists_hints() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::AlreadyExists, "file exists");
+        let error = Error::Io(Box::new(io_err));
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("already exists"));
+    }
+
+    #[test]
+    fn test_io_generic_fallback() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe broken");
+        let error = Error::Io(Box::new(io_err));
+        let hint = hints_for_error(&error);
+        assert_eq!(hint.summary, "I/O error");
+    }
+
+    // -----------------------------------------------------------------------
+    // json_hints additional branches
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_json_data_error_hints() {
+        // Trigger a data error (wrong type for field)
+        let json_err = serde_json::from_str::<Vec<i32>>(r#"{"not": "an array"}"#).unwrap_err();
+        let error = Error::Json(Box::new(json_err));
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("data") || hint.summary.contains("structure"));
+    }
+
+    #[test]
+    fn test_json_eof_fallback() {
+        // EOF error is neither syntax nor data
+        let json_err = serde_json::from_str::<serde_json::Value>("").unwrap_err();
+        let error = Error::Json(Box::new(json_err));
+        let hint = hints_for_error(&error);
+        // EOF may be classified as syntax or generic depending on serde_json version
+        assert!(hint.summary.contains("JSON"));
+    }
+
+    // -----------------------------------------------------------------------
+    // api_hints branches
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_api_401_hints() {
+        let error = Error::api("401 Unauthorized");
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("Unauthorized"));
+        assert!(hint.context_fields.contains(&"status_code"));
+    }
+
+    #[test]
+    fn test_api_403_hints() {
+        let error = Error::api("403 Forbidden");
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("Forbidden"));
+        assert!(hint.hints.iter().any(|h| h.contains("permissions")));
+    }
+
+    #[test]
+    fn test_api_404_hints() {
+        let error = Error::api("404 Not Found");
+        let hint = hints_for_error(&error);
+        assert!(hint.summary.contains("not found"));
+        assert!(hint.context_fields.contains(&"url"));
+    }
+
+    #[test]
+    fn test_api_generic_fallback() {
+        let error = Error::api("502 Bad Gateway");
+        let hint = hints_for_error(&error);
+        assert_eq!(hint.summary, "API error");
+    }
+
+    // -----------------------------------------------------------------------
+    // format_error_with_hints additional tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_format_error_aborted_no_suggestions() {
+        let error = Error::Aborted;
+        let formatted = format_error_with_hints(&error);
+        assert!(formatted.contains("Error:"));
+        assert!(!formatted.contains("Suggestions:"));
+    }
+
+    #[test]
+    fn test_format_error_includes_summary_when_different() {
+        let error = Error::provider("openai", "429 rate limit exceeded");
+        let formatted = format_error_with_hints(&error);
+        // Summary "Rate limit exceeded" should appear since error message differs
+        assert!(formatted.contains("Rate limit"));
+        assert!(formatted.contains("Suggestions:"));
+    }
+
+    #[test]
+    fn test_format_error_io_not_found() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let error = Error::Io(Box::new(io_err));
+        let formatted = format_error_with_hints(&error);
+        assert!(formatted.contains("not found"));
+        assert!(formatted.contains("Verify the path"));
+    }
 }

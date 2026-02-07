@@ -824,9 +824,8 @@ fn clean_shutdown_after_valid_load() {
 
     let (manager, _runtime) = load_extension(&fixture).expect("should load");
 
-    let shutdown_ok = common::run_async(
-        async move { manager.shutdown(std::time::Duration::from_secs(5)).await },
-    );
+    let shutdown_ok =
+        common::run_async(async move { manager.shutdown(std::time::Duration::from_secs(5)).await });
 
     assert!(shutdown_ok, "Shutdown should complete cleanly");
 }
