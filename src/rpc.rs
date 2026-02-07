@@ -1983,6 +1983,85 @@ mod ui_bridge_tests {
             "non-string input should error"
         );
     }
+
+    #[test]
+    fn parse_editor_requires_string_value() {
+        let active = ExtensionUiRequest::new("req-1", "editor", json!({"title":"t"}));
+        let ok = json!({"requestId":"req-1","value":"multi\nline"});
+        let resp = rpc_parse_extension_ui_response(&ok, &active).expect("editor ok");
+        assert_eq!(resp.value, Some(json!("multi\nline")));
+
+        let bad = json!({"requestId":"req-1","value":42});
+        assert!(
+            rpc_parse_extension_ui_response(&bad, &active).is_err(),
+            "editor needs string"
+        );
+    }
+
+    #[test]
+    fn parse_notify_returns_no_value() {
+        let active = ExtensionUiRequest::new("req-1", "notify", json!({"title":"t"}));
+        let val = json!({"requestId":"req-1"});
+        let resp = rpc_parse_extension_ui_response(&val, &active).expect("notify ok");
+        assert!(!resp.cancelled);
+        assert!(resp.value.is_none());
+    }
+
+    #[test]
+    fn parse_unsupported_method_errors() {
+        let active = ExtensionUiRequest::new("req-1", "custom_method", json!({}));
+        let val = json!({"requestId":"req-1","value":"x"});
+        let err = rpc_parse_extension_ui_response(&val, &active).unwrap_err();
+        assert!(err.contains("Unsupported"), "err={err}");
+    }
+
+    #[test]
+    fn parse_select_missing_value_field() {
+        let active =
+            ExtensionUiRequest::new("req-1", "select", json!({"title":"pick","options":["A"]}));
+        let val = json!({"requestId":"req-1"});
+        let err = rpc_parse_extension_ui_response(&val, &active).unwrap_err();
+        assert!(err.contains("value"), "err={err}");
+    }
+
+    #[test]
+    fn parse_confirm_missing_value_errors() {
+        let active = ExtensionUiRequest::new("req-1", "confirm", json!({"title":"t"}));
+        let val = json!({"requestId":"req-1"});
+        let err = rpc_parse_extension_ui_response(&val, &active).unwrap_err();
+        assert!(err.contains("confirm"), "err={err}");
+    }
+
+    #[test]
+    fn parse_select_with_label_value_objects() {
+        let active = ExtensionUiRequest::new(
+            "req-1",
+            "select",
+            json!({
+                "title": "pick",
+                "options": [
+                    {"label": "Alpha", "value": "a"},
+                    {"label": "Beta", "value": "b"},
+                ]
+            }),
+        );
+        let val = json!({"requestId":"req-1","value":"a"});
+        let resp = rpc_parse_extension_ui_response(&val, &active).expect("select by value");
+        assert_eq!(resp.value, Some(json!("a")));
+    }
+
+    #[test]
+    fn parse_id_rejects_empty_and_whitespace() {
+        let val = json!({"requestId":"  ","id":""});
+        assert!(rpc_parse_extension_ui_response_id(&val).is_none());
+    }
+
+    #[test]
+    fn bridge_state_default_is_empty() {
+        let state = RpcUiBridgeState::default();
+        assert!(state.active.is_none());
+        assert!(state.queue.is_empty());
+    }
 }
 
 fn error_hints_value(error: &Error) -> Value {
