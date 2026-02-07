@@ -730,14 +730,16 @@ fn print_search_results(hits: &[pi::extension_index::ExtensionSearchHit]) {
     // Rows
     for hit in hits {
         let desc = hit.entry.description.as_deref().unwrap_or("");
-        let desc_truncated = if desc.len() > 50 {
-            format!("{}...", &desc[..47])
+        let desc_truncated = if desc.chars().count() > 50 {
+            let truncated: String = desc.chars().take(47).collect();
+            format!("{truncated}...")
         } else {
             desc.to_string()
         };
         let tags_joined = hit.entry.tags.join(", ");
-        let tags_truncated = if tags_joined.len() > 30 {
-            format!("{}...", &tags_joined[..27])
+        let tags_truncated = if tags_joined.chars().count() > 30 {
+            let truncated: String = tags_joined.chars().take(27).collect();
+            format!("{truncated}...")
         } else {
             tags_joined
         };

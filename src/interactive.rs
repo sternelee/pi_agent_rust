@@ -6132,8 +6132,9 @@ impl PiApp {
 
                 let current_marker = if branch.is_current { " *" } else { "" };
                 let msg_count = format!("({} msgs)", branch.message_count);
-                let preview = if branch.preview.len() > 40 {
-                    format!("{}...", &branch.preview[..37])
+                let preview = if branch.preview.chars().count() > 40 {
+                    let truncated: String = branch.preview.chars().take(37).collect();
+                    format!("{truncated}...")
                 } else {
                     branch.preview.clone()
                 };

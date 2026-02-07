@@ -784,10 +784,19 @@ impl Session {
             asupersync::fs::create_dir_all(&project_session_dir).await?;
 
             let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S%.3fZ");
+            // Robust against malformed/legacy session ids that may be shorter than 8 chars.
+            let short_id = {
+                let prefix: String = self.header.id.chars().take(8).collect();
+                if prefix.is_empty() {
+                    "session".to_string()
+                } else {
+                    prefix
+                }
+            };
             let filename = format!(
                 "{}_{}.{}",
                 timestamp,
-                &self.header.id[..8],
+                short_id,
                 store_kind.extension()
             );
             self.path = Some(project_session_dir.join(filename));
@@ -1368,13 +1377,43 @@ impl Session {
                 messages.push(message);
             }
 
+            // Find the index of the compaction entry so we can fall back to
+            // including everything after it if first_kept_entry_id is orphaned.
+            let compaction_idx = path_entries.iter().position(|e| {
+                matches!(e, SessionEntry::Compaction(c) if std::ptr::eq(c, compaction))
+            });
+
+            let has_kept_entry = path_entries.iter().any(|e| {
+                e.base_id()
+                    .is_some_and(|id| id == &compaction.first_kept_entry_id)
+            });
+
             let mut keep = false;
-            for entry in path_entries {
+            let mut past_compaction = false;
+            for (idx, entry) in path_entries.iter().enumerate() {
+                // Track when we pass the compaction entry itself.
+                if compaction_idx == Some(idx) {
+                    past_compaction = true;
+                }
+
                 if !keep {
-                    if entry
-                        .base_id()
-                        .is_some_and(|id| id == &compaction.first_kept_entry_id)
-                    {
+                    if has_kept_entry {
+                        // Normal path: skip until we find the first kept entry.
+                        if entry
+                            .base_id()
+                            .is_some_and(|id| id == &compaction.first_kept_entry_id)
+                        {
+                            keep = true;
+                        } else {
+                            continue;
+                        }
+                    } else if past_compaction {
+                        // Fallback: first_kept_entry_id is orphaned (session corruption).
+                        // Include all entries after the compaction entry to avoid data loss.
+                        tracing::warn!(
+                            first_kept_entry_id = %compaction.first_kept_entry_id,
+                            "Compaction references missing entry; including all post-compaction entries"
+                        );
                         keep = true;
                     } else {
                         continue;
@@ -1503,8 +1542,9 @@ impl Session {
                     let text = user_content_to_text(content);
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
-                        return if trimmed.len() > 60 {
-                            format!("{}...", &trimmed[..57])
+                        return if trimmed.chars().count() > 60 {
+                            let truncated: String = trimmed.chars().take(57).collect();
+                            format!("{truncated}...")
                         } else {
                             trimmed.to_string()
                         };
@@ -2589,6 +2629,33 @@ mod tests {
         assert!(types.contains(&"compaction".to_string()));
         assert!(types.contains(&"branch_summary".to_string()));
         assert!(types.contains(&"session_info".to_string()));
+    }
+
+    #[test]
+    fn test_save_handles_short_or_empty_session_id() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let mut short_id_session = Session::create_with_dir(Some(temp.path().to_path_buf()));
+        short_id_session.header.id = "x".to_string();
+        run_async(async { short_id_session.save().await }).expect("save with short id");
+        let short_name = short_id_session
+            .path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .expect("short id filename");
+        assert!(short_name.contains("_x."));
+
+        let mut empty_id_session = Session::create_with_dir(Some(temp.path().to_path_buf()));
+        empty_id_session.header.id.clear();
+        run_async(async { empty_id_session.save().await }).expect("save with empty id");
+        let empty_name = empty_id_session
+            .path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .expect("empty id filename");
+        assert!(empty_name.contains("_session."));
     }
 
     #[test]

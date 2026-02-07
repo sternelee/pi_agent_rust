@@ -15,6 +15,7 @@ use std::rc::Rc;
 
 use rquickjs::function::Func;
 use rquickjs::{ArrayBuffer, Ctx, Value};
+use serde::Serialize;
 use tracing::debug;
 use wasmtime::{
     Caller, Engine, ExternType, Instance as WasmInstance, Linker, Module as WasmModule, Store, Val,
@@ -35,6 +36,12 @@ struct WasmHostData {
 struct InstanceState {
     store: Store<WasmHostData>,
     instance: WasmInstance,
+}
+
+#[derive(Serialize)]
+struct WasmExportEntry {
+    name: String,
+    kind: &'static str,
 }
 
 /// Per-JS-runtime WASM bridge state, shared via `Rc<RefCell<>>`.
@@ -285,7 +292,7 @@ pub(crate) fn inject_wasm_globals(
                         .get_mut(&instance_id)
                         .ok_or_else(|| throw_wasm(&ctx, "RuntimeError", "Instance not found"))?;
 
-                    let mut entries = Vec::new();
+                    let mut entries: Vec<WasmExportEntry> = Vec::new();
                     for export in inst.instance.exports(&mut inst.store) {
                         let name = export.name().to_string();
                         let kind = match export.into_extern() {
@@ -295,9 +302,10 @@ pub(crate) fn inject_wasm_globals(
                             wasmtime::Extern::Global(_) => "global",
                             _ => "unknown",
                         };
-                        entries.push(format!(r#"{{"name":"{name}","kind":"{kind}"}}"#));
+                        entries.push(WasmExportEntry { name, kind });
                     }
-                    Ok(format!("[{}]", entries.join(",")))
+                    serde_json::to_string(&entries)
+                        .map_err(|e| throw_wasm(&ctx, "RuntimeError", &e.to_string()))
                 },
             ),
         )?;
@@ -764,6 +772,33 @@ mod tests {
                 )
                 .expect("get exports count");
             assert_eq!(count, 3);
+        });
+    }
+
+    #[test]
+    fn get_exports_json_handles_escaped_names() {
+        let wasm_bytes = wat_to_wasm(
+            r#"(module
+              (func (export "name\"with_quote") (result i32) i32.const 1)
+            )"#,
+        );
+        run_wasm_test(|ctx, _state| {
+            let arr = rquickjs::Array::new(ctx.clone()).unwrap();
+            for (i, &b) in wasm_bytes.iter().enumerate() {
+                arr.set(i, b as i32).unwrap();
+            }
+            ctx.globals().set("__test_bytes", arr).unwrap();
+
+            let name: String = ctx
+                .eval(
+                    r#"
+                    var mid = __pi_wasm_compile_native(__test_bytes);
+                    var iid = __pi_wasm_instantiate_native(mid);
+                    JSON.parse(__pi_wasm_get_exports_native(iid))[0].name;
+                "#,
+                )
+                .expect("parse export JSON");
+            assert_eq!(name, "name\"with_quote");
         });
     }
 
