@@ -190,6 +190,9 @@ impl Provider for AnthropicProvider {
         let stream = stream::unfold(
             StreamState::new(event_source, model, api, provider),
             |mut state| async move {
+                if state.done {
+                    return None;
+                }
                 loop {
                     match state.event_source.next().await {
                         Some(Ok(msg)) => {
@@ -197,13 +200,25 @@ impl Provider for AnthropicProvider {
                                 // Skip ping events
                             } else {
                                 match state.process_event(&msg.data) {
-                                    Ok(Some(event)) => return Some((Ok(event), state)),
+                                    Ok(Some(event)) => {
+                                        if matches!(
+                                            &event,
+                                            StreamEvent::Done { .. } | StreamEvent::Error { .. }
+                                        ) {
+                                            state.done = true;
+                                        }
+                                        return Some((Ok(event), state));
+                                    }
                                     Ok(None) => {}
-                                    Err(e) => return Some((Err(e), state)),
+                                    Err(e) => {
+                                        state.done = true;
+                                        return Some((Err(e), state));
+                                    }
                                 }
                             }
                         }
                         Some(Err(e)) => {
+                            state.done = true;
                             let err = Error::api(format!("SSE error: {e}"));
                             return Some((Err(err), state));
                         }
@@ -211,6 +226,7 @@ impl Provider for AnthropicProvider {
                         // network disconnect).  Emit Done so the
                         // agent loop receives the partial message.
                         None => {
+                            state.done = true;
                             let reason = state.partial.stop_reason;
                             return Some((
                                 Ok(StreamEvent::Done {
@@ -244,6 +260,7 @@ where
     current_tool_json: String,
     current_tool_id: Option<String>,
     current_tool_name: Option<String>,
+    done: bool,
 }
 
 impl<S> StreamState<S>
@@ -268,6 +285,7 @@ where
             current_tool_json: String::new(),
             current_tool_id: None,
             current_tool_name: None,
+            done: false,
         }
     }
 
@@ -1149,6 +1167,54 @@ mod tests {
     }
 
     #[test]
+    fn test_stream_emits_single_done_when_transport_ends_after_message_stop() {
+        let out = collect_stream_items_from_body(&success_sse_body());
+        let done_count = out
+            .iter()
+            .filter(|item| matches!(item, Ok(StreamEvent::Done { .. })))
+            .count();
+        assert_eq!(done_count, 1, "expected exactly one terminal Done event");
+    }
+
+    #[test]
+    fn test_stream_error_event_is_terminal() {
+        let body = [
+            r#"data: {"type":"error","error":{"message":"boom"}}"#,
+            "",
+            // If the stream keeps running after Error, this would produce Done.
+            r#"data: {"type":"message_stop"}"#,
+            "",
+        ]
+        .join("\n");
+
+        let out = collect_stream_items_from_body(&body);
+        assert_eq!(out.len(), 1, "Error should terminate the stream");
+        assert!(matches!(out[0], Ok(StreamEvent::Error { .. })));
+    }
+
+    #[test]
+    fn test_stream_parse_error_is_terminal() {
+        let body = [
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":1}}}"#,
+            "",
+            r#"data: {invalid-json}"#,
+            "",
+            // This should not be emitted after parse error.
+            r#"data: {"type":"message_stop"}"#,
+            "",
+        ]
+        .join("\n");
+
+        let out = collect_stream_items_from_body(&body);
+        assert_eq!(out.len(), 2, "parse error should stop further events");
+        assert!(matches!(out[0], Ok(StreamEvent::Start { .. })));
+        match &out[1] {
+            Ok(event) => panic!("expected parse error item, got event: {event:?}"),
+            Err(err) => assert!(err.to_string().contains("JSON parse error")),
+        }
+    }
+
+    #[test]
     fn test_stream_sets_required_headers() {
         let captured = run_stream_and_capture_headers(CacheRetention::None)
             .expect("captured request for required headers");
@@ -1246,6 +1312,35 @@ mod tests {
         });
 
         rx.recv_timeout(Duration::from_secs(2)).ok()
+    }
+
+    fn collect_stream_items_from_body(body: &str) -> Vec<Result<StreamEvent>> {
+        let (base_url, _rx) = spawn_test_server(200, "text/event-stream", body);
+        let provider = AnthropicProvider::new("claude-test").with_base_url(base_url);
+        let context = Context {
+            system_prompt: Some("test system".to_string()),
+            messages: vec![Message::User(crate::model::UserMessage {
+                content: UserContent::Text("ping".to_string()),
+                timestamp: 0,
+            })],
+            tools: Vec::new(),
+        };
+        let options = StreamOptions {
+            api_key: Some("test-key".to_string()),
+            ..Default::default()
+        };
+
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async {
+            let mut stream = provider.stream(&context, &options).await.expect("stream");
+            let mut items = Vec::new();
+            while let Some(item) = stream.next().await {
+                items.push(item);
+            }
+            items
+        })
     }
 
     fn success_sse_body() -> String {

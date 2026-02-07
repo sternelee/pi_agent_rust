@@ -135,6 +135,7 @@ impl Provider for OpenAIProvider {
         &self.model
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn stream(
         &self,
         context: &Context,
