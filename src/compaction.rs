@@ -1875,15 +1875,7 @@ mod tests {
         // If it picked >= 2, it would pick 3, discarding the ToolResult and Call (keeping only 20 tokens).
         // By picking 1, we keep 1..4 (130 tokens).
 
-        let entries = vec![
-            user_entry("0", "user"),
-            tool_call_entry("1", "tool", "arg"),
-            compact_entry("2", "fake_tr", 100), // Hack: compact_entry has specific tokens, but we need ToolResult for invalid cut check
-                                                // Actually, let's use real ToolResult but mock estimate_tokens?
-                                                // estimate_tokens uses content length.
-        ];
-
-        // Re-create entries with controlled lengths.
+        // Create entries with controlled lengths.
         // We need 100 tokens for TR. 100 * 4 = 400 chars.
         let tr_text = "x".repeat(400);
         let entries = vec![
@@ -1911,14 +1903,21 @@ mod tests {
 
         let prep = prepare_compaction(&entries, settings).expect("should compact");
 
-        // We expect it to keep from index 1 (Assistant/Call).
-        // If it cut at 3, kept messages would be 3,4.
-        // If it cut at 1, kept messages are 1,2,3,4.
+        // Cut point is index 1 (Assistant/Call). Because entries[1] is Assistant (not User),
+        // this is a split turn: the turn started at index 0 (User). The User message at index 0
+        // goes into turn_prefix_messages (not messages_to_summarize) because history_end = 0.
+        assert_eq!(prep.first_kept_entry_id, "1");
 
-        // messages_to_summarize is 0..cut_index.
-        // So if cut_index is 1, summarize should contain ONLY 0.
-        assert_eq!(prep.messages_to_summarize.len(), 1);
-        match &prep.messages_to_summarize[0] {
+        // messages_to_summarize is entries[0..0] = empty (split-turn puts the
+        // prefix in turn_prefix_messages instead).
+        assert!(
+            prep.messages_to_summarize.is_empty(),
+            "split turn: user goes into turn prefix, not summarize"
+        );
+
+        // turn_prefix_messages should contain the User message at index 0.
+        assert_eq!(prep.turn_prefix_messages.len(), 1);
+        match &prep.turn_prefix_messages[0] {
             SessionMessage::User { content, .. } => {
                 if let UserContent::Text(t) = content {
                     assert_eq!(t, "user");
@@ -1926,9 +1925,7 @@ mod tests {
                     panic!("wrong content");
                 }
             }
-            _ => panic!("expected user message"),
+            _ => panic!("expected user message in turn prefix"),
         }
-
-        assert_eq!(prep.first_kept_entry_id, "1");
     }
 }
