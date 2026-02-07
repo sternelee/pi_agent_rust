@@ -148,23 +148,18 @@ fn main() -> Result<()> {
             .unwrap_or_default();
 
         let category = classify_registrations(&registrations);
-        let license = license_map
-            .get(&item.id)
-            .cloned()
-            .unwrap_or_else(|| {
-                pool_item
-                    .map(|p| p.license.clone())
-                    .unwrap_or_else(|| "UNKNOWN".to_string())
-            });
+        let license = license_map.get(&item.id).cloned().unwrap_or_else(|| {
+            pool_item.map_or_else(|| "UNKNOWN".to_string(), |p| p.license.clone())
+        });
 
         let source_tier = item
             .source_tier
             .clone()
             .or_else(|| pool_item.map(|p| p.source_tier.clone()))
-            .unwrap_or_else(|| "unknown".to_string());
+            .unwrap_or_else(|| "unknown".into());
 
-        let (version_pin, sha256, artifact_path) = pool_item
-            .map(|p| {
+        let (version_pin, sha256, artifact_path) =
+            pool_item.map_or((VersionPin::Checksum, None, None), |p| {
                 let pin = match &p.source {
                     CandidateSource::Npm {
                         package,
@@ -185,8 +180,7 @@ fn main() -> Result<()> {
                 let sha = p.checksum.as_ref().map(|c| c.sha256.clone());
                 let art = p.artifact_path.clone();
                 (pin, sha, art)
-            })
-            .unwrap_or((VersionPin::Checksum, None, None));
+            });
 
         match &version_pin {
             VersionPin::Npm { .. } => pinned_npm += 1,
@@ -222,7 +216,9 @@ fn main() -> Result<()> {
             _ => {
                 // Top excluded items get exclusion notes.
                 if item.score.final_total >= 30 {
-                    let reason = if !item.gates.passes {
+                    let reason = if item.gates.passes {
+                        format!("Score {}/100 below threshold (50)", item.score.final_total)
+                    } else {
                         let mut gates = Vec::new();
                         if !item.gates.provenance_pinned {
                             gates.push("no provenance");
@@ -237,8 +233,6 @@ fn main() -> Result<()> {
                             gates.push("requires modification");
                         }
                         format!("Gate failure: {}", gates.join(", "))
-                    } else {
-                        format!("Score {}/100 below threshold (50)", item.score.final_total)
                     };
                     exclusions.push(ExclusionNote {
                         id: item.id.clone(),
