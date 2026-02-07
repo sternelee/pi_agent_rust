@@ -437,8 +437,9 @@ used by CI/harnesses:
   submodules + confidence + per-tier stats).
 - `docs/extension-master-catalog.json` — **deduplicated master pool** for
   conformance (all tiers, minimal fields + checksums).
-- `docs/extension-catalog.json` — enriched metadata for the **official upstream**
-  corpus (capabilities, IO patterns, complexity buckets, checksums).
+- `docs/extension-catalog.json` — enriched metadata for the **full validated
+  corpus** (223 extensions across all source tiers, with conformance status,
+  capabilities, IO patterns, complexity buckets, checksums, and perf budgets).
 - `docs/extension-catalog.schema.json` — JSON Schema for `docs/extension-catalog.json`
   (`pi.ext.catalog.v1`).
 - `docs/extension-priority.json` — ranking/order plan for the official corpus
@@ -487,11 +488,11 @@ extension corpus. It is defined by:
 - Node API + hostcall usage: `docs/extension-api-matrix.json`
 - Testability notes + execution order: `docs/extension-priority.json`
 
-### 1C.5 Coverage Targets (v1)
+### 1C.5 Coverage Targets and Achieved Results
 
-The purpose of coverage targets is to prevent a “high-score shortlist” from
+The purpose of coverage targets is to prevent a "high-score shortlist" from
 missing whole classes of real-world behavior. Targets are used by selection
-beads to produce a Tier-1 “must-pass” corpus that is large, stratified, and
+beads to produce a Tier-1 "must-pass" corpus that is large, stratified, and
 defensible.
 
 **Tier size targets (selection constraint):**
@@ -502,15 +503,38 @@ defensible.
 - **Tier-2 stretch:** additional long-tail extensions chosen primarily for
   unique API surface / coverage (not popularity).
 
-**Tier-1 per-source-tier minimums (initial framing):**
+**Achieved coverage (as of 2026-02-07):**
 
-| Source tier | Minimum | Rationale |
-|---|---:|---|
-| `official-pi-mono` | 60 | Baseline corpus; defines expected semantics. |
-| `npm-registry` | 50 | Real-world packaging/deps patterns. |
-| `community` | 50 | Diverse small extensions; fast surface coverage. |
-| `third-party-github` | 20 | Multi-file patterns and higher complexity. |
-| `agents-mikeastock` | all | Curated corpus; include all available. |
+All 223 validated extensions are tested. 187 pass (83.9%).
+
+| Source tier | Target | Actual | Pass | Rate |
+|---|---:|---:|---:|---:|
+| `official-pi-mono` | 60 | 61 | 60 | 98.4% |
+| `npm-registry` | 50 | 75 | 48 | 64.0% |
+| `community` | 50 | 58 | 52 | 89.7% |
+| `third-party-github` | 20 | 23 | 16 | 69.6% |
+| `agents-mikeastock` | all | 1 | 0 | 0% |
+| **Total** | **≥ 200** | **223** | **187** | **83.9%** |
+
+By conformance tier (complexity bucket):
+
+| Tier | Description | Total | Pass | Rate |
+|---|---|---:|---:|---:|
+| T1 | Simple single-file | 38 | 38 | 100% |
+| T2 | Multi-registration | 87 | 85 | 97.7% |
+| T3 | Multi-file / complex | 90 | 60 | 66.7% |
+| T4 | npm dependencies | 3 | 2 | 66.7% |
+| T5 | exec/network | 5 | 2 | 40.0% |
+
+**36 failures break down as:**
+- Manifest registration mismatch (22) — fixable by auditing manifests
+- Missing npm package stub (5) — fixable by adding virtual modules
+- Multi-file dependency (4) — partially fixable (needs bundling)
+- Runtime error (4) — needs investigation
+- Test fixture (1) — not a real extension
+
+See `tests/ext_conformance/reports/COMPATIBILITY_SUMMARY.md` for the full
+combined conformance + performance report.
 
 **Tier-1 behavior / capability quotas (minimum coverage buckets):**
 
@@ -542,7 +566,7 @@ Maintain at least a small quorum in each high-value workflow category:
 - `security` / policy / guardrails
 
 Notes:
-- These targets intentionally mix **hard minima** and “include-all-rare” rules.
+- These targets intentionally mix **hard minima** and "include-all-rare" rules.
   For rare-but-critical surfaces (provider registration, exec-heavy), selection
   should bias toward full coverage rather than sampling.
 - The `docs/extension-*.json` artifacts are the measurement source for counts
