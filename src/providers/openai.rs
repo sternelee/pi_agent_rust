@@ -247,7 +247,20 @@ impl Provider for OpenAIProvider {
                             let err = Error::api(format!("SSE error: {e}"));
                             return Some((Err(err), state));
                         }
-                        None => return None,
+                        // Stream ended without [DONE] sentinel (e.g.
+                        // premature server disconnect).  Emit a Done event
+                        // so the agent loop receives the accumulated partial
+                        // instead of silently losing it.
+                        None => {
+                            let reason = state.partial.stop_reason;
+                            return Some((
+                                Ok(StreamEvent::Done {
+                                    reason,
+                                    message: state.partial.clone(),
+                                }),
+                                state,
+                            ));
+                        }
                     }
                 }
             },

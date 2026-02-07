@@ -207,7 +207,19 @@ impl Provider for AnthropicProvider {
                             let err = Error::api(format!("SSE error: {e}"));
                             return Some((Err(err), state));
                         }
-                        None => return None,
+                        // Stream ended before message_stop (e.g.
+                        // network disconnect).  Emit Done so the
+                        // agent loop receives the partial message.
+                        None => {
+                            let reason = state.partial.stop_reason;
+                            return Some((
+                                Ok(StreamEvent::Done {
+                                    reason,
+                                    message: state.partial.clone(),
+                                }),
+                                state,
+                            ));
+                        }
                     }
                 }
             },
