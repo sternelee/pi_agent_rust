@@ -3412,14 +3412,8 @@ impl AgentSession {
         config: Option<&crate::config::Config>,
         extension_entries: &[std::path::PathBuf],
     ) -> Result<()> {
-        self.enable_extensions_with_policy(
-            enabled_tools,
-            cwd,
-            config,
-            extension_entries,
-            None,
-        )
-        .await
+        self.enable_extensions_with_policy(enabled_tools, cwd, config, extension_entries, None)
+            .await
     }
 
     pub async fn enable_extensions_with_policy(

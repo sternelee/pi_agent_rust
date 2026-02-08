@@ -535,9 +535,9 @@ impl TestLogger {
     /// Returns the current active span ID, if any.
     fn current_span(&self) -> (Option<String>, Option<String>) {
         let spans = self.active_spans.lock().unwrap();
-        spans
-            .last()
-            .map_or((None, None), |span| (Some(span.id.clone()), span.parent_id.clone()))
+        spans.last().map_or((None, None), |span| {
+            (Some(span.id.clone()), span.parent_id.clone())
+        })
     }
 
     /// Log an entry with the given level and category.
@@ -951,7 +951,10 @@ fn build_log_record(
         trace_id.to_string()
     };
     let span_id = if normalized {
-        entry.span_id.as_ref().map(|_| PLACEHOLDER_SPAN_ID.to_string())
+        entry
+            .span_id
+            .as_ref()
+            .map(|_| PLACEHOLDER_SPAN_ID.to_string())
     } else {
         entry.span_id.clone()
     };
@@ -1988,7 +1991,8 @@ mod tests {
         let logger = TestLogger::new();
         logger.info("test", "hello");
         let jsonl = logger.dump_jsonl();
-        let record: serde_json::Value = serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
         assert_eq!(record["trace_id"].as_str().unwrap(), logger.trace_id());
         assert_eq!(record["schema"], "pi.test.log.v2");
     }
@@ -1998,7 +2002,8 @@ mod tests {
         let logger = TestLogger::new();
         logger.info("test", "hello");
         let jsonl = logger.dump_jsonl_normalized();
-        let record: serde_json::Value = serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
         assert_eq!(record["trace_id"], PLACEHOLDER_TRACE_ID);
     }
 
@@ -2076,14 +2081,8 @@ mod tests {
             logger.info("test", "work");
         }
         let entries = logger.entries();
-        let end_entry = entries
-            .iter()
-            .find(|e| e.category == "span.end")
-            .unwrap();
-        assert!(end_entry
-            .context
-            .iter()
-            .any(|(k, _)| k == "duration_ms"));
+        let end_entry = entries.iter().find(|e| e.category == "span.end").unwrap();
+        assert!(end_entry.context.iter().any(|(k, _)| k == "duration_ms"));
     }
 
     #[test]
@@ -2106,11 +2105,17 @@ mod tests {
         }
 
         // span.begin record should have span_id
-        let begin = lines.iter().find(|l| l["category"] == "span.begin").unwrap();
+        let begin = lines
+            .iter()
+            .find(|l| l["category"] == "span.begin")
+            .unwrap();
         assert_eq!(begin["span_id"], "span-1");
 
         // "inside span" record should have span_id
-        let inside = lines.iter().find(|l| l["message"] == "inside span").unwrap();
+        let inside = lines
+            .iter()
+            .find(|l| l["message"] == "inside span")
+            .unwrap();
         assert_eq!(inside["span_id"], "span-1");
     }
 
@@ -2136,10 +2141,7 @@ mod tests {
         }
         let jsonl = logger.dump_jsonl();
         let errors = validate_jsonl(&jsonl);
-        assert!(
-            errors.is_empty(),
-            "v2 JSONL validation errors: {errors:?}"
-        );
+        assert!(errors.is_empty(), "v2 JSONL validation errors: {errors:?}");
     }
 
     #[test]

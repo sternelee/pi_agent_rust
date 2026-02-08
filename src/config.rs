@@ -369,10 +369,7 @@ impl Config {
             enable_skill_commands: other.enable_skill_commands.or(base.enable_skill_commands),
 
             // Extension Policy
-            extension_policy: merge_extension_policy(
-                base.extension_policy,
-                other.extension_policy,
-            ),
+            extension_policy: merge_extension_policy(base.extension_policy, other.extension_policy),
         }
     }
 
@@ -1382,5 +1379,167 @@ mod tests {
         let config = Config::load_with_roots(None, &global_dir, &cwd).expect("load");
         assert_eq!(config.thinking_budget("minimal"), 999);
         assert_eq!(config.thinking_budget("low"), 200);
+    }
+
+    // ====================================================================
+    // Extension Policy Config
+    // ====================================================================
+
+    #[test]
+    fn extension_policy_defaults_to_standard() {
+        let config = Config::default();
+        let policy = config.resolve_extension_policy(None);
+        // Standard mode: exec and env should be in deny_caps
+        assert!(policy.deny_caps.contains(&"exec".to_string()));
+        assert!(policy.deny_caps.contains(&"env".to_string()));
+    }
+
+    #[test]
+    fn extension_policy_cli_override_safe() {
+        let config = Config::default();
+        let policy = config.resolve_extension_policy(Some("safe"));
+        assert_eq!(
+            policy.mode,
+            crate::extensions::ExtensionPolicyMode::Strict
+        );
+        assert!(policy.deny_caps.contains(&"exec".to_string()));
+    }
+
+    #[test]
+    fn extension_policy_cli_override_permissive() {
+        let config = Config::default();
+        let policy = config.resolve_extension_policy(Some("permissive"));
+        assert_eq!(
+            policy.mode,
+            crate::extensions::ExtensionPolicyMode::Permissive
+        );
+    }
+
+    #[test]
+    fn extension_policy_from_settings_json() {
+        let temp = TempDir::new().expect("create tempdir");
+        let cwd = temp.path().join("cwd");
+        let global_dir = temp.path().join("global");
+        write_file(
+            &global_dir.join("settings.json"),
+            r#"{ "extensionPolicy": { "profile": "safe" } }"#,
+        );
+
+        let config = Config::load_with_roots(None, &global_dir, &cwd).expect("load");
+        let policy = config.resolve_extension_policy(None);
+        assert_eq!(
+            policy.mode,
+            crate::extensions::ExtensionPolicyMode::Strict
+        );
+    }
+
+    #[test]
+    fn extension_policy_cli_overrides_config() {
+        let temp = TempDir::new().expect("create tempdir");
+        let cwd = temp.path().join("cwd");
+        let global_dir = temp.path().join("global");
+        write_file(
+            &global_dir.join("settings.json"),
+            r#"{ "extensionPolicy": { "profile": "safe" } }"#,
+        );
+
+        let config = Config::load_with_roots(None, &global_dir, &cwd).expect("load");
+        // CLI says permissive, config says safe → CLI wins
+        let policy = config.resolve_extension_policy(Some("permissive"));
+        assert_eq!(
+            policy.mode,
+            crate::extensions::ExtensionPolicyMode::Permissive
+        );
+    }
+
+    #[test]
+    fn extension_policy_allow_dangerous_removes_deny() {
+        let temp = TempDir::new().expect("create tempdir");
+        let cwd = temp.path().join("cwd");
+        let global_dir = temp.path().join("global");
+        write_file(
+            &global_dir.join("settings.json"),
+            r#"{ "extensionPolicy": { "allowDangerous": true } }"#,
+        );
+
+        let config = Config::load_with_roots(None, &global_dir, &cwd).expect("load");
+        let policy = config.resolve_extension_policy(None);
+        // Standard mode but exec/env removed from deny
+        assert!(!policy.deny_caps.contains(&"exec".to_string()));
+        assert!(!policy.deny_caps.contains(&"env".to_string()));
+    }
+
+    #[test]
+    fn extension_policy_project_overrides_global() {
+        let temp = TempDir::new().expect("create tempdir");
+        let cwd = temp.path().join("cwd");
+        let global_dir = temp.path().join("global");
+        write_file(
+            &global_dir.join("settings.json"),
+            r#"{ "extensionPolicy": { "profile": "safe" } }"#,
+        );
+        write_file(
+            &cwd.join(".pi/settings.json"),
+            r#"{ "extensionPolicy": { "profile": "permissive" } }"#,
+        );
+
+        let config = Config::load_with_roots(None, &global_dir, &cwd).expect("load");
+        let policy = config.resolve_extension_policy(None);
+        assert_eq!(
+            policy.mode,
+            crate::extensions::ExtensionPolicyMode::Permissive
+        );
+    }
+
+    #[test]
+    fn extension_policy_unknown_profile_defaults_to_standard() {
+        let config = Config::default();
+        let policy = config.resolve_extension_policy(Some("unknown-value"));
+        assert_eq!(
+            policy.mode,
+            crate::extensions::ExtensionPolicyMode::Prompt
+        );
+    }
+
+    #[test]
+    fn extension_policy_deserializes_camel_case() {
+        let json =
+            r#"{ "extensionPolicy": { "profile": "safe", "allowDangerous": false } }"#;
+        let config: Config = serde_json::from_str(json).expect("parse");
+        assert_eq!(
+            config.extension_policy.as_ref().unwrap().profile.as_deref(),
+            Some("safe")
+        );
+        assert_eq!(
+            config
+                .extension_policy
+                .as_ref()
+                .unwrap()
+                .allow_dangerous,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn extension_policy_merge_project_overrides_global_partial() {
+        let temp = TempDir::new().expect("create tempdir");
+        let cwd = temp.path().join("cwd");
+        let global_dir = temp.path().join("global");
+        // Global sets profile=safe
+        write_file(
+            &global_dir.join("settings.json"),
+            r#"{ "extensionPolicy": { "profile": "safe" } }"#,
+        );
+        // Project sets allowDangerous=true but not profile
+        write_file(
+            &cwd.join(".pi/settings.json"),
+            r#"{ "extensionPolicy": { "allowDangerous": true } }"#,
+        );
+
+        let config = Config::load_with_roots(None, &global_dir, &cwd).expect("load");
+        // Profile from global, allowDangerous from project
+        let ext_config = config.extension_policy.as_ref().unwrap();
+        assert_eq!(ext_config.profile.as_deref(), Some("safe"));
+        assert_eq!(ext_config.allow_dangerous, Some(true));
     }
 }
