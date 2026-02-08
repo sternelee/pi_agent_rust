@@ -2293,6 +2293,364 @@ pub mod normalization {
                 "SKILL.md"
             ));
         }
+
+        // ── Harness unit-test expansion (bd-k5q5.7.2) ──────────────────
+
+        #[test]
+        fn normalize_deeply_nested_mixed_fields() {
+            let ctx = NormalizationContext::new(String::new(), String::new(), String::new());
+            let mut val = json!({
+                "outer": {
+                    "inner": {
+                        "session_id": "sess-deep",
+                        "semantic_data": "keep me",
+                        "ts": "2026-01-01T00:00:00Z",
+                        "nested_array": [
+                            { "pid": 99, "name": "tool-a" },
+                            { "host": "deep-host", "value": 42 }
+                        ]
+                    }
+                }
+            });
+            normalize_value(&mut val, None, &ctx);
+            assert_eq!(val["outer"]["inner"]["session_id"], PLACEHOLDER_SESSION_ID);
+            assert_eq!(val["outer"]["inner"]["semantic_data"], "keep me");
+            assert_eq!(val["outer"]["inner"]["ts"], PLACEHOLDER_TIMESTAMP);
+            assert_eq!(val["outer"]["inner"]["nested_array"][0]["pid"], 0);
+            assert_eq!(val["outer"]["inner"]["nested_array"][0]["name"], "tool-a");
+            assert_eq!(
+                val["outer"]["inner"]["nested_array"][1]["host"],
+                PLACEHOLDER_HOST
+            );
+            assert_eq!(val["outer"]["inner"]["nested_array"][1]["value"], 42);
+        }
+
+        #[test]
+        fn normalize_array_of_events() {
+            let ctx = NormalizationContext::new(String::new(), String::new(), String::new());
+            let mut val = json!([
+                { "ts": "2026-01-01", "session_id": "s1", "event": "start" },
+                { "ts": "2026-01-02", "session_id": "s2", "event": "end" }
+            ]);
+            normalize_value(&mut val, None, &ctx);
+            assert_eq!(val[0]["ts"], PLACEHOLDER_TIMESTAMP);
+            assert_eq!(val[0]["session_id"], PLACEHOLDER_SESSION_ID);
+            assert_eq!(val[0]["event"], "start");
+            assert_eq!(val[1]["ts"], PLACEHOLDER_TIMESTAMP);
+            assert_eq!(val[1]["session_id"], PLACEHOLDER_SESSION_ID);
+            assert_eq!(val[1]["event"], "end");
+        }
+
+        #[test]
+        fn normalize_empty_structures_unchanged() {
+            let ctx = NormalizationContext::new(String::new(), String::new(), String::new());
+            let mut empty_obj = json!({});
+            normalize_value(&mut empty_obj, None, &ctx);
+            assert_eq!(empty_obj, json!({}));
+
+            let mut empty_arr = json!([]);
+            normalize_value(&mut empty_arr, None, &ctx);
+            assert_eq!(empty_arr, json!([]));
+
+            let mut null_val = Value::Null;
+            normalize_value(&mut null_val, None, &ctx);
+            assert!(null_val.is_null());
+
+            let mut bool_val = json!(true);
+            normalize_value(&mut bool_val, None, &ctx);
+            assert_eq!(bool_val, true);
+        }
+
+        #[test]
+        fn normalize_string_combined_patterns() {
+            let ctx = NormalizationContext::new(
+                "/repo/pi".to_string(),
+                "/repo/pi/legacy".to_string(),
+                "/tmp/work".to_string(),
+            );
+            let input = "\x1b[31mrun-123e4567-e89b-12d3-a456-426614174000\x1b[0m at /tmp/work/test.rs with id=deadbeef-dead-beef-dead-beefdeadbeef http://127.0.0.1:9999/v1/api";
+            let out = normalize_string(input, &ctx);
+            assert!(!out.contains("\x1b["), "ANSI should be stripped");
+            assert!(out.contains(PLACEHOLDER_RUN_ID), "run-ID: {out}");
+            assert!(out.contains(PLACEHOLDER_PI_MONO_ROOT), "path: {out}");
+            assert!(out.contains(PLACEHOLDER_UUID), "UUID: {out}");
+            assert!(out.contains(PLACEHOLDER_PORT), "port: {out}");
+        }
+
+        #[test]
+        fn normalize_path_canonicalization_overlapping_roots() {
+            // When cwd is inside pi_mono_root, both should be replaced correctly.
+            let ctx = NormalizationContext::new(
+                "/repo".to_string(),
+                "/repo/legacy/pi-mono".to_string(),
+                "/repo/legacy/pi-mono/test-dir".to_string(),
+            );
+            // The cwd path should be replaced first (most-specific match).
+            let input = "file at /repo/legacy/pi-mono/test-dir/output.txt";
+            let out = normalize_string(input, &ctx);
+            assert!(
+                out.contains(PLACEHOLDER_PI_MONO_ROOT),
+                "cwd inside pi_mono: {out}"
+            );
+            assert!(
+                !out.contains("/repo/legacy/pi-mono/test-dir"),
+                "original cwd should be gone: {out}"
+            );
+        }
+
+        #[test]
+        fn normalize_idempotent() {
+            let ctx = NormalizationContext::new(
+                "/repo".to_string(),
+                "/repo/legacy".to_string(),
+                "/tmp/work".to_string(),
+            );
+            let contract = NormalizationContract::default();
+            let input = json!({
+                "ts": "2026-01-01",
+                "session_id": "sess-x",
+                "host": "myhost",
+                "pid": 42,
+                "message": "\x1b[31m/tmp/work/file.txt\x1b[0m"
+            });
+            let first = contract.normalize_and_canonicalize(input, &ctx);
+            let second = contract.normalize_and_canonicalize(first.clone(), &ctx);
+            assert_eq!(first, second, "normalization must be idempotent");
+        }
+
+        #[test]
+        fn normalize_preserves_all_semantic_fields() {
+            let ctx = NormalizationContext::new(String::new(), String::new(), String::new());
+            let mut val = json!({
+                "schema": "pi.ext.log.v1",
+                "level": "info",
+                "event": "tool_call.start",
+                "extension_id": "ext.demo",
+                "data": { "key": "value", "nested": [1, 2, 3] }
+            });
+            let original = val.clone();
+            normalize_value(&mut val, None, &ctx);
+            assert_eq!(val["schema"], original["schema"]);
+            assert_eq!(val["level"], original["level"]);
+            assert_eq!(val["event"], original["event"]);
+            assert_eq!(val["extension_id"], original["extension_id"]);
+            assert_eq!(val["data"]["key"], "value");
+            assert_eq!(val["data"]["nested"], json!([1, 2, 3]));
+        }
+
+        #[test]
+        fn normalize_all_timestamp_key_variants() {
+            let ctx = NormalizationContext::new(String::new(), String::new(), String::new());
+            for key in &["timestamp", "started_at", "finished_at", "created_at", "createdAt", "ts"]
+            {
+                let mut val =
+                    serde_json::from_str(&format!(r#"{{"{key}": "2026-01-01T00:00:00Z"}}"#))
+                        .unwrap();
+                normalize_value(&mut val, None, &ctx);
+                assert_eq!(
+                    val[key], PLACEHOLDER_TIMESTAMP,
+                    "key {key} should be normalized"
+                );
+            }
+        }
+
+        #[test]
+        fn normalize_numeric_timestamp_keys_zeroed() {
+            let ctx = NormalizationContext::new(String::new(), String::new(), String::new());
+            for key in &["timestamp", "started_at", "finished_at", "ts"] {
+                let mut val = serde_json::from_str(&format!(r#"{{"{key}": 1700000000}}"#)).unwrap();
+                normalize_value(&mut val, None, &ctx);
+                assert_eq!(val[key], 0, "numeric {key} should be zeroed");
+            }
+        }
+
+        #[test]
+        fn canonicalize_json_keys_preserves_array_order() {
+            let input = json!({"items": [3, 1, 2], "z": "last", "a": "first"});
+            let out = canonicalize_json_keys(&input);
+            // Keys sorted, but array order preserved
+            let keys: Vec<&String> = out.as_object().unwrap().keys().collect();
+            assert_eq!(keys, &["a", "items", "z"]);
+            assert_eq!(out["items"], json!([3, 1, 2]));
+        }
+
+        #[test]
+        fn canonicalize_json_keys_nested_arrays_of_objects() {
+            let input = json!({
+                "b": [
+                    {"z": 1, "a": 2},
+                    {"y": 3, "b": 4}
+                ],
+                "a": "first"
+            });
+            let out = canonicalize_json_keys(&input);
+            let serialized = serde_json::to_string(&out).unwrap();
+            // Top-level keys sorted: "a" before "b"
+            // Object keys inside array sorted: "a" before "z", "b" before "y"
+            assert_eq!(
+                serialized,
+                r#"{"a":"first","b":[{"a":2,"z":1},{"b":4,"y":3}]}"#
+            );
+        }
+
+        #[test]
+        fn canonicalize_json_keys_scalar_values_unchanged() {
+            assert_eq!(canonicalize_json_keys(&json!(42)), json!(42));
+            assert_eq!(canonicalize_json_keys(&json!("hello")), json!("hello"));
+            assert_eq!(canonicalize_json_keys(&json!(true)), json!(true));
+            assert_eq!(canonicalize_json_keys(&json!(null)), json!(null));
+        }
+
+        #[test]
+        fn normalize_string_no_match_returns_unchanged() {
+            let ctx = NormalizationContext::new(String::new(), String::new(), String::new());
+            let input = "plain text with no special patterns";
+            let out = normalize_string(input, &ctx);
+            assert_eq!(out, input);
+        }
+
+        #[test]
+        fn normalize_string_multiple_uuids() {
+            let ctx = NormalizationContext::new(String::new(), String::new(), String::new());
+            let input = "ids: 11111111-2222-3333-4444-555555555555 and 66666666-7777-8888-9999-aaaaaaaaaaaa";
+            let out = normalize_string(input, &ctx);
+            let count = out.matches(PLACEHOLDER_UUID).count();
+            assert_eq!(count, 2, "both UUIDs should be replaced: {out}");
+        }
+
+        #[test]
+        fn is_path_key_additional_patterns() {
+            assert!(is_path_key("outputPath"));
+            assert!(is_path_key("inputDir"));
+            assert!(is_path_key("rootdir"));
+            assert!(is_path_key("filePaths"));
+            assert!(!is_path_key("method"));
+            assert!(!is_path_key("status"));
+            assert!(!is_path_key(""));
+        }
+
+        #[test]
+        fn path_suffix_match_empty_strings() {
+            assert!(path_suffix_match("", ""));
+            assert!(!path_suffix_match("file.txt", ""));
+            assert!(!path_suffix_match("", "file.txt"));
+        }
+
+        #[test]
+        fn path_suffix_match_partial_filename_no_match() {
+            // "LL.md" should not match "SKILL.md" via suffix
+            assert!(!path_suffix_match("/path/to/SKILL.md", "LL.md"));
+        }
+
+        #[test]
+        fn replace_path_variants_empty_path_noop() {
+            let result = super::replace_path_variants("some input text", "", "PLACEHOLDER");
+            assert_eq!(result, "some input text");
+        }
+
+        #[test]
+        fn replace_path_variants_backslash_form() {
+            let result =
+                super::replace_path_variants("C:\\repo\\pi\\file.rs", "/repo/pi", "<ROOT>");
+            // The forward-slash form won't match, but the backslash variant should.
+            // Actually, replace_path_variants replaces both forward and backslash.
+            // Input has backslashes, path is forward-slash. The backslash variant
+            // of path (\repo\pi) should match.
+            assert!(
+                result.contains("<ROOT>"),
+                "backslash variant should match: {result}"
+            );
+        }
+
+        #[test]
+        fn context_new_explicit_paths() {
+            let ctx = NormalizationContext::new(
+                "/a".to_string(),
+                "/b".to_string(),
+                "/c".to_string(),
+            );
+            assert_eq!(ctx.project_root, "/a");
+            assert_eq!(ctx.pi_mono_root, "/b");
+            assert_eq!(ctx.cwd, "/c");
+        }
+
+        #[test]
+        fn canonicalize_ui_method_non_ui_type_untouched() {
+            let mut map = serde_json::Map::new();
+            map.insert("type".into(), json!("rpc_request"));
+            map.insert("method".into(), json!("setStatus"));
+            super::canonicalize_ui_method(&mut map);
+            assert_eq!(map["method"], "setStatus");
+        }
+
+        #[test]
+        fn canonicalize_ui_method_missing_type_untouched() {
+            let mut map = serde_json::Map::new();
+            map.insert("method".into(), json!("setStatus"));
+            super::canonicalize_ui_method(&mut map);
+            assert_eq!(map["method"], "setStatus");
+        }
+
+        #[test]
+        fn canonicalize_ui_method_unknown_method_untouched() {
+            let mut map = serde_json::Map::new();
+            map.insert("type".into(), json!("extension_ui_request"));
+            map.insert("method".into(), json!("customOp"));
+            super::canonicalize_ui_method(&mut map);
+            assert_eq!(map["method"], "customOp");
+        }
+
+        #[test]
+        fn canonicalize_ui_method_all_aliases() {
+            for &(alias, canonical) in UI_OP_ALIASES {
+                let mut map = serde_json::Map::new();
+                map.insert("type".into(), json!("extension_ui_request"));
+                map.insert("method".into(), json!(alias));
+                super::canonicalize_ui_method(&mut map);
+                assert_eq!(
+                    map["method"].as_str().unwrap(),
+                    canonical,
+                    "alias {alias} should canonicalize to {canonical}"
+                );
+            }
+        }
+
+        #[test]
+        fn matches_any_key_none_returns_false() {
+            assert!(!super::matches_any_key(None, &["ts", "pid"]));
+        }
+
+        #[test]
+        fn transport_id_placeholder_known_keys() {
+            assert_eq!(
+                super::transport_id_placeholder(Some("session_id")),
+                Some(PLACEHOLDER_SESSION_ID)
+            );
+            assert_eq!(
+                super::transport_id_placeholder(Some("sessionId")),
+                Some(PLACEHOLDER_SESSION_ID)
+            );
+            assert_eq!(
+                super::transport_id_placeholder(Some("run_id")),
+                Some(PLACEHOLDER_RUN_ID)
+            );
+            assert_eq!(super::transport_id_placeholder(Some("unknown")), None);
+            assert_eq!(super::transport_id_placeholder(None), None);
+        }
+
+        #[test]
+        fn fixed_placeholder_known_keys() {
+            assert_eq!(
+                super::fixed_placeholder(Some("cwd")),
+                Some(PLACEHOLDER_PI_MONO_ROOT)
+            );
+            assert_eq!(
+                super::fixed_placeholder(Some("host")),
+                Some(PLACEHOLDER_HOST)
+            );
+            assert_eq!(super::fixed_placeholder(Some("other")), None);
+            assert_eq!(super::fixed_placeholder(None), None);
+        }
     }
 }
 
@@ -2935,5 +3293,550 @@ mod tests {
         let parsed: ArtifactSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.id, "test-ext");
         assert_eq!(parsed.source_tier, SourceTier::Community);
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Harness unit-test expansion: comparison functions (bd-k5q5.7.2)
+    // ════════════════════════════════════════════════════════════════════
+
+    fn base_output(registrations: serde_json::Value, hostcall_log: serde_json::Value) -> serde_json::Value {
+        json!({
+            "extension_id": "ext",
+            "name": "Ext",
+            "version": "1.0.0",
+            "registrations": registrations,
+            "hostcall_log": hostcall_log
+        })
+    }
+
+    fn empty_registrations() -> serde_json::Value {
+        json!({
+            "commands": [],
+            "shortcuts": [],
+            "flags": [],
+            "providers": [],
+            "tool_defs": [],
+            "models": [],
+            "event_hooks": []
+        })
+    }
+
+    #[test]
+    fn compare_detects_root_extension_id_mismatch() {
+        let expected = base_output(empty_registrations(), json!([]));
+        let mut actual = expected.clone();
+        actual["extension_id"] = json!("other");
+        let err = compare_conformance_output(&expected, &actual).unwrap_err();
+        assert!(err.contains("ROOT"), "should report ROOT diff: {err}");
+        assert!(
+            err.contains("extension_id"),
+            "should mention field: {err}"
+        );
+    }
+
+    #[test]
+    fn compare_detects_root_name_mismatch() {
+        let expected = base_output(empty_registrations(), json!([]));
+        let mut actual = expected.clone();
+        actual["name"] = json!("Different");
+        let err = compare_conformance_output(&expected, &actual).unwrap_err();
+        assert!(err.contains("ROOT"), "diff kind: {err}");
+    }
+
+    #[test]
+    fn compare_detects_root_version_mismatch() {
+        let expected = base_output(empty_registrations(), json!([]));
+        let mut actual = expected.clone();
+        actual["version"] = json!("2.0.0");
+        let err = compare_conformance_output(&expected, &actual).unwrap_err();
+        assert!(err.contains("version"), "diff: {err}");
+    }
+
+    #[test]
+    fn compare_detects_extra_registration_item() {
+        let expected = base_output(
+            json!({
+                "commands": [{"name": "a", "description": "A"}],
+                "shortcuts": [], "flags": [], "providers": [],
+                "tool_defs": [], "models": [], "event_hooks": []
+            }),
+            json!([]),
+        );
+        let actual = base_output(
+            json!({
+                "commands": [
+                    {"name": "a", "description": "A"},
+                    {"name": "b", "description": "B"}
+                ],
+                "shortcuts": [], "flags": [], "providers": [],
+                "tool_defs": [], "models": [], "event_hooks": []
+            }),
+            json!([]),
+        );
+        let err = compare_conformance_output(&expected, &actual).unwrap_err();
+        assert!(err.contains("extra"), "should report extra: {err}");
+        assert!(err.contains("name=b"), "should name the extra item: {err}");
+    }
+
+    #[test]
+    fn compare_detects_missing_registration_item() {
+        let expected = base_output(
+            json!({
+                "commands": [
+                    {"name": "a", "description": "A"},
+                    {"name": "b", "description": "B"}
+                ],
+                "shortcuts": [], "flags": [], "providers": [],
+                "tool_defs": [], "models": [], "event_hooks": []
+            }),
+            json!([]),
+        );
+        let actual = base_output(
+            json!({
+                "commands": [{"name": "a", "description": "A"}],
+                "shortcuts": [], "flags": [], "providers": [],
+                "tool_defs": [], "models": [], "event_hooks": []
+            }),
+            json!([]),
+        );
+        let err = compare_conformance_output(&expected, &actual).unwrap_err();
+        assert!(err.contains("missing"), "should report missing: {err}");
+    }
+
+    #[test]
+    fn compare_detects_string_value_mismatch_in_registration() {
+        let expected = base_output(
+            json!({
+                "commands": [{"name": "a", "description": "original"}],
+                "shortcuts": [], "flags": [], "providers": [],
+                "tool_defs": [], "models": [], "event_hooks": []
+            }),
+            json!([]),
+        );
+        let actual = base_output(
+            json!({
+                "commands": [{"name": "a", "description": "changed"}],
+                "shortcuts": [], "flags": [], "providers": [],
+                "tool_defs": [], "models": [], "event_hooks": []
+            }),
+            json!([]),
+        );
+        let err = compare_conformance_output(&expected, &actual).unwrap_err();
+        assert!(
+            err.contains("description"),
+            "should identify field: {err}"
+        );
+    }
+
+    #[test]
+    fn compare_type_mismatch_produces_clear_diff() {
+        let expected = base_output(
+            json!({
+                "commands": [{"name": "a", "value": "string"}],
+                "shortcuts": [], "flags": [], "providers": [],
+                "tool_defs": [], "models": [], "event_hooks": []
+            }),
+            json!([]),
+        );
+        let actual = base_output(
+            json!({
+                "commands": [{"name": "a", "value": 42}],
+                "shortcuts": [], "flags": [], "providers": [],
+                "tool_defs": [], "models": [], "event_hooks": []
+            }),
+            json!([]),
+        );
+        let err = compare_conformance_output(&expected, &actual).unwrap_err();
+        assert!(
+            err.contains("type mismatch"),
+            "should report type mismatch: {err}"
+        );
+    }
+
+    #[test]
+    fn compare_event_hooks_order_insensitive() {
+        let expected = base_output(
+            json!({
+                "commands": [], "shortcuts": [], "flags": [],
+                "providers": [], "tool_defs": [], "models": [],
+                "event_hooks": ["on_tool", "on_message", "on_session"]
+            }),
+            json!([]),
+        );
+        let actual = base_output(
+            json!({
+                "commands": [], "shortcuts": [], "flags": [],
+                "providers": [], "tool_defs": [], "models": [],
+                "event_hooks": ["on_session", "on_tool", "on_message"]
+            }),
+            json!([]),
+        );
+        compare_conformance_output(&expected, &actual).unwrap();
+    }
+
+    #[test]
+    fn compare_event_hooks_detects_mismatch() {
+        let expected = base_output(
+            json!({
+                "commands": [], "shortcuts": [], "flags": [],
+                "providers": [], "tool_defs": [], "models": [],
+                "event_hooks": ["on_tool", "on_message"]
+            }),
+            json!([]),
+        );
+        let actual = base_output(
+            json!({
+                "commands": [], "shortcuts": [], "flags": [],
+                "providers": [], "tool_defs": [], "models": [],
+                "event_hooks": ["on_tool", "on_session"]
+            }),
+            json!([]),
+        );
+        let err = compare_conformance_output(&expected, &actual).unwrap_err();
+        assert!(
+            err.contains("on_message") || err.contains("on_session"),
+            "should report hook difference: {err}"
+        );
+    }
+
+    #[test]
+    fn compare_empty_outputs_equal() {
+        let a = base_output(empty_registrations(), json!([]));
+        compare_conformance_output(&a, &a).unwrap();
+    }
+
+    #[test]
+    fn compare_null_vs_missing_registration_sections() {
+        // One side has registrations, other side null → should still handle gracefully
+        let expected = json!({
+            "extension_id": "ext",
+            "name": "Ext",
+            "version": "1.0.0",
+            "registrations": null,
+            "hostcall_log": []
+        });
+        let actual = json!({
+            "extension_id": "ext",
+            "name": "Ext",
+            "version": "1.0.0",
+            "hostcall_log": []
+        });
+        // Both null/missing registrations should be equivalent
+        compare_conformance_output(&expected, &actual).unwrap();
+    }
+
+    #[test]
+    fn compare_hostcall_log_length_mismatch() {
+        let expected = base_output(
+            empty_registrations(),
+            json!([
+                {"op": "get_state", "result": {}},
+                {"op": "set_name", "payload": {"name": "x"}}
+            ]),
+        );
+        let actual = base_output(
+            empty_registrations(),
+            json!([{"op": "get_state", "result": {}}]),
+        );
+        let err = compare_conformance_output(&expected, &actual).unwrap_err();
+        assert!(err.contains("length mismatch"), "should report length: {err}");
+    }
+
+    #[test]
+    fn compare_float_within_epsilon_equal() {
+        let expected = base_output(
+            json!({
+                "commands": [], "shortcuts": [], "flags": [],
+                "providers": [], "models": [], "event_hooks": [],
+                "tool_defs": [{"name": "t", "score": 0.1}]
+            }),
+            json!([]),
+        );
+        let actual = base_output(
+            json!({
+                "commands": [], "shortcuts": [], "flags": [],
+                "providers": [], "models": [], "event_hooks": [],
+                "tool_defs": [{"name": "t", "score": 0.100_000_000_000_001}]
+            }),
+            json!([]),
+        );
+        compare_conformance_output(&expected, &actual).unwrap();
+    }
+
+    #[test]
+    fn compare_float_beyond_epsilon_differs() {
+        let expected = base_output(
+            json!({
+                "commands": [], "shortcuts": [], "flags": [],
+                "providers": [], "models": [], "event_hooks": [],
+                "tool_defs": [{"name": "t", "score": 0.1}]
+            }),
+            json!([]),
+        );
+        let actual = base_output(
+            json!({
+                "commands": [], "shortcuts": [], "flags": [],
+                "providers": [], "models": [], "event_hooks": [],
+                "tool_defs": [{"name": "t", "score": 0.2}]
+            }),
+            json!([]),
+        );
+        let err = compare_conformance_output(&expected, &actual).unwrap_err();
+        assert!(err.contains("score"), "should mention score: {err}");
+    }
+
+    #[test]
+    fn compare_integer_exact_match() {
+        let expected = base_output(
+            json!({
+                "commands": [], "shortcuts": [], "flags": [],
+                "providers": [], "models": [], "event_hooks": [],
+                "tool_defs": [{"name": "t", "count": 42}]
+            }),
+            json!([]),
+        );
+        let actual = base_output(
+            json!({
+                "commands": [], "shortcuts": [], "flags": [],
+                "providers": [], "models": [], "event_hooks": [],
+                "tool_defs": [{"name": "t", "count": 42}]
+            }),
+            json!([]),
+        );
+        compare_conformance_output(&expected, &actual).unwrap();
+    }
+
+    #[test]
+    fn compare_with_events_section() {
+        let expected = json!({
+            "extension_id": "ext",
+            "name": "Ext",
+            "version": "1.0.0",
+            "registrations": {
+                "commands": [], "shortcuts": [], "flags": [],
+                "providers": [], "tool_defs": [], "models": [],
+                "event_hooks": []
+            },
+            "hostcall_log": [],
+            "events": { "count": 3, "types": ["start", "end"] }
+        });
+        let actual = json!({
+            "extension_id": "ext",
+            "name": "Ext",
+            "version": "1.0.0",
+            "registrations": {
+                "commands": [], "shortcuts": [], "flags": [],
+                "providers": [], "tool_defs": [], "models": [],
+                "event_hooks": []
+            },
+            "hostcall_log": [],
+            "events": { "count": 3, "types": ["start", "end"] }
+        });
+        compare_conformance_output(&expected, &actual).unwrap();
+    }
+
+    #[test]
+    fn compare_events_mismatch_detected() {
+        let expected = json!({
+            "extension_id": "ext",
+            "name": "Ext",
+            "version": "1.0.0",
+            "registrations": {
+                "commands": [], "shortcuts": [], "flags": [],
+                "providers": [], "tool_defs": [], "models": [],
+                "event_hooks": []
+            },
+            "hostcall_log": [],
+            "events": { "count": 3 }
+        });
+        let actual = json!({
+            "extension_id": "ext",
+            "name": "Ext",
+            "version": "1.0.0",
+            "registrations": {
+                "commands": [], "shortcuts": [], "flags": [],
+                "providers": [], "tool_defs": [], "models": [],
+                "event_hooks": []
+            },
+            "hostcall_log": [],
+            "events": { "count": 5 }
+        });
+        let err = compare_conformance_output(&expected, &actual).unwrap_err();
+        assert!(err.contains("EVENT"), "should be EVENT diff: {err}");
+    }
+
+    #[test]
+    fn compare_missing_events_both_sides_ok() {
+        let a = base_output(empty_registrations(), json!([]));
+        // Neither has events section → should pass
+        compare_conformance_output(&a, &a).unwrap();
+    }
+
+    #[test]
+    fn compare_shortcuts_keyed_by_key_id() {
+        let expected = base_output(
+            json!({
+                "commands": [], "flags": [], "providers": [],
+                "tool_defs": [], "models": [], "event_hooks": [],
+                "shortcuts": [
+                    {"key_id": "ctrl+b", "label": "Bold"},
+                    {"key_id": "ctrl+a", "label": "All"}
+                ]
+            }),
+            json!([]),
+        );
+        let actual = base_output(
+            json!({
+                "commands": [], "flags": [], "providers": [],
+                "tool_defs": [], "models": [], "event_hooks": [],
+                "shortcuts": [
+                    {"key_id": "ctrl+a", "label": "All"},
+                    {"key_id": "ctrl+b", "label": "Bold"}
+                ]
+            }),
+            json!([]),
+        );
+        // Order should not matter for shortcuts (keyed by key_id)
+        compare_conformance_output(&expected, &actual).unwrap();
+    }
+
+    #[test]
+    fn compare_models_keyed_by_id() {
+        let expected = base_output(
+            json!({
+                "commands": [], "shortcuts": [], "flags": [],
+                "providers": [], "tool_defs": [], "event_hooks": [],
+                "models": [
+                    {"id": "m2", "name": "Model 2"},
+                    {"id": "m1", "name": "Model 1"}
+                ]
+            }),
+            json!([]),
+        );
+        let actual = base_output(
+            json!({
+                "commands": [], "shortcuts": [], "flags": [],
+                "providers": [], "tool_defs": [], "event_hooks": [],
+                "models": [
+                    {"id": "m1", "name": "Model 1"},
+                    {"id": "m2", "name": "Model 2"}
+                ]
+            }),
+            json!([]),
+        );
+        compare_conformance_output(&expected, &actual).unwrap();
+    }
+
+    #[test]
+    fn report_empty_results() {
+        let report = generate_report(
+            "run-empty",
+            Some("2026-02-07T00:00:00Z".to_string()),
+            vec![],
+        );
+        assert_eq!(report.summary.total, 0);
+        assert_eq!(report.summary.passed, 0);
+        assert_eq!(report.summary.pass_rate, 0.0);
+        assert!(report.summary.by_tier.is_empty());
+    }
+
+    #[test]
+    fn report_all_pass() {
+        let results = vec![
+            ExtensionConformanceResult {
+                id: "a".into(),
+                tier: Some(1),
+                status: ConformanceStatus::Pass,
+                ts_time_ms: Some(10),
+                rust_time_ms: Some(8),
+                diffs: vec![],
+                notes: None,
+            },
+            ExtensionConformanceResult {
+                id: "b".into(),
+                tier: Some(1),
+                status: ConformanceStatus::Pass,
+                ts_time_ms: Some(20),
+                rust_time_ms: Some(15),
+                diffs: vec![],
+                notes: None,
+            },
+        ];
+        let report = generate_report(
+            "run-pass",
+            Some("2026-02-07T00:00:00Z".to_string()),
+            results,
+        );
+        assert_eq!(report.summary.total, 2);
+        assert_eq!(report.summary.passed, 2);
+        assert!((report.summary.pass_rate - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn regression_no_overlap_not_flagged() {
+        let previous = generate_report(
+            "prev",
+            Some("2026-02-05T00:00:00Z".to_string()),
+            vec![ExtensionConformanceResult {
+                id: "old-ext".into(),
+                tier: Some(1),
+                status: ConformanceStatus::Pass,
+                ts_time_ms: None,
+                rust_time_ms: None,
+                diffs: vec![],
+                notes: None,
+            }],
+        );
+        let current = generate_report(
+            "cur",
+            Some("2026-02-06T00:00:00Z".to_string()),
+            vec![ExtensionConformanceResult {
+                id: "new-ext".into(),
+                tier: Some(1),
+                status: ConformanceStatus::Fail,
+                ts_time_ms: None,
+                rust_time_ms: None,
+                diffs: vec![],
+                notes: None,
+            }],
+        );
+        let regression = compute_regression(&previous, &current);
+        assert!(!regression.has_regression());
+        assert_eq!(regression.compared_total, 0);
+    }
+
+    #[test]
+    fn regression_all_passing_to_passing() {
+        let results = vec![ExtensionConformanceResult {
+            id: "a".into(),
+            tier: Some(1),
+            status: ConformanceStatus::Pass,
+            ts_time_ms: None,
+            rust_time_ms: None,
+            diffs: vec![],
+            notes: None,
+        }];
+        let previous = generate_report(
+            "prev",
+            Some("2026-02-05T00:00:00Z".to_string()),
+            results.clone(),
+        );
+        let current = generate_report(
+            "cur",
+            Some("2026-02-06T00:00:00Z".to_string()),
+            results,
+        );
+        let regression = compute_regression(&previous, &current);
+        assert!(!regression.has_regression());
+        assert_eq!(regression.compared_total, 1);
+        assert!((regression.pass_rate_delta).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn conformance_status_as_upper_str() {
+        assert_eq!(ConformanceStatus::Pass.as_upper_str(), "PASS");
+        assert_eq!(ConformanceStatus::Fail.as_upper_str(), "FAIL");
+        assert_eq!(ConformanceStatus::Skip.as_upper_str(), "SKIP");
+        assert_eq!(ConformanceStatus::Error.as_upper_str(), "ERROR");
     }
 }
