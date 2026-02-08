@@ -432,6 +432,14 @@ jobs:
               sys.exit(1)
           PY
 
+      - name: Conformance regression gate [linux]
+        if: runner.os == 'Linux'
+        env:
+          CI_REGRESSION_MODE: ${{ vars.CI_REGRESSION_MODE || 'strict' }}
+        run: |
+          set -euxo pipefail
+          python3 scripts/check_conformance_regression.py
+
       - name: Coverage summary (llvm-cov)
         if: runner.os == 'Linux'
         run: |
