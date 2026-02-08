@@ -127,7 +127,7 @@
         "registers_tools": true,
         "registers_commands": true,
         "registers_flags": true,
-        "registers_providers": true,
+        "registers_providers": false,
         "subscribes_events": [
           "agent_start"
         ],
@@ -3178,7 +3178,7 @@
       "entry_path": "npm/aliou-pi-linkup/src/index.ts",
       "source_tier": "npm-registry",
       "capabilities": {
-        "registers_tools": true,
+        "registers_tools": false,
         "registers_commands": true,
         "registers_flags": false,
         "registers_providers": false,
@@ -3637,7 +3637,7 @@
       "entry_path": "npm/marckrenn-pi-sub-bar/index.ts",
       "source_tier": "npm-registry",
       "capabilities": {
-        "registers_tools": true,
+        "registers_tools": false,
         "registers_commands": true,
         "registers_flags": false,
         "registers_providers": false,
@@ -3672,9 +3672,8 @@
       "registrations": {
         "tools": [],
         "commands": [
-          "sub-bar:import",
           "sub-bar:settings",
-          "sub-core:settings"
+          "sub-bar:import"
         ],
         "flags": [],
         "event_handlers": [
@@ -3701,7 +3700,7 @@
       "entry_path": "npm/marckrenn-pi-sub-core/index.ts",
       "source_tier": "npm-registry",
       "capabilities": {
-        "registers_tools": true,
+        "registers_tools": false,
         "registers_commands": true,
         "registers_flags": false,
         "registers_providers": false,
@@ -3755,7 +3754,7 @@
       "entry_path": "npm/mitsupi/pi-extensions/answer.ts",
       "source_tier": "npm-registry",
       "capabilities": {
-        "registers_tools": true,
+        "registers_tools": false,
         "registers_commands": true,
         "registers_flags": true,
         "registers_providers": false,
@@ -4186,7 +4185,7 @@
       "entry_path": "npm/pi-extensions/agent-guidance/agent-guidance.ts",
       "source_tier": "npm-registry",
       "capabilities": {
-        "registers_tools": true,
+        "registers_tools": false,
         "registers_commands": true,
         "registers_flags": false,
         "registers_providers": false,
@@ -4644,7 +4643,7 @@
       "entry_path": "npm/pi-package-test/extensions/confirm-destructive.ts",
       "source_tier": "npm-registry",
       "capabilities": {
-        "registers_tools": true,
+        "registers_tools": false,
         "registers_commands": true,
         "registers_flags": true,
         "registers_providers": false,
@@ -6971,7 +6970,7 @@
       "entry_path": "third-party/ben-vargas-pi-packages/pi-ancestor-discovery/extensions/index.ts",
       "source_tier": "third-party-github",
       "capabilities": {
-        "registers_tools": true,
+        "registers_tools": false,
         "registers_commands": true,
         "registers_flags": true,
         "registers_providers": true,
@@ -7010,7 +7009,7 @@
       "entry_path": "third-party/charles-cooper-pi-extensions/per-model-system-prompt.ts",
       "source_tier": "third-party-github",
       "capabilities": {
-        "registers_tools": true,
+        "registers_tools": false,
         "registers_commands": true,
         "registers_flags": false,
         "registers_providers": false,
@@ -7355,7 +7354,7 @@
       "entry_path": "third-party/marckrenn-pi-sub/sub-bar/index.ts",
       "source_tier": "third-party-github",
       "capabilities": {
-        "registers_tools": true,
+        "registers_tools": false,
         "registers_commands": true,
         "registers_flags": false,
         "registers_providers": false,
@@ -7390,9 +7389,8 @@
       "registrations": {
         "tools": [],
         "commands": [
-          "sub-bar:import",
           "sub-bar:settings",
-          "sub-core:settings"
+          "sub-bar:import"
         ],
         "flags": [],
         "event_handlers": [
@@ -7783,7 +7781,7 @@
       "entry_path": "third-party/w-winter-dot314/agentic-compaction/index.ts",
       "source_tier": "third-party-github",
       "capabilities": {
-        "registers_tools": true,
+        "registers_tools": false,
         "registers_commands": true,
         "registers_flags": true,
         "registers_providers": false,

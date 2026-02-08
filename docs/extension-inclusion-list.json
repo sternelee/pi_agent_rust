@@ -1,6 +1,6 @@
 {
   "schema": "pi.ext.inclusion_list.v1",
-  "generated_at": "2026-02-08T08:33:45.952328328+00:00",
+  "generated_at": "2026-02-08T20:42:49.920833079+00:00",
   "summary": {
     "tier1_count": 179,
     "tier1_review_count": 29,
@@ -704,7 +704,7 @@
       "source_tier": "community",
       "license": "MIT",
       "provenance": {
-        "checksum_sha256": "c3589f0daacbf63f54da18e4483efc8d93d98e5ed65fd9f5fd1c6a27db5a53cc",
+        "checksum_sha256": "a97fb744fd931e76155f5f31f37652b7801f1ceaa0730af9ef330136147e3fd3",
         "source_type": "git",
         "source_repo": "https://github.com/badlogic/pi-mono",
         "source_path": "packages/coding-agent/community/nicobailon/index.ts"
@@ -1002,7 +1002,7 @@
       "source_tier": "community",
       "license": "MIT",
       "provenance": {
-        "checksum_sha256": "0320a754323cc480229a4ed5b931542d0c5095c3033e52f67ec0cc0be78e6d8b",
+        "checksum_sha256": "8ccb331d582aa712c55da71b83a5a1d941e7469b673c76c30170974c2ebfa950",
         "source_type": "git",
         "source_repo": "https://github.com/badlogic/pi-mono",
         "source_path": "packages/coding-agent/community/qualisero/index.ts"
@@ -3929,7 +3929,7 @@
       "source_tier": "npm-registry",
       "license": "UNKNOWN",
       "provenance": {
-        "checksum_sha256": "b4099b9e789b25e572cbb7ccf478ec4c704b22f633257d5f9a705cf2168e9e6b",
+        "checksum_sha256": "f88f2a6d86c9b22eea010043de078de999812dc5b54b002a388d5919b79a0c4d",
         "source_type": "npm",
         "npm_package": "aliou-pi-processes",
         "npm_version": "0.3.3"

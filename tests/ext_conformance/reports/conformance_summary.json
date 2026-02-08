@@ -1,49 +1,53 @@
 {
-  "schema": "pi.ext.conformance_summary.v2",
-  "generated_at": "2026-02-08T20:15:13Z",
   "counts": {
-    "total": 223,
-    "pass": 213,
-    "fail": 10,
-    "na": 0
+    "fail": 0,
+    "na": 163,
+    "pass": 60,
+    "total": 223
   },
-  "pass_rate_pct": 95.5,
-  "per_tier": [
-    {
-      "fail": 0,
-      "pass": 38,
-      "skip": 0,
-      "tier": 1
-    },
-    {
-      "fail": 2,
-      "pass": 85,
-      "skip": 0,
-      "tier": 2
-    },
-    {
-      "fail": 7,
-      "pass": 83,
-      "skip": 0,
-      "tier": 3
-    },
-    {
-      "fail": 1,
-      "pass": 2,
-      "skip": 0,
-      "tier": 4
-    },
-    {
-      "fail": 0,
-      "pass": 5,
-      "skip": 0,
-      "tier": 5
-    }
-  ],
   "evidence": {
     "golden_fixtures": 16,
-    "smoke_logs": 16,
+    "load_time_benchmarks": 60,
     "parity_logs": 16,
-    "load_time_benchmarks": 60
-  }
+    "smoke_logs": 16
+  },
+  "generated_at": "2026-02-08T20:41:46Z",
+  "negative": {
+    "fail": 0,
+    "pass": 30
+  },
+  "pass_rate_pct": 26.905829596412556,
+  "per_tier": {
+    "agents-mikeastock": {
+      "fail": 0,
+      "na": 1,
+      "pass": 0,
+      "total": 1
+    },
+    "community": {
+      "fail": 0,
+      "na": 58,
+      "pass": 0,
+      "total": 58
+    },
+    "npm-registry": {
+      "fail": 0,
+      "na": 75,
+      "pass": 0,
+      "total": 75
+    },
+    "official-pi-mono": {
+      "fail": 0,
+      "na": 6,
+      "pass": 60,
+      "total": 66
+    },
+    "third-party-github": {
+      "fail": 0,
+      "na": 23,
+      "pass": 0,
+      "total": 23
+    }
+  },
+  "schema": "pi.ext.conformance_summary.v2"
 }

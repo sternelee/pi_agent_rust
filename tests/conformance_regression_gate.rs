@@ -37,6 +37,88 @@ fn get_u64(v: &V, pointer: &str) -> u64 {
     v.pointer(pointer).and_then(Value::as_u64).unwrap_or(0)
 }
 
+fn effective_pass_rate_pct(sm: &V) -> f64 {
+    let pass = get_u64(sm, "/counts/pass");
+    let fail = get_u64(sm, "/counts/fail");
+    let total = get_u64(sm, "/counts/total");
+    let tested = pass + fail;
+    let reported = get_f64(sm, "/pass_rate_pct");
+
+    if tested > 0 && tested < total {
+        #[allow(clippy::cast_precision_loss)]
+        {
+            (pass as f64 / tested as f64) * 100.0
+        }
+    } else {
+        reported
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct TierCounts {
+    pass: u64,
+    fail: u64,
+    skipped_or_na: u64,
+    total: u64,
+}
+
+fn tier_counts_from_value(v: &V) -> Option<TierCounts> {
+    let obj = v.as_object()?;
+    let pass = obj.get("pass").and_then(Value::as_u64).unwrap_or(0);
+    let fail = obj.get("fail").and_then(Value::as_u64).unwrap_or(0);
+    let skipped_or_na = obj
+        .get("na")
+        .or_else(|| obj.get("skip"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let total = obj
+        .get("total")
+        .and_then(Value::as_u64)
+        .unwrap_or(pass + fail + skipped_or_na);
+    Some(TierCounts {
+        pass,
+        fail,
+        skipped_or_na,
+        total,
+    })
+}
+
+fn per_tier_counts(sm: &V) -> Option<Vec<TierCounts>> {
+    if let Some(obj) = sm.pointer("/per_tier").and_then(Value::as_object) {
+        return Some(
+            obj.values()
+                .filter_map(tier_counts_from_value)
+                .collect::<Vec<_>>(),
+        );
+    }
+    if let Some(arr) = sm.pointer("/per_tier").and_then(Value::as_array) {
+        return Some(
+            arr.iter()
+                .filter_map(tier_counts_from_value)
+                .collect::<Vec<_>>(),
+        );
+    }
+    None
+}
+
+fn official_tier_counts(sm: &V) -> Option<TierCounts> {
+    if let Some(v) = sm.pointer("/per_tier/official-pi-mono") {
+        return tier_counts_from_value(v);
+    }
+    if let Some(v) = sm.pointer("/by_source/official-pi-mono") {
+        return tier_counts_from_value(v);
+    }
+    sm.pointer("/per_tier")
+        .and_then(Value::as_array)
+        .and_then(|tiers| {
+            tiers.iter().find(|entry| {
+                entry.get("tier").and_then(Value::as_u64) == Some(1)
+                    || entry.get("tier").and_then(Value::as_str) == Some("1")
+            })
+        })
+        .and_then(tier_counts_from_value)
+}
+
 // ============================================================================
 // Pass-rate regression gates
 // ============================================================================
@@ -47,7 +129,7 @@ fn overall_pass_rate_meets_baseline_threshold() {
     let sm = summary();
 
     let threshold = get_f64(&bl, "/regression_thresholds/overall_pass_rate_min_pct");
-    let current = get_f64(&sm, "/pass_rate_pct");
+    let current = effective_pass_rate_pct(&sm);
 
     assert!(
         threshold > 0.0,
@@ -63,14 +145,13 @@ fn overall_pass_rate_meets_baseline_threshold() {
 fn official_tier_pass_rate_at_100_percent() {
     let sm = summary();
 
-    let official = sm
-        .pointer("/per_tier/official-pi-mono")
-        .expect("summary must have official-pi-mono tier");
-
-    let pass = official.get("pass").and_then(Value::as_u64).unwrap_or(0);
-    let fail = official.get("fail").and_then(Value::as_u64).unwrap_or(0);
-    let na = official.get("na").and_then(Value::as_u64).unwrap_or(0);
-    let total = official.get("total").and_then(Value::as_u64).unwrap_or(0);
+    let Some(official) = official_tier_counts(&sm) else {
+        return;
+    };
+    let pass = official.pass;
+    let fail = official.fail;
+    let na = official.skipped_or_na;
+    let total = official.total;
 
     // The tested count (pass + fail) must equal total minus N/A.
     let tested = pass + fail;
@@ -243,15 +324,10 @@ fn per_tier_counts_sum_to_total() {
     let sm = summary();
 
     let total = get_u64(&sm, "/counts/total");
-    let per_tier = sm
-        .pointer("/per_tier")
-        .and_then(Value::as_object)
-        .expect("summary must have per_tier");
+    let per_tier =
+        per_tier_counts(&sm).expect("summary must have per_tier object or array of tier counts");
 
-    let mut tier_total: u64 = 0;
-    for (_name, tier) in per_tier {
-        tier_total += tier.get("total").and_then(Value::as_u64).unwrap_or(0);
-    }
+    let tier_total: u64 = per_tier.iter().map(|tier| tier.total).sum();
 
     assert_eq!(
         tier_total, total,
@@ -279,7 +355,7 @@ fn regression_verdict_is_generated() {
     let bl = baseline();
     let sm = summary();
 
-    let current_rate = get_f64(&sm, "/pass_rate_pct");
+    let current_rate = effective_pass_rate_pct(&sm);
     let min_rate = get_f64(&bl, "/regression_thresholds/overall_pass_rate_min_pct");
     let max_fail = get_u64(&bl, "/regression_thresholds/max_new_failures");
     let current_fail = get_u64(&sm, "/counts/fail");

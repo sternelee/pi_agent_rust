@@ -1401,7 +1401,7 @@
         "ui_header"
       ],
       "file_count": 4,
-      "checksum": "c3589f0daacbf63f54da18e4483efc8d93d98e5ed65fd9f5fd1c6a27db5a53cc"
+      "checksum": "a97fb744fd931e76155f5f31f37652b7801f1ceaa0730af9ef330136147e3fd3"
     },
     {
       "id": "community/nicobailon-mcp-adapter",
@@ -1682,7 +1682,7 @@
         "registerTool"
       ],
       "file_count": 13,
-      "checksum": "0320a754323cc480229a4ed5b931542d0c5095c3033e52f67ec0cc0be78e6d8b"
+      "checksum": "8ccb331d582aa712c55da71b83a5a1d941e7469b673c76c30170974c2ebfa950"
     },
     {
       "id": "community/qualisero-safe-git",
@@ -2914,7 +2914,7 @@
         "registerTool"
       ],
       "file_count": 16,
-      "checksum": "b4099b9e789b25e572cbb7ccf478ec4c704b22f633257d5f9a705cf2168e9e6b"
+      "checksum": "f88f2a6d86c9b22eea010043de078de999812dc5b54b002a388d5919b79a0c4d"
     },
     {
       "id": "npm/aliou-pi-synthetic",

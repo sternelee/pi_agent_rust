@@ -502,7 +502,7 @@
       "directory": "community/nicobailon-interview-tool",
       "retrieved": "2026-02-05",
       "checksum": {
-        "sha256": "c3589f0daacbf63f54da18e4483efc8d93d98e5ed65fd9f5fd1c6a27db5a53cc"
+        "sha256": "a97fb744fd931e76155f5f31f37652b7801f1ceaa0730af9ef330136147e3fd3"
       },
       "name": "nicobailon-interview-tool",
       "license": "MIT",
@@ -712,7 +712,7 @@
       "directory": "community/qualisero-pi-agent-scip",
       "retrieved": "2026-02-05",
       "checksum": {
-        "sha256": "0320a754323cc480229a4ed5b931542d0c5095c3033e52f67ec0cc0be78e6d8b"
+        "sha256": "8ccb331d582aa712c55da71b83a5a1d941e7469b673c76c30170974c2ebfa950"
       },
       "name": "qualisero-pi-agent-scip",
       "license": "MIT",
@@ -1366,7 +1366,7 @@
       "directory": "npm/aliou-pi-processes",
       "retrieved": "2026-02-05",
       "checksum": {
-        "sha256": "b4099b9e789b25e572cbb7ccf478ec4c704b22f633257d5f9a705cf2168e9e6b"
+        "sha256": "f88f2a6d86c9b22eea010043de078de999812dc5b54b002a388d5919b79a0c4d"
       },
       "name": "@aliou/pi-processes",
       "version": "0.3.3",

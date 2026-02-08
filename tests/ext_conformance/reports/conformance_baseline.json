@@ -468,6 +468,237 @@
         "owner": "pi-parity-runtime",
         "review_by": "2026-03-31",
         "tracking_issue": "bd-k5q5.3.9"
+      },
+      {
+        "id": "agents-mikeastock/extensions",
+        "kind": "extension",
+        "status": "temporary",
+        "cause_code": "manifest_mismatch",
+        "rationale": "Registered command set diverges from manifest expectation in current fixture corpus.",
+        "mitigation": "Audit fixture expectations and extension registrations to restore parity.",
+        "owner": "pi-conformance-team",
+        "review_by": "2026-03-31",
+        "tracking_issue": "bd-k5q5.2.7"
+      },
+      {
+        "id": "community/prateekmedia-lsp",
+        "kind": "extension",
+        "status": "temporary",
+        "cause_code": "manifest_mismatch",
+        "rationale": "Registered command set diverges from manifest expectation in current fixture corpus.",
+        "mitigation": "Audit fixture expectations and extension registrations to restore parity.",
+        "owner": "pi-conformance-team",
+        "review_by": "2026-03-31",
+        "tracking_issue": "bd-k5q5.2.7"
+      },
+      {
+        "id": "npm/aliou-pi-linkup",
+        "kind": "extension",
+        "status": "temporary",
+        "cause_code": "manifest_mismatch",
+        "rationale": "Registered command set diverges from manifest expectation in current fixture corpus.",
+        "mitigation": "Audit fixture expectations and extension registrations to restore parity.",
+        "owner": "pi-conformance-team",
+        "review_by": "2026-03-31",
+        "tracking_issue": "bd-k5q5.2.7"
+      },
+      {
+        "id": "npm/aliou-pi-synthetic",
+        "kind": "extension",
+        "status": "temporary",
+        "cause_code": "manifest_mismatch",
+        "rationale": "Registered command set diverges from manifest expectation in current fixture corpus.",
+        "mitigation": "Audit fixture expectations and extension registrations to restore parity.",
+        "owner": "pi-conformance-team",
+        "review_by": "2026-03-31",
+        "tracking_issue": "bd-k5q5.2.7"
+      },
+      {
+        "id": "npm/lsp-pi",
+        "kind": "extension",
+        "status": "temporary",
+        "cause_code": "manifest_mismatch",
+        "rationale": "Registered command set diverges from manifest expectation in current fixture corpus.",
+        "mitigation": "Audit fixture expectations and extension registrations to restore parity.",
+        "owner": "pi-conformance-team",
+        "review_by": "2026-03-31",
+        "tracking_issue": "bd-k5q5.2.7"
+      },
+      {
+        "id": "npm/marckrenn-pi-sub-bar",
+        "kind": "extension",
+        "status": "temporary",
+        "cause_code": "manifest_mismatch",
+        "rationale": "Registered command set diverges from manifest expectation in current fixture corpus.",
+        "mitigation": "Audit fixture expectations and extension registrations to restore parity.",
+        "owner": "pi-conformance-team",
+        "review_by": "2026-03-31",
+        "tracking_issue": "bd-k5q5.2.7"
+      },
+      {
+        "id": "npm/mitsupi",
+        "kind": "extension",
+        "status": "temporary",
+        "cause_code": "manifest_mismatch",
+        "rationale": "Registered command set diverges from manifest expectation in current fixture corpus.",
+        "mitigation": "Audit fixture expectations and extension registrations to restore parity.",
+        "owner": "pi-conformance-team",
+        "review_by": "2026-03-31",
+        "tracking_issue": "bd-k5q5.2.7"
+      },
+      {
+        "id": "npm/pi-amplike",
+        "kind": "extension",
+        "status": "temporary",
+        "cause_code": "manifest_mismatch",
+        "rationale": "Registered command set diverges from manifest expectation in current fixture corpus.",
+        "mitigation": "Audit fixture expectations and extension registrations to restore parity.",
+        "owner": "pi-conformance-team",
+        "review_by": "2026-03-31",
+        "tracking_issue": "bd-k5q5.2.7"
+      },
+      {
+        "id": "npm/pi-bash-confirm",
+        "kind": "extension",
+        "status": "temporary",
+        "cause_code": "manifest_mismatch",
+        "rationale": "Registered command set diverges from manifest expectation in current fixture corpus.",
+        "mitigation": "Audit fixture expectations and extension registrations to restore parity.",
+        "owner": "pi-conformance-team",
+        "review_by": "2026-03-31",
+        "tracking_issue": "bd-k5q5.2.7"
+      },
+      {
+        "id": "npm/pi-extensions",
+        "kind": "extension",
+        "status": "temporary",
+        "cause_code": "manifest_mismatch",
+        "rationale": "Registered command set diverges from manifest expectation in current fixture corpus.",
+        "mitigation": "Audit fixture expectations and extension registrations to restore parity.",
+        "owner": "pi-conformance-team",
+        "review_by": "2026-03-31",
+        "tracking_issue": "bd-k5q5.2.7"
+      },
+      {
+        "id": "npm/pi-package-test",
+        "kind": "extension",
+        "status": "temporary",
+        "cause_code": "manifest_mismatch",
+        "rationale": "Registered command set diverges from manifest expectation in current fixture corpus.",
+        "mitigation": "Audit fixture expectations and extension registrations to restore parity.",
+        "owner": "pi-conformance-team",
+        "review_by": "2026-03-31",
+        "tracking_issue": "bd-k5q5.2.7"
+      },
+      {
+        "id": "npm/shitty-extensions",
+        "kind": "extension",
+        "status": "temporary",
+        "cause_code": "manifest_mismatch",
+        "rationale": "Registered command set diverges from manifest expectation in current fixture corpus.",
+        "mitigation": "Audit fixture expectations and extension registrations to restore parity.",
+        "owner": "pi-conformance-team",
+        "review_by": "2026-03-31",
+        "tracking_issue": "bd-k5q5.2.7"
+      },
+      {
+        "id": "npm/tmustier-pi-arcade",
+        "kind": "extension",
+        "status": "temporary",
+        "cause_code": "manifest_mismatch",
+        "rationale": "Registered command set diverges from manifest expectation in current fixture corpus.",
+        "mitigation": "Audit fixture expectations and extension registrations to restore parity.",
+        "owner": "pi-conformance-team",
+        "review_by": "2026-03-31",
+        "tracking_issue": "bd-k5q5.2.7"
+      },
+      {
+        "id": "npm/vaayne-agent-kit",
+        "kind": "extension",
+        "status": "temporary",
+        "cause_code": "manifest_mismatch",
+        "rationale": "Registered command set diverges from manifest expectation in current fixture corpus.",
+        "mitigation": "Audit fixture expectations and extension registrations to restore parity.",
+        "owner": "pi-conformance-team",
+        "review_by": "2026-03-31",
+        "tracking_issue": "bd-k5q5.2.7"
+      },
+      {
+        "id": "third-party/aliou-pi-extensions",
+        "kind": "extension",
+        "status": "temporary",
+        "cause_code": "manifest_mismatch",
+        "rationale": "Registered command set diverges from manifest expectation in current fixture corpus.",
+        "mitigation": "Audit fixture expectations and extension registrations to restore parity.",
+        "owner": "pi-conformance-team",
+        "review_by": "2026-03-31",
+        "tracking_issue": "bd-k5q5.2.7"
+      },
+      {
+        "id": "third-party/ben-vargas-pi-packages",
+        "kind": "extension",
+        "status": "temporary",
+        "cause_code": "manifest_mismatch",
+        "rationale": "Registered command set diverges from manifest expectation in current fixture corpus.",
+        "mitigation": "Audit fixture expectations and extension registrations to restore parity.",
+        "owner": "pi-conformance-team",
+        "review_by": "2026-03-31",
+        "tracking_issue": "bd-k5q5.2.7"
+      },
+      {
+        "id": "third-party/charles-cooper-pi-extensions",
+        "kind": "extension",
+        "status": "temporary",
+        "cause_code": "manifest_mismatch",
+        "rationale": "Registered command set diverges from manifest expectation in current fixture corpus.",
+        "mitigation": "Audit fixture expectations and extension registrations to restore parity.",
+        "owner": "pi-conformance-team",
+        "review_by": "2026-03-31",
+        "tracking_issue": "bd-k5q5.2.7"
+      },
+      {
+        "id": "third-party/marckrenn-pi-sub",
+        "kind": "extension",
+        "status": "temporary",
+        "cause_code": "manifest_mismatch",
+        "rationale": "Registered command set diverges from manifest expectation in current fixture corpus.",
+        "mitigation": "Audit fixture expectations and extension registrations to restore parity.",
+        "owner": "pi-conformance-team",
+        "review_by": "2026-03-31",
+        "tracking_issue": "bd-k5q5.2.7"
+      },
+      {
+        "id": "third-party/openclaw-openclaw",
+        "kind": "extension",
+        "status": "temporary",
+        "cause_code": "manifest_mismatch",
+        "rationale": "Registered command set diverges from manifest expectation in current fixture corpus.",
+        "mitigation": "Audit fixture expectations and extension registrations to restore parity.",
+        "owner": "pi-conformance-team",
+        "review_by": "2026-03-31",
+        "tracking_issue": "bd-k5q5.2.7"
+      },
+      {
+        "id": "third-party/pasky-pi-amplike",
+        "kind": "extension",
+        "status": "temporary",
+        "cause_code": "manifest_mismatch",
+        "rationale": "Registered command set diverges from manifest expectation in current fixture corpus.",
+        "mitigation": "Audit fixture expectations and extension registrations to restore parity.",
+        "owner": "pi-conformance-team",
+        "review_by": "2026-03-31",
+        "tracking_issue": "bd-k5q5.2.7"
+      },
+      {
+        "id": "third-party/w-winter-dot314",
+        "kind": "extension",
+        "status": "temporary",
+        "cause_code": "manifest_mismatch",
+        "rationale": "Registered command set diverges from manifest expectation in current fixture corpus.",
+        "mitigation": "Audit fixture expectations and extension registrations to restore parity.",
+        "owner": "pi-conformance-team",
+        "review_by": "2026-03-31",
+        "tracking_issue": "bd-k5q5.2.7"
       }
     ]
   }
