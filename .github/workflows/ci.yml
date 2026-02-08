@@ -440,6 +440,17 @@ jobs:
           set -euxo pipefail
           python3 scripts/check_conformance_regression.py
 
+      - name: Release gate (evidence bundle) [linux]
+        if: runner.os == 'Linux'
+        run: |
+          set -euxo pipefail
+          ./scripts/release_gate.sh --report | tee release_gate_report.json
+          VERDICT=$(python3 -c "import json; print(json.load(open('release_gate_report.json')).get('verdict','unknown'))")
+          echo "Release gate verdict: $VERDICT"
+          if [ "$VERDICT" = "fail" ]; then
+            echo "::warning::Release gate failed — conformance evidence bundle does not meet thresholds"
+          fi
+
       - name: Coverage summary (llvm-cov)
         if: runner.os == 'Linux'
         run: |
@@ -486,4 +497,5 @@ jobs:
             pi_agent_rust/tests/e2e_results/**/*.json
             pi_agent_rust/tests/e2e_results/**/*.jsonl
             pi_agent_rust/tests/e2e_results/**/*.log
+            pi_agent_rust/release_gate_report.json
           if-no-files-found: ignore

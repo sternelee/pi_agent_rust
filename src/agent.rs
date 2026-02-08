@@ -1089,10 +1089,16 @@ impl Agent {
             }
         }
 
-        // Clean up the stale partial message before returning the error so
-        // `self.messages` is not left with an incomplete assistant entry.
-        if added_partial && matches!(self.messages.last(), Some(Message::Assistant(_))) {
-            self.messages.pop();
+        // If the stream ends without a Done/Error event, we may have a partial message.
+        // Instead of discarding it, we finalize it with an error state so the user/session
+        // retains the partial content.
+        if added_partial {
+            if let Some(Message::Assistant(last_msg)) = self.messages.last() {
+                let mut final_msg = last_msg.clone();
+                final_msg.stop_reason = StopReason::Error;
+                final_msg.error_message = Some("Stream ended without Done event".to_string());
+                return Ok(self.finalize_assistant_message(final_msg, on_event, true));
+            }
         }
         Err(Error::api("Stream ended without Done event"))
     }

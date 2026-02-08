@@ -319,7 +319,7 @@ where
                 provider,
                 model,
                 usage: Usage::default(),
-                stop_reason: StopReason::Stop,
+                stop_reason: StopReason::Error,
                 error_message: None,
                 timestamp: chrono::Utc::now().timestamp_millis(),
             },

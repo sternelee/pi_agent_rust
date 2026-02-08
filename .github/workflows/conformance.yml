@@ -185,9 +185,16 @@ jobs:
       - name: "Run: ${{ matrix.name }}"
         env:
           PI_OFFICIAL_MAX: ${{ matrix.env_extra == 'PI_OFFICIAL_MAX=5' && '5' || '' }}
+          PI_CONFORMANCE_MAX_RETRIES: ${{ contains(matrix.if_event, 'nightly') && '2' || '0' }}
+          PI_CONFORMANCE_RETRY_DELAY: "10"
         run: |
           set -euxo pipefail
-          ${{ matrix.test_cmd }} 2>&1 | tee "conformance-${{ matrix.name }}.log"
+          if [[ "${PI_CONFORMANCE_MAX_RETRIES}" -gt 0 ]]; then
+            bash scripts/ci_conformance_retry.sh "${{ matrix.name }}" \
+              ${{ matrix.test_cmd }} 2>&1 | tee "conformance-${{ matrix.name }}.log"
+          else
+            ${{ matrix.test_cmd }} 2>&1 | tee "conformance-${{ matrix.name }}.log"
+          fi
 
       - name: Upload conformance logs
         if: always()
@@ -196,7 +203,53 @@ jobs:
           name: conformance-${{ matrix.name }}-${{ github.sha }}
           path: |
             pi_agent_rust/conformance-${{ matrix.name }}.log
+            pi_agent_rust/flake_events.jsonl
             pi_agent_rust/tests/ext_conformance/reports/**/*.json
             pi_agent_rust/tests/ext_conformance/reports/**/*.jsonl
             pi_agent_rust/tests/ext_conformance/reports/**/*.md
+          if-no-files-found: warn
+
+  # ─── Trend report (nightly only) ──────────────────────────────────────
+  trend-report:
+    needs: [conformance-matrix]
+    if: >-
+      github.event_name == 'schedule' && github.event.schedule == '0 2 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download conformance artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: conformance-full-report-*
+          merge-multiple: true
+
+      - name: Ensure reports dir and summary exist
+        run: |
+          set -euxo pipefail
+          mkdir -p tests/ext_conformance/reports
+          # download-artifact strips the common pi_agent_rust/ prefix, so the
+          # summary lands directly in tests/ext_conformance/reports/.
+          # Verify it exists (it may also already be there from the checkout).
+          if [ -f tests/ext_conformance/reports/conformance_summary.json ]; then
+            echo "conformance_summary.json found"
+          else
+            echo "WARNING: conformance_summary.json not found after artifact download"
+            ls -la tests/ext_conformance/reports/ || true
+          fi
+
+      - name: Generate trend entry and report
+        env:
+          GIT_SHA: ${{ github.sha }}
+          GIT_REF: ${{ github.ref_name }}
+        run: python3 scripts/conformance_trend.py
+
+      - name: Upload trend report
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-trend-${{ github.sha }}
+          path: |
+            tests/ext_conformance/reports/conformance_trend.jsonl
+            tests/ext_conformance/reports/TREND_REPORT.md
           if-no-files-found: warn

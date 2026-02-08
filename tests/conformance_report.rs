@@ -62,6 +62,22 @@ struct ProvenanceItem {
     version: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TrendReport {
+    schema: String, // "pi.ext.conformance_trend.v1"
+    history: Vec<TrendEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TrendEntry {
+    ts: String,
+    total: u32,
+    pass: u32,
+    fail: u32,
+    na: u32,
+    pass_rate_pct: f64,
+}
+
 #[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
 struct ExtensionStatus {
@@ -276,6 +292,41 @@ fn ingest_negative_report(reports: &Path) -> (u32, u32) {
             .unwrap_or(0),
     );
     (pass, fail)
+}
+
+fn update_trend_report(summary: &Value, reports: &Path) {
+    let trend_path = reports.join("conformance_trend.json");
+    let mut report = if trend_path.exists() {
+        read_json_file(&trend_path)
+            .and_then(|v| serde_json::from_value::<TrendReport>(v).ok())
+            .unwrap_or_else(|| TrendReport {
+                schema: "pi.ext.conformance_trend.v1".to_string(),
+                history: Vec::new(),
+            })
+    } else {
+        TrendReport {
+            schema: "pi.ext.conformance_trend.v1".to_string(),
+            history: Vec::new(),
+        }
+    };
+
+    let counts = summary.get("counts").expect("summary counts");
+    let entry = TrendEntry {
+        ts: summary["generated_at"].as_str().unwrap_or("").to_string(),
+        total: u32_from_u64_saturating(counts["total"].as_u64().unwrap_or(0)),
+        pass: u32_from_u64_saturating(counts["pass"].as_u64().unwrap_or(0)),
+        fail: u32_from_u64_saturating(counts["fail"].as_u64().unwrap_or(0)),
+        na: u32_from_u64_saturating(counts["na"].as_u64().unwrap_or(0)),
+        pass_rate_pct: summary["pass_rate_pct"].as_f64().unwrap_or(0.0),
+    };
+
+    report.history.push(entry);
+
+    std::fs::write(
+        &trend_path,
+        serde_json::to_string_pretty(&report).unwrap_or_default(),
+    )
+    .expect("write conformance_trend.json");
 }
 
 // ─── Report Generation ──────────────────────────────────────────────────────
@@ -826,7 +877,10 @@ fn generate_conformance_report() {
     )
     .expect("write conformance_summary.json");
 
-    // 5. Generate markdown report
+    // 5. Update trend report
+    update_trend_report(&summary, &reports);
+
+    // 6. Generate markdown report
     let md = generate_markdown(
         &extensions,
         &statuses,
@@ -1252,4 +1306,51 @@ fn report_markdown_has_coverage_gaps() {
         md.contains("## Coverage Gaps"),
         "report should have Coverage Gaps section when untested extensions exist"
     );
+}
+
+#[test]
+#[allow(clippy::similar_names)]
+fn trend_report_updates_history() {
+    let tmp = tempdir().expect("create tempdir");
+    let reports = tmp.path();
+    let summary = json!({
+        "generated_at": "2026-02-08T10:00:00Z",
+        "counts": {
+            "total": 100,
+            "pass": 80,
+            "fail": 10,
+            "na": 10
+        },
+        "pass_rate_pct": 88.8
+    });
+
+    // First run: create
+    update_trend_report(&summary, reports);
+    let trend_path = reports.join("conformance_trend.json");
+    assert!(trend_path.exists());
+    
+    let report: TrendReport = serde_json::from_str(
+        &std::fs::read_to_string(&trend_path).unwrap()
+    ).unwrap();
+    assert_eq!(report.history.len(), 1);
+    assert_eq!(report.history[0].pass, 80);
+
+    // Second run: append
+    let summary2 = json!({
+        "generated_at": "2026-02-09T10:00:00Z",
+        "counts": {
+            "total": 100,
+            "pass": 85,
+            "fail": 5,
+            "na": 10
+        },
+        "pass_rate_pct": 94.4
+    });
+    update_trend_report(&summary2, reports);
+    
+    let report2: TrendReport = serde_json::from_str(
+        &std::fs::read_to_string(&trend_path).unwrap()
+    ).unwrap();
+    assert_eq!(report2.history.len(), 2);
+    assert_eq!(report2.history[1].pass, 85);
 }

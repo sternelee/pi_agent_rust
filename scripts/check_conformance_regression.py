@@ -11,6 +11,7 @@ Checks performed:
 3. N/A count must not increase (no new N/A introductions).
 4. Individual extension regressions: PASS→FAIL and PASS→N/A are flagged.
 5. New failures must not exceed max_new_failures threshold.
+6. Trend degradation warning: warn if pass_rate dropped 3+ consecutive runs (non-blocking).
 
 Environment variables:
   CI_REGRESSION_MODE    "strict" (default) or "warn" (log but don't fail)
@@ -30,6 +31,7 @@ BASELINE_PATH = REPO_ROOT / "tests" / "ext_conformance" / "reports" / "conforman
 SUMMARY_PATH = REPO_ROOT / "tests" / "ext_conformance" / "reports" / "conformance_summary.json"
 EVENTS_PATH = REPO_ROOT / "tests" / "ext_conformance" / "reports" / "conformance_events.jsonl"
 VERDICT_PATH = REPO_ROOT / "tests" / "ext_conformance" / "reports" / "regression_verdict.json"
+TREND_PATH = REPO_ROOT / "tests" / "ext_conformance" / "reports" / "conformance_trend.jsonl"
 
 
 def load_json(path: Path, label: str) -> dict[str, Any]:
@@ -281,6 +283,40 @@ def main() -> int:
             f"(threshold: {scenario_min}%). "
             "Scenario regression is validated by ext_conformance_scenarios test."
         )
+
+    # ── 6. Trend degradation warning (informational) ──────────────────────
+    #
+    # If conformance_trend.jsonl exists with 3+ entries, warn if pass_rate
+    # has dropped for 3 or more consecutive runs (sustained degradation).
+
+    if TREND_PATH.is_file():
+        trend_entries: list[dict[str, Any]] = []
+        with TREND_PATH.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    trend_entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+        if len(trend_entries) >= 3:
+            consecutive_drops = 0
+            for i in range(len(trend_entries) - 1, 0, -1):
+                curr = trend_entries[i].get("pass_rate_pct", 0.0)
+                prev = trend_entries[i - 1].get("pass_rate_pct", 0.0)
+                if curr < prev:
+                    consecutive_drops += 1
+                else:
+                    break
+
+            if consecutive_drops >= 3:
+                warnings.append(
+                    f"Sustained degradation: pass_rate dropped for "
+                    f"{consecutive_drops} consecutive runs. "
+                    f"Review conformance_trend.jsonl for details."
+                )
 
     # ── Build verdict ────────────────────────────────────────────────────────
 

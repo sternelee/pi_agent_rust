@@ -101,6 +101,12 @@ pub const DEFAULT_FIND_LIMIT: usize = 1000;
 /// Default ls result limit.
 pub const DEFAULT_LS_LIMIT: usize = 500;
 
+/// Hard limit for directory scanning in ls tool to prevent OOM/hangs.
+pub const LS_SCAN_HARD_LIMIT: usize = 20_000;
+
+/// Hard limit for read tool file size (100MB) to prevent OOM.
+pub const READ_TOOL_MAX_BYTES: u64 = 100 * 1024 * 1024;
+
 /// Default timeout (in seconds) for bash tool execution.
 pub const DEFAULT_BASH_TIMEOUT_SECS: u64 = 120;
 
@@ -1028,6 +1034,19 @@ impl Tool for ReadTool {
             serde_json::from_value(input).map_err(|e| Error::validation(e.to_string()))?;
 
         let path = resolve_read_path(&input.path, &self.cwd);
+
+        if let Ok(meta) = asupersync::fs::metadata(&path).await {
+            if meta.len() > READ_TOOL_MAX_BYTES {
+                return Err(Error::tool(
+                    "read",
+                    format!(
+                        "File is too large ({} bytes). Max allowed is {} bytes. For large files, use `bash` with `grep`, `head`, `tail`, or `sed`.",
+                        meta.len(),
+                        READ_TOOL_MAX_BYTES
+                    ),
+                ));
+            }
+        }
 
         let bytes = asupersync::fs::read(&path)
             .await
@@ -1988,6 +2007,19 @@ impl Tool for EditTool {
                 "edit",
                 format!("File not found: {}", input.path),
             ));
+        }
+
+        if let Ok(meta) = asupersync::fs::metadata(&absolute_path).await {
+            if meta.len() > READ_TOOL_MAX_BYTES {
+                return Err(Error::tool(
+                    "edit",
+                    format!(
+                        "File is too large ({} bytes). Max allowed for editing is {} bytes.",
+                        meta.len(),
+                        READ_TOOL_MAX_BYTES
+                    ),
+                ));
+            }
         }
 
         // Read bytes and decode strictly as UTF-8 to avoid corrupting binary files.
@@ -3016,7 +3048,7 @@ impl LsTool {
 }
 
 #[async_trait]
-#[allow(clippy::unnecessary_literal_bound)]
+#[allow(clippy::unnecessary_literal_bound, clippy::too_many_lines)]
 impl Tool for LsTool {
     fn name(&self) -> &str {
         "ls"
@@ -3078,11 +3110,16 @@ impl Tool for LsTool {
             .await
             .map_err(|e| Error::tool("ls", format!("Cannot read directory: {e}")))?;
 
+        let mut scan_limit_reached = false;
         while let Some(entry) = read_dir
             .next_entry()
             .await
             .map_err(|e| Error::tool("ls", format!("Cannot read directory entry: {e}")))?
         {
+            if entries.len() >= LS_SCAN_HARD_LIMIT {
+                scan_limit_reached = true;
+                break;
+            }
             let name = entry.file_name().to_string_lossy().to_string();
             let Ok(meta) = entry.metadata().await else {
                 continue;
@@ -3132,6 +3169,16 @@ impl Tool for LsTool {
             details_map.insert(
                 "entryLimitReached".to_string(),
                 serde_json::Value::Number(serde_json::Number::from(effective_limit)),
+            );
+        }
+
+        if scan_limit_reached {
+            notices.push(format!(
+                "Directory scan limited to {LS_SCAN_HARD_LIMIT} entries to prevent system overload"
+            ));
+            details_map.insert(
+                "scanLimitReached".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(LS_SCAN_HARD_LIMIT)),
             );
         }
 
