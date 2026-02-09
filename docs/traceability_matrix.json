@@ -2,14 +2,14 @@
   "schema_version": "1.0.0",
   "program_issue_id": "bd-k5q5.7",
   "program_title": "Comprehensive Verification Program: unit tests, end-to-end scripts, and detailed diagnostics logging",
-  "updated_at": "2026-02-08",
+  "updated_at": "2026-02-09",
   "ci_policy": {
     "required_categories": [
       "unit_tests",
       "e2e_scripts",
       "evidence_logs"
     ],
-    "min_classified_trace_coverage_pct": 20
+    "min_classified_trace_coverage_pct": 100
   },
   "requirements": [
     {
