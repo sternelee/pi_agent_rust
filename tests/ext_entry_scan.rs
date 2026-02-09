@@ -58,7 +58,10 @@ struct ScanOutput {
 }
 
 fn artifacts_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/ext_conformance/artifacts")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("ext_conformance")
+        .join("artifacts")
 }
 
 fn collect_ts_files(root: &Path) -> Vec<PathBuf> {
@@ -416,8 +419,9 @@ fn scan_extension_entry_points() {
     };
 
     // Write output to docs/
-    let output_path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/extension-entry-scan.json");
+    let output_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("docs")
+        .join("extension-entry-scan.json");
     let json = serde_json::to_string_pretty(&output).expect("serialize scan output");
     std::fs::write(&output_path, &json).expect("write scan output");
 
@@ -458,10 +462,16 @@ fn scan_extension_entry_points() {
     let hello = output
         .files
         .iter()
-        .find(|f| f.path.contains("hello/hello.ts"));
+        .find(|f| f.path.contains("hello/hello.ts") || f.path.contains("hello\\hello.ts"));
     assert!(
         hello.is_some(),
-        "hello/hello.ts should be in the scan output"
+        "hello/hello.ts should be in the scan output; sample paths: {:?}",
+        output
+            .files
+            .iter()
+            .take(5)
+            .map(|f| &f.path)
+            .collect::<Vec<_>>()
     );
     let hello = hello.unwrap();
     assert_eq!(
@@ -472,7 +482,9 @@ fn scan_extension_entry_points() {
 
     // Spot-check: doom-overlay sub-modules should NOT be entry points
     for f in &output.files {
-        if f.path.contains("doom-overlay/") && !f.path.contains("index.ts") {
+        if (f.path.contains("doom-overlay/") || f.path.contains("doom-overlay\\"))
+            && !f.path.contains("index.ts")
+        {
             assert_ne!(
                 f.classification, "entry_point",
                 "doom-overlay sub-module {} should not be entry_point",
