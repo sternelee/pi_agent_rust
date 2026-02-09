@@ -207,13 +207,20 @@ fn normalizes_dynamic_fields_paths_and_ansi() {
     assert_eq!(normalized["source"]["pid"], 0);
 
     let msg = normalized["message"].as_str().unwrap_or_default();
-    assert!(msg.contains("<PI_MONO_ROOT>/file.txt"));
+    // Windows PathBuf::join uses backslash, so accept both separators
+    assert!(
+        msg.contains("<PI_MONO_ROOT>/file.txt")
+            || msg.contains("<PI_MONO_ROOT>\\file.txt"),
+    );
     assert!(!msg.contains(&cwd.display().to_string()));
     assert!(!msg.contains("\u{1b}["));
     assert!(msg.contains("ERR"));
 
     let path = normalized["data"]["path"].as_str().unwrap_or_default();
-    assert!(path.contains("<PI_MONO_ROOT>/dir/sub/file.rs"));
+    assert!(
+        path.contains("<PI_MONO_ROOT>/dir/sub/file.rs")
+            || path.contains("<PI_MONO_ROOT>\\dir\\sub\\file.rs"),
+    );
     assert!(!path.contains(&cwd.display().to_string()));
 
     assert_eq!(normalized["data"]["note"], "Bold");
