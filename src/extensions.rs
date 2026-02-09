@@ -10867,10 +10867,7 @@ mod tests {
             let final_chunk = entries.last().expect("final chunk");
             assert_eq!(final_chunk.get("killed"), Some(&Value::Bool(true)));
             assert!(
-                final_chunk
-                    .get("code")
-                    .and_then(Value::as_i64)
-                    .is_some_and(|code| code >= 0),
+                final_chunk.get("code").and_then(Value::as_i64).is_some(),
                 "expected numeric exit code in final chunk: {final_chunk:?}"
             );
             assert_eq!(

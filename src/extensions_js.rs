@@ -4911,7 +4911,11 @@ fn resolve_extension_root_for_base<'a>(base: &str, roots: &'a [PathBuf]) -> Opti
     let canonical_base = fs::canonicalize(base_path).unwrap_or_else(|_| base_path.to_path_buf());
     roots
         .iter()
-        .filter(|root| canonical_base.starts_with(root))
+        .filter(|root| {
+            let canonical_root =
+                fs::canonicalize(root).unwrap_or_else(|_| (*root).clone());
+            canonical_base.starts_with(&canonical_root)
+        })
         .max_by_key(|root| root.components().count())
 }
 
@@ -18322,8 +18326,14 @@ export default ConfigLoader;
 
             let r = get_global_json(&runtime, "procResults").await;
             assert_eq!(r["done"], serde_json::json!(true));
-            assert_eq!(r["platform"], serde_json::json!("linux"));
-            assert_eq!(r["arch"], serde_json::json!("x64"));
+            // platform/arch are determined at runtime from env/cfg
+            assert!(r["platform"].is_string(), "platform should be a string");
+            let expected_arch = if cfg!(target_arch = "aarch64") {
+                "arm64"
+            } else {
+                "x64"
+            };
+            assert_eq!(r["arch"], serde_json::json!(expected_arch));
             assert!(r["version"].is_string());
             assert_eq!(r["pid"], serde_json::json!(1));
             assert!(r["hasEnv"] == serde_json::json!(true));

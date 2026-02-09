@@ -2358,11 +2358,8 @@ fn prune_empty_git_parents(target_dir: &Path, root: &Path) {
     let mut current = target_dir.parent().map(PathBuf::from);
 
     while let Some(dir) = current {
-        if dir == root {
-            break;
-        }
         let Ok(canon) = dir.canonicalize() else { break };
-        if !canon.starts_with(&root) {
+        if canon == root || !canon.starts_with(&root) {
             break;
         }
         let Ok(entries) = fs::read_dir(&dir) else {
