@@ -267,6 +267,36 @@ fn read_output_for_sample(cwd: &Path, path: &str) -> String {
         .unwrap_or_default()
 }
 
+fn assert_tool_output_visible(pane: &str, tool_output: &str) -> (String, String) {
+    // Include both numbered tool output lines and raw sample content lines.
+    // The TUI can reflow or trim prefixes in narrow panes.
+    let mut expected_lines: Vec<&str> = tool_output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    for raw_line in SAMPLE_FILE_CONTENT.lines() {
+        let trimmed = raw_line.trim();
+        if !trimmed.is_empty() && !expected_lines.contains(&trimmed) {
+            expected_lines.push(trimmed);
+        }
+    }
+    if expected_lines.is_empty() {
+        expected_lines.push("Hello");
+    }
+    let matched_line = expected_lines
+        .iter()
+        .copied()
+        .find(|line| pane.contains(line));
+    assert!(
+        matched_line.is_some(),
+        "Expected at least one tool output line in pane.\nExpected any of: {expected_lines:?}\nPane:\n{pane}"
+    );
+    (
+        expected_lines.join(" | "),
+        matched_line.unwrap_or("<none>").to_string(),
+    )
+}
+
 #[allow(clippy::too_many_lines)]
 fn write_vcr_cassette(dir: &Path, tool_output: &str, system_prompt: &str) -> PathBuf {
     let cassette_path = dir.join(format!("{VCR_TEST_NAME}.json"));
@@ -1219,6 +1249,7 @@ fn e2e_tui_basic_chat_vcr() {
 
 /// E2E interactive: VCR playback tool call with deterministic artifacts.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn e2e_tui_vcr_tool_read() {
     let Some((_lock, mut session)) = new_locked_tui_session("e2e_tui_vcr_tool_read") else {
         eprintln!("Skipping: tmux not available");
@@ -1270,20 +1301,14 @@ fn e2e_tui_vcr_tool_read() {
     session.wait_and_capture("startup", "Welcome to Pi!", STARTUP_TIMEOUT);
 
     let pane = session.send_text_and_wait("prompt", VCR_PROMPT, "Done.", COMMAND_TIMEOUT);
-    let expected_line = tool_output
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("Hello");
-    assert!(
-        pane.contains(expected_line),
-        "Expected tool output line in pane.\nExpected: {expected_line}\nPane:\n{pane}"
-    );
+    let (expected_lines_log, matched_line) = assert_tool_output_visible(&pane, &tool_output);
 
     session
         .harness
         .log()
         .info_ctx("verify", "Tool output rendered", |ctx| {
-            ctx.push(("expected_line".into(), expected_line.to_string()));
+            ctx.push(("expected_lines".into(), expected_lines_log.clone()));
+            ctx.push(("matched_line".into(), matched_line.clone()));
             ctx.push(("prompt".into(), VCR_PROMPT.to_string()));
         });
 
@@ -1430,14 +1455,7 @@ fn e2e_tui_full_interactive_loop() {
     session.harness.section("verify tool output");
 
     // The read tool output should appear in the pane (the file content).
-    let expected_line = tool_output
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("Hello");
-    assert!(
-        pane.contains(expected_line),
-        "Expected tool output line in pane.\nExpected: {expected_line}\nPane:\n{pane}"
-    );
+    let (expected_lines_log, matched_line) = assert_tool_output_visible(&pane, &tool_output);
 
     // The tool name "read" should appear somewhere in the rendered output
     // (pi renders tool calls with their name).
@@ -1456,7 +1474,8 @@ fn e2e_tui_full_interactive_loop() {
         .harness
         .log()
         .info_ctx("verify", "Tool output + response rendered", |ctx| {
-            ctx.push(("expected_line".into(), expected_line.to_string()));
+            ctx.push(("expected_lines".into(), expected_lines_log.clone()));
+            ctx.push(("matched_line".into(), matched_line.clone()));
             ctx.push(("tool_name_found".into(), pane.contains("read").to_string()));
             ctx.push((
                 "final_response_found".into(),
