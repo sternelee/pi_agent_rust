@@ -29,6 +29,7 @@ jobs:
     steps:
       - name: Free disk space [linux]
         if: runner.os == 'Linux'
+        working-directory: /
         run: |
           set -euxo pipefail
           df -h /

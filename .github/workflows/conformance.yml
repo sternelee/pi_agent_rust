@@ -112,6 +112,7 @@ jobs:
 
     steps:
       - name: Free disk space
+        working-directory: /
         run: |
           set -euxo pipefail
           df -h /
