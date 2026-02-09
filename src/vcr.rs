@@ -60,7 +60,9 @@ fn env_var(name: &str) -> Option<String> {
 
 #[cfg(test)]
 fn set_test_env_var(name: &str, value: Option<&str>) -> Option<String> {
-    let mut guard = test_env_overrides().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = test_env_overrides()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let previous = guard.get(name).and_then(Clone::clone);
     // Store Some(val) for override or None as tombstone (explicitly unset)
     guard.insert(name.to_string(), value.map(String::from));
@@ -69,7 +71,9 @@ fn set_test_env_var(name: &str, value: Option<&str>) -> Option<String> {
 
 #[cfg(test)]
 fn restore_test_env_var(name: &str, previous: Option<String>) {
-    let mut guard = test_env_overrides().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = test_env_overrides()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     match previous {
         Some(value) => {
             guard.insert(name.to_string(), Some(value));
@@ -752,7 +756,9 @@ mod tests {
     /// Acquire `env_test_lock`, recovering from poison so that one
     /// test-thread panic doesn't cascade into every other env-test.
     fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-        env_test_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     #[test]

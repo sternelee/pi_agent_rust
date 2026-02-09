@@ -4912,8 +4912,7 @@ fn resolve_extension_root_for_base<'a>(base: &str, roots: &'a [PathBuf]) -> Opti
     roots
         .iter()
         .filter(|root| {
-            let canonical_root =
-                fs::canonicalize(root).unwrap_or_else(|_| (*root).clone());
+            let canonical_root = fs::canonicalize(root).unwrap_or_else(|_| (*root).clone());
             canonical_base.starts_with(&canonical_root)
         })
         .max_by_key(|root| root.components().count())
