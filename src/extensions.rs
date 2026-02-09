@@ -657,6 +657,11 @@ fn extract_import_specifiers(line: &str) -> Vec<(String, usize)> {
         return Vec::new();
     }
 
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with("import") && !line.contains('(') {
+        return Vec::new();
+    }
+
     let mut out = Vec::new();
 
     if let Some(caps) = import_from_regex().captures(line) {
@@ -685,12 +690,17 @@ fn extract_require_specifiers(line: &str) -> Vec<(String, usize)> {
         return Vec::new();
     }
 
+    if !line.contains('(') {
+        return Vec::new();
+    }
+
     let mut out = Vec::new();
     for caps in require_regex().captures_iter(line) {
         if let Some(m) = caps.get(1) {
             out.push((m.as_str().to_string(), m.start() + 1));
         }
     }
+
     out
 }
 
@@ -1244,6 +1254,15 @@ pub enum ExtensionPolicyMode {
     Strict,
     Prompt,
     Permissive,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RepairPolicyMode {
+    Off,
+    Suggest,
+    AutoSafe,
+    AutoStrict,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6070,10 +6089,11 @@ async fn load_one_extension(
 ) -> Result<()> {
     // Register the extension's root directory so `readFileSync` can access
     // bundled assets (HTML templates, markdown docs, etc.) within the
-    // extension's own directory tree.
+    // extension's own directory tree, and so the resolver can detect
+    // monorepo escape patterns (Pattern 3).
     if let Some(ext_dir) = spec.entry_path.parent() {
         if let Ok(canonical) = std::fs::canonicalize(ext_dir) {
-            runtime.add_allowed_read_root(canonical);
+            runtime.add_extension_root(canonical);
         }
     }
 

@@ -32,6 +32,7 @@ use pi::extensions_js::{
     RepairMode, RepairPattern, RepairRisk, SemanticDriftSeverity, SemanticParityVerdict,
     SloVerdict, StructuralVerdict, TelemetryCollector, TelemetryMetric,
     TolerantParseResult, VerificationBundle, REPAIR_REGISTRY_VERSION, REPAIR_RULES,
+    extract_import_names, generate_monorepo_stub,
 };
 use pi::tools::ToolRegistry;
 use std::sync::Arc;
@@ -3492,4 +3493,251 @@ fn governance_report_has_expected_checks() {
     assert!(ids.contains(&"GOV-004"));
     assert!(ids.contains(&"GOV-005"));
     assert!(ids.contains(&"GOV-006"));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Pattern 3 (bd-k5q5.8.4): Monorepo Sibling Module Stubs
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── extract_import_names ────────────────────────────────────────────────────
+
+#[test]
+fn extract_import_names_esm_basic() {
+    let source = r#"import { foo, bar, baz } from "../../shared";"#;
+    let names = extract_import_names(source, "../../shared");
+    assert_eq!(names, vec!["bar", "baz", "foo"]); // sorted
+}
+
+#[test]
+fn extract_import_names_esm_skips_type_imports() {
+    let source = r#"import { foo, type Bar, baz } from "../../shared";"#;
+    let names = extract_import_names(source, "../../shared");
+    assert_eq!(names, vec!["baz", "foo"]);
+}
+
+#[test]
+fn extract_import_names_cjs_require() {
+    let source = r#"const { alpha, beta } = require("../../shared");"#;
+    let names = extract_import_names(source, "../../shared");
+    assert_eq!(names, vec!["alpha", "beta"]);
+}
+
+#[test]
+fn extract_import_names_ignores_other_specifiers() {
+    let source = r#"
+import { foo } from "../../shared";
+import { bar } from "./local";
+"#;
+    let names = extract_import_names(source, "../../shared");
+    assert_eq!(names, vec!["foo"]);
+}
+
+#[test]
+fn extract_import_names_with_as_alias() {
+    let source = r#"import { foo as myFoo, bar } from "../../shared";"#;
+    let names = extract_import_names(source, "../../shared");
+    // Exports the original name, not the alias
+    assert_eq!(names, vec!["bar", "foo"]);
+}
+
+#[test]
+fn extract_import_names_deduplicates() {
+    let source = r#"
+import { foo, bar } from "../../shared";
+const { foo, baz } = require("../../shared");
+"#;
+    let names = extract_import_names(source, "../../shared");
+    assert_eq!(names, vec!["bar", "baz", "foo"]); // deduped
+}
+
+#[test]
+fn extract_import_names_empty_for_no_match() {
+    let source = r#"import { foo } from "./local";"#;
+    let names = extract_import_names(source, "../../shared");
+    assert!(names.is_empty());
+}
+
+// ─── generate_monorepo_stub ──────────────────────────────────────────────────
+
+#[test]
+fn generate_stub_boolean_heuristic() {
+    let stub = generate_monorepo_stub(&["isReady".to_string(), "hasAccess".to_string()]);
+    assert!(stub.contains("export const isReady = () => false;"));
+    assert!(stub.contains("export const hasAccess = () => false;"));
+}
+
+#[test]
+fn generate_stub_getter_heuristic() {
+    let stub = generate_monorepo_stub(&["getConfig".to_string(), "detectTerminal".to_string()]);
+    assert!(stub.contains("export const getConfig = () => ({});"));
+    assert!(stub.contains("export const detectTerminal = () => ({});"));
+}
+
+#[test]
+fn generate_stub_action_heuristic() {
+    let stub = generate_monorepo_stub(&["playBeep".to_string(), "sendNotification".to_string()]);
+    assert!(stub.contains("export const playBeep = () => {};"));
+    assert!(stub.contains("export const sendNotification = () => {};"));
+}
+
+#[test]
+fn generate_stub_constant_heuristic() {
+    let stub = generate_monorepo_stub(&["BEEP_SOUNDS".to_string(), "MAX_RETRY".to_string()]);
+    assert!(stub.contains("export const BEEP_SOUNDS = [];"));
+    assert!(stub.contains("export const MAX_RETRY = [];"));
+}
+
+#[test]
+fn generate_stub_class_heuristic() {
+    let stub = generate_monorepo_stub(&["ProcessManager".to_string()]);
+    assert!(stub.contains("export class ProcessManager {}"));
+}
+
+#[test]
+fn generate_stub_generic_function() {
+    let stub = generate_monorepo_stub(&["doSomething".to_string(), "notify".to_string()]);
+    assert!(stub.contains("export const doSomething = () => {};"));
+    assert!(stub.contains("export const notify = () => {};"));
+}
+
+#[test]
+fn generate_stub_header_comment() {
+    let stub = generate_monorepo_stub(&["foo".to_string()]);
+    assert!(stub.contains("Auto-generated monorepo escape stub"));
+}
+
+#[test]
+fn generate_stub_empty_names() {
+    let stub = generate_monorepo_stub(&[]);
+    assert!(stub.contains("Auto-generated monorepo escape stub"));
+    // Only the header line
+    assert_eq!(stub.lines().count(), 1);
+}
+
+// ─── Integration: monorepo escape resolver with real runtime ─────────────────
+
+fn start_runtime_with_repair_mode(
+    harness: &common::TestHarness,
+    mode: RepairMode,
+) -> (ExtensionManager, JsExtensionRuntimeHandle) {
+    let cwd = harness.temp_dir().to_path_buf();
+    let manager = ExtensionManager::new();
+    let tools = Arc::new(ToolRegistry::new(&[], &cwd, None));
+    let config = PiJsRuntimeConfig {
+        cwd: cwd.display().to_string(),
+        repair_mode: mode,
+        ..Default::default()
+    };
+
+    let runtime = common::run_async({
+        let manager = manager.clone();
+        let tools = Arc::clone(&tools);
+        async move {
+            JsExtensionRuntimeHandle::start(config, tools, manager)
+                .await
+                .expect("start js runtime")
+        }
+    });
+
+    (manager, runtime)
+}
+
+#[test]
+fn monorepo_escape_stub_loads_with_autostrict() {
+    use pi::extensions::{ExtensionEventName, JsExtensionLoadSpec};
+
+    let harness = common::TestHarness::new("monorepo_escape");
+    let cwd = harness.temp_dir().to_path_buf();
+
+    // Create an extension that imports from a monorepo sibling
+    let ext_source = r#"
+import { getConfig, isReady, BEEP_SOUNDS } from "../../shared";
+
+export default function activate(pi) {
+    pi.on("agent_start", (event, ctx) => {
+        const cfg = getConfig();
+        const ready = isReady();
+        return {
+            result: `cfg=${JSON.stringify(cfg)},ready=${ready},beeps=${JSON.stringify(BEEP_SOUNDS)}`
+        };
+    });
+}
+"#;
+    let ext_dir = cwd.join("extensions").join("test-ext");
+    std::fs::create_dir_all(&ext_dir).unwrap();
+    std::fs::write(ext_dir.join("index.mjs"), ext_source).unwrap();
+
+    let (manager, runtime) = start_runtime_with_repair_mode(&harness, RepairMode::AutoStrict);
+    manager.set_js_runtime(runtime);
+
+    let spec =
+        JsExtensionLoadSpec::from_entry_path(ext_dir.join("index.mjs")).expect("load spec");
+
+    common::run_async({
+        let mgr = manager.clone();
+        async move {
+            mgr.load_js_extensions(vec![spec])
+                .await
+                .expect("load extension with monorepo escape stub");
+        }
+    });
+
+    // Dispatch event to verify the stub exports work
+    let response = common::run_async(async move {
+        manager
+            .dispatch_event_with_response(ExtensionEventName::AgentStart, None, 10000)
+            .await
+            .expect("dispatch")
+    });
+
+    let result = response
+        .and_then(|v| v.get("result").and_then(|r| r.as_str()).map(String::from))
+        .unwrap_or_else(|| "NO_RESPONSE".to_string());
+
+    // getConfig() returns {}, isReady() returns false, BEEP_SOUNDS is []
+    assert!(
+        result.contains("cfg={}"),
+        "expected getConfig() to return empty object, got: {result}"
+    );
+    assert!(
+        result.contains("ready=false"),
+        "expected isReady() to return false, got: {result}"
+    );
+    assert!(
+        result.contains("beeps=[]"),
+        "expected BEEP_SOUNDS to be [], got: {result}"
+    );
+}
+
+#[test]
+fn monorepo_escape_not_applied_in_autosafe_mode() {
+    use pi::extensions::JsExtensionLoadSpec;
+
+    let harness = common::TestHarness::new("monorepo_safe");
+    let cwd = harness.temp_dir().to_path_buf();
+
+    // Same extension, but with AutoSafe mode — should fail to load
+    let ext_source = r#"
+import { getConfig } from "../../shared";
+export default function activate(pi) {}
+"#;
+    let ext_dir = cwd.join("extensions").join("test-ext");
+    std::fs::create_dir_all(&ext_dir).unwrap();
+    std::fs::write(ext_dir.join("index.mjs"), ext_source).unwrap();
+
+    let (manager, runtime) = start_runtime_with_repair_mode(&harness, RepairMode::AutoSafe);
+    manager.set_js_runtime(runtime);
+
+    let spec =
+        JsExtensionLoadSpec::from_entry_path(ext_dir.join("index.mjs")).expect("load spec");
+
+    let result = common::run_async(async move {
+        manager.load_js_extensions(vec![spec]).await
+    });
+
+    // Should fail because AutoSafe doesn't allow aggressive patterns
+    assert!(
+        result.is_err(),
+        "expected monorepo escape to fail under AutoSafe mode"
+    );
 }

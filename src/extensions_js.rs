@@ -4737,6 +4737,11 @@ struct PiJsModuleState {
     /// Repair mode propagated from `PiJsRuntimeConfig` so the resolver can
     /// gate fallback patterns without executing any broken code.
     repair_mode: RepairMode,
+    /// Extension root directories used to detect monorepo escape (Pattern 3).
+    /// Populated as extensions are loaded via [`PiJsRuntime::add_extension_root`].
+    extension_roots: Vec<PathBuf>,
+    /// Shared handle for recording repair events from the resolver.
+    repair_events: Arc<std::sync::Mutex<Vec<ExtensionRepairEvent>>>,
 }
 
 impl PiJsModuleState {
@@ -4745,11 +4750,21 @@ impl PiJsModuleState {
             virtual_modules: default_virtual_modules(),
             compiled_sources: HashMap::new(),
             repair_mode: RepairMode::default(),
+            extension_roots: Vec::new(),
+            repair_events: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
     const fn with_repair_mode(mut self, mode: RepairMode) -> Self {
         self.repair_mode = mode;
+        self
+    }
+
+    fn with_repair_events(
+        mut self,
+        events: Arc<std::sync::Mutex<Vec<ExtensionRepairEvent>>>,
+    ) -> Self {
+        self.repair_events = events;
         self
     }
 }
@@ -4816,6 +4831,7 @@ fn unsupported_module_specifier_message(spec: &str) -> String {
 }
 
 impl JsModuleResolver for PiJsResolver {
+    #[allow(clippy::too_many_lines)]
     fn resolve(&mut self, _ctx: &Ctx<'_>, base: &str, name: &str) -> rquickjs::Result<String> {
         let spec = name.trim();
         if spec.is_empty() {
@@ -4834,6 +4850,62 @@ impl JsModuleResolver for PiJsResolver {
 
         if let Some(path) = resolve_module_path(base, spec, repair_mode) {
             return Ok(path.to_string_lossy().to_string());
+        }
+
+        // Pattern 3 (bd-k5q5.8.4): monorepo sibling module stubs.
+        // When a relative import escapes all known extension roots and
+        // the repair mode is aggressive, generate a virtual stub module
+        // containing no-op exports matching the import declaration.
+        if spec.starts_with('.') && repair_mode.allows_aggressive() {
+            let state = self.state.borrow();
+            let roots = state.extension_roots.clone();
+            drop(state);
+
+            if let Some(escaped_path) = detect_monorepo_escape(base, spec, &roots) {
+                // Read the importing file to extract import names.
+                let source = std::fs::read_to_string(base).unwrap_or_default();
+                let names = extract_import_names(&source, spec);
+
+                let stub = generate_monorepo_stub(&names);
+                let virtual_key = format!(
+                    "pijs-repair://monorepo/{}",
+                    escaped_path.display()
+                );
+
+                tracing::info!(
+                    event = "pijs.repair.monorepo_escape",
+                    base = %base,
+                    specifier = %spec,
+                    resolved = %escaped_path.display(),
+                    exports = ?names,
+                    "auto-repair: generated monorepo escape stub"
+                );
+
+                // Record repair event.
+                let state = self.state.borrow();
+                if let Ok(mut events) = state.repair_events.lock() {
+                    events.push(ExtensionRepairEvent {
+                        extension_id: String::new(),
+                        pattern: RepairPattern::MonorepoEscape,
+                        original_error: format!(
+                            "monorepo escape: {} from {base}",
+                            escaped_path.display()
+                        ),
+                        repair_action: format!(
+                            "generated stub with {} exports: {virtual_key}",
+                            names.len()
+                        ),
+                        success: true,
+                        timestamp_ms: 0,
+                    });
+                }
+                drop(state);
+
+                // Register and return the virtual module.
+                let mut state = self.state.borrow_mut();
+                state.virtual_modules.insert(virtual_key.clone(), stub);
+                return Ok(virtual_key);
+            }
         }
 
         Err(rquickjs::Error::new_resolving_message(
@@ -5084,6 +5156,171 @@ fn resolve_existing_module_candidate(path: PathBuf) -> Option<PathBuf> {
     }
 
     None
+}
+
+// ─── Pattern 3 (bd-k5q5.8.4): Monorepo Sibling Module Stubs ─────────────────
+
+/// Regex that captures named imports from an ESM import statement:
+///   `import { a, b, type C } from "specifier"`
+///
+/// Group 1: the names inside braces.
+static IMPORT_NAMES_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+
+fn import_names_regex() -> &'static regex::Regex {
+    IMPORT_NAMES_RE.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?m)import\s*\{([^}]+)\}\s*from\s*['"]([^'"]+)['"]"#,
+        )
+        .expect("import names regex")
+    })
+}
+
+/// Regex for CJS destructured require:
+///   `const { a, b } = require("specifier")`
+static REQUIRE_DESTRUCTURE_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+
+fn require_destructure_regex() -> &'static regex::Regex {
+    REQUIRE_DESTRUCTURE_RE.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?m)(?:const|let|var)\s*\{([^}]+)\}\s*=\s*require\s*\(\s*['"]([^'"]+)['"]"#,
+        )
+        .expect("require destructure regex")
+    })
+}
+
+/// Detect if a relative specifier resolves to a path outside all known
+/// extension roots.  Returns the resolved absolute path if it's an escape.
+fn detect_monorepo_escape(
+    base: &str,
+    specifier: &str,
+    extension_roots: &[PathBuf],
+) -> Option<PathBuf> {
+    if !specifier.starts_with('.') {
+        return None;
+    }
+    let base_dir = Path::new(base).parent()?;
+    let resolved = base_dir.join(specifier);
+
+    // Canonicalize as much as possible — if the exact path doesn't exist,
+    // try the parent directory.
+    let effective = std::fs::canonicalize(&resolved)
+        .or_else(|_| {
+            resolved
+                .parent()
+                .and_then(|p| std::fs::canonicalize(p).ok())
+                .map(|p| p.join(resolved.file_name().unwrap_or_default()))
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no parent"))
+        })
+        .unwrap_or_else(|_| resolved.clone());
+
+    for root in extension_roots {
+        if effective.starts_with(root) {
+            return None; // Within an extension root — not an escape
+        }
+    }
+
+    Some(resolved)
+}
+
+/// Extract the named imports that a source file pulls from a given specifier.
+///
+/// Handles both ESM `import { x, y } from "spec"` and CJS
+/// `const { x, y } = require("spec")`.  Type-only imports (`type Foo`)
+/// are excluded because TypeScript erases them.
+pub fn extract_import_names(source: &str, specifier: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let re_esm = import_names_regex();
+    let re_cjs = require_destructure_regex();
+
+    for cap in re_esm.captures_iter(source) {
+        let spec_in_source = &cap[2];
+        if spec_in_source != specifier {
+            continue;
+        }
+        parse_import_list(&cap[1], &mut names);
+    }
+
+    for cap in re_cjs.captures_iter(source) {
+        let spec_in_source = &cap[2];
+        if spec_in_source != specifier {
+            continue;
+        }
+        parse_import_list(&cap[1], &mut names);
+    }
+
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Parse a comma-separated list of import names, skipping `type`-only imports.
+fn parse_import_list(raw: &str, out: &mut Vec<String>) {
+    for token in raw.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        // Skip `type Foo` (TypeScript type-only import)
+        if token.starts_with("type ") || token.starts_with("type\t") {
+            continue;
+        }
+        // Handle `X as Y` — we export the original name `X`.
+        let name = token
+            .split_whitespace()
+            .next()
+            .unwrap_or(token)
+            .trim();
+        if !name.is_empty() {
+            out.push(name.to_string());
+        }
+    }
+}
+
+/// Generate a synthetic ESM stub module that exports no-op values for each
+/// requested name.  Uses simple heuristics to choose the export shape:
+///
+/// - Names starting with `is`/`has`/`check` → `() => false`
+/// - Names starting with `get`/`detect`/`find`/`create`/`make` → `() => ({})`
+/// - Names starting with `set`/`play`/`send`/`run`/`do`/`emit` → `() => {}`
+/// - `ALL_CAPS` names → `[]` (constants are often arrays)
+/// - Names starting with uppercase → `class Name {}` (likely class/type)
+/// - Everything else → `() => {}`
+pub fn generate_monorepo_stub(names: &[String]) -> String {
+    let mut lines = Vec::with_capacity(names.len() + 1);
+    lines.push("// Auto-generated monorepo escape stub (Pattern 3)".to_string());
+
+    for name in names {
+        let export = if name.chars().all(|c| c.is_ascii_uppercase() || c == '_') && !name.is_empty()
+        {
+            // ALL_CAPS constant
+            format!("export const {name} = [];")
+        } else if name.starts_with("is")
+            || name.starts_with("has")
+            || name.starts_with("check")
+        {
+            format!("export const {name} = () => false;")
+        } else if name.starts_with("get")
+            || name.starts_with("detect")
+            || name.starts_with("find")
+            || name.starts_with("create")
+            || name.starts_with("make")
+        {
+            format!("export const {name} = () => ({{}});")
+        } else if name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_uppercase())
+        {
+            // Likely a class or type — export as class
+            format!("export class {name} {{}}")
+        } else {
+            // Generic function stub
+            format!("export const {name} = () => {{}};")
+        };
+        lines.push(export);
+    }
+
+    lines.join("\n")
 }
 
 static REQUIRE_CALL_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -10183,6 +10420,10 @@ pub struct PiJsRuntime<C: SchedulerClock = WallClock> {
     /// Accumulated auto-repair events.  Use [`Self::record_repair`] to append
     /// and [`Self::drain_repair_events`] to retrieve and clear.
     repair_events: Arc<std::sync::Mutex<Vec<ExtensionRepairEvent>>>,
+    /// Shared module state used by the resolver and loader.  Stored here so
+    /// that [`Self::add_extension_root`] can push extension roots into the
+    /// resolver after construction.
+    module_state: Rc<RefCell<PiJsModuleState>>,
 }
 
 #[allow(clippy::future_not_send)]
@@ -10238,8 +10479,12 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                 .await;
         }
 
+        let repair_events: Arc<std::sync::Mutex<Vec<ExtensionRepairEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
         let module_state = Rc::new(RefCell::new(
-            PiJsModuleState::new().with_repair_mode(config.repair_mode),
+            PiJsModuleState::new()
+                .with_repair_mode(config.repair_mode)
+                .with_repair_events(Arc::clone(&repair_events)),
         ));
         runtime
             .set_loader(
@@ -10277,7 +10522,8 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
             interrupt_budget,
             config,
             allowed_read_roots: Arc::new(std::sync::Mutex::new(Vec::new())),
-            repair_events: Arc::new(std::sync::Mutex::new(Vec::new())),
+            repair_events,
+            module_state,
         };
 
         instance.install_pi_bridge().await?;
@@ -10777,6 +11023,17 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
             if !roots.contains(&root) {
                 roots.push(root);
             }
+        }
+    }
+
+    /// Register an extension root directory so the resolver can detect
+    /// monorepo escape patterns (Pattern 3).  Also registers the root
+    /// for `readFileSync` access.
+    pub fn add_extension_root(&self, root: PathBuf) {
+        self.add_allowed_read_root(root.clone());
+        let mut state = self.module_state.borrow_mut();
+        if !state.extension_roots.contains(&root) {
+            state.extension_roots.push(root);
         }
     }
 
