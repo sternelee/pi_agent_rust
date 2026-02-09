@@ -28,3 +28,20 @@ tests/ext_conformance/reports/*
 *.sqlite3-wal
 *.sqlite3-shm
 *.sqlite3-journal
+
+# Agent probe/scratch files and temp directories
+.codex_space_probe
+.tmp-*/
+.tmp-*
+.white_deer_target/
+
+# Patch/merge artifacts
+*.orig
+*.rej
+
+# E2E test run results (timestamped, ephemeral)
+tests/e2e_results/
+
+# Python bytecode caches
+__pycache__/
+*.pyc
