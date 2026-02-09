@@ -63,6 +63,8 @@ pub struct TestHarness {
     name: String,
     /// Temporary directory for test files.
     temp_dir: TempDir,
+    /// Canonicalized path (resolves macOS `/var` → `/private/var` symlinks).
+    canonical_dir: PathBuf,
     /// Test logger for detailed tracing.
     logger: Arc<TestLogger>,
     /// Whether to use colored output.
@@ -77,9 +79,11 @@ impl TestHarness {
     pub fn new(name: impl Into<String>) -> Self {
         let name = name.into();
         let temp_dir = TempDir::new().expect("Failed to create temp directory");
+        let canonical_dir = std::fs::canonicalize(temp_dir.path())
+            .unwrap_or_else(|_| temp_dir.path().to_path_buf());
         let logger = Arc::new(TestLogger::new());
         logger.set_test_name(&name);
-        logger.set_normalization_root(temp_dir.path());
+        logger.set_normalization_root(&canonical_dir);
 
         logger
             .as_ref()
@@ -87,12 +91,13 @@ impl TestHarness {
         logger
             .as_ref()
             .info_ctx("harness", "Temp directory created", |ctx| {
-                ctx.push(("path".into(), temp_dir.path().display().to_string()));
+                ctx.push(("path".into(), canonical_dir.display().to_string()));
             });
 
         Self {
             name,
             temp_dir,
+            canonical_dir,
             logger,
             use_colors: true,
         }
@@ -115,16 +120,16 @@ impl TestHarness {
         Arc::clone(&self.logger)
     }
 
-    /// Get the path to the temporary directory.
+    /// Get the path to the temporary directory (canonicalized).
     pub fn temp_dir(&self) -> &Path {
-        self.temp_dir.path()
+        &self.canonical_dir
     }
 
-    /// Get a path within the temporary directory.
+    /// Get a path within the temporary directory (canonicalized).
     ///
     /// This is a convenience method that joins the given path to the temp directory.
     pub fn temp_path(&self, path: impl AsRef<Path>) -> PathBuf {
-        self.temp_dir.path().join(path)
+        self.canonical_dir.join(path)
     }
 
     /// Create a file in the temp directory with the given content.
@@ -433,10 +438,12 @@ impl TestHarnessBuilder {
     /// Build the test harness.
     pub fn build(self) -> TestHarness {
         let temp_dir = TempDir::new().expect("Failed to create temp directory");
+        let canonical_dir = std::fs::canonicalize(temp_dir.path())
+            .unwrap_or_else(|_| temp_dir.path().to_path_buf());
         let logger = Arc::new(TestLogger::with_min_level(self.min_log_level));
         let name = self.name;
         logger.set_test_name(&name);
-        logger.set_normalization_root(temp_dir.path());
+        logger.set_normalization_root(&canonical_dir);
 
         logger
             .as_ref()
@@ -444,12 +451,13 @@ impl TestHarnessBuilder {
         logger
             .as_ref()
             .info_ctx("harness", "Temp directory created", |ctx| {
-                ctx.push(("path".into(), temp_dir.path().display().to_string()));
+                ctx.push(("path".into(), canonical_dir.display().to_string()));
             });
 
         TestHarness {
             name,
             temp_dir,
+            canonical_dir,
             logger,
             use_colors: self.use_colors,
         }
