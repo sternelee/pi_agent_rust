@@ -5274,6 +5274,12 @@ fn resolve_module_path(base: &str, specifier: &str, repair_mode: RepairMode) -> 
 
     let path = if specifier.starts_with('/') {
         PathBuf::from(specifier)
+    } else if specifier.len() > 2
+        && specifier.as_bytes()[1] == b':'
+        && specifier.as_bytes()[2] == b'/'
+    {
+        // Windows absolute path: `C:/Users/...`
+        PathBuf::from(specifier)
     } else if specifier.starts_with('.') {
         let base_path = Path::new(base);
         let base_dir = base_path.parent()?;
