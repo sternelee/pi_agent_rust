@@ -1231,9 +1231,9 @@ fn fs_stat_host_fallback() {
                         globalThis.hostStatSize = s.size;
                     }
 
-                    globalThis.outsideExists = fs.existsSync('/etc/hostname');
+                    globalThis.outsideExists = fs.existsSync('/usr');
                     try {
-                        fs.statSync('/etc/hostname');
+                        fs.statSync('/usr');
                         globalThis.outsideStat = 'ok';
                     } catch (e) {
                         globalThis.outsideStat = String(e.message || e);

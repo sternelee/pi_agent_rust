@@ -941,6 +941,14 @@ fn generate_conformance_report_impl() {
 
 #[test]
 fn generate_conformance_report() {
+    // Skip on CI: the detailed conformance report inputs (load-time, scenario,
+    // smoke, parity JSONL files) are not generated during CI runs, so
+    // regenerating the summary would overwrite the committed summary with zeros
+    // and cause the release_evidence_gate threshold check to fail.
+    if std::env::var("CI").is_ok() {
+        eprintln!("[conformance_report] Skipping report generation on CI");
+        return;
+    }
     let _guard = CONFORMANCE_REPORT_IO_LOCK
         .lock()
         .expect("acquire conformance report IO lock");
@@ -953,7 +961,9 @@ fn read_or_regenerate_conformance_events() -> Vec<Value> {
         .expect("acquire conformance report IO lock");
     let events_path = reports_dir().join("conformance_events.jsonl");
     let mut events = read_jsonl_file(&events_path);
-    if events.is_empty() {
+    if events.is_empty() && std::env::var("CI").is_err() {
+        // Only regenerate locally; on CI the report inputs don't exist and
+        // regenerating would overwrite conformance_summary.json with zeros.
         generate_conformance_report_impl();
         events = read_jsonl_file(&events_path);
     }
