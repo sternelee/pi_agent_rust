@@ -124,6 +124,14 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
+For heavyweight local runs (especially `--all-targets`) in multi-agent environments, prefer a tmpfs-backed target dir to avoid linker failures when `/` is near capacity:
+
+```bash
+export CARGO_TARGET_DIR="/tmp/pi_agent_rust/${USER:-agent}"
+```
+
+Use an agent-specific suffix (for example `/tmp/pi_agent_rust/topazfalcon`) to avoid build artifact collisions.
+
 If you see errors, **carefully understand and resolve each issue**. Read sufficient context to fix them the RIGHT way.
 
 ---
