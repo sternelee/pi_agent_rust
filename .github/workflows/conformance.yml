@@ -144,11 +144,11 @@ jobs:
           path: sqlmodel_rust
           fetch-depth: 1
 
-      - name: Install system deps (fd, rg) [linux]
+      - name: Install system deps (fd, rg, xcb) [linux]
         run: |
           set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y fd-find ripgrep
+          sudo apt-get install -y fd-find ripgrep libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
           sudo ln -sf "$(command -v fdfind)" /usr/local/bin/fd
 
       - name: Install Rust toolchain (nightly)
