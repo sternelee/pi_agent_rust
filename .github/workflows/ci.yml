@@ -18,6 +18,7 @@ jobs:
       VCR_CASSETTE_DIR: "tests/fixtures/vcr"
       RUST_BACKTRACE: "1"
       CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
       CI_GATE_PROMOTION_MODE: ${{ vars.CI_GATE_PROMOTION_MODE || 'strict' }}
       CI_GATE_THRESHOLD_VERSION: ${{ vars.CI_GATE_THRESHOLD_VERSION || '2026-02-08.v1' }}
       CI_GATE_MIN_PASS_RATE_PCT: ${{ vars.CI_GATE_MIN_PASS_RATE_PCT || '80.0' }}
