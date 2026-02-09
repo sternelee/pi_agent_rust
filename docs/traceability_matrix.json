@@ -197,6 +197,22 @@
         {
           "path": "tests/extensions_provider_streaming.rs",
           "justification": "Provider-path extension runtime behavior support."
+        },
+        {
+          "path": "tests/extension_auto_repair_integration.rs",
+          "justification": "Integration coverage for auto-repair behavior on real-world extension failure patterns."
+        },
+        {
+          "path": "tests/extensions_auto_repair_unit.rs",
+          "justification": "Pattern-level unit coverage for auto-repair decisions and fallback correctness."
+        },
+        {
+          "path": "tests/security_fs_escape.rs",
+          "justification": "Validates auto-repair fallback confinement so escape paths stay blocked outside extension scope."
+        },
+        {
+          "path": "tests/e2e_auto_repair.rs",
+          "justification": "Corpus-wide auto-repair end-to-end verification and report generation."
         }
       ],
       "e2e_scripts": [
@@ -266,6 +282,10 @@
         {
           "path": "tests/ext_conformance_artifacts.rs",
           "justification": "Artifact/report structure validation for conformance outputs."
+        },
+        {
+          "path": "tests/extensions_repair_events.rs",
+          "justification": "Auto-repair event schema, emission, and drain-path logging contract checks."
         }
       ],
       "e2e_scripts": [
