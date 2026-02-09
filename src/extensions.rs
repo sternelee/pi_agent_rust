@@ -9085,7 +9085,7 @@ impl ExtensionManager {
     }
 
     /// Convert extension-registered providers into model entries suitable for
-    /// merging into the [`ModelRegistry`].
+    /// merging into the `ModelRegistry`.
     #[allow(clippy::too_many_lines)]
     pub fn extension_model_entries(&self) -> Vec<crate::models::ModelEntry> {
         use crate::provider::{InputType, Model, ModelCost};

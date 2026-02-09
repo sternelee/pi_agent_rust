@@ -192,7 +192,7 @@ impl PermissionStore {
         &self.decisions
     }
 
-    /// Seed the in-memory cache of an [`ExtensionManager`]-style
+    /// Seed the in-memory cache of an `ExtensionManager`-style
     /// `HashMap<String, HashMap<String, bool>>` from persisted decisions.
     ///
     /// Only non-expired entries are included.

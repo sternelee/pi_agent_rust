@@ -1033,7 +1033,7 @@ pub mod report {
 /// # Integrity
 ///
 /// Every artifact must have a deterministic SHA-256 directory digest computed
-/// by [`digest_artifact_dir`].  This digest is stored in both
+/// by `digest_artifact_dir`.  This digest is stored in both
 /// `extension-master-catalog.json` and `extension-artifact-provenance.json`.
 pub mod snapshot {
     use serde::{Deserialize, Serialize};

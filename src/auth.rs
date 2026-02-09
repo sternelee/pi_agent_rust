@@ -283,7 +283,7 @@ impl AuthStorage {
     /// Refresh expired OAuth tokens for extension-registered providers.
     ///
     /// `extension_configs` maps provider ID to its [`OAuthConfig`](crate::models::OAuthConfig).
-    /// Providers already handled by [`refresh_expired_oauth_tokens_with_client`] (e.g. "anthropic")
+    /// Providers already handled by `refresh_expired_oauth_tokens_with_client` (e.g. "anthropic")
     /// are skipped.
     pub async fn refresh_expired_extension_oauth_tokens(
         &mut self,
