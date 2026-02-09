@@ -60,7 +60,7 @@ fn env_var(name: &str) -> Option<String> {
 
 #[cfg(test)]
 fn set_test_env_var(name: &str, value: Option<&str>) -> Option<String> {
-    let mut guard = test_env_overrides().lock().expect("env override lock");
+    let mut guard = test_env_overrides().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let previous = guard.get(name).and_then(Clone::clone);
     // Store Some(val) for override or None as tombstone (explicitly unset)
     guard.insert(name.to_string(), value.map(String::from));
@@ -69,7 +69,7 @@ fn set_test_env_var(name: &str, value: Option<&str>) -> Option<String> {
 
 #[cfg(test)]
 fn restore_test_env_var(name: &str, previous: Option<String>) {
-    let mut guard = test_env_overrides().lock().expect("env override lock");
+    let mut guard = test_env_overrides().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     match previous {
         Some(value) => {
             guard.insert(name.to_string(), Some(value));
@@ -749,6 +749,12 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    /// Acquire `env_test_lock`, recovering from poison so that one
+    /// test-thread panic doesn't cascade into every other env-test.
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        env_test_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn cassette_round_trip() {
         let cassette = Cassette {
@@ -920,7 +926,7 @@ mod tests {
 
     #[test]
     fn vcr_mode_from_env_values_and_invalid() {
-        let _lock = env_test_lock().lock().expect("env test lock");
+        let _lock = lock_env();
         let previous = set_test_env_var(VCR_ENV_MODE, None);
         assert_eq!(VcrMode::from_env().expect("unset mode"), None);
         restore_test_env_var(VCR_ENV_MODE, previous);
@@ -1083,7 +1089,7 @@ mod tests {
     #[test]
     fn test_env_override_helpers_set_and_restore_values() {
         const TEST_VAR: &str = "PI_AGENT_VCR_TEST_ENV_OVERRIDE";
-        let _lock = env_test_lock().lock().expect("env test lock");
+        let _lock = lock_env();
 
         let original = set_test_env_var(TEST_VAR, None);
         assert_eq!(env_var(TEST_VAR), None);
@@ -1690,7 +1696,7 @@ mod tests {
 
     #[test]
     fn env_truthy_values() {
-        let _lock = env_test_lock().lock().expect("env test lock");
+        let _lock = lock_env();
         let key = "PI_VCR_TEST_TRUTHY";
 
         for val in ["1", "true", "TRUE", "yes", "YES"] {
@@ -1714,7 +1720,7 @@ mod tests {
 
     #[test]
     fn default_mode_ci_is_playback() {
-        let _lock = env_test_lock().lock().expect("env test lock");
+        let _lock = lock_env();
         let prev = set_test_env_var("CI", Some("true"));
         assert_eq!(default_mode(), VcrMode::Playback);
         restore_test_env_var("CI", prev);
@@ -1722,7 +1728,7 @@ mod tests {
 
     #[test]
     fn default_mode_no_ci_is_auto() {
-        let _lock = env_test_lock().lock().expect("env test lock");
+        let _lock = lock_env();
         let prev = set_test_env_var("CI", None);
         assert_eq!(default_mode(), VcrMode::Auto);
         restore_test_env_var("CI", prev);
