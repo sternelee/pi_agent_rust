@@ -3529,7 +3529,7 @@ fn find_fd_binary() -> Option<&'static str> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     use std::time::Duration;
 
     #[test]
