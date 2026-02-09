@@ -27,7 +27,10 @@
 #   E2E_DIFF_FROM      Baseline summary.json to diff against (optional)
 #   VERIFY_MIN_FREE_MB Minimum free MB required for repo/artifact mounts (default: 2048)
 #   VERIFY_MIN_TMP_FREE_MB Minimum free MB required for tmp/cargo mounts (default: 8192)
-#   CARGO_TARGET_DIR   Optional cargo target directory (checked by preflight)
+#   CARGO_TARGET_DIR   Optional cargo target directory (checked by preflight).
+#                      If unset and CODEX_THREAD_ID is present, defaults to
+#                      target/agents/<CODEX_THREAD_ID> to reduce multi-agent
+#                      artifact contention.
 #   CARGO_HOME         Optional cargo home directory (checked by preflight)
 #   VERIFY_MIN_FREE_INODE_PCT Minimum free inode percent required (default: 5)
 
@@ -36,6 +39,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
+
+# In multi-agent Codex sessions, isolate cargo artifacts by default unless the
+# caller explicitly sets CARGO_TARGET_DIR.
+if [[ -z "${CARGO_TARGET_DIR:-}" && -n "${CODEX_THREAD_ID:-}" ]]; then
+    safe_codex_thread_id="$(printf '%s' "$CODEX_THREAD_ID" | tr -c 'A-Za-z0-9._-' '_')"
+    export CARGO_TARGET_DIR="$PROJECT_ROOT/target/agents/$safe_codex_thread_id"
+fi
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -155,7 +165,7 @@ while [[ $# -gt 0 ]]; do
             echo "  VERIFY_PROFILE       Default profile when --profile not provided"
             echo "  E2E_DIFF_FROM        Baseline summary.json for diff/triage output"
             echo "  VERIFY_MIN_TMP_FREE_MB Minimum free MB for tmp/cargo mounts (default: 8192)"
-            echo "  CARGO_TARGET_DIR     Optional cargo target directory (checked by preflight)"
+            echo "  CARGO_TARGET_DIR     Optional cargo target directory (checked by preflight); defaults to target/agents/<CODEX_THREAD_ID> when CODEX_THREAD_ID is set"
             echo "  CARGO_HOME           Optional cargo home directory (checked by preflight)"
             echo "  VERIFY_MIN_FREE_MB   Minimum free MB for repo/artifact mounts (default: 2048)"
             echo "  VERIFY_MIN_FREE_INODE_PCT Minimum free inode percent required (default: 5)"
@@ -327,12 +337,12 @@ check_disk_headroom() {
         IFS='|' read -r raw_path probe_label required_kb required_mb <<<"$probe_spec"
 
         local probe_path="$raw_path"
-        if [[ ! -e "$probe_path" ]]; then
+        while [[ ! -e "$probe_path" && "$probe_path" != "/" ]]; do
             probe_path="$(dirname "$probe_path")"
-        fi
+        done
 
         if [[ ! -e "$probe_path" ]]; then
-            echo "[preflight] WARN: cannot probe path '$raw_path' (missing parent '$probe_path')" >&2
+            echo "[preflight] WARN: cannot probe path '$raw_path' (no existing ancestor found)" >&2
             continue
         fi
 
@@ -411,6 +421,7 @@ capture_env() {
   "parallelism": $PARALLELISM,
   "log_level": "$LOG_LEVEL",
   "artifact_dir": "$ARTIFACT_DIR",
+  "cargo_target_dir": "${CARGO_TARGET_DIR:-$PROJECT_ROOT/target}",
   "vcr_mode": "${VCR_MODE:-unset}",
   "unit_targets": $(printf '%s\n' "${SELECTED_UNIT_TARGETS[@]:-}" | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' 2>/dev/null || echo '[]'),
   "e2e_suites": $(printf '%s\n' "${SELECTED_SUITES[@]:-}" | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' 2>/dev/null || echo '[]')
