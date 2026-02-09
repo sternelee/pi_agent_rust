@@ -143,6 +143,28 @@ fn target_roots_with(manifest_dir: &Path, cargo_target_dir: Option<&Path>) -> Ve
     roots
 }
 
+const fn binary_file_names() -> &'static [&'static str] {
+    #[cfg(windows)]
+    {
+        &["pi.exe", "pi"]
+    }
+    #[cfg(not(windows))]
+    {
+        &["pi"]
+    }
+}
+
+fn find_profile_binary(root: &Path, profile: &str) -> Option<PathBuf> {
+    let profile_dir = root.join(profile);
+    for binary_name in binary_file_names() {
+        let candidate = profile_dir.join(binary_name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 fn run_resolution_regression_checks() {
     use std::path::{Path, PathBuf};
@@ -173,6 +195,18 @@ fn run_resolution_regression_checks() {
     // Default target root should not be duplicated.
     let roots = target_roots_with(manifest_dir, Some(Path::new("target")));
     assert_eq!(roots, vec![manifest_dir.join("target")]);
+
+    // Platform-aware binary lookup candidate order.
+    let names = binary_file_names();
+    #[cfg(windows)]
+    {
+        assert_eq!(names.first().copied(), Some("pi.exe"));
+        assert!(names.contains(&"pi"));
+    }
+    #[cfg(not(windows))]
+    {
+        assert_eq!(names, &["pi"]);
+    }
 }
 
 fn resolve_pi_binary() -> ResolvedBinary {
@@ -190,8 +224,7 @@ fn resolve_pi_binary() -> ResolvedBinary {
 
     // Look for release binary first (more realistic)
     for root in &target_roots {
-        let release_path = root.join("release/pi");
-        if release_path.exists() {
+        if let Some(release_path) = find_profile_binary(root, "release") {
             return ResolvedBinary {
                 path: release_path,
                 kind: BinaryKind::Release,
@@ -201,8 +234,7 @@ fn resolve_pi_binary() -> ResolvedBinary {
 
     // Fall back to debug binary
     for root in &target_roots {
-        let debug_path = root.join("debug/pi");
-        if debug_path.exists() {
+        if let Some(debug_path) = find_profile_binary(root, "debug") {
             return ResolvedBinary {
                 path: debug_path,
                 kind: BinaryKind::Debug,
