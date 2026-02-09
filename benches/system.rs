@@ -73,6 +73,8 @@ fn print_system_banner_once() {
 
 fn criterion_config() -> Criterion {
     print_system_banner_once();
+    #[cfg(test)]
+    run_resolution_regression_checks();
     Criterion::default()
         .sample_size(20) // Fewer samples for process spawn benchmarks
         .measurement_time(Duration::from_secs(10))
@@ -117,12 +119,16 @@ fn infer_binary_kind(path: &Path) -> BinaryKind {
 }
 
 fn target_roots(manifest_dir: &Path) -> Vec<PathBuf> {
+    let cargo_target_dir = env::var_os("CARGO_TARGET_DIR").map(PathBuf::from);
+    target_roots_with(manifest_dir, cargo_target_dir.as_deref())
+}
+
+fn target_roots_with(manifest_dir: &Path, cargo_target_dir: Option<&Path>) -> Vec<PathBuf> {
     let mut roots = Vec::new();
 
-    if let Ok(raw) = env::var("CARGO_TARGET_DIR") {
-        let candidate = PathBuf::from(raw);
+    if let Some(candidate) = cargo_target_dir {
         let resolved = if candidate.is_absolute() {
-            candidate
+            candidate.to_path_buf()
         } else {
             manifest_dir.join(candidate)
         };
@@ -135,6 +141,38 @@ fn target_roots(manifest_dir: &Path) -> Vec<PathBuf> {
     }
 
     roots
+}
+
+#[cfg(test)]
+fn run_resolution_regression_checks() {
+    use std::path::{Path, PathBuf};
+
+    // Binary kind inference
+    let path = Path::new("/tmp/target/release/pi");
+    assert_eq!(infer_binary_kind(path), BinaryKind::Release);
+    let path = Path::new("/tmp/target/debug/pi");
+    assert_eq!(infer_binary_kind(path), BinaryKind::Debug);
+    let path = Path::new("/tmp/target/debug/release/pi");
+    assert_eq!(infer_binary_kind(path), BinaryKind::Release);
+    let path = Path::new("/tmp/pi");
+    assert_eq!(infer_binary_kind(path), BinaryKind::Unknown);
+
+    // Relative CARGO_TARGET_DIR is resolved from manifest dir.
+    let manifest_dir = Path::new("/workspace/pi_agent_rust");
+    let roots = target_roots_with(manifest_dir, Some(Path::new("target/agents/blackglen")));
+    assert_eq!(roots.len(), 2);
+    assert_eq!(roots[0], manifest_dir.join("target/agents/blackglen"));
+    assert_eq!(roots[1], manifest_dir.join("target"));
+
+    // Absolute CARGO_TARGET_DIR is preserved.
+    let roots = target_roots_with(manifest_dir, Some(Path::new("/tmp/custom-target")));
+    assert_eq!(roots.len(), 2);
+    assert_eq!(roots[0], PathBuf::from("/tmp/custom-target"));
+    assert_eq!(roots[1], manifest_dir.join("target"));
+
+    // Default target root should not be duplicated.
+    let roots = target_roots_with(manifest_dir, Some(Path::new("target")));
+    assert_eq!(roots, vec![manifest_dir.join("target")]);
 }
 
 fn resolve_pi_binary() -> ResolvedBinary {
