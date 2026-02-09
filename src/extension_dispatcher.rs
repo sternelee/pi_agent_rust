@@ -2360,9 +2360,9 @@ mod tests {
                     globalThis.timeoutChunks = [];
                     globalThis.timeoutResult = null;
                     globalThis.timeoutError = null;
-                    pi.exec("sh", ["-c", "printf 'start\n'; sleep 1; printf 'late\n'"], {
+                    pi.exec("sh", ["-c", "printf 'start\n'; sleep 5; printf 'late\n'"], {
                         stream: true,
-                        timeoutMs: 50,
+                        timeoutMs: 500,
                         onChunk: (chunk, isFinal) => {
                             globalThis.timeoutChunks.push({ chunk, isFinal });
                         },
