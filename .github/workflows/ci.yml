@@ -203,9 +203,9 @@ jobs:
         run: |
           set -euxo pipefail
           df -h /
-          # Remove clippy/doc artifacts; tests will recompile what they need
-          cargo clean --doc 2>/dev/null || true
-          rm -rf target/debug/incremental
+          # Full clean: clippy/doc artefacts are not reusable by cargo test and
+          # can consume 20+ GB.  Tests will recompile from scratch.
+          cargo clean 2>/dev/null || true
           df -h /
 
       - name: cargo test
@@ -216,9 +216,9 @@ jobs:
         run: |
           set -euxo pipefail
           df -h /
-          # Remove default-feature test binaries before building wasm-host ones
-          rm -rf target/debug/deps/ext_conformance* target/debug/deps/extensions_* target/debug/deps/e2e_*
-          rm -rf target/debug/incremental
+          # Full clean again: default-feature test binaries are not reusable by
+          # wasm-host feature tests and consume 20+ GB.
+          cargo clean 2>/dev/null || true
           df -h /
 
       - name: cargo test (wasm-host) [linux]
@@ -491,6 +491,14 @@ jobs:
           if [ "$VERDICT" = "fail" ]; then
             echo "::warning::Release gate failed — conformance evidence bundle does not meet thresholds"
           fi
+
+      - name: Reclaim disk space before coverage [linux]
+        if: runner.os == 'Linux'
+        run: |
+          set -euxo pipefail
+          df -h /
+          cargo clean 2>/dev/null || true
+          df -h /
 
       - name: Coverage summary (llvm-cov)
         if: runner.os == 'Linux'
