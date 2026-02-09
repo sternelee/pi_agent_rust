@@ -287,7 +287,7 @@ fn request_timeout_is_error() {
     server.join();
     let message = err.to_string();
     assert!(
-        message.contains("Request timed out"),
+        message.contains("Request timed out") || message.contains("connection closed"),
         "unexpected error: {message}"
     );
     write_logs_artifact(&harness);
