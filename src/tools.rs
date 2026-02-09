@@ -9,6 +9,7 @@
 use crate::agent_cx::AgentCx;
 use crate::config::Config;
 use crate::error::{Error, Result};
+use crate::extensions::strip_unc_prefix;
 use crate::model::{ContentBlock, ImageContent, TextContent};
 use asupersync::io::AsyncWriteExt;
 use asupersync::time::{sleep, wall_now};
@@ -2799,7 +2800,7 @@ impl Tool for FindTool {
             serde_json::from_value(input).map_err(|e| Error::validation(e.to_string()))?;
 
         let search_dir = input.path.as_deref().unwrap_or(".");
-        let search_path = resolve_path(search_dir, &self.cwd);
+        let search_path = strip_unc_prefix(resolve_path(search_dir, &self.cwd));
         let effective_limit = input.limit.unwrap_or(DEFAULT_FIND_LIMIT);
 
         if !search_path.exists() {
@@ -2946,20 +2947,23 @@ impl Tool for FindTool {
                 continue;
             }
 
-            let line_path = Path::new(line);
+            // On Windows, fd may emit `//?/…` or `\\?\…` extended-length
+            // paths. Strip the prefix so relativization works correctly.
+            let clean = strip_unc_prefix(PathBuf::from(line));
+            let line_path = clean.as_path();
             let mut rel = if line_path.is_absolute() {
                 line_path.strip_prefix(&search_path).map_or_else(
-                    |_| line.to_string(),
+                    |_| line_path.to_string_lossy().to_string(),
                     |stripped| stripped.to_string_lossy().to_string(),
                 )
             } else {
-                line.to_string()
+                line_path.to_string_lossy().to_string()
             };
 
             let full_path = if line_path.is_absolute() {
-                PathBuf::from(line)
+                line_path.to_path_buf()
             } else {
-                search_path.join(line)
+                search_path.join(line_path)
             };
             if full_path.is_dir() && !rel.ends_with('/') {
                 rel.push('/');

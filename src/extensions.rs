@@ -48,13 +48,17 @@ pub fn safe_canonicalize(path: &Path) -> PathBuf {
     strip_unc_prefix(canonical)
 }
 
-/// Strip the `\\?\` verbatim prefix from a path on Windows. No-op on Unix.
+/// Strip the `\\?\` or `//?/` verbatim prefix from a path on Windows. No-op on Unix.
 #[allow(clippy::missing_const_for_fn)]
 pub fn strip_unc_prefix(path: PathBuf) -> PathBuf {
     #[cfg(windows)]
     {
         let s = path.to_string_lossy();
         if let Some(stripped) = s.strip_prefix(r"\\?\") {
+            return PathBuf::from(stripped);
+        }
+        // fd normalises separators to `/`, producing `//?/` instead of `\\?\`.
+        if let Some(stripped) = s.strip_prefix("//?/") {
             return PathBuf::from(stripped);
         }
     }

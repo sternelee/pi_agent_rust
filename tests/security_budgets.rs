@@ -295,8 +295,9 @@ for (let i = 0; i < 100000; i++) {
 fn stack_limit_prevents_deep_recursion() {
     futures::executor::block_on(async {
         let config = config_with_limits(PiJsRuntimeLimits {
-            // Small stack: 256KB (bridge JS init needs >64KB on macOS ARM64)
-            max_stack_bytes: Some(256 * 1024),
+            // Small stack: 512KB — bridge JS init needs >256KB on macOS ARM64
+            // after recent bridge code growth (regex operations during init).
+            max_stack_bytes: Some(512 * 1024),
             ..Default::default()
         });
 
@@ -462,8 +463,8 @@ fn budget_exceeded_error_is_descriptive() {
 fn stack_overflow_error_is_not_budget_error() {
     futures::executor::block_on(async {
         let config = config_with_limits(PiJsRuntimeLimits {
-            // 256KB: bridge JS init needs >32KB on macOS ARM64
-            max_stack_bytes: Some(256 * 1024),
+            // 512KB: bridge JS init needs >256KB on macOS ARM64
+            max_stack_bytes: Some(512 * 1024),
             // No interrupt budget — so stack overflow should be separate error
             interrupt_budget: None,
             ..Default::default()
