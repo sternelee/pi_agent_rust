@@ -4,7 +4,9 @@ mod common;
 
 use asupersync::runtime::RuntimeBuilder;
 use bubbletea::{KeyMsg, KeyType, Message};
+use clap::Parser;
 use common::TestHarness;
+use pi::cli::Cli;
 use pi::config::Config;
 use pi::model::UserContent;
 use pi::session::{Session, SessionHeader, SessionMessage, encode_cwd};
@@ -450,6 +452,50 @@ fn resume_with_picker_selects_session_with_override_input() {
                 .map_or_else(|| "<none>".to_string(), |p| p.display().to_string()),
         ));
     });
+
+    assert_eq!(session.path.as_ref(), Some(&first_path));
+    assert_eq!(session.session_dir.as_ref(), Some(&base_dir));
+}
+
+#[test]
+fn session_new_resume_uses_config_session_picker_input() {
+    let _lock = session_picker_lock();
+    let harness = TestHarness::new("session_new_resume_uses_config_session_picker_input");
+    let base_dir = harness.temp_path("sessions");
+    let cwd = harness.temp_path("project");
+    std::fs::create_dir_all(&cwd).expect("create cwd");
+    let _guard = CurrentDirGuard::new(&cwd);
+
+    let first_path = create_session(&harness, &base_dir, &cwd, "first");
+    sleep(Duration::from_millis(20));
+    let second_path = create_session(&harness, &base_dir, &cwd, "second");
+
+    let cli = Cli::parse_from([
+        "pi".to_string(),
+        "--resume".to_string(),
+        "--session-dir".to_string(),
+        base_dir.display().to_string(),
+    ]);
+    let config = Config {
+        session_picker_input: Some(2),
+        ..Config::default()
+    };
+
+    let session = run_async(Session::new(&cli, &config)).expect("resume with config selection");
+
+    harness
+        .log()
+        .info_ctx("verify", "selected via config", |ctx| {
+            ctx.push(("expected".to_string(), first_path.display().to_string()));
+            ctx.push(("newest".to_string(), second_path.display().to_string()));
+            ctx.push((
+                "actual".to_string(),
+                session
+                    .path
+                    .as_ref()
+                    .map_or_else(|| "<none>".to_string(), |p| p.display().to_string()),
+            ));
+        });
 
     assert_eq!(session.path.as_ref(), Some(&first_path));
     assert_eq!(session.session_dir.as_ref(), Some(&base_dir));

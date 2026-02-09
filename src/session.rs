@@ -396,10 +396,14 @@ impl Session {
         }
 
         if cli.resume {
+            let picker_input_override = config
+                .session_picker_input
+                .filter(|value| *value > 0)
+                .map(|value| value.to_string());
             return Box::pin(Self::resume_with_picker(
                 session_dir.as_deref(),
                 config,
-                None,
+                picker_input_override,
             ))
             .await;
         }
@@ -420,7 +424,11 @@ impl Session {
         config: &Config,
         picker_input_override: Option<String>,
     ) -> Result<Self> {
-        if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        let mut picker_input_override = picker_input_override;
+        if picker_input_override.is_none()
+            && std::io::stdin().is_terminal()
+            && std::io::stdout().is_terminal()
+        {
             if let Some(session) = crate::session_picker::pick_session(override_dir).await {
                 return Ok(session);
             }
@@ -488,7 +496,6 @@ impl Session {
             .collect();
         console.render_table(&headers, &row_refs);
 
-        let mut picker_input_override = picker_input_override;
         let mut attempts = 0;
         loop {
             attempts += 1;
