@@ -68,6 +68,74 @@
         {
           "path": "tests/e2e_workflow_preflight.rs",
           "justification": "Validates preflight workflow expectations before end-to-end runtime execution."
+        },
+        {
+          "path": "tests/bench_schema.rs",
+          "justification": "Schema-level bench artifact shape checks for deterministic diagnostics output."
+        },
+        {
+          "path": "tests/capability_policy_model.rs",
+          "justification": "Model-scoped capability policy resolution and precedence verification."
+        },
+        {
+          "path": "tests/capability_policy_scoped.rs",
+          "justification": "Scoped capability policy enforcement checks across nested policy contexts."
+        },
+        {
+          "path": "tests/compaction.rs",
+          "justification": "Session compaction correctness coverage for history truncation and continuity."
+        },
+        {
+          "path": "tests/compaction_bug.rs",
+          "justification": "Regression guard for previously observed compaction edge-case failures."
+        },
+        {
+          "path": "tests/config_precedence.rs",
+          "justification": "Configuration precedence behavior across defaults, env, project, and CLI layers."
+        },
+        {
+          "path": "tests/error_types.rs",
+          "justification": "Error typing and conversion-path behavior checks for stable diagnostics."
+        },
+        {
+          "path": "tests/extension_scoring.rs",
+          "justification": "Extension scoring logic and ranking stability under deterministic inputs."
+        },
+        {
+          "path": "tests/mock_spec_schema.rs",
+          "justification": "Mock spec schema invariants and validation behavior coverage."
+        },
+        {
+          "path": "tests/mock_spec_validation.rs",
+          "justification": "End-to-end mock spec validation and failure-path diagnostics checks."
+        },
+        {
+          "path": "tests/model_selector_cycling.rs",
+          "justification": "Model selector cycling behavior across available model inventories."
+        },
+        {
+          "path": "tests/model_serialization.rs",
+          "justification": "Model/message serialization round-trip correctness and edge-case handling."
+        },
+        {
+          "path": "tests/perf_budgets.rs",
+          "justification": "Performance budget policy enforcement for regression detection."
+        },
+        {
+          "path": "tests/performance_comparison.rs",
+          "justification": "Performance comparison harness behavior and report integrity checks."
+        },
+        {
+          "path": "tests/scheduler_repro.rs",
+          "justification": "Scheduler reproducer coverage for deterministic ordering and race regression guards."
+        },
+        {
+          "path": "tests/security_budgets.rs",
+          "justification": "Security budget threshold enforcement and evidence emission checks."
+        },
+        {
+          "path": "tests/session_conformance.rs",
+          "justification": "Session contract conformance for persistence, structure, and replay behavior."
         }
       ],
       "e2e_scripts": [
