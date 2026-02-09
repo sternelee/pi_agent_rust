@@ -191,10 +191,7 @@ fn os_platform_matches_process_platform() {
         // be derived from different sources. Accept as long as both are
         // reasonable platform strings.
         let parts: Vec<&str> = result.split(',').collect();
-        assert!(
-            parts.len() == 2,
-            "unexpected mismatch format: {result}"
-        );
+        assert!(parts.len() == 2, "unexpected mismatch format: {result}");
     } else {
         assert_eq!(result, "true");
     }
@@ -214,7 +211,10 @@ fn path_resolve_uses_process_cwd() {
 
 #[test]
 fn os_eol_is_newline() {
-    let result = eval_multi(r#"import os from "node:os";"#, r#"os.EOL === "\n" || os.EOL === "\r\n""#);
+    let result = eval_multi(
+        r#"import os from "node:os";"#,
+        r#"os.EOL === "\n" || os.EOL === "\r\n""#,
+    );
     assert_eq!(result, "true");
 }
 
