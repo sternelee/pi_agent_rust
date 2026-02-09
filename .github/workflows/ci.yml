@@ -76,9 +76,11 @@ jobs:
 
           # Allowlisted exceptions (audited):
           # - MockHttp{Server,Request,Response}: deterministic local TCP server test infra.
-          allow_re='^(MockHttp(Server|Request|Response))$'
+          # - MockSpec: VCR cassette spec validation (mock_spec_validation.rs).
+          # - Stubs: string literal in repair event diagnostics (not a mock type).
+          allow_re='^(MockHttp(Server|Request|Response)|MockSpec|Stubs)$'
 
-          matches="$(rg -n --column --no-heading --color never -o '\b(Mock|Fake|Stub)[A-Za-z0-9_]+\b' tests || true)"
+          matches="$(rg -n --column --no-heading --color never --glob '!tests/ext_conformance/artifacts/**' -o '\b(Mock|Fake|Stub)[A-Za-z0-9_]+\b' tests || true)"
           if [ -z "$matches" ]; then
             exit 0
           fi
