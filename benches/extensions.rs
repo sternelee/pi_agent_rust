@@ -415,6 +415,9 @@ fn bench_extension_tool_call_roundtrip(c: &mut Criterion) {
     {
         let mut group = c.benchmark_group("ext_tool_call");
         group.throughput(Throughput::Elements(1));
+        // Reduce sample size — each iteration spawns threads that may not be
+        // reclaimed fast enough on resource-constrained CI runners.
+        group.sample_size(10);
         group.bench_function("hello", |b| {
             b.iter(|| {
                 let result = block_on(runtime.execute_tool(

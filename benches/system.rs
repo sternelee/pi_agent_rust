@@ -190,9 +190,17 @@ fn binary_size_bytes(path: &Path) -> Option<u64> {
 /// Measure startup time for `pi --version` (minimal startup path)
 fn bench_startup_version(c: &mut Criterion) {
     let binary = resolve_pi_binary();
-    if !binary.path.exists() && binary.path != PathBuf::from("pi") {
+    // Pre-flight check: verify the binary is actually runnable (handles
+    // both missing file AND "pi" not in PATH).
+    if Command::new(&binary.path)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_err()
+    {
         eprintln!(
-            "[skip] bench_startup_version: binary not found at {}",
+            "[skip] bench_startup_version: binary not runnable at {}",
             binary.path.display()
         );
         return;
@@ -241,9 +249,15 @@ fn bench_startup_version(c: &mut Criterion) {
 /// Measure startup time for `pi --help` (loads more code paths)
 fn bench_startup_help(c: &mut Criterion) {
     let binary = resolve_pi_binary();
-    if !binary.path.exists() && binary.path != PathBuf::from("pi") {
+    if Command::new(&binary.path)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_err()
+    {
         eprintln!(
-            "[skip] bench_startup_help: binary not found at {}",
+            "[skip] bench_startup_help: binary not runnable at {}",
             binary.path.display()
         );
         return;
@@ -283,9 +297,15 @@ fn bench_startup_help(c: &mut Criterion) {
 /// Measure startup time for `pi --list-models` (exercises provider listing)
 fn bench_startup_list_models(c: &mut Criterion) {
     let binary = resolve_pi_binary();
-    if !binary.path.exists() && binary.path != PathBuf::from("pi") {
+    if Command::new(&binary.path)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_err()
+    {
         eprintln!(
-            "[skip] bench_startup_list_models: binary not found at {}",
+            "[skip] bench_startup_list_models: binary not runnable at {}",
             binary.path.display()
         );
         return;
@@ -329,9 +349,15 @@ fn bench_startup_list_models(c: &mut Criterion) {
 /// Measure RSS memory for `pi --version` (process exits immediately)
 fn bench_memory_version(c: &mut Criterion) {
     let binary = resolve_pi_binary();
-    if !binary.path.exists() && binary.path != PathBuf::from("pi") {
+    if Command::new(&binary.path)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_err()
+    {
         eprintln!(
-            "[skip] bench_memory_version: binary not found at {}",
+            "[skip] bench_memory_version: binary not runnable at {}",
             binary.path.display()
         );
         return;
