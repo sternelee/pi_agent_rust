@@ -104,6 +104,7 @@ impl CliTestHarness {
         }
     }
 
+    #[cfg(unix)]
     fn global_settings_path(&self) -> PathBuf {
         self.env
             .get("PI_CONFIG_PATH")
@@ -111,10 +112,12 @@ impl CliTestHarness {
             .expect("PI_CONFIG_PATH set by CliTestHarness::new")
     }
 
+    #[cfg(unix)]
     fn project_settings_path(&self) -> PathBuf {
         self.harness.temp_dir().join(".pi").join("settings.json")
     }
 
+    #[cfg(unix)]
     fn snapshot_path(&self, source: &Path, artifact_name: &str) {
         if !source.exists() {
             return;
@@ -125,6 +128,7 @@ impl CliTestHarness {
         self.harness.record_artifact(artifact_name, &dest);
     }
 
+    #[cfg(unix)]
     fn snapshot_settings(&self, label: &str) {
         self.snapshot_path(
             &self.global_settings_path(),
@@ -288,6 +292,7 @@ fn assert_exit_code(harness: &TestHarness, result: &CliResult, expected: i32) {
     assert_eq!(result.exit_code, expected);
 }
 
+#[cfg(unix)]
 fn read_json_value(path: &Path) -> serde_json::Value {
     let content = fs::read_to_string(path).expect("read json file");
     serde_json::from_str(&content).expect("parse json")
@@ -2999,6 +3004,7 @@ fn write_rich_session(path: &Path, cwd: &Path) -> String {
 
 /// Encode a CWD path into the session directory name format (mirrors `encode_cwd`
 /// from `src/session.rs`).
+#[cfg(unix)]
 fn encode_cwd_for_test(path: &Path) -> String {
     let s = path.display().to_string();
     let s = s.trim_start_matches(['/', '\\']).to_string();
@@ -3653,6 +3659,7 @@ fn e2e_cli_session_explicit_path_loads_session() {
 }
 
 /// Recursively find the first `.jsonl` file in a directory tree.
+#[cfg(unix)]
 fn find_first_jsonl(dir: &Path) -> Option<PathBuf> {
     let entries = fs::read_dir(dir).ok()?;
     for entry in entries.flatten() {
