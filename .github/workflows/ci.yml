@@ -76,9 +76,10 @@ jobs:
 
           # Allowlisted exceptions (audited):
           # - MockHttp{Server,Request,Response}: deterministic local TCP server test infra.
-          # - MockSpec: VCR cassette spec validation (mock_spec_validation.rs).
+          # - MockSpec{,Interceptor}: VCR cassette spec validation + conformance interceptor.
+          # - Mocked: comment heading in node_http_shim.rs.
           # - Stubs: string literal in repair event diagnostics (not a mock type).
-          allow_re='^(MockHttp(Server|Request|Response)|MockSpec|Stubs)$'
+          allow_re='^(MockHttp(Server|Request|Response)|MockSpec(Interceptor)?|Mocked|Stubs)$'
 
           matches="$(rg -n --column --no-heading --color never --glob '!tests/ext_conformance/artifacts/**' -o '\b(Mock|Fake|Stub)[A-Za-z0-9_]+\b' tests || true)"
           if [ -z "$matches" ]; then
