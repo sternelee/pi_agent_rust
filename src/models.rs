@@ -94,11 +94,29 @@ pub struct ModelConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompatConfig {
+    // ── Capability flags ────────────────────────────────────────────────
     pub supports_store: Option<bool>,
     pub supports_developer_role: Option<bool>,
     pub supports_reasoning_effort: Option<bool>,
     pub supports_usage_in_streaming: Option<bool>,
+    pub supports_tools: Option<bool>,
+    pub supports_streaming: Option<bool>,
+    pub supports_parallel_tool_calls: Option<bool>,
+
+    // ── Request field overrides ─────────────────────────────────────────
+    /// Override the JSON field name for `max_tokens` (e.g., `"max_completion_tokens"` for o1).
     pub max_tokens_field: Option<String>,
+    /// Override the system message role name (e.g., `"developer"` for some providers).
+    pub system_role_name: Option<String>,
+    /// Override the stop-reason field name in responses.
+    pub stop_reason_field: Option<String>,
+
+    // ── Per-provider request headers ────────────────────────────────────
+    /// Extra HTTP headers injected into every request for this provider.
+    /// Applied after default headers but before per-request `StreamOptions.headers`.
+    pub custom_headers: Option<HashMap<String, String>>,
+
+    // ── Gateway/routing metadata ────────────────────────────────────────
     pub open_router_routing: Option<serde_json::Value>,
     pub vercel_gateway_routing: Option<serde_json::Value>,
 }
@@ -424,12 +442,72 @@ fn apply_custom_models(auth: &AuthStorage, models: &mut Vec<ModelEntry>, config:
                 api_key: provider_key.clone(),
                 headers: model_headers,
                 auth_header,
-                compat: model_cfg
-                    .compat
-                    .clone()
-                    .or_else(|| provider_cfg.compat.clone()),
+                compat: merge_compat(provider_cfg.compat.as_ref(), model_cfg.compat.as_ref()),
                 oauth_config: None,
             });
+        }
+    }
+}
+
+fn merge_compat(
+    provider_compat: Option<&CompatConfig>,
+    model_compat: Option<&CompatConfig>,
+) -> Option<CompatConfig> {
+    match (provider_compat, model_compat) {
+        (None, None) => None,
+        (Some(provider), None) => Some(provider.clone()),
+        (None, Some(model)) => Some(model.clone()),
+        (Some(provider), Some(model)) => {
+            let custom_headers = match (&provider.custom_headers, &model.custom_headers) {
+                (None, None) => None,
+                (Some(headers), None) | (None, Some(headers)) => Some(headers.clone()),
+                (Some(provider_headers), Some(model_headers)) => {
+                    let mut merged = provider_headers.clone();
+                    for (key, value) in model_headers {
+                        merged.insert(key.clone(), value.clone());
+                    }
+                    Some(merged)
+                }
+            };
+
+            Some(CompatConfig {
+                supports_store: model.supports_store.or(provider.supports_store),
+                supports_developer_role: model
+                    .supports_developer_role
+                    .or(provider.supports_developer_role),
+                supports_reasoning_effort: model
+                    .supports_reasoning_effort
+                    .or(provider.supports_reasoning_effort),
+                supports_usage_in_streaming: model
+                    .supports_usage_in_streaming
+                    .or(provider.supports_usage_in_streaming),
+                supports_tools: model.supports_tools.or(provider.supports_tools),
+                supports_streaming: model.supports_streaming.or(provider.supports_streaming),
+                supports_parallel_tool_calls: model
+                    .supports_parallel_tool_calls
+                    .or(provider.supports_parallel_tool_calls),
+                max_tokens_field: model
+                    .max_tokens_field
+                    .clone()
+                    .or_else(|| provider.max_tokens_field.clone()),
+                system_role_name: model
+                    .system_role_name
+                    .clone()
+                    .or_else(|| provider.system_role_name.clone()),
+                stop_reason_field: model
+                    .stop_reason_field
+                    .clone()
+                    .or_else(|| provider.stop_reason_field.clone()),
+                custom_headers,
+                open_router_routing: model
+                    .open_router_routing
+                    .clone()
+                    .or_else(|| provider.open_router_routing.clone()),
+                vercel_gateway_routing: model
+                    .vercel_gateway_routing
+                    .clone()
+                    .or_else(|| provider.vercel_gateway_routing.clone()),
+            })
         }
     }
 }
@@ -747,6 +825,76 @@ mod tests {
         assert_eq!(cohere.model.context_window, 128_000);
         assert_eq!(cohere.model.max_tokens, 8192);
         assert!(!cohere.auth_header);
+    }
+
+    #[test]
+    fn apply_custom_models_merges_provider_and_model_compat() {
+        let (_dir, auth) = test_auth_storage();
+        let mut models = Vec::new();
+        let config = ModelsConfig {
+            providers: HashMap::from([(
+                "custom-openai".to_string(),
+                ProviderConfig {
+                    api: Some("openai-completions".to_string()),
+                    base_url: Some("https://compat.example/v1".to_string()),
+                    compat: Some(CompatConfig {
+                        supports_tools: Some(false),
+                        supports_usage_in_streaming: Some(false),
+                        max_tokens_field: Some("max_completion_tokens".to_string()),
+                        custom_headers: Some(HashMap::from([
+                            ("x-provider-only".to_string(), "provider".to_string()),
+                            ("x-shared".to_string(), "provider".to_string()),
+                        ])),
+                        ..CompatConfig::default()
+                    }),
+                    models: Some(vec![ModelConfig {
+                        id: "custom-model".to_string(),
+                        compat: Some(CompatConfig {
+                            supports_tools: Some(true),
+                            system_role_name: Some("developer".to_string()),
+                            custom_headers: Some(HashMap::from([
+                                ("x-model-only".to_string(), "model".to_string()),
+                                ("x-shared".to_string(), "model".to_string()),
+                            ])),
+                            ..CompatConfig::default()
+                        }),
+                        ..ModelConfig::default()
+                    }]),
+                    ..ProviderConfig::default()
+                },
+            )]),
+        };
+
+        apply_custom_models(&auth, &mut models, &config);
+
+        let entry = models
+            .iter()
+            .find(|m| m.model.provider == "custom-openai" && m.model.id == "custom-model")
+            .expect("custom model should be added");
+        let compat = entry.compat.as_ref().expect("compat should be merged");
+        assert_eq!(
+            compat.max_tokens_field.as_deref(),
+            Some("max_completion_tokens")
+        );
+        assert_eq!(compat.system_role_name.as_deref(), Some("developer"));
+        assert_eq!(compat.supports_usage_in_streaming, Some(false));
+        assert_eq!(compat.supports_tools, Some(true));
+        let custom_headers = compat
+            .custom_headers
+            .as_ref()
+            .expect("custom headers should be merged");
+        assert_eq!(
+            custom_headers.get("x-provider-only").map(String::as_str),
+            Some("provider")
+        );
+        assert_eq!(
+            custom_headers.get("x-model-only").map(String::as_str),
+            Some("model")
+        );
+        assert_eq!(
+            custom_headers.get("x-shared").map(String::as_str),
+            Some("model")
+        );
     }
 
     #[test]
@@ -1363,6 +1511,59 @@ mod tests {
             compat.max_tokens_field.as_deref(),
             Some("max_completion_tokens")
         );
+    }
+
+    #[test]
+    fn compat_config_deserialize_all_fields() {
+        let json = r#"{
+            "supportsStore": true,
+            "supportsDeveloperRole": true,
+            "supportsReasoningEffort": false,
+            "supportsUsageInStreaming": false,
+            "supportsTools": false,
+            "supportsStreaming": true,
+            "supportsParallelToolCalls": false,
+            "maxTokensField": "max_completion_tokens",
+            "systemRoleName": "developer",
+            "stopReasonField": "finish_reason",
+            "customHeaders": {"X-Region": "us-east-1", "X-Tag": "override"},
+            "openRouterRouting": {"order": ["fallback"]},
+            "vercelGatewayRouting": {"priority": 1}
+        }"#;
+        let compat: CompatConfig = serde_json::from_str(json).expect("parse");
+        assert_eq!(compat.supports_tools, Some(false));
+        assert_eq!(compat.supports_streaming, Some(true));
+        assert_eq!(compat.supports_parallel_tool_calls, Some(false));
+        assert_eq!(compat.system_role_name.as_deref(), Some("developer"));
+        assert_eq!(compat.stop_reason_field.as_deref(), Some("finish_reason"));
+        let custom = compat.custom_headers.as_ref().expect("custom_headers");
+        assert_eq!(
+            custom.get("X-Region").map(String::as_str),
+            Some("us-east-1")
+        );
+        assert_eq!(custom.get("X-Tag").map(String::as_str), Some("override"));
+        assert!(compat.open_router_routing.is_some());
+        assert!(compat.vercel_gateway_routing.is_some());
+    }
+
+    #[test]
+    fn compat_config_default_all_none() {
+        let compat = CompatConfig::default();
+        assert!(compat.supports_store.is_none());
+        assert!(compat.supports_tools.is_none());
+        assert!(compat.supports_streaming.is_none());
+        assert!(compat.max_tokens_field.is_none());
+        assert!(compat.system_role_name.is_none());
+        assert!(compat.stop_reason_field.is_none());
+        assert!(compat.custom_headers.is_none());
+    }
+
+    #[test]
+    fn compat_config_deserialize_empty_object() {
+        let compat: CompatConfig = serde_json::from_str("{}").expect("parse");
+        assert!(compat.supports_store.is_none());
+        assert!(compat.supports_tools.is_none());
+        assert!(compat.custom_headers.is_none());
     }
 
     // ─── apply_custom_models: provider replaces built-ins ────────────

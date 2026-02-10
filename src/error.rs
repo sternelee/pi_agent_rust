@@ -61,6 +61,99 @@ pub enum Error {
     Api(String),
 }
 
+/// Stable machine codes for auth/config diagnostics across provider families.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthDiagnosticCode {
+    MissingApiKey,
+    InvalidApiKey,
+    MissingOAuthAuthorizationCode,
+    OAuthTokenExchangeFailed,
+    OAuthTokenRefreshFailed,
+    MissingAzureDeployment,
+    MissingRegion,
+    MissingProject,
+    MissingProfile,
+    MissingEndpoint,
+    MissingCredentialChain,
+    UnknownAuthFailure,
+}
+
+impl AuthDiagnosticCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingApiKey => "auth.missing_api_key",
+            Self::InvalidApiKey => "auth.invalid_api_key",
+            Self::MissingOAuthAuthorizationCode => "auth.oauth.missing_authorization_code",
+            Self::OAuthTokenExchangeFailed => "auth.oauth.token_exchange_failed",
+            Self::OAuthTokenRefreshFailed => "auth.oauth.token_refresh_failed",
+            Self::MissingAzureDeployment => "config.azure.missing_deployment",
+            Self::MissingRegion => "config.auth.missing_region",
+            Self::MissingProject => "config.auth.missing_project",
+            Self::MissingProfile => "config.auth.missing_profile",
+            Self::MissingEndpoint => "config.auth.missing_endpoint",
+            Self::MissingCredentialChain => "auth.credential_chain.missing",
+            Self::UnknownAuthFailure => "auth.unknown_failure",
+        }
+    }
+
+    #[must_use]
+    pub const fn remediation(self) -> &'static str {
+        match self {
+            Self::MissingApiKey => "Set the provider API key env var or run `/login <provider>`.",
+            Self::InvalidApiKey => "Rotate or replace the API key and verify provider permissions.",
+            Self::MissingOAuthAuthorizationCode => {
+                "Re-run `/login` and paste a full callback URL or authorization code."
+            }
+            Self::OAuthTokenExchangeFailed => {
+                "Retry login flow and verify token endpoint/client configuration."
+            }
+            Self::OAuthTokenRefreshFailed => {
+                "Re-authenticate with `/login` and confirm refresh-token validity."
+            }
+            Self::MissingAzureDeployment => {
+                "Configure Azure resource+deployment in models.json before dispatch."
+            }
+            Self::MissingRegion => "Set provider region/cluster configuration before retrying.",
+            Self::MissingProject => "Set provider project/workspace identifier before retrying.",
+            Self::MissingProfile => "Set credential profile/source configuration before retrying.",
+            Self::MissingEndpoint => "Configure provider base URL/endpoint in models.json.",
+            Self::MissingCredentialChain => {
+                "Configure credential-chain sources (env/profile/role) before retrying."
+            }
+            Self::UnknownAuthFailure => {
+                "Inspect auth diagnostics and retry with explicit credentials."
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn redaction_policy(self) -> &'static str {
+        match self {
+            Self::MissingApiKey
+            | Self::InvalidApiKey
+            | Self::MissingOAuthAuthorizationCode
+            | Self::OAuthTokenExchangeFailed
+            | Self::OAuthTokenRefreshFailed
+            | Self::MissingAzureDeployment
+            | Self::MissingRegion
+            | Self::MissingProject
+            | Self::MissingProfile
+            | Self::MissingEndpoint
+            | Self::MissingCredentialChain
+            | Self::UnknownAuthFailure => "redact-secrets",
+        }
+    }
+}
+
+/// Structured auth/config diagnostic metadata for downstream tooling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthDiagnostic {
+    pub code: AuthDiagnosticCode,
+    pub remediation: &'static str,
+    pub redaction_policy: &'static str,
+}
+
 impl Error {
     /// Create a configuration error.
     pub fn config(message: impl Into<String>) -> Self {
@@ -127,10 +220,22 @@ impl Error {
         }
     }
 
+    /// Classify auth/config errors into stable machine-readable diagnostics.
+    #[must_use]
+    pub fn auth_diagnostic(&self) -> Option<AuthDiagnostic> {
+        match self {
+            Self::Auth(message) => classify_auth_diagnostic(None, message),
+            Self::Provider { provider, message } => {
+                classify_auth_diagnostic(Some(provider.as_str()), message)
+            }
+            _ => None,
+        }
+    }
+
     /// Map internal errors to a stable, user-facing hint taxonomy.
     #[must_use]
     pub fn hints(&self) -> ErrorHints {
-        match self {
+        let mut hints = match self {
             Self::Config(message) => config_hints(message),
             Self::Session(message) => session_hints(message),
             Self::SessionNotFound { path } => build_hints(
@@ -187,7 +292,24 @@ impl Error {
                 ],
                 vec![("details", message.clone())],
             ),
+        };
+
+        if let Some(diagnostic) = self.auth_diagnostic() {
+            hints.context.push((
+                "diagnostic_code".to_string(),
+                diagnostic.code.as_str().to_string(),
+            ));
+            hints.context.push((
+                "diagnostic_remediation".to_string(),
+                diagnostic.remediation.to_string(),
+            ));
+            hints.context.push((
+                "redaction_policy".to_string(),
+                diagnostic.redaction_policy.to_string(),
+            ));
         }
+
+        hints
     }
 }
 
@@ -215,6 +337,115 @@ fn build_hints(summary: &str, hints: Vec<String>, context: Vec<(&str, String)>) 
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
+}
+
+const fn build_auth_diagnostic(code: AuthDiagnosticCode) -> AuthDiagnostic {
+    AuthDiagnostic {
+        code,
+        remediation: code.remediation(),
+        redaction_policy: code.redaction_policy(),
+    }
+}
+
+fn classify_auth_diagnostic(provider: Option<&str>, message: &str) -> Option<AuthDiagnostic> {
+    let lower = message.to_lowercase();
+    let provider_lower = provider.map(str::to_lowercase);
+    if contains_any(
+        &lower,
+        &[
+            "missing authorization code",
+            "authorization code is missing",
+        ],
+    ) {
+        return Some(build_auth_diagnostic(
+            AuthDiagnosticCode::MissingOAuthAuthorizationCode,
+        ));
+    }
+    if contains_any(&lower, &["token exchange failed", "invalid token response"]) {
+        return Some(build_auth_diagnostic(
+            AuthDiagnosticCode::OAuthTokenExchangeFailed,
+        ));
+    }
+    if contains_any(
+        &lower,
+        &[
+            "token refresh failed",
+            "oauth token refresh failed",
+            "refresh token",
+        ],
+    ) {
+        return Some(build_auth_diagnostic(
+            AuthDiagnosticCode::OAuthTokenRefreshFailed,
+        ));
+    }
+    if contains_any(
+        &lower,
+        &[
+            "missing api key",
+            "api key not configured",
+            "api key is required",
+        ],
+    ) {
+        return Some(build_auth_diagnostic(AuthDiagnosticCode::MissingApiKey));
+    }
+    if contains_any(
+        &lower,
+        &["401", "unauthorized", "403", "forbidden", "invalid api key"],
+    ) {
+        return Some(build_auth_diagnostic(AuthDiagnosticCode::InvalidApiKey));
+    }
+    if contains_any(&lower, &["resource+deployment", "missing deployment"]) {
+        return Some(build_auth_diagnostic(
+            AuthDiagnosticCode::MissingAzureDeployment,
+        ));
+    }
+    if contains_any(&lower, &["missing region", "region is required"]) {
+        return Some(build_auth_diagnostic(AuthDiagnosticCode::MissingRegion));
+    }
+    if contains_any(&lower, &["missing project", "project is required"]) {
+        return Some(build_auth_diagnostic(AuthDiagnosticCode::MissingProject));
+    }
+    if contains_any(&lower, &["missing profile", "profile is required"]) {
+        return Some(build_auth_diagnostic(AuthDiagnosticCode::MissingProfile));
+    }
+    if contains_any(
+        &lower,
+        &[
+            "missing endpoint",
+            "missing base url",
+            "base url is required",
+        ],
+    ) {
+        return Some(build_auth_diagnostic(AuthDiagnosticCode::MissingEndpoint));
+    }
+    if contains_any(
+        &lower,
+        &[
+            "credential chain",
+            "aws_access_key_id",
+            "credential source",
+            "missing credentials",
+        ],
+    ) || provider_lower
+        .as_deref()
+        .is_some_and(|provider_id| provider_id.contains("bedrock") && lower.contains("credential"))
+    {
+        return Some(build_auth_diagnostic(
+            AuthDiagnosticCode::MissingCredentialChain,
+        ));
+    }
+
+    if lower.contains("oauth")
+        || lower.contains("authentication")
+        || lower.contains("credential")
+        || lower.contains("api key")
+    {
+        return Some(build_auth_diagnostic(
+            AuthDiagnosticCode::UnknownAuthFailure,
+        ));
+    }
+
+    None
 }
 
 fn config_hints(message: &str) -> ErrorHints {
@@ -553,6 +784,14 @@ impl From<sqlmodel_core::Error> for Error {
 mod tests {
     use super::*;
 
+    fn context_value<'a>(hints: &'a ErrorHints, key: &str) -> Option<&'a str> {
+        hints
+            .context
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, value)| value.as_str())
+    }
+
     // ─── Constructor tests ──────────────────────────────────────────────
 
     #[test]
@@ -879,6 +1118,76 @@ mod tests {
         let err = Error::auth("unknown auth issue");
         let h = err.hints();
         assert!(h.summary.contains("Authentication error"));
+    }
+
+    #[test]
+    fn auth_diagnostic_provider_invalid_key_code_and_context() {
+        let err = Error::provider("openai", "HTTP 401 unauthorized");
+        let diagnostic = err.auth_diagnostic().expect("diagnostic should be present");
+        assert_eq!(diagnostic.code, AuthDiagnosticCode::InvalidApiKey);
+        assert_eq!(diagnostic.code.as_str(), "auth.invalid_api_key");
+        assert_eq!(diagnostic.redaction_policy, "redact-secrets");
+
+        let hints = err.hints();
+        assert_eq!(
+            context_value(&hints, "diagnostic_code"),
+            Some("auth.invalid_api_key")
+        );
+        assert_eq!(
+            context_value(&hints, "redaction_policy"),
+            Some("redact-secrets")
+        );
+    }
+
+    #[test]
+    fn auth_diagnostic_oauth_exchange_failure_code() {
+        let err = Error::auth("Token exchange failed: invalid_grant");
+        let diagnostic = err.auth_diagnostic().expect("diagnostic should be present");
+        assert_eq!(
+            diagnostic.code,
+            AuthDiagnosticCode::OAuthTokenExchangeFailed
+        );
+        assert_eq!(
+            diagnostic.remediation,
+            "Retry login flow and verify token endpoint/client configuration."
+        );
+
+        let hints = err.hints();
+        assert_eq!(
+            context_value(&hints, "diagnostic_code"),
+            Some("auth.oauth.token_exchange_failed")
+        );
+    }
+
+    #[test]
+    fn auth_diagnostic_azure_missing_deployment_code() {
+        let err = Error::provider(
+            "azure-openai",
+            "Azure OpenAI provider requires resource+deployment; configure via models.json",
+        );
+        let diagnostic = err.auth_diagnostic().expect("diagnostic should be present");
+        assert_eq!(diagnostic.code, AuthDiagnosticCode::MissingAzureDeployment);
+        assert_eq!(diagnostic.code.as_str(), "config.azure.missing_deployment");
+    }
+
+    #[test]
+    fn auth_diagnostic_bedrock_missing_credential_chain_code() {
+        let err = Error::provider(
+            "amazon-bedrock",
+            "AWS credential chain not configured for provider",
+        );
+        let diagnostic = err.auth_diagnostic().expect("diagnostic should be present");
+        assert_eq!(diagnostic.code, AuthDiagnosticCode::MissingCredentialChain);
+        assert_eq!(diagnostic.code.as_str(), "auth.credential_chain.missing");
+    }
+
+    #[test]
+    fn auth_diagnostic_absent_for_non_auth_provider_error() {
+        let err = Error::provider("anthropic", "429 rate limit");
+        assert!(err.auth_diagnostic().is_none());
+
+        let hints = err.hints();
+        assert!(context_value(&hints, "diagnostic_code").is_none());
     }
 
     #[test]
