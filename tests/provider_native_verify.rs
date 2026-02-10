@@ -1,0 +1,1913 @@
+//! Native-provider verification harness.
+//!
+//! Defines a **provider-agnostic** set of canonical scenarios and runs them
+//! against every native provider using VCR cassettes for deterministic,
+//! offline playback.  Each run produces a `VerificationReport` JSON artifact
+//! that can be diffed across providers to surface behavior divergence.
+//!
+//! ## Design
+//!
+//! ```text
+//! CanonicalScenario  ──►  fixture_for_<provider>()  ──►  VCR cassette
+//!                         run_scenario()            ──►  StreamSummary
+//!                         assert + artifact         ──►  VerificationReport
+//! ```
+//!
+//! The harness is consumed by the **parity slices** (bd-3uqg.3.8.2/3) which
+//! wire specific providers into the canonical scenario set.
+//!
+//! ## Running
+//!
+//! ```bash
+//! # All harness tests (playback, no API keys needed):
+//! cargo test provider_native_verify
+//!
+//! # Record real cassettes (Vertex example):
+//! GOOGLE_CLOUD_API_KEY=... GOOGLE_CLOUD_PROJECT=... VCR_MODE=record \
+//!   cargo test provider_native_verify::vertex_
+//! ```
+
+mod common;
+
+use common::TestHarness;
+use futures::{Stream, StreamExt};
+use pi::http::client::Client;
+use pi::model::{Message, StopReason, StreamEvent, UserContent, UserMessage};
+use pi::provider::{Context, Provider, StreamOptions, ToolDef};
+use pi::vcr::{Cassette, Interaction, RecordedRequest, RecordedResponse, VcrMode, VcrRecorder};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::env;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+
+// ============================================================================
+// Shared helpers (mirror provider_streaming.rs so we're self-contained)
+// ============================================================================
+
+fn cassette_root() -> PathBuf {
+    env::var("VCR_CASSETTE_DIR").map_or_else(
+        |_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vcr"),
+        PathBuf::from,
+    )
+}
+
+#[allow(dead_code)]
+fn vcr_mode() -> VcrMode {
+    match env::var("VCR_MODE")
+        .ok()
+        .map(|v| v.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("record") => VcrMode::Record,
+        Some("auto") => VcrMode::Auto,
+        _ => VcrMode::Playback,
+    }
+}
+
+#[allow(dead_code)]
+fn vcr_strict() -> bool {
+    env::var("VCR_STRICT")
+        .is_ok_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+fn user_text(text: &str) -> Message {
+    Message::User(UserMessage {
+        content: UserContent::Text(text.to_string()),
+        timestamp: 0,
+    })
+}
+
+fn should_generate_fixture(path: &Path, cassette_name: &str) -> bool {
+    if path.exists() {
+        return false;
+    }
+    if matches!(vcr_mode(), VcrMode::Record) {
+        return false;
+    }
+    assert!(
+        !vcr_strict(),
+        "missing cassette in strict mode: {cassette_name} ({})",
+        path.display()
+    );
+    true
+}
+
+// ============================================================================
+// Stream collection & summarization (self-contained copy)
+// ============================================================================
+
+struct StreamOutcome {
+    events: Vec<StreamEvent>,
+    stream_error: Option<String>,
+}
+
+async fn collect_events<S>(mut stream: S) -> StreamOutcome
+where
+    S: Stream<Item = pi::PiResult<StreamEvent>> + Unpin,
+{
+    let mut events = Vec::new();
+    let mut stream_error = None;
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(event) => events.push(event),
+            Err(err) => {
+                stream_error = Some(err.to_string());
+                break;
+            }
+        }
+    }
+    StreamOutcome {
+        events,
+        stream_error,
+    }
+}
+
+#[derive(Debug)]
+struct StreamSummary {
+    timeline: Vec<String>,
+    event_count: usize,
+    has_start: bool,
+    has_done: bool,
+    has_error_event: bool,
+    text: String,
+    thinking: String,
+    tool_calls: Vec<pi::model::ToolCall>,
+    text_deltas: usize,
+    thinking_deltas: usize,
+    tool_call_deltas: usize,
+    stop_reason: Option<StopReason>,
+    stream_error: Option<String>,
+}
+
+fn summarize_events(outcome: &StreamOutcome) -> StreamSummary {
+    let mut summary = StreamSummary {
+        timeline: Vec::new(),
+        event_count: outcome.events.len(),
+        has_start: false,
+        has_done: false,
+        has_error_event: false,
+        text: String::new(),
+        thinking: String::new(),
+        tool_calls: Vec::new(),
+        text_deltas: 0,
+        thinking_deltas: 0,
+        tool_call_deltas: 0,
+        stop_reason: None,
+        stream_error: outcome.stream_error.clone(),
+    };
+
+    for event in &outcome.events {
+        match event {
+            StreamEvent::Start { .. } => {
+                summary.has_start = true;
+                summary.timeline.push("start".into());
+            }
+            StreamEvent::TextStart { .. } => summary.timeline.push("text_start".into()),
+            StreamEvent::TextDelta { delta, .. } => {
+                summary.text_deltas += 1;
+                summary.text.push_str(delta);
+                summary.timeline.push("text_delta".into());
+            }
+            StreamEvent::TextEnd { content, .. } => {
+                summary.text.clone_from(content);
+                summary.timeline.push("text_end".into());
+            }
+            StreamEvent::ThinkingStart { .. } => summary.timeline.push("thinking_start".into()),
+            StreamEvent::ThinkingDelta { delta, .. } => {
+                summary.thinking_deltas += 1;
+                summary.thinking.push_str(delta);
+                summary.timeline.push("thinking_delta".into());
+            }
+            StreamEvent::ThinkingEnd { content, .. } => {
+                summary.thinking.clone_from(content);
+                summary.timeline.push("thinking_end".into());
+            }
+            StreamEvent::ToolCallStart { .. } => summary.timeline.push("tool_call_start".into()),
+            StreamEvent::ToolCallDelta { .. } => {
+                summary.tool_call_deltas += 1;
+                summary.timeline.push("tool_call_delta".into());
+            }
+            StreamEvent::ToolCallEnd { tool_call, .. } => {
+                summary.tool_calls.push(tool_call.clone());
+                summary.timeline.push("tool_call_end".into());
+            }
+            StreamEvent::Done { reason, .. } => {
+                summary.has_done = true;
+                summary.stop_reason = Some(*reason);
+                summary.timeline.push("done".into());
+            }
+            StreamEvent::Error { reason, .. } => {
+                summary.has_error_event = true;
+                summary.stop_reason = Some(*reason);
+                summary.timeline.push("error".into());
+            }
+        }
+    }
+
+    summary
+}
+
+// ============================================================================
+// Canonical Scenarios
+// ============================================================================
+
+/// A provider-agnostic scenario specification.
+#[derive(Clone)]
+struct CanonicalScenario {
+    /// Short identifier (used for cassette naming: `{provider}_{tag}`).
+    tag: &'static str,
+    /// Human-readable description.
+    description: &'static str,
+    /// Messages sent to the provider.
+    messages: Vec<Message>,
+    /// Tools available for the provider to invoke.
+    tools: Vec<ToolDef>,
+    /// Expected behavior of the stream.
+    expectation: CanonicalExpectation,
+}
+
+/// Expected outcome of a canonical scenario.
+#[derive(Clone, Debug)]
+enum CanonicalExpectation {
+    /// Expect a successful stream with these minimum properties.
+    Stream(StreamExpectations),
+    /// Expect the provider to return an HTTP error.
+    Error(ErrorExpectation),
+}
+
+#[derive(Clone, Debug, Default)]
+struct StreamExpectations {
+    min_text_deltas: usize,
+    min_tool_calls: usize,
+    allowed_stop_reasons: Option<Vec<StopReason>>,
+    require_unicode: bool,
+    allow_stream_error: bool,
+    /// When false, the harness does NOT require a `Start` event.
+    /// Batch-response providers (e.g. Bedrock Converse) emit events from
+    /// a fully-buffered JSON response and may skip `Start`.
+    require_start_event: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ErrorExpectation {
+    status: u16,
+    contains: Option<&'static str>,
+}
+
+fn tool_echo() -> ToolDef {
+    ToolDef {
+        name: "echo".to_string(),
+        description: "Echo the provided text.".to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "text": { "type": "string" }
+            },
+            "required": ["text"]
+        }),
+    }
+}
+
+fn tool_add() -> ToolDef {
+    ToolDef {
+        name: "add".to_string(),
+        description: "Add two numbers.".to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "a": { "type": "number" },
+                "b": { "type": "number" }
+            },
+            "required": ["a", "b"]
+        }),
+    }
+}
+
+/// The full set of canonical verification scenarios.
+fn canonical_scenarios() -> Vec<CanonicalScenario> {
+    vec![
+        // ── Text streaming ──────────────────────────────────────────
+        CanonicalScenario {
+            tag: "simple_text",
+            description: "Basic text generation",
+            messages: vec![user_text(
+                "Say exactly: 'Hello from the verification harness.'",
+            )],
+            tools: vec![],
+            expectation: CanonicalExpectation::Stream(StreamExpectations {
+                min_text_deltas: 1,
+                allowed_stop_reasons: Some(vec![StopReason::Stop]),
+                ..Default::default()
+            }),
+        },
+        CanonicalScenario {
+            tag: "unicode_text",
+            description: "Non-ASCII text generation",
+            messages: vec![user_text(
+                "Respond with exactly: '日本語テスト — émojis: 🦀🔥'",
+            )],
+            tools: vec![],
+            expectation: CanonicalExpectation::Stream(StreamExpectations {
+                min_text_deltas: 1,
+                require_unicode: true,
+                allowed_stop_reasons: Some(vec![StopReason::Stop]),
+                ..Default::default()
+            }),
+        },
+        // ── Tool use ────────────────────────────────────────────────
+        CanonicalScenario {
+            tag: "tool_call_single",
+            description: "Single tool invocation",
+            messages: vec![user_text("Use the echo tool to echo 'verification test'.")],
+            tools: vec![tool_echo()],
+            expectation: CanonicalExpectation::Stream(StreamExpectations {
+                min_tool_calls: 1,
+                allowed_stop_reasons: Some(vec![StopReason::ToolUse]),
+                ..Default::default()
+            }),
+        },
+        CanonicalScenario {
+            tag: "tool_call_multiple",
+            description: "Multiple tool invocations",
+            messages: vec![user_text(
+                "Use the add tool to compute 2+3, then use echo to say 'done'.",
+            )],
+            tools: vec![tool_add(), tool_echo()],
+            expectation: CanonicalExpectation::Stream(StreamExpectations {
+                min_tool_calls: 1,
+                allowed_stop_reasons: Some(vec![StopReason::ToolUse]),
+                ..Default::default()
+            }),
+        },
+        // ── Error paths ─────────────────────────────────────────────
+        CanonicalScenario {
+            tag: "error_auth_401",
+            description: "Authentication failure",
+            messages: vec![user_text("Hello")],
+            tools: vec![],
+            expectation: CanonicalExpectation::Error(ErrorExpectation {
+                status: 401,
+                contains: None,
+            }),
+        },
+        CanonicalScenario {
+            tag: "error_bad_request_400",
+            description: "Malformed request",
+            messages: vec![user_text("Hello")],
+            tools: vec![],
+            expectation: CanonicalExpectation::Error(ErrorExpectation {
+                status: 400,
+                contains: None,
+            }),
+        },
+        CanonicalScenario {
+            tag: "error_rate_limit_429",
+            description: "Rate limit exceeded",
+            messages: vec![user_text("Hello")],
+            tools: vec![],
+            expectation: CanonicalExpectation::Error(ErrorExpectation {
+                status: 429,
+                contains: None,
+            }),
+        },
+    ]
+}
+
+// ============================================================================
+// Verification Report
+// ============================================================================
+
+/// Build a verification report artifact.
+fn build_verification_report(
+    provider_name: &str,
+    scenario_tag: &str,
+    description: &str,
+    summary: &StreamSummary,
+) -> Value {
+    json!({
+        "schema": "pi.test.native_verify.v1",
+        "provider": provider_name,
+        "scenario": scenario_tag,
+        "description": description,
+        "event_count": summary.event_count,
+        "has_start": summary.has_start,
+        "has_done": summary.has_done,
+        "has_error_event": summary.has_error_event,
+        "timeline": &summary.timeline,
+        "stop_reason": summary.stop_reason.map(|r| format!("{r:?}")),
+        "text_sha256": sha256_hex(summary.text.as_bytes()),
+        "text_chars": summary.text.chars().count(),
+        "text_deltas": summary.text_deltas,
+        "thinking_chars": summary.thinking.chars().count(),
+        "thinking_deltas": summary.thinking_deltas,
+        "tool_call_count": summary.tool_calls.len(),
+        "tool_call_names": summary.tool_calls.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+        "stream_error": summary.stream_error.as_deref(),
+    })
+}
+
+fn write_report(harness: &TestHarness, provider: &str, tag: &str, report: &Value) {
+    let file_name = format!("{provider}_{tag}.verify.json");
+    let path = harness.temp_path(&file_name);
+    let serialized = serde_json::to_string_pretty(report)
+        .unwrap_or_else(|_| r#"{"schema":"serialization_error"}"#.to_string());
+    std::fs::write(&path, serialized)
+        .unwrap_or_else(|err| panic!("write verify artifact {}: {err}", path.display()));
+    harness.record_artifact(format!("verify/{file_name}"), &path);
+}
+
+// ============================================================================
+// Assertions
+// ============================================================================
+
+fn assert_stream_ok(
+    _harness: &TestHarness,
+    tag: &str,
+    summary: &StreamSummary,
+    expectations: &StreamExpectations,
+) {
+    if !expectations.allow_stream_error {
+        assert!(
+            summary.stream_error.is_none(),
+            "{tag}: unexpected stream error {:?}",
+            summary.stream_error
+        );
+    }
+
+    if expectations.require_start_event && summary.event_count > 0 {
+        assert!(summary.has_start, "{tag}: missing Start event");
+    }
+
+    if expectations.min_text_deltas > 0 {
+        assert!(
+            summary.text_deltas >= expectations.min_text_deltas,
+            "{tag}: expected >= {} text deltas, got {}",
+            expectations.min_text_deltas,
+            summary.text_deltas
+        );
+    }
+
+    if expectations.min_tool_calls > 0 {
+        assert!(
+            summary.tool_calls.len() >= expectations.min_tool_calls,
+            "{tag}: expected >= {} tool calls, got {}",
+            expectations.min_tool_calls,
+            summary.tool_calls.len()
+        );
+    }
+
+    if expectations.require_unicode {
+        assert!(!summary.text.is_ascii(), "{tag}: expected unicode text");
+    }
+
+    if let Some(allowed) = &expectations.allowed_stop_reasons {
+        let reason = summary
+            .stop_reason
+            .unwrap_or_else(|| panic!("{tag}: missing stop reason"));
+        assert!(
+            allowed.contains(&reason),
+            "{tag}: stop reason {reason:?} not in {allowed:?}"
+        );
+    }
+}
+
+fn assert_error_ok(tag: &str, message: &str, expectation: &ErrorExpectation) {
+    let needle = format!("HTTP {}", expectation.status);
+    assert!(
+        message.contains(&needle),
+        "{tag}: expected '{needle}' in error, got: {message}"
+    );
+    if let Some(fragment) = expectation.contains {
+        assert!(
+            message.contains(fragment),
+            "{tag}: expected '{fragment}' in error, got: {message}"
+        );
+    }
+}
+
+fn assert_tool_schema_fidelity(
+    tag: &str,
+    tool_defs: &[ToolDef],
+    tool_calls: &[pi::model::ToolCall],
+) {
+    for tool_call in tool_calls {
+        let tool_def = tool_defs
+            .iter()
+            .find(|t| t.name == tool_call.name)
+            .unwrap_or_else(|| panic!("{tag}: tool call '{}' has no schema", tool_call.name));
+        let validator = jsonschema::draft202012::options()
+            .should_validate_formats(true)
+            .build(&tool_def.parameters)
+            .unwrap_or_else(|err| panic!("{tag}: invalid schema for '{}': {err}", tool_call.name));
+        if let Err(err) = validator.validate(&tool_call.arguments) {
+            panic!(
+                "{tag}: tool '{}' args failed schema validation: {err}; args={}",
+                tool_call.name, tool_call.arguments
+            );
+        }
+    }
+}
+
+// ============================================================================
+// VCR fixture generators (per wire format)
+// ============================================================================
+
+/// Generate an error fixture cassette for the Gemini/Vertex SSE wire format.
+fn generate_vertex_error_fixture(
+    cassette_path: &Path,
+    cassette_name: &str,
+    url: &str,
+    status: u16,
+) {
+    let error_body = json!({
+        "error": {
+            "code": status,
+            "message": format!("Simulated error {status}"),
+            "status": match status {
+                401 => "UNAUTHENTICATED",
+                400 => "INVALID_ARGUMENT",
+                429 => "RESOURCE_EXHAUSTED",
+                _ => "INTERNAL",
+            },
+        },
+    });
+
+    let cassette = Cassette {
+        version: "1.0".to_string(),
+        test_name: cassette_name.to_string(),
+        recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        interactions: vec![Interaction {
+            request: RecordedRequest {
+                method: "POST".to_string(),
+                url: url.to_string(),
+                headers: vec![
+                    ("Content-Type".to_string(), "application/json".to_string()),
+                    ("Accept".to_string(), "text/event-stream".to_string()),
+                    ("Authorization".to_string(), "Bearer [REDACTED]".to_string()),
+                ],
+                body: None,
+                body_text: None,
+            },
+            response: RecordedResponse {
+                status,
+                headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+                body_chunks: vec![serde_json::to_string(&error_body).unwrap_or_default()],
+                body_chunks_base64: None,
+            },
+        }],
+    };
+
+    write_cassette(cassette_path, &cassette);
+}
+
+/// Generate a simple text fixture cassette for the Gemini/Vertex SSE format.
+fn generate_vertex_text_fixture(cassette_path: &Path, cassette_name: &str, url: &str, text: &str) {
+    let chunk1 = json!({
+        "candidates": [{
+            "content": {
+                "role": "model",
+                "parts": [{"text": text}]
+            },
+            "finishReason": "STOP"
+        }],
+        "usageMetadata": {
+            "promptTokenCount": 15,
+            "candidatesTokenCount": 10,
+            "totalTokenCount": 25
+        }
+    });
+
+    let sse_chunk = format!("data: {}\n\n", serde_json::to_string(&chunk1).unwrap());
+
+    let cassette = Cassette {
+        version: "1.0".to_string(),
+        test_name: cassette_name.to_string(),
+        recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        interactions: vec![Interaction {
+            request: RecordedRequest {
+                method: "POST".to_string(),
+                url: url.to_string(),
+                headers: vec![
+                    ("Content-Type".to_string(), "application/json".to_string()),
+                    ("Accept".to_string(), "text/event-stream".to_string()),
+                    ("Authorization".to_string(), "Bearer [REDACTED]".to_string()),
+                ],
+                body: None,
+                body_text: None,
+            },
+            response: RecordedResponse {
+                status: 200,
+                headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+                body_chunks: vec![sse_chunk],
+                body_chunks_base64: None,
+            },
+        }],
+    };
+
+    write_cassette(cassette_path, &cassette);
+}
+
+/// Generate a tool-call fixture cassette for the Gemini/Vertex SSE format.
+fn generate_vertex_tool_fixture(
+    cassette_path: &Path,
+    cassette_name: &str,
+    url: &str,
+    tool_name: &str,
+    tool_args: &Value,
+) {
+    let chunk = json!({
+        "candidates": [{
+            "content": {
+                "role": "model",
+                "parts": [{
+                    "functionCall": {
+                        "name": tool_name,
+                        "args": tool_args
+                    }
+                }]
+            },
+            "finishReason": "STOP"
+        }],
+        "usageMetadata": {
+            "promptTokenCount": 25,
+            "candidatesTokenCount": 15,
+            "totalTokenCount": 40
+        }
+    });
+
+    let sse_chunk = format!("data: {}\n\n", serde_json::to_string(&chunk).unwrap());
+
+    let cassette = Cassette {
+        version: "1.0".to_string(),
+        test_name: cassette_name.to_string(),
+        recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        interactions: vec![Interaction {
+            request: RecordedRequest {
+                method: "POST".to_string(),
+                url: url.to_string(),
+                headers: vec![
+                    ("Content-Type".to_string(), "application/json".to_string()),
+                    ("Accept".to_string(), "text/event-stream".to_string()),
+                    ("Authorization".to_string(), "Bearer [REDACTED]".to_string()),
+                ],
+                body: None,
+                body_text: None,
+            },
+            response: RecordedResponse {
+                status: 200,
+                headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+                body_chunks: vec![sse_chunk],
+                body_chunks_base64: None,
+            },
+        }],
+    };
+
+    write_cassette(cassette_path, &cassette);
+}
+
+/// Build an OpenAI-compatible JSON error response body.
+fn openai_error_body(status: u16) -> Value {
+    let code = match status {
+        401 => "invalid_api_key",
+        400 => "invalid_request_error",
+        429 => "rate_limit_exceeded",
+        _ => "server_error",
+    };
+    json!({
+        "error": {
+            "message": format!("Simulated error {status}"),
+            "type": "invalid_request_error",
+            "param": Value::Null,
+            "code": code,
+        }
+    })
+}
+
+/// Build an OpenAI-compatible SSE response for plain text generation.
+fn openai_text_response(model: &str, text: &str) -> RecordedResponse {
+    let chunk_start = json!({
+        "id": "chatcmpl-verify-001",
+        "object": "chat.completion.chunk",
+        "created": 1_738_875_600,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": {"role": "assistant", "content": ""},
+            "finish_reason": Value::Null
+        }]
+    });
+    let chunk_text = json!({
+        "id": "chatcmpl-verify-001",
+        "object": "chat.completion.chunk",
+        "created": 1_738_875_600,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": {"content": text},
+            "finish_reason": Value::Null
+        }]
+    });
+    let chunk_done = json!({
+        "id": "chatcmpl-verify-001",
+        "object": "chat.completion.chunk",
+        "created": 1_738_875_600,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": {},
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 20,
+            "completion_tokens": 10,
+            "total_tokens": 30
+        }
+    });
+    RecordedResponse {
+        status: 200,
+        headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+        body_chunks: vec![
+            format!("data: {}\n\n", serde_json::to_string(&chunk_start).unwrap()),
+            format!("data: {}\n\n", serde_json::to_string(&chunk_text).unwrap()),
+            format!("data: {}\n\n", serde_json::to_string(&chunk_done).unwrap()),
+            "data: [DONE]\n\n".to_string(),
+        ],
+        body_chunks_base64: None,
+    }
+}
+
+/// Build an OpenAI-compatible SSE response for single tool invocation.
+fn openai_tool_response(model: &str, tool_name: &str, tool_args: &Value) -> RecordedResponse {
+    let args = serde_json::to_string(tool_args).unwrap_or_else(|_| "{}".to_string());
+    let chunk_start = json!({
+        "id": "chatcmpl-verify-002",
+        "object": "chat.completion.chunk",
+        "created": 1_738_875_600,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "role": "assistant",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": format!("call_verify_{tool_name}"),
+                    "type": "function",
+                    "function": {"name": tool_name, "arguments": ""}
+                }]
+            },
+            "finish_reason": Value::Null
+        }]
+    });
+    let chunk_args = json!({
+        "id": "chatcmpl-verify-002",
+        "object": "chat.completion.chunk",
+        "created": 1_738_875_600,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "function": {"arguments": args}
+                }]
+            },
+            "finish_reason": Value::Null
+        }]
+    });
+    let chunk_done = json!({
+        "id": "chatcmpl-verify-002",
+        "object": "chat.completion.chunk",
+        "created": 1_738_875_600,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": {},
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {
+            "prompt_tokens": 30,
+            "completion_tokens": 12,
+            "total_tokens": 42
+        }
+    });
+    RecordedResponse {
+        status: 200,
+        headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+        body_chunks: vec![
+            format!("data: {}\n\n", serde_json::to_string(&chunk_start).unwrap()),
+            format!("data: {}\n\n", serde_json::to_string(&chunk_args).unwrap()),
+            format!("data: {}\n\n", serde_json::to_string(&chunk_done).unwrap()),
+            "data: [DONE]\n\n".to_string(),
+        ],
+        body_chunks_base64: None,
+    }
+}
+
+/// Generate an error fixture cassette for the Bedrock Converse JSON format.
+fn generate_bedrock_error_fixture(
+    cassette_path: &Path,
+    cassette_name: &str,
+    url: &str,
+    status: u16,
+) {
+    let error_body = json!({
+        "message": format!("Simulated error {status}"),
+        "__type": match status {
+            401 | 403 => "UnrecognizedClientException",
+            400 => "ValidationException",
+            429 => "ThrottlingException",
+            _ => "InternalServerException",
+        },
+    });
+
+    let cassette = Cassette {
+        version: "1.0".to_string(),
+        test_name: cassette_name.to_string(),
+        recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        interactions: vec![Interaction {
+            request: RecordedRequest {
+                method: "POST".to_string(),
+                url: url.to_string(),
+                headers: vec![
+                    ("Content-Type".to_string(), "application/json".to_string()),
+                    ("Accept".to_string(), "application/json".to_string()),
+                ],
+                body: None,
+                body_text: None,
+            },
+            response: RecordedResponse {
+                status,
+                headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+                body_chunks: vec![serde_json::to_string(&error_body).unwrap_or_default()],
+                body_chunks_base64: None,
+            },
+        }],
+    };
+
+    write_cassette(cassette_path, &cassette);
+}
+
+/// Generate a text response fixture for the Bedrock Converse JSON format.
+fn generate_bedrock_text_fixture(cassette_path: &Path, cassette_name: &str, url: &str, text: &str) {
+    let body = json!({
+        "output": {
+            "message": {
+                "role": "assistant",
+                "content": [{"text": text}]
+            }
+        },
+        "stopReason": "end_turn",
+        "usage": {
+            "inputTokens": 15,
+            "outputTokens": 10,
+            "totalTokens": 25
+        }
+    });
+
+    let cassette = Cassette {
+        version: "1.0".to_string(),
+        test_name: cassette_name.to_string(),
+        recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        interactions: vec![Interaction {
+            request: RecordedRequest {
+                method: "POST".to_string(),
+                url: url.to_string(),
+                headers: vec![
+                    ("Content-Type".to_string(), "application/json".to_string()),
+                    ("Accept".to_string(), "application/json".to_string()),
+                ],
+                body: None,
+                body_text: None,
+            },
+            response: RecordedResponse {
+                status: 200,
+                headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+                body_chunks: vec![serde_json::to_string(&body).unwrap_or_default()],
+                body_chunks_base64: None,
+            },
+        }],
+    };
+
+    write_cassette(cassette_path, &cassette);
+}
+
+/// Generate a tool-call response fixture for the Bedrock Converse format.
+fn generate_bedrock_tool_fixture(
+    cassette_path: &Path,
+    cassette_name: &str,
+    url: &str,
+    tool_name: &str,
+    tool_args: &Value,
+) {
+    let body = json!({
+        "output": {
+            "message": {
+                "role": "assistant",
+                "content": [{
+                    "toolUse": {
+                        "toolUseId": format!("call_verify_{tool_name}"),
+                        "name": tool_name,
+                        "input": tool_args
+                    }
+                }]
+            }
+        },
+        "stopReason": "tool_use",
+        "usage": {
+            "inputTokens": 25,
+            "outputTokens": 15,
+            "totalTokens": 40
+        }
+    });
+
+    let cassette = Cassette {
+        version: "1.0".to_string(),
+        test_name: cassette_name.to_string(),
+        recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        interactions: vec![Interaction {
+            request: RecordedRequest {
+                method: "POST".to_string(),
+                url: url.to_string(),
+                headers: vec![
+                    ("Content-Type".to_string(), "application/json".to_string()),
+                    ("Accept".to_string(), "application/json".to_string()),
+                ],
+                body: None,
+                body_text: None,
+            },
+            response: RecordedResponse {
+                status: 200,
+                headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+                body_chunks: vec![serde_json::to_string(&body).unwrap_or_default()],
+                body_chunks_base64: None,
+            },
+        }],
+    };
+
+    write_cassette(cassette_path, &cassette);
+}
+
+fn write_cassette(path: &Path, cassette: &Cassette) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let serialized = serde_json::to_string_pretty(cassette).expect("Failed to serialize cassette");
+    std::fs::write(path, serialized)
+        .unwrap_or_else(|err| panic!("write cassette {}: {err}", path.display()));
+}
+
+// ============================================================================
+// Harness runner
+// ============================================================================
+
+const SYSTEM_PROMPT: &str =
+    "You are a test harness model. Follow instructions precisely and deterministically.";
+
+/// Run a single canonical scenario against a pre-built provider.
+///
+/// Returns `true` if the scenario ran (cassette present), `false` if skipped.
+async fn run_canonical_scenario(
+    provider: &dyn Provider,
+    scenario: &CanonicalScenario,
+    harness: &TestHarness,
+) -> bool {
+    let context = Context {
+        system_prompt: Some(SYSTEM_PROMPT.to_string()),
+        messages: scenario.messages.clone(),
+        tools: scenario.tools.clone(),
+    };
+
+    let options = StreamOptions {
+        api_key: Some("vcr-playback".to_string()),
+        max_tokens: Some(256),
+        temperature: Some(0.0),
+        ..Default::default()
+    };
+
+    let provider_name = provider.name();
+    let tag = scenario.tag;
+
+    harness
+        .log()
+        .info_ctx("scenario", "Running canonical scenario", |ctx| {
+            ctx.push(("provider".into(), provider_name.to_string()));
+            ctx.push(("tag".into(), tag.to_string()));
+            ctx.push(("description".into(), scenario.description.to_string()));
+        });
+
+    match &scenario.expectation {
+        CanonicalExpectation::Stream(expectations) => {
+            let stream = provider
+                .stream(&context, &options)
+                .await
+                .unwrap_or_else(|err| {
+                    panic!("{provider_name}/{tag}: expected stream, got error: {err}")
+                });
+            let outcome = collect_events(stream).await;
+            let summary = summarize_events(&outcome);
+
+            harness.log().info_ctx("result", "Stream complete", |ctx| {
+                ctx.push(("events".into(), summary.event_count.to_string()));
+                ctx.push(("text_deltas".into(), summary.text_deltas.to_string()));
+                ctx.push(("tool_calls".into(), summary.tool_calls.len().to_string()));
+                if let Some(r) = summary.stop_reason {
+                    ctx.push(("stop_reason".into(), format!("{r:?}")));
+                }
+            });
+
+            assert_stream_ok(
+                harness,
+                &format!("{provider_name}/{tag}"),
+                &summary,
+                expectations,
+            );
+            assert_tool_schema_fidelity(
+                &format!("{provider_name}/{tag}"),
+                &scenario.tools,
+                &summary.tool_calls,
+            );
+
+            let report =
+                build_verification_report(provider_name, tag, scenario.description, &summary);
+            write_report(harness, provider_name, tag, &report);
+        }
+        CanonicalExpectation::Error(expectation) => {
+            let result = provider.stream(&context, &options).await;
+            let Err(err) = result else {
+                panic!("{provider_name}/{tag}: expected error, got success");
+            };
+            let message = err.to_string();
+            assert_error_ok(&format!("{provider_name}/{tag}"), &message, expectation);
+
+            harness.log().info("error", &message);
+        }
+    }
+
+    true
+}
+
+// ============================================================================
+// Vertex Provider Smoke Tests
+// ============================================================================
+
+mod vertex_smoke {
+    use super::*;
+    use pi::providers::vertex::VertexProvider;
+
+    const TEST_PROJECT: &str = "verify-project";
+    const TEST_LOCATION: &str = "us-central1";
+    const TEST_MODEL: &str = "gemini-2.0-flash";
+
+    fn vertex_url() -> String {
+        format!(
+            "https://{TEST_LOCATION}-aiplatform.googleapis.com/v1/projects/{TEST_PROJECT}/locations/{TEST_LOCATION}/publishers/google/models/{TEST_MODEL}:streamGenerateContent"
+        )
+    }
+
+    fn cassette_name(tag: &str) -> String {
+        format!("verify_vertex_{tag}")
+    }
+
+    fn ensure_fixture(tag: &str, scenario: &CanonicalScenario) -> PathBuf {
+        let dir = cassette_root();
+        let name = cassette_name(tag);
+        let path = dir.join(format!("{name}.json"));
+
+        if should_generate_fixture(&path, &name) {
+            let url = vertex_url();
+            match &scenario.expectation {
+                CanonicalExpectation::Error(e) => {
+                    generate_vertex_error_fixture(&path, &name, &url, e.status);
+                }
+                CanonicalExpectation::Stream(exp) => {
+                    if exp.min_tool_calls > 0 {
+                        let tool_name = scenario
+                            .tools
+                            .first()
+                            .map(|t| t.name.as_str())
+                            .unwrap_or("echo");
+                        let tool_args = json!({"text": "verification test"});
+                        generate_vertex_tool_fixture(&path, &name, &url, tool_name, &tool_args);
+                    } else if exp.require_unicode {
+                        generate_vertex_text_fixture(
+                            &path,
+                            &name,
+                            &url,
+                            "日本語テスト — émojis: 🦀🔥",
+                        );
+                    } else {
+                        generate_vertex_text_fixture(
+                            &path,
+                            &name,
+                            &url,
+                            "Hello from the verification harness.",
+                        );
+                    }
+                }
+            }
+        }
+
+        path
+    }
+
+    fn build_provider(tag: &str) -> VertexProvider {
+        let cassette_dir = cassette_root();
+        let name = cassette_name(tag);
+        let recorder = VcrRecorder::new_with(&name, vcr_mode(), &cassette_dir);
+        let client = Client::new().with_vcr(recorder);
+
+        VertexProvider::new(TEST_MODEL)
+            .with_project(TEST_PROJECT)
+            .with_location(TEST_LOCATION)
+            .with_client(client)
+    }
+
+    #[test]
+    fn vertex_simple_text() {
+        let scenarios = canonical_scenarios();
+        let scenario = scenarios.iter().find(|s| s.tag == "simple_text").unwrap();
+        ensure_fixture("simple_text", scenario);
+        let provider = build_provider("simple_text");
+
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let harness = TestHarness::new("verify_vertex_simple_text");
+                run_canonical_scenario(&provider, scenario, &harness).await;
+            });
+    }
+
+    #[test]
+    fn vertex_unicode_text() {
+        let scenarios = canonical_scenarios();
+        let scenario = scenarios.iter().find(|s| s.tag == "unicode_text").unwrap();
+        ensure_fixture("unicode_text", scenario);
+        let provider = build_provider("unicode_text");
+
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let harness = TestHarness::new("verify_vertex_unicode_text");
+                run_canonical_scenario(&provider, scenario, &harness).await;
+            });
+    }
+
+    #[test]
+    fn vertex_tool_call_single() {
+        let scenarios = canonical_scenarios();
+        let scenario = scenarios
+            .iter()
+            .find(|s| s.tag == "tool_call_single")
+            .unwrap();
+        ensure_fixture("tool_call_single", scenario);
+        let provider = build_provider("tool_call_single");
+
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let harness = TestHarness::new("verify_vertex_tool_call_single");
+                run_canonical_scenario(&provider, scenario, &harness).await;
+            });
+    }
+
+    #[test]
+    fn vertex_error_auth_401() {
+        let scenarios = canonical_scenarios();
+        let scenario = scenarios
+            .iter()
+            .find(|s| s.tag == "error_auth_401")
+            .unwrap();
+        ensure_fixture("error_auth_401", scenario);
+        let provider = build_provider("error_auth_401");
+
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let harness = TestHarness::new("verify_vertex_error_auth_401");
+                run_canonical_scenario(&provider, scenario, &harness).await;
+            });
+    }
+
+    #[test]
+    fn vertex_error_bad_request_400() {
+        let scenarios = canonical_scenarios();
+        let scenario = scenarios
+            .iter()
+            .find(|s| s.tag == "error_bad_request_400")
+            .unwrap();
+        ensure_fixture("error_bad_request_400", scenario);
+        let provider = build_provider("error_bad_request_400");
+
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let harness = TestHarness::new("verify_vertex_error_bad_request_400");
+                run_canonical_scenario(&provider, scenario, &harness).await;
+            });
+    }
+
+    #[test]
+    fn vertex_error_rate_limit_429() {
+        let scenarios = canonical_scenarios();
+        let scenario = scenarios
+            .iter()
+            .find(|s| s.tag == "error_rate_limit_429")
+            .unwrap();
+        ensure_fixture("error_rate_limit_429", scenario);
+        let provider = build_provider("error_rate_limit_429");
+
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let harness = TestHarness::new("verify_vertex_error_rate_limit_429");
+                run_canonical_scenario(&provider, scenario, &harness).await;
+            });
+    }
+}
+
+// ============================================================================
+// Bedrock Provider Smoke Tests
+// ============================================================================
+
+mod bedrock_smoke {
+    use super::*;
+    use pi::providers::bedrock::BedrockProvider;
+
+    const TEST_MODEL: &str = "anthropic.claude-3-haiku-20240307-v1:0";
+    const TEST_REGION: &str = "us-east-1";
+
+    fn bedrock_url() -> String {
+        format!("https://bedrock-runtime.{TEST_REGION}.amazonaws.com/model/{TEST_MODEL}/converse")
+    }
+
+    fn cassette_name(tag: &str) -> String {
+        format!("verify_bedrock_{tag}")
+    }
+
+    fn ensure_fixture(tag: &str, scenario: &CanonicalScenario) -> PathBuf {
+        let dir = cassette_root();
+        let name = cassette_name(tag);
+        let path = dir.join(format!("{name}.json"));
+
+        if should_generate_fixture(&path, &name) {
+            let url = bedrock_url();
+            match &scenario.expectation {
+                CanonicalExpectation::Error(e) => {
+                    generate_bedrock_error_fixture(&path, &name, &url, e.status);
+                }
+                CanonicalExpectation::Stream(exp) => {
+                    if exp.min_tool_calls > 0 {
+                        let tool_name = scenario
+                            .tools
+                            .first()
+                            .map(|t| t.name.as_str())
+                            .unwrap_or("echo");
+                        let tool_args = json!({"text": "verification test"});
+                        generate_bedrock_tool_fixture(&path, &name, &url, tool_name, &tool_args);
+                    } else if exp.require_unicode {
+                        generate_bedrock_text_fixture(
+                            &path,
+                            &name,
+                            &url,
+                            "日本語テスト — émojis: 🦀🔥",
+                        );
+                    } else {
+                        generate_bedrock_text_fixture(
+                            &path,
+                            &name,
+                            &url,
+                            "Hello from the verification harness.",
+                        );
+                    }
+                }
+            }
+        }
+
+        path
+    }
+
+    fn build_provider(tag: &str) -> BedrockProvider {
+        let cassette_dir = cassette_root();
+        let name = cassette_name(tag);
+        let recorder = VcrRecorder::new_with(&name, vcr_mode(), &cassette_dir);
+        let client = Client::new().with_vcr(recorder);
+
+        // Use a temp auth path so we don't need real AWS credentials.
+        let tmp = std::env::temp_dir().join("verify_bedrock_auth.json");
+        if !tmp.exists() {
+            // Write a minimal auth file with bearer token for VCR playback.
+            let auth = json!({
+                "version": "1.0",
+                "entries": {
+                    "amazon-bedrock": {
+                        "token": "vcr-playback-token"
+                    }
+                }
+            });
+            std::fs::write(&tmp, serde_json::to_string_pretty(&auth).unwrap()).ok();
+        }
+
+        BedrockProvider::new(TEST_MODEL)
+            .with_base_url(format!(
+                "https://bedrock-runtime.{TEST_REGION}.amazonaws.com"
+            ))
+            .with_client(client)
+    }
+
+    #[test]
+    fn bedrock_simple_text() {
+        let scenarios = canonical_scenarios();
+        let scenario = scenarios.iter().find(|s| s.tag == "simple_text").unwrap();
+        ensure_fixture("simple_text", scenario);
+        let provider = build_provider("simple_text");
+
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let harness = TestHarness::new("verify_bedrock_simple_text");
+                run_canonical_scenario(&provider, scenario, &harness).await;
+            });
+    }
+
+    #[test]
+    fn bedrock_unicode_text() {
+        let scenarios = canonical_scenarios();
+        let scenario = scenarios.iter().find(|s| s.tag == "unicode_text").unwrap();
+        ensure_fixture("unicode_text", scenario);
+        let provider = build_provider("unicode_text");
+
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let harness = TestHarness::new("verify_bedrock_unicode_text");
+                run_canonical_scenario(&provider, scenario, &harness).await;
+            });
+    }
+
+    #[test]
+    fn bedrock_tool_call_single() {
+        let scenarios = canonical_scenarios();
+        let scenario = scenarios
+            .iter()
+            .find(|s| s.tag == "tool_call_single")
+            .unwrap();
+        ensure_fixture("tool_call_single", scenario);
+        let provider = build_provider("tool_call_single");
+
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let harness = TestHarness::new("verify_bedrock_tool_call_single");
+                run_canonical_scenario(&provider, scenario, &harness).await;
+            });
+    }
+
+    #[test]
+    fn bedrock_error_auth_401() {
+        let scenarios = canonical_scenarios();
+        let scenario = scenarios
+            .iter()
+            .find(|s| s.tag == "error_auth_401")
+            .unwrap();
+        ensure_fixture("error_auth_401", scenario);
+        let provider = build_provider("error_auth_401");
+
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let harness = TestHarness::new("verify_bedrock_error_auth_401");
+                run_canonical_scenario(&provider, scenario, &harness).await;
+            });
+    }
+}
+
+// ============================================================================
+// Copilot Provider Smoke Tests
+// ============================================================================
+
+mod copilot_smoke {
+    use super::*;
+    use pi::providers::copilot::CopilotProvider;
+
+    const TEST_MODEL: &str = "gpt-4o-mini";
+    const TEST_GITHUB_TOKEN: &str = "ghp_vcr_playback_token";
+    const TOKEN_URL: &str = "https://api.github.com/copilot_internal/v2/token";
+    const CHAT_BASE_URL: &str = "https://api.githubcopilot.com";
+    const CHAT_URL: &str = "https://api.githubcopilot.com/chat/completions";
+
+    fn cassette_name(tag: &str) -> String {
+        format!("verify_copilot_{tag}")
+    }
+
+    fn token_success_interaction() -> Interaction {
+        let body = json!({
+            "token": "ghu_vcr_session_token",
+            "expires_at": chrono::Utc::now().timestamp() + 3600,
+            "endpoints": {
+                "api": CHAT_BASE_URL
+            }
+        });
+        Interaction {
+            request: RecordedRequest {
+                method: "GET".to_string(),
+                url: TOKEN_URL.to_string(),
+                headers: vec![
+                    ("Accept".to_string(), "application/json".to_string()),
+                    ("Authorization".to_string(), "token [REDACTED]".to_string()),
+                ],
+                body: None,
+                body_text: None,
+            },
+            response: RecordedResponse {
+                status: 200,
+                headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+                body_chunks: vec![serde_json::to_string(&body).unwrap_or_default()],
+                body_chunks_base64: None,
+            },
+        }
+    }
+
+    fn token_error_interaction(status: u16) -> Interaction {
+        Interaction {
+            request: RecordedRequest {
+                method: "GET".to_string(),
+                url: TOKEN_URL.to_string(),
+                headers: vec![],
+                body: None,
+                body_text: None,
+            },
+            response: RecordedResponse {
+                status,
+                headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+                body_chunks: vec![
+                    serde_json::to_string(&json!({"message": format!("Simulated error {status}")}))
+                        .unwrap_or_default(),
+                ],
+                body_chunks_base64: None,
+            },
+        }
+    }
+
+    fn chat_interaction(response: RecordedResponse) -> Interaction {
+        Interaction {
+            request: RecordedRequest {
+                method: "POST".to_string(),
+                url: CHAT_URL.to_string(),
+                headers: vec![
+                    ("Accept".to_string(), "text/event-stream".to_string()),
+                    ("Authorization".to_string(), "Bearer [REDACTED]".to_string()),
+                    ("Content-Type".to_string(), "application/json".to_string()),
+                ],
+                body: None,
+                body_text: None,
+            },
+            response,
+        }
+    }
+
+    fn ensure_fixture(tag: &str, scenario: &CanonicalScenario) -> PathBuf {
+        let dir = cassette_root();
+        let name = cassette_name(tag);
+        let path = dir.join(format!("{name}.json"));
+
+        if should_generate_fixture(&path, &name) {
+            let interactions = match &scenario.expectation {
+                CanonicalExpectation::Error(e) if e.status == 401 => {
+                    vec![token_error_interaction(e.status)]
+                }
+                CanonicalExpectation::Error(e) => vec![
+                    token_success_interaction(),
+                    chat_interaction(RecordedResponse {
+                        status: e.status,
+                        headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+                        body_chunks: vec![
+                            serde_json::to_string(&openai_error_body(e.status))
+                                .unwrap_or_default(),
+                        ],
+                        body_chunks_base64: None,
+                    }),
+                ],
+                CanonicalExpectation::Stream(exp) => {
+                    let response = if exp.min_tool_calls > 0 {
+                        let tool_name = scenario
+                            .tools
+                            .first()
+                            .map(|tool| tool.name.as_str())
+                            .unwrap_or("echo");
+                        openai_tool_response(TEST_MODEL, tool_name, &json!({"text": "verification test"}))
+                    } else if exp.require_unicode {
+                        openai_text_response(TEST_MODEL, "日本語テスト — émojis: 🦀🔥")
+                    } else {
+                        openai_text_response(TEST_MODEL, "Hello from the verification harness.")
+                    };
+                    vec![token_success_interaction(), chat_interaction(response)]
+                }
+            };
+
+            let cassette = Cassette {
+                version: "1.0".to_string(),
+                test_name: name.clone(),
+                recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                interactions,
+            };
+            write_cassette(&path, &cassette);
+        }
+
+        path
+    }
+
+    fn build_provider(tag: &str) -> CopilotProvider {
+        let cassette_dir = cassette_root();
+        let name = cassette_name(tag);
+        let recorder = VcrRecorder::new_with(&name, vcr_mode(), &cassette_dir);
+        let client = Client::new().with_vcr(recorder);
+
+        CopilotProvider::new(TEST_MODEL, TEST_GITHUB_TOKEN).with_client(client)
+    }
+
+    #[test]
+    fn copilot_simple_text() {
+        let scenarios = canonical_scenarios();
+        let scenario = scenarios.iter().find(|s| s.tag == "simple_text").unwrap();
+        ensure_fixture("simple_text", scenario);
+        let provider = build_provider("simple_text");
+
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let harness = TestHarness::new("verify_copilot_simple_text");
+                run_canonical_scenario(&provider, scenario, &harness).await;
+            });
+    }
+
+    #[test]
+    fn copilot_unicode_text() {
+        let scenarios = canonical_scenarios();
+        let scenario = scenarios.iter().find(|s| s.tag == "unicode_text").unwrap();
+        ensure_fixture("unicode_text", scenario);
+        let provider = build_provider("unicode_text");
+
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let harness = TestHarness::new("verify_copilot_unicode_text");
+                run_canonical_scenario(&provider, scenario, &harness).await;
+            });
+    }
+
+    #[test]
+    fn copilot_tool_call_single() {
+        let scenarios = canonical_scenarios();
+        let scenario = scenarios
+            .iter()
+            .find(|s| s.tag == "tool_call_single")
+            .unwrap();
+        ensure_fixture("tool_call_single", scenario);
+        let provider = build_provider("tool_call_single");
+
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let harness = TestHarness::new("verify_copilot_tool_call_single");
+                run_canonical_scenario(&provider, scenario, &harness).await;
+            });
+    }
+
+    #[test]
+    fn copilot_error_auth_401() {
+        let scenarios = canonical_scenarios();
+        let scenario = scenarios
+            .iter()
+            .find(|s| s.tag == "error_auth_401")
+            .unwrap();
+        ensure_fixture("error_auth_401", scenario);
+        let provider = build_provider("error_auth_401");
+
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let harness = TestHarness::new("verify_copilot_error_auth_401");
+                run_canonical_scenario(&provider, scenario, &harness).await;
+            });
+    }
+
+    #[test]
+    fn copilot_error_bad_request_400() {
+        let scenarios = canonical_scenarios();
+        let scenario = scenarios
+            .iter()
+            .find(|s| s.tag == "error_bad_request_400")
+            .unwrap();
+        ensure_fixture("error_bad_request_400", scenario);
+        let provider = build_provider("error_bad_request_400");
+
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let harness = TestHarness::new("verify_copilot_error_bad_request_400");
+                run_canonical_scenario(&provider, scenario, &harness).await;
+            });
+    }
+
+    #[test]
+    fn copilot_error_rate_limit_429() {
+        let scenarios = canonical_scenarios();
+        let scenario = scenarios
+            .iter()
+            .find(|s| s.tag == "error_rate_limit_429")
+            .unwrap();
+        ensure_fixture("error_rate_limit_429", scenario);
+        let provider = build_provider("error_rate_limit_429");
+
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let harness = TestHarness::new("verify_copilot_error_rate_limit_429");
+                run_canonical_scenario(&provider, scenario, &harness).await;
+            });
+    }
+}
+
+// ============================================================================
+// GitLab Provider Smoke Tests
+// ============================================================================
+
+mod gitlab_smoke {
+    use super::*;
+    use pi::providers::gitlab::GitLabProvider;
+
+    const TEST_MODEL: &str = "gitlab-duo-chat";
+    const BASE_URL: &str = "https://gitlab.com";
+
+    fn gitlab_url() -> String {
+        format!("{BASE_URL}/api/v4/chat/completions")
+    }
+
+    fn cassette_name(tag: &str) -> String {
+        format!("verify_gitlab_{tag}")
+    }
+
+    fn ensure_fixture(tag: &str, scenario: &CanonicalScenario) -> PathBuf {
+        let dir = cassette_root();
+        let name = cassette_name(tag);
+        let path = dir.join(format!("{name}.json"));
+
+        if should_generate_fixture(&path, &name) {
+            let response = match &scenario.expectation {
+                CanonicalExpectation::Error(e) => RecordedResponse {
+                    status: e.status,
+                    headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+                    body_chunks: vec![
+                        serde_json::to_string(&json!({"message": format!("Simulated error {}", e.status)}))
+                            .unwrap_or_default(),
+                    ],
+                    body_chunks_base64: None,
+                },
+                CanonicalExpectation::Stream(exp) => {
+                    let text = if exp.require_unicode {
+                        "日本語テスト — émojis: 🦀🔥"
+                    } else {
+                        "Hello from the verification harness."
+                    };
+                    RecordedResponse {
+                        status: 200,
+                        headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+                        body_chunks: vec![
+                            serde_json::to_string(&json!({"response": text})).unwrap_or_default(),
+                        ],
+                        body_chunks_base64: None,
+                    }
+                }
+            };
+
+            let cassette = Cassette {
+                version: "1.0".to_string(),
+                test_name: name.clone(),
+                recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                interactions: vec![Interaction {
+                    request: RecordedRequest {
+                        method: "POST".to_string(),
+                        url: gitlab_url(),
+                        headers: vec![
+                            ("Authorization".to_string(), "Bearer [REDACTED]".to_string()),
+                            ("Content-Type".to_string(), "application/json".to_string()),
+                            ("Accept".to_string(), "application/json".to_string()),
+                        ],
+                        body: None,
+                        body_text: None,
+                    },
+                    response,
+                }],
+            };
+            write_cassette(&path, &cassette);
+        }
+
+        path
+    }
+
+    fn build_provider(tag: &str) -> GitLabProvider {
+        let cassette_dir = cassette_root();
+        let name = cassette_name(tag);
+        let recorder = VcrRecorder::new_with(&name, vcr_mode(), &cassette_dir);
+        let client = Client::new().with_vcr(recorder);
+        GitLabProvider::new(TEST_MODEL)
+            .with_base_url(BASE_URL)
+            .with_client(client)
+    }
+
+    #[test]
+    fn gitlab_simple_text() {
+        let scenarios = canonical_scenarios();
+        let scenario = scenarios.iter().find(|s| s.tag == "simple_text").unwrap();
+        ensure_fixture("simple_text", scenario);
+        let provider = build_provider("simple_text");
+
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let harness = TestHarness::new("verify_gitlab_simple_text");
+                run_canonical_scenario(&provider, scenario, &harness).await;
+            });
+    }
+
+    #[test]
+    fn gitlab_unicode_text() {
+        let scenarios = canonical_scenarios();
+        let scenario = scenarios.iter().find(|s| s.tag == "unicode_text").unwrap();
+        ensure_fixture("unicode_text", scenario);
+        let provider = build_provider("unicode_text");
+
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let harness = TestHarness::new("verify_gitlab_unicode_text");
+                run_canonical_scenario(&provider, scenario, &harness).await;
+            });
+    }
+
+    #[test]
+    fn gitlab_error_auth_401() {
+        let scenarios = canonical_scenarios();
+        let scenario = scenarios
+            .iter()
+            .find(|s| s.tag == "error_auth_401")
+            .unwrap();
+        ensure_fixture("error_auth_401", scenario);
+        let provider = build_provider("error_auth_401");
+
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let harness = TestHarness::new("verify_gitlab_error_auth_401");
+                run_canonical_scenario(&provider, scenario, &harness).await;
+            });
+    }
+
+    #[test]
+    fn gitlab_error_bad_request_400() {
+        let scenarios = canonical_scenarios();
+        let scenario = scenarios
+            .iter()
+            .find(|s| s.tag == "error_bad_request_400")
+            .unwrap();
+        ensure_fixture("error_bad_request_400", scenario);
+        let provider = build_provider("error_bad_request_400");
+
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let harness = TestHarness::new("verify_gitlab_error_bad_request_400");
+                run_canonical_scenario(&provider, scenario, &harness).await;
+            });
+    }
+
+    #[test]
+    fn gitlab_error_rate_limit_429() {
+        let scenarios = canonical_scenarios();
+        let scenario = scenarios
+            .iter()
+            .find(|s| s.tag == "error_rate_limit_429")
+            .unwrap();
+        ensure_fixture("error_rate_limit_429", scenario);
+        let provider = build_provider("error_rate_limit_429");
+
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let harness = TestHarness::new("verify_gitlab_error_rate_limit_429");
+                run_canonical_scenario(&provider, scenario, &harness).await;
+            });
+    }
+}
+
+// ============================================================================
+// Harness metadata test — validates the canonical scenario set itself.
+// ============================================================================
+
+#[test]
+fn canonical_scenarios_are_valid() {
+    let scenarios = canonical_scenarios();
+    assert!(
+        scenarios.len() >= 5,
+        "Expected at least 5 canonical scenarios, got {}",
+        scenarios.len()
+    );
+
+    // Tags must be unique.
+    let mut tags: Vec<&str> = scenarios.iter().map(|s| s.tag).collect();
+    tags.sort_unstable();
+    tags.dedup();
+    assert_eq!(
+        tags.len(),
+        scenarios.len(),
+        "Duplicate tags in canonical scenarios"
+    );
+
+    // Every scenario must have at least one message.
+    for scenario in &scenarios {
+        assert!(
+            !scenario.messages.is_empty(),
+            "Scenario '{}' has no messages",
+            scenario.tag
+        );
+    }
+
+    // Tool scenarios must provide at least one tool definition.
+    for scenario in &scenarios {
+        if let CanonicalExpectation::Stream(exp) = &scenario.expectation {
+            if exp.min_tool_calls > 0 {
+                assert!(
+                    !scenario.tools.is_empty(),
+                    "Scenario '{}' expects tool calls but provides no tools",
+                    scenario.tag
+                );
+            }
+        }
+    }
+}
+
+/// Cross-provider report comparison: ensures all reports follow the same schema.
+#[test]
+fn verification_report_schema_is_consistent() {
+    let summary = StreamSummary {
+        timeline: vec!["start".into(), "text_delta".into(), "done".into()],
+        event_count: 3,
+        has_start: true,
+        has_done: true,
+        has_error_event: false,
+        text: "Hello".into(),
+        thinking: String::new(),
+        tool_calls: vec![],
+        text_deltas: 1,
+        thinking_deltas: 0,
+        tool_call_deltas: 0,
+        stop_reason: Some(StopReason::Stop),
+        stream_error: None,
+    };
+
+    let report = build_verification_report("test-provider", "simple_text", "Test", &summary);
+
+    // Validate required fields exist.
+    assert_eq!(report["schema"], "pi.test.native_verify.v1");
+    assert_eq!(report["provider"], "test-provider");
+    assert_eq!(report["scenario"], "simple_text");
+    assert!(report["event_count"].is_number());
+    assert!(report["has_start"].is_boolean());
+    assert!(report["has_done"].is_boolean());
+    assert!(report["timeline"].is_array());
+    assert!(report["text_sha256"].is_string());
+    assert!(report["text_chars"].is_number());
+    assert!(report["tool_call_count"].is_number());
+    assert!(report["tool_call_names"].is_array());
+}
