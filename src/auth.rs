@@ -46,8 +46,18 @@ pub enum AuthCredential {
         access_token: String,
         refresh_token: String,
         expires: i64, // Unix ms
+        /// Token endpoint URL for self-contained refresh (optional; backward-compatible).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_url: Option<String>,
+        /// Client ID for self-contained refresh (optional; backward-compatible).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
     },
 }
+
+/// Proactive refresh: attempt refresh this many ms *before* actual expiry.
+/// This avoids using a token that's about to expire during a long-running request.
+const PROACTIVE_REFRESH_WINDOW_MS: i64 = 10 * 60 * 1000; // 10 minutes
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AuthFile {
@@ -689,6 +699,8 @@ pub async fn complete_anthropic_oauth(code_input: &str, verifier: &str) -> Resul
         access_token: oauth_response.access_token,
         refresh_token: oauth_response.refresh_token,
         expires: oauth_expires_at_ms(oauth_response.expires_in),
+        token_url: Some(ANTHROPIC_OAUTH_TOKEN_URL.to_string()),
+        client_id: Some(ANTHROPIC_OAUTH_CLIENT_ID.to_string()),
     })
 }
 
@@ -728,6 +740,8 @@ async fn refresh_anthropic_oauth_token(
         access_token: oauth_response.access_token,
         refresh_token: oauth_response.refresh_token,
         expires: oauth_expires_at_ms(oauth_response.expires_in),
+        token_url: Some(ANTHROPIC_OAUTH_TOKEN_URL.to_string()),
+        client_id: Some(ANTHROPIC_OAUTH_CLIENT_ID.to_string()),
     })
 }
 
@@ -820,6 +834,8 @@ pub async fn complete_extension_oauth(
         access_token: oauth_response.access_token,
         refresh_token: oauth_response.refresh_token,
         expires: oauth_expires_at_ms(oauth_response.expires_in),
+        token_url: Some(config.token_url.clone()),
+        client_id: Some(config.client_id.clone()),
     })
 }
 
@@ -859,6 +875,8 @@ async fn refresh_extension_oauth_token(
         access_token: oauth_response.access_token,
         refresh_token: oauth_response.refresh_token,
         expires: oauth_expires_at_ms(oauth_response.expires_in),
+        token_url: Some(config.token_url.clone()),
+        client_id: Some(config.client_id.clone()),
     })
 }
 
@@ -930,7 +948,7 @@ pub async fn complete_copilot_browser_oauth(
 
     let state = state.unwrap_or_else(|| verifier.to_string());
 
-    let token_url = if config.github_base_url == "https://github.com" {
+    let token_url_str = if config.github_base_url == "https://github.com" {
         GITHUB_OAUTH_TOKEN_URL.to_string()
     } else {
         format!(
@@ -941,7 +959,7 @@ pub async fn complete_copilot_browser_oauth(
 
     let client = crate::http::client::Client::new();
     let request = client
-        .post(&token_url)
+        .post(&token_url_str)
         .header("Accept", "application/json")
         .json(&serde_json::json!({
             "grant_type": "authorization_code",
@@ -969,7 +987,18 @@ pub async fn complete_copilot_browser_oauth(
         )));
     }
 
-    parse_github_token_response(&text)
+    let mut cred = parse_github_token_response(&text)?;
+    // Attach refresh metadata so the credential is self-contained for lifecycle refresh.
+    if let AuthCredential::OAuth {
+        ref mut token_url,
+        ref mut client_id,
+        ..
+    } = cred
+    {
+        *token_url = Some(token_url_str.clone());
+        *client_id = Some(config.client_id.clone());
+    }
+    Ok(cred)
 }
 
 /// Start the GitHub device flow (RFC 8628) for Copilot.
@@ -1133,6 +1162,10 @@ fn parse_github_token_response(text: &str) -> Result<AuthCredential> {
         access_token,
         refresh_token,
         expires,
+        // token_url/client_id are set by the caller (start/complete functions)
+        // since parse_github_token_response doesn't know the config context.
+        token_url: None,
+        client_id: None,
     })
 }
 
@@ -1259,10 +1292,13 @@ pub async fn complete_gitlab_oauth(
         ))
     })?;
 
+    let base = trim_trailing_slash(&config.base_url);
     Ok(AuthCredential::OAuth {
         access_token: oauth_response.access_token,
         refresh_token: oauth_response.refresh_token,
         expires: oauth_expires_at_ms(oauth_response.expires_in),
+        token_url: Some(format!("{base}{GITLAB_OAUTH_TOKEN_PATH}")),
+        client_id: Some(config.client_id.clone()),
     })
 }
 

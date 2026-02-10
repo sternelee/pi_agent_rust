@@ -339,17 +339,17 @@
       "provider_id": "firmware",
       "canonical_id": "firmware",
       "id_kind": "canonical",
-      "profile": "deferred-watchlist",
-      "current_runtime_status": "missing",
-      "rationale": "No runtime/auth evidence beyond upstream catalog listing."
+      "profile": "oai-compatible-preset",
+      "current_runtime_status": "metadata-registered",
+      "rationale": "Batch A2 onboarding: canonical metadata, env-key, and routing defaults added to PROVIDER_METADATA."
     },
     {
       "provider_id": "friendli",
       "canonical_id": "friendli",
       "id_kind": "canonical",
-      "profile": "deferred-watchlist",
-      "current_runtime_status": "missing",
-      "rationale": "No runtime/auth evidence beyond upstream catalog listing."
+      "profile": "oai-compatible-preset",
+      "current_runtime_status": "metadata-registered",
+      "rationale": "Batch A2 onboarding: canonical metadata, env-key, and routing defaults added to PROVIDER_METADATA."
     },
     {
       "provider_id": "gemini",
@@ -371,9 +371,9 @@
       "provider_id": "github-models",
       "canonical_id": "github-models",
       "id_kind": "canonical",
-      "profile": "gateway-wrapper-high-risk",
-      "current_runtime_status": "missing",
-      "rationale": "Service acts as a routed model gateway requiring provider attribution and wrapper-level diagnostics."
+      "profile": "oai-compatible-preset",
+      "current_runtime_status": "metadata-registered",
+      "rationale": "Batch A2 onboarding: canonical metadata, env-key, and routing defaults added to PROVIDER_METADATA."
     },
     {
       "provider_id": "gitlab",
@@ -419,41 +419,41 @@
       "provider_id": "helicone",
       "canonical_id": "helicone",
       "id_kind": "canonical",
-      "profile": "gateway-wrapper-high-risk",
-      "current_runtime_status": "missing",
-      "rationale": "Proxy/gateway service requires wrapper routing semantics and telemetry correctness."
+      "profile": "oai-compatible-preset",
+      "current_runtime_status": "metadata-registered",
+      "rationale": "Batch A2 onboarding: canonical metadata, env-key, and routing defaults added to PROVIDER_METADATA."
     },
     {
       "provider_id": "huggingface",
       "canonical_id": "huggingface",
       "id_kind": "canonical",
-      "profile": "deferred-watchlist",
-      "current_runtime_status": "missing",
-      "rationale": "No validated runtime/auth contract yet for this provider surface."
+      "profile": "oai-compatible-preset",
+      "current_runtime_status": "metadata-registered",
+      "rationale": "Batch A2 onboarding: canonical metadata, env-key, and routing defaults added to PROVIDER_METADATA."
     },
     {
       "provider_id": "iflowcn",
       "canonical_id": "iflowcn",
       "id_kind": "canonical",
-      "profile": "deferred-watchlist",
-      "current_runtime_status": "missing",
-      "rationale": "No runtime/auth evidence beyond upstream catalog listing."
+      "profile": "oai-compatible-preset",
+      "current_runtime_status": "metadata-registered",
+      "rationale": "Batch A2 onboarding: canonical metadata, env-key, and routing defaults added to PROVIDER_METADATA."
     },
     {
       "provider_id": "inception",
       "canonical_id": "inception",
       "id_kind": "canonical",
-      "profile": "deferred-watchlist",
-      "current_runtime_status": "missing",
-      "rationale": "No runtime/auth evidence beyond upstream catalog listing."
+      "profile": "oai-compatible-preset",
+      "current_runtime_status": "metadata-registered",
+      "rationale": "Batch A2 onboarding: canonical metadata, env-key, and routing defaults added to PROVIDER_METADATA."
     },
     {
       "provider_id": "inference",
       "canonical_id": "inference",
       "id_kind": "canonical",
-      "profile": "deferred-watchlist",
-      "current_runtime_status": "missing",
-      "rationale": "No runtime/auth evidence beyond upstream catalog listing."
+      "profile": "oai-compatible-preset",
+      "current_runtime_status": "metadata-registered",
+      "rationale": "Batch A2 onboarding: canonical metadata, env-key, and routing defaults added to PROVIDER_METADATA."
     },
     {
       "provider_id": "io-net",
@@ -943,18 +943,18 @@
     "classification_profile_counts": {
       "native-established": 4,
       "native-new-high-risk": 11,
-      "oai-compatible-preset": 20,
-      "gateway-wrapper-high-risk": 8,
-      "deferred-watchlist": 46,
+      "oai-compatible-preset": 28,
+      "gateway-wrapper-high-risk": 6,
+      "deferred-watchlist": 40,
       "alias-forwarder": 10
     },
     "bucket_counts": {
       "native-adapter-required": 15,
-      "openai-compatible-preset": 20,
-      "gateway-wrapper-routing": 8,
-      "deferred": 56
+      "openai-compatible-preset": 28,
+      "gateway-wrapper-routing": 6,
+      "deferred": 50
     },
-    "high_risk_provider_count": 19,
+    "high_risk_provider_count": 17,
     "high_risk_provider_ids": [
       "amazon-bedrock",
       "azure",
@@ -962,10 +962,8 @@
       "cloudflare-ai-gateway",
       "cloudflare-workers-ai",
       "github-copilot",
-      "github-models",
       "google-vertex",
       "google-vertex-anthropic",
-      "helicone",
       "lmstudio",
       "local",
       "ollama",

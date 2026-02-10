@@ -439,6 +439,135 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
         }),
         test_obligations: TEST_REQUIRED,
     },
+    // ── Batch A2: OAI-compatible preset providers ──────────────────────
+    ProviderMetadata {
+        canonical_id: "firmware",
+        aliases: &[],
+        auth_env_keys: &["FIRMWARE_API_KEY"],
+        onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
+        routing_defaults: Some(ProviderRoutingDefaults {
+            api: "openai-completions",
+            base_url: "https://app.firmware.ai/api/v1",
+            auth_header: true,
+            reasoning: true,
+            input: &INPUT_TEXT,
+            context_window: 128_000,
+            max_tokens: 16_384,
+        }),
+        test_obligations: TEST_REQUIRED,
+    },
+    ProviderMetadata {
+        canonical_id: "friendli",
+        aliases: &[],
+        auth_env_keys: &["FRIENDLI_TOKEN"],
+        onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
+        routing_defaults: Some(ProviderRoutingDefaults {
+            api: "openai-completions",
+            base_url: "https://api.friendli.ai/serverless/v1",
+            auth_header: true,
+            reasoning: true,
+            input: &INPUT_TEXT,
+            context_window: 128_000,
+            max_tokens: 16_384,
+        }),
+        test_obligations: TEST_REQUIRED,
+    },
+    ProviderMetadata {
+        canonical_id: "github-models",
+        aliases: &[],
+        auth_env_keys: &["GITHUB_TOKEN"],
+        onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
+        routing_defaults: Some(ProviderRoutingDefaults {
+            api: "openai-completions",
+            base_url: "https://models.github.ai/inference",
+            auth_header: true,
+            reasoning: true,
+            input: &INPUT_TEXT,
+            context_window: 128_000,
+            max_tokens: 16_384,
+        }),
+        test_obligations: TEST_REQUIRED,
+    },
+    ProviderMetadata {
+        canonical_id: "helicone",
+        aliases: &[],
+        auth_env_keys: &["HELICONE_API_KEY"],
+        onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
+        routing_defaults: Some(ProviderRoutingDefaults {
+            api: "openai-completions",
+            base_url: "https://ai-gateway.helicone.ai/v1",
+            auth_header: true,
+            reasoning: true,
+            input: &INPUT_TEXT,
+            context_window: 128_000,
+            max_tokens: 16_384,
+        }),
+        test_obligations: TEST_REQUIRED,
+    },
+    ProviderMetadata {
+        canonical_id: "huggingface",
+        aliases: &[],
+        auth_env_keys: &["HF_TOKEN"],
+        onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
+        routing_defaults: Some(ProviderRoutingDefaults {
+            api: "openai-completions",
+            base_url: "https://router.huggingface.co/v1",
+            auth_header: true,
+            reasoning: true,
+            input: &INPUT_TEXT,
+            context_window: 128_000,
+            max_tokens: 16_384,
+        }),
+        test_obligations: TEST_REQUIRED,
+    },
+    ProviderMetadata {
+        canonical_id: "iflowcn",
+        aliases: &[],
+        auth_env_keys: &["IFLOW_API_KEY"],
+        onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
+        routing_defaults: Some(ProviderRoutingDefaults {
+            api: "openai-completions",
+            base_url: "https://apis.iflow.cn/v1",
+            auth_header: true,
+            reasoning: true,
+            input: &INPUT_TEXT,
+            context_window: 128_000,
+            max_tokens: 16_384,
+        }),
+        test_obligations: TEST_REQUIRED,
+    },
+    ProviderMetadata {
+        canonical_id: "inception",
+        aliases: &[],
+        auth_env_keys: &["INCEPTION_API_KEY"],
+        onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
+        routing_defaults: Some(ProviderRoutingDefaults {
+            api: "openai-completions",
+            base_url: "https://api.inceptionlabs.ai/v1",
+            auth_header: true,
+            reasoning: false,
+            input: &INPUT_TEXT,
+            context_window: 128_000,
+            max_tokens: 16_384,
+        }),
+        test_obligations: TEST_REQUIRED,
+    },
+    ProviderMetadata {
+        canonical_id: "inference",
+        aliases: &[],
+        auth_env_keys: &["INFERENCE_API_KEY"],
+        onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
+        routing_defaults: Some(ProviderRoutingDefaults {
+            api: "openai-completions",
+            base_url: "https://inference.net/v1",
+            auth_header: true,
+            reasoning: true,
+            input: &INPUT_TEXT,
+            context_window: 128_000,
+            max_tokens: 16_384,
+        }),
+        test_obligations: TEST_REQUIRED,
+    },
     // ── Native adapter required providers ────────────────────────────────
     ProviderMetadata {
         canonical_id: "google-vertex",
@@ -655,5 +784,98 @@ mod tests {
         urls.sort();
         urls.dedup();
         assert_eq!(urls.len(), ids.len(), "duplicate base URLs detected");
+    }
+
+    #[test]
+    fn batch_a2_metadata_resolves_all_eight_providers() {
+        let ids = [
+            "firmware",
+            "friendli",
+            "github-models",
+            "helicone",
+            "huggingface",
+            "iflowcn",
+            "inception",
+            "inference",
+        ];
+        for id in &ids {
+            let meta = provider_metadata(id).unwrap_or_else(|| panic!("{id} metadata missing"));
+            assert_eq!(meta.canonical_id, *id);
+            assert_eq!(
+                meta.onboarding,
+                ProviderOnboardingMode::OpenAICompatiblePreset
+            );
+        }
+    }
+
+    #[test]
+    fn batch_a2_env_keys_match_upstream_registry() {
+        assert_eq!(provider_auth_env_keys("firmware"), &["FIRMWARE_API_KEY"]);
+        assert_eq!(provider_auth_env_keys("friendli"), &["FRIENDLI_TOKEN"]);
+        assert_eq!(provider_auth_env_keys("github-models"), &["GITHUB_TOKEN"]);
+        assert_eq!(provider_auth_env_keys("helicone"), &["HELICONE_API_KEY"]);
+        assert_eq!(provider_auth_env_keys("huggingface"), &["HF_TOKEN"]);
+        assert_eq!(provider_auth_env_keys("iflowcn"), &["IFLOW_API_KEY"]);
+        assert_eq!(provider_auth_env_keys("inception"), &["INCEPTION_API_KEY"]);
+        assert_eq!(provider_auth_env_keys("inference"), &["INFERENCE_API_KEY"]);
+    }
+
+    #[test]
+    fn batch_a2_routing_defaults_use_openai_completions() {
+        let ids = [
+            "firmware",
+            "friendli",
+            "github-models",
+            "helicone",
+            "huggingface",
+            "iflowcn",
+            "inception",
+            "inference",
+        ];
+        for id in &ids {
+            let defaults =
+                provider_routing_defaults(id).unwrap_or_else(|| panic!("{id} defaults missing"));
+            assert_eq!(defaults.api, "openai-completions", "{id} api mismatch");
+            assert!(defaults.auth_header, "{id} must use auth header");
+        }
+    }
+
+    #[test]
+    fn batch_a2_base_urls_are_distinct_and_nonempty() {
+        let ids = [
+            "firmware",
+            "friendli",
+            "github-models",
+            "helicone",
+            "huggingface",
+            "iflowcn",
+            "inception",
+            "inference",
+        ];
+        let mut urls: Vec<&str> = Vec::new();
+        for id in &ids {
+            let defaults =
+                provider_routing_defaults(id).unwrap_or_else(|| panic!("{id} defaults missing"));
+            assert!(
+                !defaults.base_url.is_empty(),
+                "{id} base_url must not be empty"
+            );
+            assert!(
+                defaults.base_url.starts_with("https://"),
+                "{id} base_url must use HTTPS"
+            );
+            urls.push(defaults.base_url);
+        }
+        urls.sort();
+        urls.dedup();
+        assert_eq!(urls.len(), ids.len(), "duplicate base URLs detected");
+    }
+
+    #[test]
+    fn fireworks_ai_alias_already_registered() {
+        // fireworks-ai is listed in Batch A2 bead but already exists as alias
+        // for the "fireworks" canonical entry from the initial metadata set.
+        let meta = provider_metadata("fireworks-ai").expect("fireworks-ai alias");
+        assert_eq!(meta.canonical_id, "fireworks");
     }
 }

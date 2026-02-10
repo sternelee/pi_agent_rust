@@ -808,6 +808,28 @@ fn factory_routes_batch_a1_providers_correctly() {
     }
 }
 
+#[test]
+fn factory_routes_batch_a2_providers_correctly() {
+    use pi::providers::create_provider;
+
+    let cases = [
+        ("firmware", "https://app.firmware.ai/api/v1"),
+        ("friendli", "https://api.friendli.ai/serverless/v1"),
+        ("github-models", "https://models.github.ai/inference"),
+        ("helicone", "https://ai-gateway.helicone.ai/v1"),
+        ("huggingface", "https://router.huggingface.co/v1"),
+        ("iflowcn", "https://apis.iflow.cn/v1"),
+        ("inception", "https://api.inceptionlabs.ai/v1"),
+        ("inference", "https://inference.net/v1"),
+    ];
+    for (provider, base_url) in &cases {
+        let entry = oai_compat_entry(provider, base_url);
+        let p = create_provider(&entry, None)
+            .unwrap_or_else(|e| panic!("factory should route {provider}: {e}"));
+        assert_eq!(p.api(), "openai-completions", "{provider} api mismatch");
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Cross-provider: field name differences (locked)
 // ═══════════════════════════════════════════════════════════════════════
