@@ -30,7 +30,7 @@ use crate::model::{
     StopReason, StreamEvent, TextContent, ToolCall, ToolResultMessage, Usage, UserContent,
     UserMessage,
 };
-use crate::models::ModelRegistry;
+use crate::models::{ModelEntry, ModelRegistry};
 use crate::provider::{Context, Provider, StreamOptions, ToolDef};
 use crate::session::{Session, SessionHandle};
 use crate::tools::{Tool, ToolOutput, ToolRegistry, ToolUpdate};
@@ -3387,6 +3387,52 @@ impl AgentSession {
         self.auth_storage = Some(auth);
     }
 
+    fn resolve_stream_api_key_for_model(&self, entry: &ModelEntry) -> Option<String> {
+        self.auth_storage
+            .as_ref()
+            .and_then(|auth| auth.resolve_api_key(&entry.model.provider, None))
+            .or_else(|| entry.api_key.clone())
+    }
+
+    fn apply_session_model_selection(&mut self, provider_id: &str, model_id: &str) {
+        if self.agent.provider().name() == provider_id && self.agent.provider().model_id() == model_id {
+            return;
+        }
+
+        let Some(registry) = &self.model_registry else {
+            return;
+        };
+
+        let Some(entry) = registry.find(provider_id, model_id) else {
+            tracing::warn!("Session model {provider_id}/{model_id} not found in model registry");
+            return;
+        };
+
+        match crate::providers::create_provider(
+            &entry,
+            self.extensions.as_ref().map(ExtensionRegion::manager),
+        ) {
+            Ok(provider) => {
+                tracing::info!("Updating agent provider to {provider_id}/{model_id}");
+                self.agent.set_provider(provider);
+
+                let resolved_key = self.resolve_stream_api_key_for_model(&entry);
+                if resolved_key.is_none() {
+                    tracing::warn!(
+                        "No API key resolved for session model {provider_id}/{model_id}; clearing stream API key"
+                    );
+                }
+
+                let stream_options = self.agent.stream_options_mut();
+                stream_options.api_key = resolved_key;
+                stream_options.headers.clone_from(&entry.headers);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to create provider for session model: {e}");
+            }
+        }
+    }
+
     pub const fn save_enabled(&self) -> bool {
         self.save_enabled
     }
@@ -3773,30 +3819,7 @@ impl AgentSession {
         self.agent.replace_messages(history);
 
         if let (Some(provider_id), Some(model_id)) = session_model {
-            if self.agent.provider().name() != provider_id
-                || self.agent.provider().model_id() != model_id
-            {
-                if let Some(registry) = &self.model_registry {
-                    if let Some(entry) = registry.find(&provider_id, &model_id) {
-                        match crate::providers::create_provider(
-                            &entry,
-                            self.extensions.as_ref().map(ExtensionRegion::manager),
-                        ) {
-                            Ok(provider) => {
-                                tracing::info!(
-                                    "Updating agent provider to {}/{}",
-                                    provider_id,
-                                    model_id
-                                );
-                                self.agent.set_provider(provider);
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to create provider for session model: {e}");
-                            }
-                        }
-                    }
-                }
-            }
+            self.apply_session_model_selection(provider_id.as_str(), model_id.as_str());
         }
 
         let start_len = self.agent.messages().len();
@@ -3857,30 +3880,7 @@ impl AgentSession {
         self.agent.replace_messages(history);
 
         if let (Some(provider_id), Some(model_id)) = session_model {
-            if self.agent.provider().name() != provider_id
-                || self.agent.provider().model_id() != model_id
-            {
-                if let Some(registry) = &self.model_registry {
-                    if let Some(entry) = registry.find(&provider_id, &model_id) {
-                        match crate::providers::create_provider(
-                            &entry,
-                            self.extensions.as_ref().map(ExtensionRegion::manager),
-                        ) {
-                            Ok(provider) => {
-                                tracing::info!(
-                                    "Updating agent provider to {}/{}",
-                                    provider_id,
-                                    model_id
-                                );
-                                self.agent.set_provider(provider);
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to create provider for session model: {e}");
-                            }
-                        }
-                    }
-                }
-            }
+            self.apply_session_model_selection(provider_id.as_str(), model_id.as_str());
         }
 
         let start_len = self.agent.messages().len();
