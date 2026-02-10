@@ -581,6 +581,581 @@ impl ScenarioRunner {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Replay manifest
+// ---------------------------------------------------------------------------
+
+/// Persisted snapshot of all deterministic controls used for a scenario run.
+///
+/// Contains everything needed to exactly reproduce a failing scenario execution:
+/// scenario definition, environment snapshot, VCR config, and seed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReplayManifest {
+    /// Schema version for forward compatibility.
+    pub schema: String,
+    /// Scenario name.
+    pub scenario_name: String,
+    /// Deterministic seed used for run ID generation.
+    pub seed: u64,
+    /// CLI arguments.
+    pub args: Vec<String>,
+    /// Environment variables (only test-relevant ones).
+    pub env: BTreeMap<String, String>,
+    /// VCR cassette directory (relative path preferred).
+    pub vcr_cassette_dir: Option<String>,
+    /// VCR test name for cassette matching.
+    pub vcr_test_name: Option<String>,
+    /// Step definitions for replay.
+    pub steps: Vec<ReplayStepDef>,
+    /// Exit strategy name.
+    pub exit_strategy: String,
+    /// Original run ID from the failing run.
+    pub original_run_id: String,
+    /// Path to the original transcript JSONL (for diff comparison).
+    pub original_transcript_path: Option<String>,
+    /// Timestamp when the manifest was created.
+    pub created_at: String,
+    /// System metadata (hostname, OS, Rust version) for drift detection.
+    pub system_info: BTreeMap<String, String>,
+}
+
+/// A step definition suitable for serialization in replay manifests.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReplayStepDef {
+    pub action_type: String,
+    pub action_value: Option<String>,
+    pub expect: String,
+    pub timeout_ms: u64,
+    pub label: Option<String>,
+}
+
+impl ReplayStepDef {
+    pub fn from_step(step: &ScenarioStep) -> Self {
+        let (action_type, action_value) = match &step.action {
+            StepAction::SendText(t) => ("send_text".to_string(), Some(t.clone())),
+            StepAction::SendKey(k) => ("send_key".to_string(), Some(k.clone())),
+            StepAction::Wait => ("wait".to_string(), None),
+        };
+        Self {
+            action_type,
+            action_value,
+            expect: step.expect.clone(),
+            timeout_ms: u64::try_from(step.timeout.as_millis()).unwrap_or(u64::MAX),
+            label: step.label.clone(),
+        }
+    }
+
+    pub fn to_step(&self) -> ScenarioStep {
+        let action = match self.action_type.as_str() {
+            "send_text" => StepAction::SendText(self.action_value.clone().unwrap_or_default()),
+            "send_key" => StepAction::SendKey(self.action_value.clone().unwrap_or_default()),
+            _ => StepAction::Wait,
+        };
+        ScenarioStep {
+            action,
+            expect: self.expect.clone(),
+            timeout: Duration::from_millis(self.timeout_ms),
+            label: self.label.clone(),
+        }
+    }
+}
+
+/// Result of replaying a scenario.
+pub struct ReplayResult {
+    /// The replayed transcript.
+    pub transcript: ScenarioTranscript,
+    /// Differences between original and replay transcripts.
+    pub divergences: Vec<ReplayDivergence>,
+    /// Path to the replay manifest used.
+    pub manifest_path: PathBuf,
+    /// Path to the replay transcript JSONL.
+    pub transcript_path: PathBuf,
+    /// Path to the divergence report (if any divergences found).
+    pub divergence_report_path: Option<PathBuf>,
+}
+
+/// A detected divergence between original and replay execution.
+#[derive(Clone, Debug, Serialize)]
+pub struct ReplayDivergence {
+    /// Which step diverged (or "exit" / "structure").
+    pub location: String,
+    /// What field diverged.
+    pub field: String,
+    /// Original value.
+    pub original: String,
+    /// Replay value.
+    pub replay: String,
+    /// Severity: "critical" (success changed), "warning" (timing drift), "info" (cosmetic).
+    pub severity: String,
+}
+
+const REPLAY_MANIFEST_SCHEMA: &str = "pi.test.replay.v1";
+
+impl ReplayManifest {
+    /// Build a manifest from a completed scenario run.
+    pub fn from_run(
+        scenario: &CliScenario,
+        transcript: &ScenarioTranscript,
+        seed: u64,
+        transcript_path: Option<&Path>,
+    ) -> Self {
+        Self {
+            schema: REPLAY_MANIFEST_SCHEMA.to_string(),
+            scenario_name: scenario.name.clone(),
+            seed,
+            args: scenario.args.clone(),
+            env: scenario.env.clone(),
+            vcr_cassette_dir: scenario
+                .vcr
+                .as_ref()
+                .map(|v| v.cassette_dir.display().to_string()),
+            vcr_test_name: scenario.vcr.as_ref().map(|v| v.test_name.clone()),
+            steps: scenario
+                .steps
+                .iter()
+                .map(ReplayStepDef::from_step)
+                .collect(),
+            exit_strategy: match &scenario.exit_strategy {
+                ExitStrategy::Graceful => "graceful".to_string(),
+                ExitStrategy::CtrlC => "ctrl_c".to_string(),
+                ExitStrategy::CtrlD => "ctrl_d".to_string(),
+                ExitStrategy::Timeout(d) => format!("timeout_{}ms", d.as_millis()),
+            },
+            original_run_id: transcript.run_id.clone(),
+            original_transcript_path: transcript_path.map(|p| p.display().to_string()),
+            created_at: chrono_now_iso(),
+            system_info: collect_system_info(),
+        }
+    }
+
+    /// Reconstruct a `CliScenario` from this manifest.
+    pub fn to_scenario(&self) -> CliScenario {
+        let exit_strategy = match self.exit_strategy.as_str() {
+            "graceful" => ExitStrategy::Graceful,
+            "ctrl_c" => ExitStrategy::CtrlC,
+            "ctrl_d" => ExitStrategy::CtrlD,
+            s if s.starts_with("timeout_") => {
+                let ms_str = s
+                    .strip_prefix("timeout_")
+                    .and_then(|s| s.strip_suffix("ms"))
+                    .unwrap_or("30000");
+                let ms: u64 = ms_str.parse().unwrap_or(30_000);
+                ExitStrategy::Timeout(Duration::from_millis(ms))
+            }
+            _ => ExitStrategy::Graceful,
+        };
+
+        let vcr = match (&self.vcr_cassette_dir, &self.vcr_test_name) {
+            (Some(dir), Some(name)) => Some(VcrConfig {
+                cassette_dir: PathBuf::from(dir),
+                test_name: name.clone(),
+            }),
+            _ => None,
+        };
+
+        CliScenario {
+            name: format!("{}_replay", self.scenario_name),
+            args: self.args.clone(),
+            env: self.env.clone(),
+            steps: self.steps.iter().map(ReplayStepDef::to_step).collect(),
+            vcr,
+            exit_strategy,
+        }
+    }
+
+    /// Write manifest to a JSON file.
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(path, json)
+    }
+
+    /// Load manifest from a JSON file.
+    pub fn load(path: &Path) -> std::io::Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        serde_json::from_str(&content)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+}
+
+/// Detect divergences between an original transcript and a replay transcript.
+pub fn detect_divergences(
+    original: &ScenarioTranscript,
+    replay: &ScenarioTranscript,
+) -> Vec<ReplayDivergence> {
+    let mut divergences = Vec::new();
+
+    // Structural: step count mismatch
+    if original.steps.len() != replay.steps.len() {
+        divergences.push(ReplayDivergence {
+            location: "structure".to_string(),
+            field: "step_count".to_string(),
+            original: original.steps.len().to_string(),
+            replay: replay.steps.len().to_string(),
+            severity: "critical".to_string(),
+        });
+    }
+
+    // Per-step comparison
+    let step_count = original.steps.len().min(replay.steps.len());
+    for i in 0..step_count {
+        let orig = &original.steps[i];
+        let repl = &replay.steps[i];
+
+        // Success divergence is critical
+        if orig.success != repl.success {
+            divergences.push(ReplayDivergence {
+                location: format!("step[{i}]/{}", orig.label),
+                field: "success".to_string(),
+                original: orig.success.to_string(),
+                replay: repl.success.to_string(),
+                severity: "critical".to_string(),
+            });
+        }
+
+        // Label should match exactly
+        if orig.label != repl.label {
+            divergences.push(ReplayDivergence {
+                location: format!("step[{i}]"),
+                field: "label".to_string(),
+                original: orig.label.clone(),
+                replay: repl.label.clone(),
+                severity: "warning".to_string(),
+            });
+        }
+
+        // Timing drift > 5x is a warning
+        if orig.elapsed_ms > 0 {
+            let ratio = repl
+                .elapsed_ms
+                .checked_div(orig.elapsed_ms)
+                .or_else(|| orig.elapsed_ms.checked_div(repl.elapsed_ms))
+                .unwrap_or(0);
+            if ratio > 5 {
+                divergences.push(ReplayDivergence {
+                    location: format!("step[{i}]/{}", orig.label),
+                    field: "elapsed_ms".to_string(),
+                    original: format!("{}ms", orig.elapsed_ms),
+                    replay: format!("{}ms ({}x drift)", repl.elapsed_ms, ratio),
+                    severity: "warning".to_string(),
+                });
+            }
+        }
+
+        // Boundary count divergence
+        if orig.event_boundaries.len() != repl.event_boundaries.len() {
+            divergences.push(ReplayDivergence {
+                location: format!("step[{i}]/{}", orig.label),
+                field: "event_boundary_count".to_string(),
+                original: orig.event_boundaries.len().to_string(),
+                replay: repl.event_boundaries.len().to_string(),
+                severity: "info".to_string(),
+            });
+        }
+    }
+
+    // Exit status divergence
+    let orig_exit = format!("{:?}", original.exit_status);
+    let repl_exit = format!("{:?}", replay.exit_status);
+    if orig_exit != repl_exit {
+        divergences.push(ReplayDivergence {
+            location: "exit".to_string(),
+            field: "exit_status".to_string(),
+            original: orig_exit,
+            replay: repl_exit,
+            severity: "critical".to_string(),
+        });
+    }
+
+    divergences
+}
+
+/// Write a divergence report as JSONL.
+pub fn write_divergence_report(
+    divergences: &[ReplayDivergence],
+    manifest: &ReplayManifest,
+    path: &Path,
+) -> std::io::Result<()> {
+    use std::fmt::Write as _;
+    let mut buf = String::new();
+
+    let header = serde_json::json!({
+        "type": "replay_divergence_header",
+        "schema": REPLAY_MANIFEST_SCHEMA,
+        "scenario_name": manifest.scenario_name,
+        "original_run_id": manifest.original_run_id,
+        "divergence_count": divergences.len(),
+        "created_at": chrono_now_iso(),
+    });
+    let _ = writeln!(
+        buf,
+        "{}",
+        serde_json::to_string(&header).unwrap_or_default()
+    );
+
+    for div in divergences {
+        let _ = writeln!(buf, "{}", serde_json::to_string(div).unwrap_or_default());
+    }
+
+    std::fs::write(path, buf)
+}
+
+/// Format a human-readable divergence summary.
+pub fn divergence_summary(divergences: &[ReplayDivergence], manifest: &ReplayManifest) -> String {
+    use std::fmt::Write as _;
+
+    if divergences.is_empty() {
+        return format!(
+            "Replay of '{}' (original run {}) matched perfectly.",
+            manifest.scenario_name, manifest.original_run_id
+        );
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "Replay divergence report for '{}' (original run {})",
+        manifest.scenario_name, manifest.original_run_id
+    );
+    let _ = writeln!(out, "─────────────────────────────────────────");
+
+    let critical = divergences
+        .iter()
+        .filter(|d| d.severity == "critical")
+        .count();
+    let warnings = divergences
+        .iter()
+        .filter(|d| d.severity == "warning")
+        .count();
+    let info = divergences.iter().filter(|d| d.severity == "info").count();
+    let _ = writeln!(
+        out,
+        "  {} divergence(s): {} critical, {} warning, {} info",
+        divergences.len(),
+        critical,
+        warnings,
+        info
+    );
+    let _ = writeln!(out);
+
+    for div in divergences {
+        let marker = match div.severity.as_str() {
+            "critical" => "!!",
+            "warning" => "!",
+            _ => "i",
+        };
+        let _ = writeln!(
+            out,
+            "  [{marker}] {location} :: {field}",
+            location = div.location,
+            field = div.field,
+        );
+        let _ = writeln!(out, "      original: {}", div.original);
+        let _ = writeln!(out, "      replay:   {}", div.replay);
+    }
+
+    out
+}
+
+fn chrono_now_iso() -> String {
+    // Simple ISO timestamp without chrono dependency
+    let dur = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}s_since_epoch", dur.as_secs())
+}
+
+fn collect_system_info() -> BTreeMap<String, String> {
+    let mut info = BTreeMap::new();
+    info.insert("os".to_string(), std::env::consts::OS.to_string());
+    info.insert("arch".to_string(), std::env::consts::ARCH.to_string());
+    if let Ok(hostname) = std::env::var("HOSTNAME") {
+        info.insert("hostname".to_string(), hostname);
+    }
+    if let Ok(user) = std::env::var("USER") {
+        info.insert("user".to_string(), user);
+    }
+    info
+}
+
+// ---------------------------------------------------------------------------
+// ScenarioRunner replay extension
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+impl ScenarioRunner {
+    /// Run a scenario and save a replay manifest alongside the transcript.
+    ///
+    /// Returns `(transcript, manifest_path)`.
+    pub fn run_with_replay(scenario: CliScenario) -> Option<(ScenarioTranscript, PathBuf)> {
+        // Capture scenario before moving into run()
+        let scenario_clone = scenario.clone();
+        let transcript = Self::run(scenario)?;
+
+        // Find the transcript JSONL path from artifacts
+        let transcript_path = transcript
+            .artifacts
+            .iter()
+            .find(|a| a.name == "scenario-transcript.jsonl")
+            .map(|a| PathBuf::from(&a.path));
+
+        let seed = {
+            let mut hasher = Sha256::new();
+            hasher.update(scenario_clone.name.as_bytes());
+            let digest = hasher.finalize();
+            u64::from_le_bytes(digest[..8].try_into().unwrap_or([0; 8]))
+        };
+
+        let manifest = ReplayManifest::from_run(
+            &scenario_clone,
+            &transcript,
+            seed,
+            transcript_path.as_deref(),
+        );
+
+        // Save manifest next to transcript
+        let manifest_path = transcript_path.as_ref().map_or_else(
+            || PathBuf::from(format!("/tmp/{}_replay.json", scenario_clone.name)),
+            |p| p.with_extension("replay.json"),
+        );
+
+        if let Err(e) = manifest.save(&manifest_path) {
+            eprintln!("Warning: failed to save replay manifest: {e}");
+        }
+
+        Some((transcript, manifest_path))
+    }
+
+    /// Replay a scenario from a saved manifest and detect divergences.
+    pub fn replay(manifest_path: &Path) -> Option<ReplayResult> {
+        let manifest = ReplayManifest::load(manifest_path).ok()?;
+        let scenario = manifest.to_scenario();
+
+        let transcript = Self::run(scenario)?;
+
+        // Load original transcript for comparison
+        let divergences = manifest
+            .original_transcript_path
+            .as_ref()
+            .and_then(|orig_path| {
+                let orig_path = Path::new(orig_path);
+                if orig_path.exists() {
+                    load_transcript_from_jsonl(orig_path)
+                        .map(|original| detect_divergences(&original, &transcript))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+
+        // Write replay transcript
+        let replay_transcript_path = manifest_path.with_extension("replay-transcript.jsonl");
+        let _ = transcript.write_jsonl(&replay_transcript_path);
+
+        // Write divergence report if any
+        let divergence_report_path = if divergences.is_empty() {
+            None
+        } else {
+            let report_path = manifest_path.with_extension("divergences.jsonl");
+            let _ = write_divergence_report(&divergences, &manifest, &report_path);
+            Some(report_path)
+        };
+
+        Some(ReplayResult {
+            transcript,
+            divergences,
+            manifest_path: manifest_path.to_path_buf(),
+            transcript_path: replay_transcript_path,
+            divergence_report_path,
+        })
+    }
+}
+
+/// Load a `ScenarioTranscript` from JSONL by parsing header and step lines.
+pub fn load_transcript_from_jsonl(path: &Path) -> Option<ScenarioTranscript> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let mut scenario_name = String::new();
+    let mut run_id = String::new();
+    let mut total_elapsed_ms = 0u64;
+    let mut exit_status = ExitStatus::Clean;
+    let mut steps = Vec::new();
+    let mut boundaries_by_cid: BTreeMap<String, Vec<EventBoundary>> = BTreeMap::new();
+
+    for line in content.lines() {
+        let v: serde_json::Value = serde_json::from_str(line).ok()?;
+        match v["type"].as_str()? {
+            "scenario_header" => {
+                scenario_name = v["scenario_name"].as_str().unwrap_or("").to_string();
+                run_id = v["run_id"].as_str().unwrap_or("").to_string();
+                total_elapsed_ms = v["total_elapsed_ms"].as_u64().unwrap_or(0);
+                if let Some(es) = v["exit_status"].as_str() {
+                    exit_status = match es {
+                        "Clean" => ExitStatus::Clean,
+                        "Timeout" => ExitStatus::Timeout,
+                        "SessionDied" => ExitStatus::SessionDied,
+                        _ => ExitStatus::ForcedExit {
+                            method: es.to_string(),
+                        },
+                    };
+                } else if v["exit_status"].is_object() {
+                    // Handle {"ForcedExit":{"method":"..."}} format
+                    if let Some(method) = v["exit_status"]["ForcedExit"]["method"].as_str() {
+                        exit_status = ExitStatus::ForcedExit {
+                            method: method.to_string(),
+                        };
+                    }
+                }
+            }
+            "step_result" => {
+                let cid_str = v["correlation_id"].as_str().unwrap_or("").to_string();
+                #[allow(clippy::cast_possible_truncation)]
+                let step_index = v["step_index"].as_u64().unwrap_or(0) as usize;
+                steps.push(StepResult {
+                    correlation_id: CorrelationId {
+                        run_id: v["run_id"].as_str().unwrap_or("").to_string(),
+                        step_index,
+                        composite: cid_str,
+                    },
+                    label: v["label"].as_str().unwrap_or("").to_string(),
+                    action: v["action"].as_str().unwrap_or("").to_string(),
+                    expected: v["expected"].as_str().unwrap_or("").to_string(),
+                    #[allow(clippy::cast_possible_truncation)]
+                    pane_snapshot_lines: v["pane_snapshot_lines"].as_u64().unwrap_or(0) as usize,
+                    elapsed_ms: v["elapsed_ms"].as_u64().unwrap_or(0),
+                    success: v["success"].as_bool().unwrap_or(false),
+                    event_boundaries: Vec::new(), // filled below
+                });
+            }
+            "event_boundary" => {
+                let cid = v["correlation_id"].as_str().unwrap_or("").to_string();
+                let boundary = EventBoundary {
+                    boundary_type: v["boundary_type"].as_str().unwrap_or("").to_string(),
+                    timestamp_ms: v["timestamp_ms"].as_u64().unwrap_or(0),
+                    details: v.get("details").cloned(),
+                };
+                boundaries_by_cid.entry(cid).or_default().push(boundary);
+            }
+            _ => {}
+        }
+    }
+
+    // Attach boundaries to steps
+    for step in &mut steps {
+        if let Some(boundaries) = boundaries_by_cid.remove(&step.correlation_id.composite) {
+            step.event_boundaries = boundaries;
+        }
+    }
+
+    Some(ScenarioTranscript {
+        scenario_name,
+        run_id,
+        steps,
+        exit_status,
+        total_elapsed_ms,
+        artifacts: Vec::new(), // not persisted in JSONL step/boundary lines
+    })
+}
+
 /// Execute a single step against the TUI session.
 ///
 /// Returns `(pane_content, success)`.

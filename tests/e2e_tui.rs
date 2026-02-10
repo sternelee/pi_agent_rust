@@ -3195,3 +3195,372 @@ fn e2e_scenario_transcript_diff_self_compare() {
         "failure_summary should show 0 failed for passing scenario:\n{summary}"
     );
 }
+
+// ─── Suite 9: Replay Manifest + Divergence Detection ─────────────────────────
+
+/// Scenario: Save a replay manifest from a run, reload it, and verify
+/// the reconstructed scenario matches the original definition.
+#[test]
+fn e2e_scenario_replay_manifest_roundtrip() {
+    use common::scenario_runner::ReplayManifest;
+
+    let scenario = CliScenario::new("manifest_roundtrip")
+        .args(&base_interactive_args())
+        .env("TEST_VAR", "test_value")
+        .step(
+            ScenarioStep::wait("Welcome to Pi!")
+                .label("startup")
+                .timeout_secs(20),
+        )
+        .step(
+            ScenarioStep::send_text("/help", "Available")
+                .label("help")
+                .timeout_secs(10),
+        )
+        .exit(ExitStrategy::Graceful);
+
+    // Build a mock transcript for the manifest (no tmux needed)
+    let mock_transcript = common::scenario_runner::ScenarioTranscript {
+        scenario_name: "manifest_roundtrip".to_string(),
+        run_id: "test-run-abc".to_string(),
+        steps: vec![],
+        exit_status: common::scenario_runner::ExitStatus::Clean,
+        total_elapsed_ms: 1234,
+        artifacts: vec![],
+    };
+
+    let manifest = ReplayManifest::from_run(&scenario, &mock_transcript, 42, None);
+
+    // Verify manifest fields
+    assert_eq!(manifest.schema, "pi.test.replay.v1");
+    assert_eq!(manifest.scenario_name, "manifest_roundtrip");
+    assert_eq!(manifest.seed, 42);
+    assert_eq!(manifest.original_run_id, "test-run-abc");
+    assert_eq!(manifest.exit_strategy, "graceful");
+    assert!(manifest.env.contains_key("TEST_VAR"));
+    assert_eq!(manifest.steps.len(), 2);
+    assert_eq!(manifest.steps[0].action_type, "wait");
+    assert_eq!(manifest.steps[1].action_type, "send_text");
+    assert!(manifest.system_info.contains_key("os"));
+
+    // Save and reload
+    let dir = tempfile::tempdir().expect("tempdir");
+    let manifest_path = dir.path().join("replay.json");
+    manifest.save(&manifest_path).expect("save manifest");
+
+    let loaded = ReplayManifest::load(&manifest_path).expect("load manifest");
+    assert_eq!(loaded.scenario_name, "manifest_roundtrip");
+    assert_eq!(loaded.seed, 42);
+    assert_eq!(loaded.steps.len(), 2);
+
+    // Reconstruct scenario from manifest
+    let reconstructed = loaded.to_scenario();
+    assert_eq!(reconstructed.name, "manifest_roundtrip_replay");
+    assert_eq!(reconstructed.args, scenario.args);
+    assert_eq!(reconstructed.steps.len(), scenario.steps.len());
+    assert!(matches!(
+        reconstructed.exit_strategy,
+        ExitStrategy::Graceful
+    ));
+
+    // Step definitions should match
+    for (orig, recon) in scenario.steps.iter().zip(reconstructed.steps.iter()) {
+        assert_eq!(orig.expect, recon.expect);
+        assert_eq!(orig.label, recon.label);
+    }
+}
+
+/// Scenario: Verify divergence detection catches success/timing/exit mismatches.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn e2e_scenario_divergence_detection() {
+    use common::scenario_runner::{
+        CorrelationId, EventBoundary, ExitStatus, ReplayManifest, ScenarioTranscript, StepResult,
+        detect_divergences, divergence_summary, write_divergence_report,
+    };
+
+    let make_step = |label: &str, success: bool, elapsed: u64| StepResult {
+        correlation_id: CorrelationId {
+            run_id: "run-1".to_string(),
+            step_index: 0,
+            composite: "run-1/0".to_string(),
+        },
+        label: label.to_string(),
+        action: "send_text: hello".to_string(),
+        expected: "world".to_string(),
+        pane_snapshot_lines: 24,
+        elapsed_ms: elapsed,
+        success,
+        event_boundaries: vec![
+            EventBoundary {
+                boundary_type: "step_start".to_string(),
+                timestamp_ms: 0,
+                details: None,
+            },
+            EventBoundary {
+                boundary_type: "output_matched".to_string(),
+                timestamp_ms: elapsed,
+                details: None,
+            },
+            EventBoundary {
+                boundary_type: "step_end".to_string(),
+                timestamp_ms: elapsed,
+                details: None,
+            },
+        ],
+    };
+
+    let original = ScenarioTranscript {
+        scenario_name: "test".to_string(),
+        run_id: "run-1".to_string(),
+        steps: vec![
+            make_step("startup", true, 100),
+            make_step("action", true, 200),
+        ],
+        exit_status: ExitStatus::Clean,
+        total_elapsed_ms: 300,
+        artifacts: vec![],
+    };
+
+    // Case 1: Identical transcripts → no divergences
+    let divs = detect_divergences(&original, &original);
+    assert!(
+        divs.is_empty(),
+        "identical transcripts should have no divergences"
+    );
+
+    // Case 2: Success changed → critical divergence
+    let mut replay_fail = original.clone();
+    replay_fail.steps[1].success = false;
+    let divs = detect_divergences(&original, &replay_fail);
+    assert!(!divs.is_empty());
+    let critical = divs
+        .iter()
+        .find(|d| d.severity == "critical" && d.field == "success");
+    assert!(critical.is_some(), "success change should be critical");
+
+    // Case 3: Large timing drift → warning
+    let mut replay_slow = original.clone();
+    replay_slow.steps[0].elapsed_ms = 1000; // 10x the original 100ms
+    let divs = detect_divergences(&original, &replay_slow);
+    let timing_warn = divs.iter().find(|d| d.field == "elapsed_ms");
+    assert!(
+        timing_warn.is_some(),
+        "10x timing drift should produce warning"
+    );
+
+    // Case 4: Exit status changed → critical
+    let mut replay_exit = original.clone();
+    replay_exit.exit_status = ExitStatus::Timeout;
+    let divs = detect_divergences(&original, &replay_exit);
+    let exit_div = divs.iter().find(|d| d.field == "exit_status");
+    assert!(exit_div.is_some(), "exit status change should be detected");
+    assert_eq!(exit_div.unwrap().severity, "critical");
+
+    // Case 5: Step count mismatch → critical
+    let mut replay_short = original.clone();
+    replay_short.steps.pop();
+    let divs = detect_divergences(&original, &replay_short);
+    let count_div = divs.iter().find(|d| d.field == "step_count");
+    assert!(
+        count_div.is_some(),
+        "step count mismatch should be detected"
+    );
+
+    // Case 6: divergence_summary formatting
+    let divs = detect_divergences(&original, &replay_fail);
+    let manifest = ReplayManifest {
+        schema: "pi.test.replay.v1".to_string(),
+        scenario_name: "test".to_string(),
+        seed: 42,
+        args: vec![],
+        env: std::collections::BTreeMap::new(),
+        vcr_cassette_dir: None,
+        vcr_test_name: None,
+        steps: vec![],
+        exit_strategy: "graceful".to_string(),
+        original_run_id: "run-1".to_string(),
+        original_transcript_path: None,
+        created_at: "now".to_string(),
+        system_info: std::collections::BTreeMap::new(),
+    };
+
+    let summary = divergence_summary(&divs, &manifest);
+    assert!(
+        summary.contains("divergence"),
+        "summary should mention divergences"
+    );
+    assert!(
+        summary.contains("critical"),
+        "summary should mention critical severity"
+    );
+
+    // Empty divergences should produce "matched perfectly"
+    let empty_summary = divergence_summary(&[], &manifest);
+    assert!(
+        empty_summary.contains("matched perfectly"),
+        "empty divergences should say matched: {empty_summary}"
+    );
+
+    // Case 7: write_divergence_report produces valid JSONL
+    let dir = tempfile::tempdir().expect("tempdir");
+    let report_path = dir.path().join("divergences.jsonl");
+    write_divergence_report(&divs, &manifest, &report_path).expect("write report");
+    let report = std::fs::read_to_string(&report_path).expect("read report");
+    let lines: Vec<&str> = report.lines().collect();
+    assert!(lines.len() >= 2, "report should have header + divergences");
+    let header: serde_json::Value = serde_json::from_str(lines[0]).expect("parse header");
+    assert_eq!(header["type"], "replay_divergence_header");
+}
+
+/// Scenario: JSONL transcript roundtrip through load_transcript_from_jsonl.
+#[test]
+fn e2e_scenario_transcript_jsonl_reload() {
+    use common::scenario_runner::{
+        CorrelationId, EventBoundary, ExitStatus, ScenarioTranscript, StepResult,
+    };
+
+    let original = ScenarioTranscript {
+        scenario_name: "reload_test".to_string(),
+        run_id: "run-reload".to_string(),
+        steps: vec![StepResult {
+            correlation_id: CorrelationId {
+                run_id: "run-reload".to_string(),
+                step_index: 0,
+                composite: "run-reload/0".to_string(),
+            },
+            label: "greet".to_string(),
+            action: "send_text: hello".to_string(),
+            expected: "world".to_string(),
+            pane_snapshot_lines: 10,
+            elapsed_ms: 42,
+            success: true,
+            event_boundaries: vec![
+                EventBoundary {
+                    boundary_type: "step_start".to_string(),
+                    timestamp_ms: 0,
+                    details: None,
+                },
+                EventBoundary {
+                    boundary_type: "output_matched".to_string(),
+                    timestamp_ms: 42,
+                    details: None,
+                },
+                EventBoundary {
+                    boundary_type: "step_end".to_string(),
+                    timestamp_ms: 42,
+                    details: None,
+                },
+            ],
+        }],
+        exit_status: ExitStatus::Clean,
+        total_elapsed_ms: 100,
+        artifacts: vec![],
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("transcript.jsonl");
+    original.write_jsonl(&path).expect("write");
+
+    // Load back through the JSONL parser
+    let loaded =
+        common::scenario_runner::load_transcript_from_jsonl(&path).expect("load transcript");
+
+    assert_eq!(loaded.scenario_name, "reload_test");
+    assert_eq!(loaded.run_id, "run-reload");
+    assert_eq!(loaded.steps.len(), 1);
+    assert_eq!(loaded.steps[0].label, "greet");
+    assert!(loaded.steps[0].success);
+    assert_eq!(loaded.steps[0].elapsed_ms, 42);
+    assert!(loaded.steps[0].event_boundaries.len() >= 2);
+    assert_eq!(
+        loaded.steps[0].event_boundaries[0].boundary_type,
+        "step_start"
+    );
+    assert!(loaded.exit_status.is_clean());
+}
+
+/// Scenario: ReplayStepDef roundtrip (step → def → step).
+#[test]
+fn e2e_scenario_replay_step_roundtrip() {
+    use common::scenario_runner::{ReplayStepDef, StepAction};
+
+    // send_text step
+    let step = ScenarioStep::send_text("hello", "world")
+        .label("greet")
+        .timeout_secs(10);
+    let def = ReplayStepDef::from_step(&step);
+    assert_eq!(def.action_type, "send_text");
+    assert_eq!(def.action_value.as_deref(), Some("hello"));
+    assert_eq!(def.expect, "world");
+    assert_eq!(def.label.as_deref(), Some("greet"));
+    assert_eq!(def.timeout_ms, 10_000);
+
+    let back = def.to_step();
+    assert!(matches!(back.action, StepAction::SendText(ref t) if t == "hello"));
+    assert_eq!(back.expect, "world");
+    assert_eq!(back.label.as_deref(), Some("greet"));
+    assert_eq!(back.timeout, Duration::from_secs(10));
+
+    // send_key step
+    let key_step = ScenarioStep::send_key("C-c", "exit");
+    let key_def = ReplayStepDef::from_step(&key_step);
+    assert_eq!(key_def.action_type, "send_key");
+    let key_back = key_def.to_step();
+    assert!(matches!(key_back.action, StepAction::SendKey(ref k) if k == "C-c"));
+
+    // wait step
+    let wait_step = ScenarioStep::wait("ready");
+    let wait_def = ReplayStepDef::from_step(&wait_step);
+    assert_eq!(wait_def.action_type, "wait");
+    assert!(wait_def.action_value.is_none());
+    let wait_back = wait_def.to_step();
+    assert!(matches!(wait_back.action, StepAction::Wait));
+}
+
+/// Scenario: ExitStrategy serialization roundtrip via manifest.
+#[test]
+fn e2e_scenario_exit_strategy_roundtrip() {
+    use common::scenario_runner::ReplayManifest;
+
+    // Helper to test one strategy
+    let test = |strategy: ExitStrategy, expected_str: &str| {
+        let scenario = CliScenario::new("exit_test").exit(strategy);
+        let mock_transcript = common::scenario_runner::ScenarioTranscript {
+            scenario_name: "exit_test".to_string(),
+            run_id: "r".to_string(),
+            steps: vec![],
+            exit_status: common::scenario_runner::ExitStatus::Clean,
+            total_elapsed_ms: 0,
+            artifacts: vec![],
+        };
+        let manifest = ReplayManifest::from_run(&scenario, &mock_transcript, 1, None);
+        assert_eq!(manifest.exit_strategy, expected_str);
+
+        let reconstructed = manifest.to_scenario();
+        // Verify the reconstructed exit strategy type matches
+        match expected_str {
+            "graceful" => assert!(matches!(
+                reconstructed.exit_strategy,
+                ExitStrategy::Graceful
+            )),
+            "ctrl_c" => assert!(matches!(reconstructed.exit_strategy, ExitStrategy::CtrlC)),
+            "ctrl_d" => assert!(matches!(reconstructed.exit_strategy, ExitStrategy::CtrlD)),
+            s if s.starts_with("timeout_") => {
+                assert!(matches!(
+                    reconstructed.exit_strategy,
+                    ExitStrategy::Timeout(_)
+                ));
+            }
+            _ => panic!("unexpected exit strategy string: {expected_str}"),
+        }
+    };
+
+    test(ExitStrategy::Graceful, "graceful");
+    test(ExitStrategy::CtrlC, "ctrl_c");
+    test(ExitStrategy::CtrlD, "ctrl_d");
+    test(
+        ExitStrategy::Timeout(Duration::from_secs(30)),
+        "timeout_30000ms",
+    );
+}
