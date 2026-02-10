@@ -732,6 +732,72 @@ fn parse_sap_service_key_json(json_str: &str) -> Option<SapResolvedCredentials> 
     })
 }
 
+#[derive(Debug, Deserialize)]
+struct SapTokenExchangeResponse {
+    access_token: String,
+}
+
+/// Exchange SAP AI Core service-key credentials for an access token.
+///
+/// Returns `Ok(None)` when SAP credentials are not configured.
+pub async fn exchange_sap_access_token(auth: &AuthStorage) -> Result<Option<String>> {
+    let Some(creds) = resolve_sap_credentials(auth) else {
+        return Ok(None);
+    };
+
+    let client = crate::http::client::Client::new();
+    let token = exchange_sap_access_token_with_client(&client, &creds).await?;
+    Ok(Some(token))
+}
+
+async fn exchange_sap_access_token_with_client(
+    client: &crate::http::client::Client,
+    creds: &SapResolvedCredentials,
+) -> Result<String> {
+    let form_body = format!(
+        "grant_type=client_credentials&client_id={}&client_secret={}",
+        percent_encode_component(&creds.client_id),
+        percent_encode_component(&creds.client_secret),
+    );
+
+    let request = client
+        .post(&creds.token_url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Accept", "application/json")
+        .body(form_body.into_bytes());
+
+    let response = Box::pin(request.send())
+        .await
+        .map_err(|e| Error::auth(format!("SAP AI Core token exchange failed: {e}")))?;
+
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .unwrap_or_else(|_| "<failed to read body>".to_string());
+    let redacted_text = redact_known_secrets(
+        &text,
+        &[creds.client_id.as_str(), creds.client_secret.as_str()],
+    );
+
+    if !(200..300).contains(&status) {
+        return Err(Error::auth(format!(
+            "SAP AI Core token exchange failed (HTTP {status}): {redacted_text}"
+        )));
+    }
+
+    let response: SapTokenExchangeResponse = serde_json::from_str(&text)
+        .map_err(|e| Error::auth(format!("SAP AI Core token response was invalid JSON: {e}")))?;
+    let access_token = response.access_token.trim();
+    if access_token.is_empty() {
+        return Err(Error::auth(
+            "SAP AI Core token exchange returned an empty access_token".to_string(),
+        ));
+    }
+
+    Ok(access_token.to_string())
+}
+
 fn redact_known_secrets(text: &str, secrets: &[&str]) -> String {
     let mut redacted = text.to_string();
     for secret in secrets {
@@ -4075,8 +4141,7 @@ mod tests {
                 region: Some("us-west-2".to_string()),
             },
         );
-        let result =
-            resolve_aws_credentials_with_env(&auth, |_| -> Option<String> { None });
+        let result = resolve_aws_credentials_with_env(&auth, |_| -> Option<String> { None });
         assert_eq!(
             result,
             Some(AwsResolvedCredentials::Sigv4 {
@@ -4101,8 +4166,7 @@ mod tests {
                 token: "stored-bearer".to_string(),
             },
         );
-        let result =
-            resolve_aws_credentials_with_env(&auth, |_| -> Option<String> { None });
+        let result = resolve_aws_credentials_with_env(&auth, |_| -> Option<String> { None });
         assert_eq!(
             result,
             Some(AwsResolvedCredentials::Bearer {
@@ -4134,9 +4198,9 @@ mod tests {
             _ => None,
         });
         match result {
-            Some(AwsResolvedCredentials::Sigv4 {
-                access_key_id, ..
-            }) => assert_eq!(access_key_id, "AKIA_ENV"),
+            Some(AwsResolvedCredentials::Sigv4 { access_key_id, .. }) => {
+                assert_eq!(access_key_id, "AKIA_ENV")
+            }
             other => panic!("expected Sigv4 from env, got: {other:?}"),
         }
     }
@@ -4144,8 +4208,7 @@ mod tests {
     #[test]
     fn test_aws_no_credentials_returns_none() {
         let auth = empty_auth();
-        let result =
-            resolve_aws_credentials_with_env(&auth, |_| -> Option<String> { None });
+        let result = resolve_aws_credentials_with_env(&auth, |_| -> Option<String> { None });
         assert!(result.is_none());
     }
 
@@ -4207,9 +4270,7 @@ mod tests {
             "SAP_AI_CORE_CLIENT_ID" => Some("env-client".to_string()),
             "SAP_AI_CORE_CLIENT_SECRET" => Some("env-secret".to_string()),
             "SAP_AI_CORE_TOKEN_URL" => Some("https://token.sap.example.com".to_string()),
-            "SAP_AI_CORE_SERVICE_URL" => {
-                Some("https://service.sap.example.com".to_string())
-            }
+            "SAP_AI_CORE_SERVICE_URL" => Some("https://service.sap.example.com".to_string()),
             _ => None,
         });
         assert_eq!(
@@ -4239,8 +4300,7 @@ mod tests {
                 service_url: Some("https://stored-api.sap.com".to_string()),
             },
         );
-        let result =
-            resolve_sap_credentials_with_env(&auth, |_| -> Option<String> { None });
+        let result = resolve_sap_credentials_with_env(&auth, |_| -> Option<String> { None });
         assert_eq!(
             result,
             Some(SapResolvedCredentials {
@@ -4266,12 +4326,8 @@ mod tests {
             "AICORE_SERVICE_KEY" => Some(key_json.clone()),
             "SAP_AI_CORE_CLIENT_ID" => Some("env-client".to_string()),
             "SAP_AI_CORE_CLIENT_SECRET" => Some("env-secret".to_string()),
-            "SAP_AI_CORE_TOKEN_URL" => {
-                Some("https://env-token.example.com".to_string())
-            }
-            "SAP_AI_CORE_SERVICE_URL" => {
-                Some("https://env-api.example.com".to_string())
-            }
+            "SAP_AI_CORE_TOKEN_URL" => Some("https://env-token.example.com".to_string()),
+            "SAP_AI_CORE_SERVICE_URL" => Some("https://env-api.example.com".to_string()),
             _ => None,
         });
         assert_eq!(result.unwrap().client_id, "json-client");
@@ -4306,8 +4362,7 @@ mod tests {
     #[test]
     fn test_sap_no_credentials_returns_none() {
         let auth = empty_auth();
-        let result =
-            resolve_sap_credentials_with_env(&auth, |_| -> Option<String> { None });
+        let result = resolve_sap_credentials_with_env(&auth, |_| -> Option<String> { None });
         assert!(result.is_none());
     }
 
@@ -4357,6 +4412,73 @@ mod tests {
         let keys = env_keys_for_provider("sap");
         assert!(!keys.is_empty(), "sap alias should resolve");
         assert!(keys.contains(&"AICORE_SERVICE_KEY"));
+    }
+
+    #[test]
+    fn test_exchange_sap_access_token_with_client_success() {
+        let rt = asupersync::runtime::RuntimeBuilder::current_thread().build();
+        rt.expect("runtime").block_on(async {
+            let token_response = r#"{"access_token":"sap-access-token"}"#;
+            let token_url = spawn_json_server(200, token_response);
+            let client = crate::http::client::Client::new();
+            let creds = SapResolvedCredentials {
+                client_id: "sap-client".to_string(),
+                client_secret: "sap-secret".to_string(),
+                token_url,
+                service_url: "https://api.ai.sap.example.com".to_string(),
+            };
+
+            let token = exchange_sap_access_token_with_client(&client, &creds)
+                .await
+                .expect("token exchange");
+            assert_eq!(token, "sap-access-token");
+        });
+    }
+
+    #[test]
+    fn test_exchange_sap_access_token_with_client_http_error() {
+        let rt = asupersync::runtime::RuntimeBuilder::current_thread().build();
+        rt.expect("runtime").block_on(async {
+            let token_url = spawn_json_server(401, r#"{"error":"unauthorized"}"#);
+            let client = crate::http::client::Client::new();
+            let creds = SapResolvedCredentials {
+                client_id: "sap-client".to_string(),
+                client_secret: "sap-secret".to_string(),
+                token_url,
+                service_url: "https://api.ai.sap.example.com".to_string(),
+            };
+
+            let err = exchange_sap_access_token_with_client(&client, &creds)
+                .await
+                .expect_err("expected HTTP error");
+            assert!(
+                err.to_string().contains("HTTP 401"),
+                "unexpected error: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_exchange_sap_access_token_with_client_invalid_json() {
+        let rt = asupersync::runtime::RuntimeBuilder::current_thread().build();
+        rt.expect("runtime").block_on(async {
+            let token_url = spawn_json_server(200, r#"{"token":"missing-access-token"}"#);
+            let client = crate::http::client::Client::new();
+            let creds = SapResolvedCredentials {
+                client_id: "sap-client".to_string(),
+                client_secret: "sap-secret".to_string(),
+                token_url,
+                service_url: "https://api.ai.sap.example.com".to_string(),
+            };
+
+            let err = exchange_sap_access_token_with_client(&client, &creds)
+                .await
+                .expect_err("expected JSON error");
+            assert!(
+                err.to_string().contains("invalid JSON"),
+                "unexpected error: {err}"
+            );
+        });
     }
 
     // ── Lifecycle tests (bd-3uqg.7.6) ─────────────────────────────
@@ -4701,7 +4823,8 @@ mod tests {
 
     #[test]
     fn test_credential_deserialization_defaults_missing_fields() {
-        let json = r#"{"type":"o_auth","access_token":"tok","refresh_token":"ref","expires":12345}"#;
+        let json =
+            r#"{"type":"o_auth","access_token":"tok","refresh_token":"ref","expires":12345}"#;
         let parsed: AuthCredential = serde_json::from_str(json).expect("deserialize");
         match parsed {
             AuthCredential::OAuth {

@@ -859,13 +859,54 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
         }),
         test_obligations: TEST_REQUIRED,
     },
+    // ── Cloudflare provider IDs (gateway + workers-ai) ────────────────────
+    ProviderMetadata {
+        canonical_id: "cloudflare-ai-gateway",
+        aliases: &[],
+        auth_env_keys: &["CLOUDFLARE_API_TOKEN"],
+        onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
+        routing_defaults: Some(ProviderRoutingDefaults {
+            api: "openai-completions",
+            base_url: "https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai",
+            auth_header: true,
+            reasoning: true,
+            input: &INPUT_TEXT,
+            context_window: 128_000,
+            max_tokens: 16_384,
+        }),
+        test_obligations: TEST_REQUIRED,
+    },
+    ProviderMetadata {
+        canonical_id: "cloudflare-workers-ai",
+        aliases: &[],
+        auth_env_keys: &["CLOUDFLARE_API_TOKEN"],
+        onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
+        routing_defaults: Some(ProviderRoutingDefaults {
+            api: "openai-completions",
+            base_url: "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
+            auth_header: true,
+            reasoning: true,
+            input: &INPUT_TEXT,
+            context_window: 128_000,
+            max_tokens: 16_384,
+        }),
+        test_obligations: TEST_REQUIRED,
+    },
     // ── Native adapter required providers ────────────────────────────────
     ProviderMetadata {
         canonical_id: "google-vertex",
         aliases: &["vertexai"],
-        auth_env_keys: &["GOOGLE_CLOUD_API_KEY"],
-        onboarding: ProviderOnboardingMode::NativeAdapterRequired,
-        routing_defaults: None,
+        auth_env_keys: &["GOOGLE_CLOUD_API_KEY", "VERTEX_API_KEY"],
+        onboarding: ProviderOnboardingMode::BuiltInNative,
+        routing_defaults: Some(ProviderRoutingDefaults {
+            api: "google-vertex",
+            base_url: "",
+            auth_header: true,
+            reasoning: true,
+            input: &INPUT_TEXT_IMAGE,
+            context_window: 1_000_000,
+            max_tokens: 8192,
+        }),
         test_obligations: TEST_REQUIRED,
     },
     ProviderMetadata {
@@ -880,7 +921,15 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
             "AWS_REGION",
         ],
         onboarding: ProviderOnboardingMode::NativeAdapterRequired,
-        routing_defaults: None,
+        routing_defaults: Some(ProviderRoutingDefaults {
+            api: "bedrock-converse-stream",
+            base_url: "",
+            auth_header: false,
+            reasoning: true,
+            input: &INPUT_TEXT,
+            context_window: 200_000,
+            max_tokens: 8192,
+        }),
         test_obligations: TEST_REQUIRED,
     },
     ProviderMetadata {
@@ -1024,6 +1073,56 @@ mod tests {
     #[test]
     fn provider_routing_defaults_absent_for_native_adapter_only_providers() {
         assert!(provider_routing_defaults("azure-openai").is_none());
+    }
+
+    #[test]
+    fn provider_routing_defaults_present_for_bedrock_native_adapter() {
+        let defaults = provider_routing_defaults("amazon-bedrock").expect("bedrock defaults");
+        assert_eq!(defaults.api, "bedrock-converse-stream");
+        assert_eq!(defaults.base_url, "");
+        assert!(!defaults.auth_header);
+    }
+
+    #[test]
+    fn cloudflare_metadata_registered_with_openai_compatible_defaults() {
+        let gateway =
+            provider_metadata("cloudflare-ai-gateway").expect("cloudflare-ai-gateway metadata");
+        assert_eq!(
+            gateway.onboarding,
+            ProviderOnboardingMode::OpenAICompatiblePreset
+        );
+        let gateway_defaults =
+            provider_routing_defaults("cloudflare-ai-gateway").expect("gateway defaults");
+        assert_eq!(gateway_defaults.api, "openai-completions");
+        assert!(
+            gateway_defaults
+                .base_url
+                .contains("gateway.ai.cloudflare.com")
+        );
+
+        let workers =
+            provider_metadata("cloudflare-workers-ai").expect("cloudflare-workers-ai metadata");
+        assert_eq!(
+            workers.onboarding,
+            ProviderOnboardingMode::OpenAICompatiblePreset
+        );
+        let workers_defaults =
+            provider_routing_defaults("cloudflare-workers-ai").expect("workers defaults");
+        assert_eq!(workers_defaults.api, "openai-completions");
+        assert!(
+            workers_defaults
+                .base_url
+                .contains("api.cloudflare.com/client/v4/accounts")
+        );
+
+        assert_eq!(
+            provider_auth_env_keys("cloudflare-ai-gateway"),
+            &["CLOUDFLARE_API_TOKEN"]
+        );
+        assert_eq!(
+            provider_auth_env_keys("cloudflare-workers-ai"),
+            &["CLOUDFLARE_API_TOKEN"]
+        );
     }
 
     #[test]

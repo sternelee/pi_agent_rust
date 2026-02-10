@@ -1,6 +1,6 @@
 //! Model registry: built-in + models.json overrides.
 
-use crate::auth::AuthStorage;
+use crate::auth::{AuthStorage, SapResolvedCredentials, resolve_sap_credentials};
 use crate::error::Error;
 use crate::provider::{Api, InputType, Model, ModelCost};
 use crate::provider_metadata::{
@@ -631,7 +631,55 @@ fn ad_hoc_provider_defaults(provider: &str) -> Option<AdHocProviderDefaults> {
     provider_routing_defaults(provider).map(AdHocProviderDefaults::from)
 }
 
-pub(crate) fn ad_hoc_model_entry(provider: &str, model_id: &str) -> Option<ModelEntry> {
+fn sap_chat_completions_endpoint(service_url: &str, model_id: &str) -> Option<String> {
+    let base = service_url.trim().trim_end_matches('/');
+    let deployment = model_id.trim();
+    if base.is_empty() || deployment.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{base}/v2/inference/deployments/{deployment}/chat/completions"
+    ))
+}
+
+fn ad_hoc_model_entry_with_sap_resolver<F>(
+    provider: &str,
+    model_id: &str,
+    mut resolve_sap: F,
+) -> Option<ModelEntry>
+where
+    F: FnMut() -> Option<SapResolvedCredentials>,
+{
+    if canonical_provider_id(provider).is_some_and(|canonical| canonical == "sap-ai-core") {
+        let sap_creds = resolve_sap()?;
+        let base_url = sap_chat_completions_endpoint(&sap_creds.service_url, model_id)?;
+        return Some(ModelEntry {
+            model: Model {
+                id: model_id.to_string(),
+                name: model_id.to_string(),
+                api: "openai-completions".to_string(),
+                provider: provider.to_string(),
+                base_url,
+                reasoning: true,
+                input: vec![InputType::Text],
+                cost: ModelCost {
+                    input: 0.0,
+                    output: 0.0,
+                    cache_read: 0.0,
+                    cache_write: 0.0,
+                },
+                context_window: 128_000,
+                max_tokens: 16_384,
+                headers: HashMap::new(),
+            },
+            api_key: None,
+            headers: HashMap::new(),
+            auth_header: true,
+            compat: None,
+            oauth_config: None,
+        });
+    }
+
     let defaults = ad_hoc_provider_defaults(provider)?;
     Some(ModelEntry {
         model: Model {
@@ -657,6 +705,13 @@ pub(crate) fn ad_hoc_model_entry(provider: &str, model_id: &str) -> Option<Model
         auth_header: defaults.auth_header,
         compat: None,
         oauth_config: None,
+    })
+}
+
+pub(crate) fn ad_hoc_model_entry(provider: &str, model_id: &str) -> Option<ModelEntry> {
+    ad_hoc_model_entry_with_sap_resolver(provider, model_id, || {
+        let auth = AuthStorage::load(crate::config::Config::auth_path()).ok()?;
+        resolve_sap_credentials(&auth)
     })
 }
 
@@ -1233,6 +1288,7 @@ mod tests {
             "openai",
             "google",
             "cohere",
+            "amazon-bedrock",
             "groq",
             "deepinfra",
             "cerebras",
@@ -1297,6 +1353,14 @@ mod tests {
         assert!(defaults.base_url.contains("groq.com"));
     }
 
+    #[test]
+    fn ad_hoc_bedrock_uses_converse_api() {
+        let defaults = ad_hoc_provider_defaults("amazon-bedrock").unwrap();
+        assert_eq!(defaults.api, "bedrock-converse-stream");
+        assert_eq!(defaults.base_url, "");
+        assert!(!defaults.auth_header);
+    }
+
     // ─── ad_hoc_model_entry ──────────────────────────────────────────
 
     #[test]
@@ -1320,6 +1384,60 @@ mod tests {
     #[test]
     fn ad_hoc_model_entry_unknown_returns_none() {
         assert!(ad_hoc_model_entry("nonexistent", "model").is_none());
+    }
+
+    #[test]
+    fn sap_chat_completions_endpoint_formats_expected_path() {
+        let endpoint =
+            sap_chat_completions_endpoint("https://api.ai.sap.example.com/", "deployment-a")
+                .expect("endpoint");
+        assert_eq!(
+            endpoint,
+            "https://api.ai.sap.example.com/v2/inference/deployments/deployment-a/chat/completions"
+        );
+    }
+
+    #[test]
+    fn ad_hoc_model_entry_supports_sap_with_resolved_service_key() {
+        let entry = ad_hoc_model_entry_with_sap_resolver("sap-ai-core", "dep-123", || {
+            Some(SapResolvedCredentials {
+                client_id: "id".to_string(),
+                client_secret: "secret".to_string(),
+                token_url: "https://auth.sap.example.com/oauth/token".to_string(),
+                service_url: "https://api.ai.sap.example.com".to_string(),
+            })
+        })
+        .expect("sap ad-hoc entry");
+
+        assert_eq!(entry.model.provider, "sap-ai-core");
+        assert_eq!(entry.model.api, "openai-completions");
+        assert_eq!(
+            entry.model.base_url,
+            "https://api.ai.sap.example.com/v2/inference/deployments/dep-123/chat/completions"
+        );
+        assert!(entry.auth_header);
+    }
+
+    #[test]
+    fn ad_hoc_model_entry_supports_sap_alias() {
+        let entry = ad_hoc_model_entry_with_sap_resolver("sap", "dep-123", || {
+            Some(SapResolvedCredentials {
+                client_id: "id".to_string(),
+                client_secret: "secret".to_string(),
+                token_url: "https://auth.sap.example.com/oauth/token".to_string(),
+                service_url: "https://api.ai.sap.example.com".to_string(),
+            })
+        })
+        .expect("sap alias ad-hoc entry");
+
+        assert_eq!(entry.model.provider, "sap");
+        assert_eq!(entry.model.api, "openai-completions");
+        assert!(entry.auth_header);
+    }
+
+    #[test]
+    fn ad_hoc_model_entry_sap_without_credentials_returns_none() {
+        assert!(ad_hoc_model_entry_with_sap_resolver("sap-ai-core", "dep-123", || None).is_none());
     }
 
     // ─── merge_headers ───────────────────────────────────────────────

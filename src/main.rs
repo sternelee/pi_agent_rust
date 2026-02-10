@@ -569,6 +569,17 @@ async fn run(mut cli: cli::Cli, runtime_handle: RuntimeHandle) -> Result<()> {
             }
             Err(err) => {
                 if let Some(startup) = err.downcast_ref::<StartupError>() {
+                    if let StartupError::MissingApiKey { provider } = startup {
+                        let canonical_provider =
+                            pi::provider_metadata::canonical_provider_id(provider)
+                                .unwrap_or(provider.as_str());
+                        if canonical_provider == "sap-ai-core" {
+                            if let Some(token) = pi::auth::exchange_sap_access_token(&auth).await? {
+                                break (selection, token);
+                            }
+                        }
+                    }
+
                     if is_interactive && io::stdin().is_terminal() && io::stdout().is_terminal() {
                         if run_first_time_setup(startup, &mut auth, &mut cli, &models_path).await? {
                             model_registry = ModelRegistry::load(&auth, Some(models_path.clone()));
