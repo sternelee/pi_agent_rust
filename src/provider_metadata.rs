@@ -1030,7 +1030,7 @@ mod tests {
         );
         assert_eq!(
             provider_auth_env_keys("vertexai"),
-            &["GOOGLE_CLOUD_API_KEY"]
+            &["GOOGLE_CLOUD_API_KEY", "VERTEX_API_KEY"]
         );
         assert_eq!(
             provider_auth_env_keys("bedrock"),
@@ -1209,7 +1209,7 @@ mod tests {
             urls.push(defaults.base_url);
         }
         // All URLs must be unique.
-        urls.sort();
+        urls.sort_unstable();
         urls.dedup();
         assert_eq!(urls.len(), ids.len(), "duplicate base URLs detected");
     }
@@ -1294,7 +1294,7 @@ mod tests {
             );
             urls.push(defaults.base_url);
         }
-        urls.sort();
+        urls.sort_unstable();
         urls.dedup();
         assert_eq!(urls.len(), ids.len(), "duplicate base URLs detected");
     }
@@ -1416,7 +1416,7 @@ mod tests {
             );
             urls.push(defaults.base_url);
         }
-        urls.sort();
+        urls.sort_unstable();
         urls.dedup();
         assert_eq!(urls.len(), ids.len(), "duplicate base URLs detected");
     }
@@ -1549,7 +1549,7 @@ mod tests {
             }
             urls.push(defaults.base_url);
         }
-        urls.sort();
+        urls.sort_unstable();
         urls.dedup();
         assert_eq!(urls.len(), ids.len(), "duplicate base URLs detected");
     }

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 112f98a6fe1eaf2fece867ab617c953e748d11d5a2fedb38c981c093aaf19084 # shrinks to input = "����5�\u{15}�\t�Z�%Wh�\u{6}i���k�1�\u{f}�[\u{1b}\r��\\-�P�F+\u{1d}��:���������E�\"�/ä�\u{1b}O��օ�-�L|\u{1c}�S��J%\u{1e}Z+I\0�*\u{94}���e\u{1f}i��U���\u{12}��\r��\0�7�Y\n", max_lines = 17, max_bytes = 215

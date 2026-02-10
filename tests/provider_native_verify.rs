@@ -1942,11 +1942,7 @@ mod openai_smoke {
                 },
                 CanonicalExpectation::Stream(exp) => {
                     if exp.min_tool_calls > 0 {
-                        let tool_name = scenario
-                            .tools
-                            .first()
-                            .map(|t| t.name.as_str())
-                            .unwrap_or("echo");
+                        let tool_name = scenario.tools.first().map_or("echo", |t| t.name.as_str());
                         openai_tool_response(
                             TEST_MODEL,
                             tool_name,
@@ -1962,7 +1958,7 @@ mod openai_smoke {
 
             let cassette = Cassette {
                 version: "1.0".to_string(),
-                test_name: name.clone(),
+                test_name: name,
                 recorded_at: chrono::Utc::now()
                     .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                 interactions: vec![Interaction {
@@ -2141,11 +2137,7 @@ mod azure_smoke {
                 },
                 CanonicalExpectation::Stream(exp) => {
                     if exp.min_tool_calls > 0 {
-                        let tool_name = scenario
-                            .tools
-                            .first()
-                            .map(|t| t.name.as_str())
-                            .unwrap_or("echo");
+                        let tool_name = scenario.tools.first().map_or("echo", |t| t.name.as_str());
                         openai_tool_response(
                             TEST_DEPLOYMENT,
                             tool_name,
@@ -2164,7 +2156,7 @@ mod azure_smoke {
 
             let cassette = Cassette {
                 version: "1.0".to_string(),
-                test_name: name.clone(),
+                test_name: name,
                 recorded_at: chrono::Utc::now()
                     .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                 interactions: vec![Interaction {
@@ -2421,11 +2413,7 @@ mod cohere_smoke {
                 },
                 CanonicalExpectation::Stream(exp) => {
                     if exp.min_tool_calls > 0 {
-                        let tool_name = scenario
-                            .tools
-                            .first()
-                            .map(|t| t.name.as_str())
-                            .unwrap_or("echo");
+                        let tool_name = scenario.tools.first().map_or("echo", |t| t.name.as_str());
                         cohere_tool_sse(tool_name, &json!({"text": "verification test"}))
                     } else if exp.require_unicode {
                         cohere_text_sse("日本語テスト — émojis: 🦀🔥")
@@ -2437,7 +2425,7 @@ mod cohere_smoke {
 
             let cassette = Cassette {
                 version: "1.0".to_string(),
-                test_name: name.clone(),
+                test_name: name,
                 recorded_at: chrono::Utc::now()
                     .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                 interactions: vec![Interaction {
@@ -2770,11 +2758,7 @@ mod anthropic_smoke {
                 },
                 CanonicalExpectation::Stream(exp) => {
                     if exp.min_tool_calls > 0 {
-                        let tool_name = scenario
-                            .tools
-                            .first()
-                            .map(|t| t.name.as_str())
-                            .unwrap_or("echo");
+                        let tool_name = scenario.tools.first().map_or("echo", |t| t.name.as_str());
                         anthropic_tool_sse(tool_name, &json!({"text": "verification test"}))
                     } else if exp.require_unicode {
                         anthropic_text_sse("日本語テスト — émojis: 🦀🔥")
@@ -2786,7 +2770,7 @@ mod anthropic_smoke {
 
             let cassette = Cassette {
                 version: "1.0".to_string(),
-                test_name: name.clone(),
+                test_name: name,
                 recorded_at: chrono::Utc::now()
                     .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                 interactions: vec![Interaction {
@@ -3026,11 +3010,7 @@ mod gemini_smoke {
                 },
                 CanonicalExpectation::Stream(exp) => {
                     if exp.min_tool_calls > 0 {
-                        let tool_name = scenario
-                            .tools
-                            .first()
-                            .map(|t| t.name.as_str())
-                            .unwrap_or("echo");
+                        let tool_name = scenario.tools.first().map_or("echo", |t| t.name.as_str());
                         gemini_tool_sse(tool_name, &json!({"text": "verification test"}))
                     } else if exp.require_unicode {
                         gemini_text_sse("日本語テスト — émojis: 🦀🔥")
@@ -3042,7 +3022,7 @@ mod gemini_smoke {
 
             let cassette = Cassette {
                 version: "1.0".to_string(),
-                test_name: name.clone(),
+                test_name: name,
                 recorded_at: chrono::Utc::now()
                     .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                 interactions: vec![Interaction {

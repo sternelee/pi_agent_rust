@@ -2982,7 +2982,7 @@ mod tests {
                 ] as &[&str],
             ),
             ("azure", &["AZURE_OPENAI_API_KEY"]),
-            ("vertexai", &["GOOGLE_CLOUD_API_KEY"]),
+            ("vertexai", &["GOOGLE_CLOUD_API_KEY", "VERTEX_API_KEY"]),
             ("copilot", &["GITHUB_COPILOT_API_KEY", "GITHUB_TOKEN"]),
             ("fireworks", &["FIREWORKS_API_KEY"]),
         ];
@@ -3466,7 +3466,7 @@ mod tests {
             let _config = CopilotOAuthConfig {
                 client_id: "Iv1.test".to_string(),
                 // Use a base URL that generates the test server URL.
-                github_base_url: token_url.trim_end_matches("/token").replace("/token", "").to_string(),
+                github_base_url: token_url.trim_end_matches("/token").replace("/token", ""),
                 scopes: "read:user".to_string(),
             };
 
@@ -4199,7 +4199,7 @@ mod tests {
         });
         match result {
             Some(AwsResolvedCredentials::Sigv4 { access_key_id, .. }) => {
-                assert_eq!(access_key_id, "AKIA_ENV")
+                assert_eq!(access_key_id, "AKIA_ENV");
             }
             other => panic!("expected Sigv4 from env, got: {other:?}"),
         }

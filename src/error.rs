@@ -1683,8 +1683,7 @@ mod tests {
             assert_eq!(
                 code.redaction_policy(),
                 "redact-secrets",
-                "code {:?} missing redact-secrets policy",
-                code
+                "code {code:?} missing redact-secrets policy",
             );
         }
     }

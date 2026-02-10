@@ -1454,6 +1454,7 @@ impl PiApp {
         output
     }
 
+    #[allow(clippy::too_many_lines)]
     fn render_session_picker(&self, picker: &SessionPickerOverlay) -> String {
         let mut output = String::new();
 
@@ -1463,14 +1464,27 @@ impl PiApp {
             self.styles.title.render("Select a session to resume")
         );
 
+        let query = picker.query();
+        let search_line = if query.is_empty() {
+            "  > (type to filter sessions)".to_string()
+        } else {
+            format!("  > {query}")
+        };
+        let _ = writeln!(output, "{}", self.styles.muted.render(&search_line));
+        let _ = writeln!(
+            output,
+            "  {}",
+            self.styles.muted.render("─".repeat(50).as_str())
+        );
+        output.push('\n');
+
         if picker.sessions.is_empty() {
-            let _ = writeln!(
-                output,
-                "  {}",
-                self.styles
-                    .muted
-                    .render("No sessions found for this project.")
-            );
+            let message = if picker.has_query() {
+                "No sessions match the current filter."
+            } else {
+                "No sessions found for this project."
+            };
+            let _ = writeln!(output, "  {}", self.styles.muted.render(message));
         } else {
             let _ = writeln!(
                 output,
@@ -1546,7 +1560,9 @@ impl PiApp {
                 "  {}",
                 self.styles
                     .muted_italic
-                    .render("↑/↓/j/k: navigate  Enter: select  Ctrl+D: delete  Esc/q: cancel")
+                    .render(
+                        "Type: filter  Backspace: clear  ↑/↓/j/k: navigate  Enter: select  Ctrl+D: delete  Esc/q: cancel",
+                    )
             );
             if let Some(message) = &picker.status_message {
                 let _ = writeln!(output, "  {}", self.styles.warning_bold.render(message));
@@ -4575,8 +4591,12 @@ impl AutocompleteState {
 /// Session picker overlay state for /resume command.
 #[derive(Debug)]
 struct SessionPickerOverlay {
+    /// Full list of available sessions.
+    all_sessions: Vec<SessionMeta>,
     /// List of available sessions.
     sessions: Vec<SessionMeta>,
+    /// Query used for typed filtering.
+    query: String,
     /// Index of the currently selected session.
     selected: usize,
     /// Maximum number of sessions to display.
@@ -4877,9 +4897,11 @@ impl BranchPickerOverlay {
 }
 
 impl SessionPickerOverlay {
-    const fn new(sessions: Vec<SessionMeta>) -> Self {
+    fn new(sessions: Vec<SessionMeta>) -> Self {
         Self {
+            all_sessions: sessions.clone(),
             sessions,
+            query: String::new(),
             selected: 0,
             max_visible: 10,
             confirm_delete: false,
@@ -4888,9 +4910,11 @@ impl SessionPickerOverlay {
         }
     }
 
-    const fn new_with_root(sessions: Vec<SessionMeta>, sessions_root: Option<PathBuf>) -> Self {
+    fn new_with_root(sessions: Vec<SessionMeta>, sessions_root: Option<PathBuf>) -> Self {
         Self {
+            all_sessions: sessions.clone(),
             sessions,
+            query: String::new(),
             selected: 0,
             max_visible: 10,
             confirm_delete: false,
@@ -4918,6 +4942,33 @@ impl SessionPickerOverlay {
         self.sessions.get(self.selected)
     }
 
+    fn query(&self) -> &str {
+        &self.query
+    }
+
+    fn has_query(&self) -> bool {
+        !self.query.is_empty()
+    }
+
+    fn push_chars<I: IntoIterator<Item = char>>(&mut self, chars: I) {
+        let mut changed = false;
+        for ch in chars {
+            if !ch.is_control() {
+                self.query.push(ch);
+                changed = true;
+            }
+        }
+        if changed {
+            self.rebuild_filtered_sessions();
+        }
+    }
+
+    fn pop_char(&mut self) {
+        if self.query.pop().is_some() {
+            self.rebuild_filtered_sessions();
+        }
+    }
+
     /// Returns the scroll offset for the dropdown view.
     const fn scroll_offset(&self) -> usize {
         if self.selected < self.max_visible {
@@ -4929,14 +4980,12 @@ impl SessionPickerOverlay {
 
     /// Remove the selected session from the list and adjust selection.
     fn remove_selected(&mut self) {
-        if self.sessions.is_empty() {
+        let Some(selected_session) = self.selected_session().cloned() else {
             return;
-        }
-        self.sessions.remove(self.selected);
-        // Adjust selection to stay in bounds
-        if self.selected >= self.sessions.len() && self.selected > 0 {
-            self.selected = self.sessions.len() - 1;
-        }
+        };
+        self.all_sessions
+            .retain(|session| session.path != selected_session.path);
+        self.rebuild_filtered_sessions();
         // Clear confirmation state
         self.confirm_delete = false;
     }
@@ -4953,6 +5002,42 @@ impl SessionPickerOverlay {
         }
         self.remove_selected();
         Ok(())
+    }
+
+    fn rebuild_filtered_sessions(&mut self) {
+        let query = self.query.trim().to_ascii_lowercase();
+        if query.is_empty() {
+            self.sessions = self.all_sessions.clone();
+        } else {
+            self.sessions = self
+                .all_sessions
+                .iter()
+                .filter(|session| Self::session_matches_query(session, &query))
+                .cloned()
+                .collect();
+        }
+
+        if self.sessions.is_empty() {
+            self.selected = 0;
+        } else if self.selected >= self.sessions.len() {
+            self.selected = self.sessions.len() - 1;
+        }
+    }
+
+    fn session_matches_query(session: &SessionMeta, query_lower: &str) -> bool {
+        let in_name = session
+            .name
+            .as_deref()
+            .is_some_and(|name| name.to_ascii_lowercase().contains(query_lower));
+        let in_id = session.id.to_ascii_lowercase().contains(query_lower);
+        let in_file_name = Path::new(&session.path)
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|file_name| file_name.to_ascii_lowercase().contains(query_lower));
+        let in_timestamp = session.timestamp.to_ascii_lowercase().contains(query_lower);
+        let in_message_count = session.message_count.to_string().contains(query_lower);
+
+        in_name || in_id || in_file_name || in_timestamp || in_message_count
     }
 }
 
@@ -5673,10 +5758,13 @@ impl PiApp {
                             picker.confirm_delete = false;
                             match picker.delete_selected() {
                                 Ok(()) => {
-                                    if picker.sessions.is_empty() {
+                                    if picker.all_sessions.is_empty() {
                                         self.session_picker = None;
                                         self.status_message =
                                             Some("No sessions found for this project".to_string());
+                                    } else if picker.sessions.is_empty() {
+                                        picker.status_message =
+                                            Some("No sessions match current filter.".to_string());
                                     } else {
                                         picker.status_message =
                                             Some("Session deleted.".to_string());
@@ -5717,12 +5805,16 @@ impl PiApp {
                         picker.select_next();
                         return None;
                     }
-                    KeyType::Runes if key.runes == ['k'] => {
+                    KeyType::Runes if key.runes == ['k'] && !picker.has_query() => {
                         picker.select_prev();
                         return None;
                     }
-                    KeyType::Runes if key.runes == ['j'] => {
+                    KeyType::Runes if key.runes == ['j'] && !picker.has_query() => {
                         picker.select_next();
+                        return None;
+                    }
+                    KeyType::Backspace => {
+                        picker.pop_char();
                         return None;
                     }
                     KeyType::Enter => {
@@ -5731,7 +5823,6 @@ impl PiApp {
                             self.session_picker = None;
                             return self.load_session_from_path(&session_meta.path);
                         }
-                        self.session_picker = None;
                         return None;
                     }
                     KeyType::CtrlD => {
@@ -5744,8 +5835,12 @@ impl PiApp {
                         self.session_picker = None;
                         return None;
                     }
-                    KeyType::Runes if key.runes == ['q'] => {
+                    KeyType::Runes if key.runes == ['q'] && !picker.has_query() => {
                         self.session_picker = None;
+                        return None;
+                    }
+                    KeyType::Runes => {
+                        picker.push_chars(key.runes.iter().copied());
                         return None;
                     }
                     _ => {
@@ -8900,6 +8995,8 @@ impl PiApp {
                 }
                 None
             }
+            AppAction::Help => self.handle_slash_command(SlashCommand::Help, ""),
+            AppAction::OpenSettings => self.handle_slash_command(SlashCommand::Settings, ""),
 
             // =========================================================
             // Models & thinking
@@ -9152,6 +9249,8 @@ impl PiApp {
             | AppAction::PasteImage
             | AppAction::Suspend
             | AppAction::ExternalEditor
+            | AppAction::Help
+            | AppAction::OpenSettings
             | AppAction::Tab
             | AppAction::BranchPicker
             | AppAction::BranchNextSibling

@@ -23,7 +23,7 @@ use pi::providers::cohere::CohereProvider;
 use pi::providers::gemini::GeminiProvider;
 use pi::providers::openai::OpenAIProvider;
 use pi::providers::openai_responses::OpenAIResponsesProvider;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::collections::HashMap;
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -570,7 +570,7 @@ fn openai_completions_url_normalization() {
 #[test]
 fn factory_routes_anthropic_correctly() {
     use pi::models::ModelEntry;
-    use pi::provider::{Api, InputType, Model, ModelCost};
+    use pi::provider::{InputType, Model, ModelCost};
     use pi::providers::create_provider;
 
     let entry = ModelEntry {
@@ -924,7 +924,7 @@ fn factory_routes_gitlab_native_provider() {
 fn system_prompt_handling_differs_by_provider() {
     // Anthropic: top-level "system" field
     let anthropic = AnthropicProvider::new("claude-sonnet-4-5");
-    let v = serde_json::to_value(&anthropic.build_request(&minimal_context(), &default_options()))
+    let v = serde_json::to_value(anthropic.build_request(&minimal_context(), &default_options()))
         .unwrap();
     assert!(
         v["system"].is_string(),
@@ -941,15 +941,15 @@ fn system_prompt_handling_differs_by_provider() {
 
     // OpenAI Completions: system message in messages array
     let openai = OpenAIProvider::new("gpt-4o");
-    let v = serde_json::to_value(&openai.build_request(&minimal_context(), &default_options()))
-        .unwrap();
+    let v =
+        serde_json::to_value(openai.build_request(&minimal_context(), &default_options())).unwrap();
     assert!(v["system"].is_null(), "OpenAI: no top-level system field");
     assert_eq!(v["messages"][0]["role"], "system");
 
     // Gemini: system_instruction field
     let gemini = GeminiProvider::new("gemini-2.5-pro");
-    let v = serde_json::to_value(&gemini.build_request(&minimal_context(), &default_options()))
-        .unwrap();
+    let v =
+        serde_json::to_value(gemini.build_request(&minimal_context(), &default_options())).unwrap();
     assert!(
         v["systemInstruction"].is_object(),
         "Gemini: systemInstruction object"
@@ -963,21 +963,21 @@ fn max_tokens_field_name_differs_by_provider() {
 
     // Anthropic: max_tokens (required, not optional)
     let v = serde_json::to_value(
-        &AnthropicProvider::new("claude-sonnet-4-5").build_request(&minimal_context(), &opts),
+        AnthropicProvider::new("claude-sonnet-4-5").build_request(&minimal_context(), &opts),
     )
     .unwrap();
     assert_eq!(v["max_tokens"], 1024);
 
     // OpenAI: max_tokens
     let v = serde_json::to_value(
-        &OpenAIProvider::new("gpt-4o").build_request(&minimal_context(), &opts),
+        OpenAIProvider::new("gpt-4o").build_request(&minimal_context(), &opts),
     )
     .unwrap();
     assert_eq!(v["max_tokens"], 1024);
 
     // OpenAI Responses: max_output_tokens (different name!)
     let v = serde_json::to_value(
-        &OpenAIResponsesProvider::new("gpt-4o").build_request(&minimal_context(), &opts),
+        OpenAIResponsesProvider::new("gpt-4o").build_request(&minimal_context(), &opts),
     )
     .unwrap();
     assert_eq!(v["max_output_tokens"], 1024);
@@ -985,14 +985,14 @@ fn max_tokens_field_name_differs_by_provider() {
 
     // Gemini: generationConfig.maxOutputTokens (camelCase)
     let v = serde_json::to_value(
-        &GeminiProvider::new("gemini-2.5-pro").build_request(&minimal_context(), &opts),
+        GeminiProvider::new("gemini-2.5-pro").build_request(&minimal_context(), &opts),
     )
     .unwrap();
     assert_eq!(v["generationConfig"]["maxOutputTokens"], 1024);
 
     // Cohere: max_tokens
     let v = serde_json::to_value(
-        &CohereProvider::new("command-r-plus").build_request(&minimal_context(), &opts),
+        CohereProvider::new("command-r-plus").build_request(&minimal_context(), &opts),
     )
     .unwrap();
     assert_eq!(v["max_tokens"], 1024);
@@ -1005,7 +1005,7 @@ fn tool_nesting_shape_differs_by_provider() {
 
     // Anthropic: flat {name, description, input_schema}
     let v = serde_json::to_value(
-        &AnthropicProvider::new("claude-sonnet-4-5").build_request(&ctx, &opts),
+        AnthropicProvider::new("claude-sonnet-4-5").build_request(&ctx, &opts),
     )
     .unwrap();
     let t = &v["tools"][0];
@@ -1020,16 +1020,14 @@ fn tool_nesting_shape_differs_by_provider() {
     );
 
     // OpenAI Completions: {type: "function", function: {name, description, parameters}}
-    let v =
-        serde_json::to_value(&OpenAIProvider::new("gpt-4o").build_request(&ctx, &opts)).unwrap();
+    let v = serde_json::to_value(OpenAIProvider::new("gpt-4o").build_request(&ctx, &opts)).unwrap();
     let t = &v["tools"][0];
     assert_eq!(t["type"], "function");
     assert!(t["function"]["parameters"].is_object());
 
     // OpenAI Responses: flat {type: "function", name, description, parameters}
-    let v =
-        serde_json::to_value(&OpenAIResponsesProvider::new("gpt-4o").build_request(&ctx, &opts))
-            .unwrap();
+    let v = serde_json::to_value(OpenAIResponsesProvider::new("gpt-4o").build_request(&ctx, &opts))
+        .unwrap();
     let t = &v["tools"][0];
     assert_eq!(t["type"], "function");
     assert!(t["parameters"].is_object());
@@ -1039,7 +1037,7 @@ fn tool_nesting_shape_differs_by_provider() {
     );
 
     // Gemini: {functionDeclarations: [{name, description, parameters}]} (camelCase)
-    let v = serde_json::to_value(&GeminiProvider::new("gemini-2.5-pro").build_request(&ctx, &opts))
+    let v = serde_json::to_value(GeminiProvider::new("gemini-2.5-pro").build_request(&ctx, &opts))
         .unwrap();
     assert_eq!(
         v["tools"].as_array().unwrap().len(),

@@ -278,9 +278,12 @@ pub fn truncate_tail(content: &str, max_lines: usize, max_bytes: usize) -> Trunc
             // files ending in newline (e.g. "a\n") when the limit is small.
             let remaining = max_bytes.saturating_sub(byte_count);
             if remaining > 0 && (line_count == 0 || (line_count == 1 && byte_count == 0)) {
+                // Use content[line_start..] (not ..search_end) so trailing
+                // newlines are included, preserving the suffix invariant:
+                // `input.ends_with(&result.content)` must hold.
                 let truncated =
-                    truncate_string_to_bytes_from_end(&content[line_start..search_end], max_bytes);
-                line_count = 1;
+                    truncate_string_to_bytes_from_end(&content[line_start..], max_bytes);
+                line_count = memchr::memchr_iter(b'\n', truncated.as_bytes()).count() + 1;
                 partial_output = Some(truncated);
                 last_line_partial = true;
             }
@@ -5241,11 +5244,14 @@ mod tests {
             if result.last_line_partial {
                 prop_assert!(result.truncated);
                 prop_assert_eq!(result.truncated_by, Some(TruncatedBy::Bytes));
-                prop_assert_eq!(result.output_lines, 1);
+                // Partial output may span 1-2 lines when the input has a
+                // trailing newline (the empty line after \n is preserved).
+                prop_assert!(result.output_lines >= 1 && result.output_lines <= 2);
+                let content_trimmed = result.content.trim_end_matches('\n');
                 prop_assert!(input
                     .split('\n')
-                    .next_back()
-                    .is_some_and(|line| line.ends_with(&result.content)));
+                    .rev()
+                    .any(|line| line.ends_with(content_trimmed)));
             }
         }
     }

@@ -201,7 +201,7 @@ impl BedrockProvider {
         }
 
         {
-            let mut segments = url.path_segments_mut().map_err(|_| {
+            let mut segments = url.path_segments_mut().map_err(|()| {
                 Error::provider(
                     "amazon-bedrock",
                     "Bedrock base URL does not support path segments",
@@ -368,7 +368,7 @@ impl Provider for BedrockProvider {
         &self.provider_name
     }
 
-    fn api(&self) -> &str {
+    fn api(&self) -> &'static str {
         "bedrock-converse-stream"
     }
 
@@ -727,6 +727,7 @@ struct BedrockResponseToolUse {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(clippy::struct_field_names)]
 struct BedrockUsage {
     #[serde(default)]
     input_tokens: u64,
@@ -834,7 +835,7 @@ fn build_sigv4_headers(
     let mut canonical_headers_block = String::new();
     for (name, value) in &canonical_headers {
         let trimmed = value.trim();
-        write!(&mut canonical_headers_block, "{name}:{trimmed}\n")
+        writeln!(&mut canonical_headers_block, "{name}:{trimmed}")
             .map_err(|err| Error::api(format!("Failed to build canonical headers: {err}")))?;
     }
 
@@ -868,10 +869,9 @@ fn canonical_host(url: &Url) -> Result<String> {
     let host = url.host_str().ok_or_else(|| {
         Error::provider("amazon-bedrock", "Bedrock endpoint URL is missing a host")
     })?;
-    Ok(match url.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_string(),
-    })
+    Ok(url
+        .port()
+        .map_or_else(|| host.to_string(), |port| format!("{host}:{port}")))
 }
 
 fn canonical_uri(url: &Url) -> String {
@@ -892,7 +892,7 @@ fn canonical_query(url: &Url) -> String {
         .query_pairs()
         .map(|(key, value)| (aws_percent_encode(&key), aws_percent_encode(&value)))
         .collect::<Vec<_>>();
-    pairs.sort_by(|left, right| left.cmp(right));
+    pairs.sort();
     pairs
         .into_iter()
         .map(|(key, value)| format!("{key}={value}"))
