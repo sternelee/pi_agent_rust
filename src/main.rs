@@ -698,6 +698,9 @@ async fn run(mut cli: cli::Cli, runtime_handle: RuntimeHandle) -> Result<()> {
         }
     }
 
+    agent_session.set_model_registry(model_registry.clone());
+    agent_session.set_auth_storage(auth.clone());
+
     if mode == "rpc" {
         let available_models = model_registry.get_available();
         let rpc_scoped_models = selection

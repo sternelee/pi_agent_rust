@@ -733,7 +733,12 @@ struct OAuthTokenResponse {
 }
 
 fn oauth_expires_at_ms(expires_in_seconds: i64) -> i64 {
-    chrono::Utc::now().timestamp_millis() + expires_in_seconds.saturating_mul(1000) - 5 * 60 * 1000
+    const SAFETY_MARGIN_MS: i64 = 5 * 60 * 1000;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let expires_ms = expires_in_seconds.saturating_mul(1000);
+    now_ms
+        .saturating_add(expires_ms)
+        .saturating_sub(SAFETY_MARGIN_MS)
 }
 
 fn generate_pkce() -> (String, String) {
@@ -2017,6 +2022,18 @@ mod tests {
         let expected_approx = now_ms - 5 * 60 * 1000;
         let diff = (result - expected_approx).unsigned_abs();
         assert!(diff < 1000, "expected ~{expected_approx}ms, got {result}ms");
+    }
+
+    #[test]
+    fn test_oauth_expires_at_ms_saturates_for_huge_positive_expires_in() {
+        let result = oauth_expires_at_ms(i64::MAX);
+        assert_eq!(result, i64::MAX - 5 * 60 * 1000);
+    }
+
+    #[test]
+    fn test_oauth_expires_at_ms_handles_huge_negative_expires_in() {
+        let result = oauth_expires_at_ms(i64::MIN);
+        assert!(result <= chrono::Utc::now().timestamp_millis());
     }
 
     // ── Overwrite semantics ───────────────────────────────────────────

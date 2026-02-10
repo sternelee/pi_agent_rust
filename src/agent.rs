@@ -12,6 +12,7 @@
 //! 4. If tool calls: execute tools, append results, goto 3
 //! 5. If done: return final message
 
+use crate::auth::AuthStorage;
 use crate::compaction::{self, ResolvedCompactionSettings};
 use crate::error::{Error, Result};
 use crate::extension_events::{InputEventOutcome, apply_input_event_response};
@@ -29,6 +30,7 @@ use crate::model::{
     StopReason, StreamEvent, TextContent, ToolCall, ToolResultMessage, Usage, UserContent,
     UserMessage,
 };
+use crate::models::ModelRegistry;
 use crate::provider::{Context, Provider, StreamOptions, ToolDef};
 use crate::session::{Session, SessionHandle};
 use crate::tools::{Tool, ToolOutput, ToolRegistry, ToolUpdate};
@@ -521,6 +523,17 @@ impl Agent {
 
         // Run the agent loop
         self.run_loop(vec![user_message], Arc::new(on_event), abort)
+            .await
+    }
+
+    /// Run the agent with a pre-constructed user message and abort support.
+    pub async fn run_with_message_with_abort(
+        &mut self,
+        message: Message,
+        abort: Option<AbortSignal>,
+        on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
+    ) -> Result<AssistantMessage> {
+        self.run_loop(vec![message], Arc::new(on_event), abort)
             .await
     }
 
@@ -1483,6 +1496,8 @@ pub struct AgentSession {
     pub extensions: Option<ExtensionRegion>,
     extensions_is_streaming: Arc<AtomicBool>,
     compaction_settings: ResolvedCompactionSettings,
+    model_registry: Option<ModelRegistry>,
+    auth_storage: Option<AuthStorage>,
 }
 
 #[derive(Debug, Default)]
@@ -3347,7 +3362,29 @@ impl AgentSession {
             extensions: None,
             extensions_is_streaming: Arc::new(AtomicBool::new(false)),
             compaction_settings,
+            model_registry: None,
+            auth_storage: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_model_registry(mut self, registry: ModelRegistry) -> Self {
+        self.model_registry = Some(registry);
+        self
+    }
+
+    #[must_use]
+    pub fn with_auth_storage(mut self, auth: AuthStorage) -> Self {
+        self.auth_storage = Some(auth);
+        self
+    }
+
+    pub fn set_model_registry(&mut self, registry: ModelRegistry) {
+        self.model_registry = Some(registry);
+    }
+
+    pub fn set_auth_storage(&mut self, auth: AuthStorage) {
+        self.auth_storage = Some(auth);
     }
 
     pub const fn save_enabled(&self) -> bool {
@@ -3718,22 +3755,80 @@ impl AgentSession {
         on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
     ) -> Result<AssistantMessage> {
         self.maybe_compact().await?;
-        let history = {
+        let (history, session_model) = {
             let cx = crate::agent_cx::AgentCx::for_request();
             let session = self
                 .session
                 .lock(cx.cx())
                 .await
                 .map_err(|e| Error::session(e.to_string()))?;
-            session.to_messages_for_current_path()
+            (
+                session.to_messages_for_current_path(),
+                (
+                    session.header.provider.clone(),
+                    session.header.model_id.clone(),
+                ),
+            )
         };
         self.agent.replace_messages(history);
+
+        if let (Some(provider_id), Some(model_id)) = session_model {
+            if self.agent.provider().name() != provider_id
+                || self.agent.provider().model_id() != model_id
+            {
+                if let Some(registry) = &self.model_registry {
+                    if let Some(entry) = registry.find(&provider_id, &model_id) {
+                        match crate::providers::create_provider(
+                            &entry,
+                            self.extensions.as_ref().map(ExtensionRegion::manager),
+                        ) {
+                            Ok(provider) => {
+                                tracing::info!(
+                                    "Updating agent provider to {}/{}",
+                                    provider_id,
+                                    model_id
+                                );
+                                self.agent.set_provider(provider);
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to create provider for session model: {e}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let start_len = self.agent.messages().len();
+
+        // Create and persist user message immediately to avoid data loss on API errors
+        let user_message = Message::User(UserMessage {
+            content: UserContent::Text(input),
+            timestamp: Utc::now().timestamp_millis(),
+        });
+
+        {
+            let cx = crate::agent_cx::AgentCx::for_request();
+            let mut session = self
+                .session
+                .lock(cx.cx())
+                .await
+                .map_err(|e| Error::session(e.to_string()))?;
+            session.append_model_message(user_message.clone());
+            if self.save_enabled {
+                session.save().await?;
+            }
+        }
+
         self.extensions_is_streaming.store(true, Ordering::SeqCst);
-        let result = self.agent.run_with_abort(input, abort, on_event).await;
+        let result = self
+            .agent
+            .run_with_message_with_abort(user_message, abort, on_event)
+            .await;
         self.extensions_is_streaming.store(false, Ordering::SeqCst);
         let result = result?;
-        self.persist_new_messages(start_len).await?;
+        // Persist only NEW messages (assistant/tools), skipping the user message we already saved.
+        self.persist_new_messages(start_len + 1).await?;
         Ok(result)
     }
 
@@ -3744,25 +3839,80 @@ impl AgentSession {
         on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
     ) -> Result<AssistantMessage> {
         self.maybe_compact().await?;
-        let history = {
+        let (history, session_model) = {
             let cx = crate::agent_cx::AgentCx::for_request();
             let session = self
                 .session
                 .lock(cx.cx())
                 .await
                 .map_err(|e| Error::session(e.to_string()))?;
-            session.to_messages_for_current_path()
+            (
+                session.to_messages_for_current_path(),
+                (
+                    session.header.provider.clone(),
+                    session.header.model_id.clone(),
+                ),
+            )
         };
         self.agent.replace_messages(history);
+
+        if let (Some(provider_id), Some(model_id)) = session_model {
+            if self.agent.provider().name() != provider_id
+                || self.agent.provider().model_id() != model_id
+            {
+                if let Some(registry) = &self.model_registry {
+                    if let Some(entry) = registry.find(&provider_id, &model_id) {
+                        match crate::providers::create_provider(
+                            &entry,
+                            self.extensions.as_ref().map(ExtensionRegion::manager),
+                        ) {
+                            Ok(provider) => {
+                                tracing::info!(
+                                    "Updating agent provider to {}/{}",
+                                    provider_id,
+                                    model_id
+                                );
+                                self.agent.set_provider(provider);
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to create provider for session model: {e}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let start_len = self.agent.messages().len();
+
+        // Create and persist user message immediately to avoid data loss on API errors
+        let user_message = Message::User(UserMessage {
+            content: UserContent::Blocks(content),
+            timestamp: Utc::now().timestamp_millis(),
+        });
+
+        {
+            let cx = crate::agent_cx::AgentCx::for_request();
+            let mut session = self
+                .session
+                .lock(cx.cx())
+                .await
+                .map_err(|e| Error::session(e.to_string()))?;
+            session.append_model_message(user_message.clone());
+            if self.save_enabled {
+                session.save().await?;
+            }
+        }
+
         self.extensions_is_streaming.store(true, Ordering::SeqCst);
         let result = self
             .agent
-            .run_with_content_with_abort(content, abort, on_event)
+            .run_with_message_with_abort(user_message, abort, on_event)
             .await;
         self.extensions_is_streaming.store(false, Ordering::SeqCst);
         let result = result?;
-        self.persist_new_messages(start_len).await?;
+        // Persist only NEW messages (assistant/tools), skipping the user message we already saved.
+        self.persist_new_messages(start_len + 1).await?;
         Ok(result)
     }
 
