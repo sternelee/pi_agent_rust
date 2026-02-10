@@ -3,6 +3,9 @@
 use crate::auth::AuthStorage;
 use crate::error::Error;
 use crate::provider::{Api, InputType, Model, ModelCost};
+use crate::provider_metadata::{
+    ProviderRoutingDefaults, canonical_provider_id, provider_routing_defaults,
+};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -288,24 +291,43 @@ fn built_in_models(auth: &AuthStorage) -> Vec<ModelEntry> {
 #[allow(clippy::too_many_lines)]
 fn apply_custom_models(auth: &AuthStorage, models: &mut Vec<ModelEntry>, config: &ModelsConfig) {
     for (provider_id, provider_cfg) in &config.providers {
-        let provider_api = provider_cfg.api.as_deref().unwrap_or("openai-completions");
+        let routing_defaults = provider_routing_defaults(provider_id);
+        let default_api = routing_defaults.map_or("openai-completions", |defaults| defaults.api);
+        let provider_api = provider_cfg.api.as_deref().unwrap_or(default_api);
         let provider_api_parsed: Api = provider_api
             .parse()
             .unwrap_or_else(|_| Api::Custom(provider_api.to_string()));
         let provider_api_string = provider_api_parsed.to_string();
-        let provider_base = provider_cfg
-            .base_url
-            .clone()
-            .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+        let provider_base = provider_cfg.base_url.clone().unwrap_or_else(|| {
+            routing_defaults.map_or_else(
+                || "https://api.openai.com/v1".to_string(),
+                |defaults| defaults.base_url.to_string(),
+            )
+        });
 
         let provider_headers = resolve_headers(provider_cfg.headers.as_ref());
+        let canonical_provider = canonical_provider_id(provider_id).unwrap_or(provider_id.as_str());
         let provider_key = provider_cfg
             .api_key
             .as_deref()
             .and_then(resolve_value)
-            .or_else(|| auth.resolve_api_key(provider_id, None));
+            .or_else(|| auth.resolve_api_key(canonical_provider, None));
 
-        let auth_header = provider_cfg.auth_header.unwrap_or(false);
+        let auth_header = provider_cfg
+            .auth_header
+            .unwrap_or_else(|| routing_defaults.is_some_and(|defaults| defaults.auth_header));
+
+        if routing_defaults.is_some() {
+            tracing::debug!(
+                event = "pi.provider.schema_defaults",
+                provider = %provider_id,
+                canonical_provider = %canonical_provider,
+                api = %provider_api_string,
+                base_url = %provider_base,
+                auth_header,
+                "Applied provider metadata defaults"
+            );
+        }
 
         let has_models = provider_cfg.models.as_ref().is_some();
         let is_override = !has_models;
@@ -498,154 +520,29 @@ pub fn default_models_path(agent_dir: &Path) -> PathBuf {
 struct AdHocProviderDefaults {
     api: &'static str,
     base_url: &'static str,
+    auth_header: bool,
     reasoning: bool,
     input: &'static [InputType],
     context_window: u32,
     max_tokens: u32,
 }
 
-const INPUT_TEXT: [InputType; 1] = [InputType::Text];
-const INPUT_TEXT_IMAGE: [InputType; 2] = [InputType::Text, InputType::Image];
-
-#[allow(clippy::too_many_lines)]
-fn ad_hoc_provider_defaults(provider: &str) -> Option<AdHocProviderDefaults> {
-    match provider {
-        // Built-in providers.
-        "anthropic" => Some(AdHocProviderDefaults {
-            api: "anthropic-messages",
-            base_url: "https://api.anthropic.com/v1/messages",
-            reasoning: true,
-            input: &INPUT_TEXT_IMAGE,
-            context_window: 200_000,
-            max_tokens: 8192,
-        }),
-        "openai" => Some(AdHocProviderDefaults {
-            api: "openai-responses",
-            base_url: "https://api.openai.com/v1",
-            reasoning: true,
-            input: &INPUT_TEXT_IMAGE,
-            context_window: 128_000,
-            max_tokens: 16_384,
-        }),
-        "google" => Some(AdHocProviderDefaults {
-            api: "google-generative-ai",
-            base_url: "https://generativelanguage.googleapis.com/v1beta",
-            reasoning: true,
-            input: &INPUT_TEXT_IMAGE,
-            context_window: 128_000,
-            max_tokens: 8192,
-        }),
-        "cohere" => Some(AdHocProviderDefaults {
-            api: "cohere-chat",
-            base_url: "https://api.cohere.com/v2",
-            reasoning: true,
-            input: &INPUT_TEXT,
-            context_window: 128_000,
-            max_tokens: 8192,
-        }),
-
-        // OpenAI-compatible providers (chat/completions).
-        // Sources: Vercel AI SDK + opencode fixture.
-        "groq" => Some(AdHocProviderDefaults {
-            api: "openai-completions",
-            base_url: "https://api.groq.com/openai/v1",
-            reasoning: true,
-            input: &INPUT_TEXT,
-            context_window: 128_000,
-            max_tokens: 16_384,
-        }),
-        "deepinfra" => Some(AdHocProviderDefaults {
-            api: "openai-completions",
-            base_url: "https://api.deepinfra.com/v1/openai",
-            reasoning: true,
-            input: &INPUT_TEXT,
-            context_window: 128_000,
-            max_tokens: 16_384,
-        }),
-        "cerebras" => Some(AdHocProviderDefaults {
-            api: "openai-completions",
-            base_url: "https://api.cerebras.ai/v1",
-            reasoning: true,
-            input: &INPUT_TEXT,
-            context_window: 128_000,
-            max_tokens: 16_384,
-        }),
-        "openrouter" => Some(AdHocProviderDefaults {
-            api: "openai-completions",
-            base_url: "https://openrouter.ai/api/v1",
-            reasoning: true,
-            input: &INPUT_TEXT,
-            context_window: 128_000,
-            max_tokens: 16_384,
-        }),
-        "mistral" => Some(AdHocProviderDefaults {
-            api: "openai-completions",
-            base_url: "https://api.mistral.ai/v1",
-            reasoning: true,
-            input: &INPUT_TEXT,
-            context_window: 128_000,
-            max_tokens: 16_384,
-        }),
-        // MoonshotAI is the API behind "Kimi".
-        "moonshotai" | "moonshot" | "kimi" => Some(AdHocProviderDefaults {
-            api: "openai-completions",
-            base_url: "https://api.moonshot.ai/v1",
-            reasoning: true,
-            input: &INPUT_TEXT,
-            context_window: 128_000,
-            max_tokens: 16_384,
-        }),
-        // Qwen models via DashScope OpenAI-compatible endpoint.
-        "alibaba" | "dashscope" | "qwen" => Some(AdHocProviderDefaults {
-            api: "openai-completions",
-            base_url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-            reasoning: true,
-            input: &INPUT_TEXT,
-            context_window: 128_000,
-            max_tokens: 16_384,
-        }),
-        "deepseek" => Some(AdHocProviderDefaults {
-            api: "openai-completions",
-            base_url: "https://api.deepseek.com",
-            reasoning: true,
-            input: &INPUT_TEXT,
-            context_window: 128_000,
-            max_tokens: 16_384,
-        }),
-        "fireworks" => Some(AdHocProviderDefaults {
-            api: "openai-completions",
-            base_url: "https://api.fireworks.ai/inference/v1",
-            reasoning: true,
-            input: &INPUT_TEXT,
-            context_window: 128_000,
-            max_tokens: 16_384,
-        }),
-        "togetherai" => Some(AdHocProviderDefaults {
-            api: "openai-completions",
-            base_url: "https://api.together.xyz/v1",
-            reasoning: true,
-            input: &INPUT_TEXT,
-            context_window: 128_000,
-            max_tokens: 16_384,
-        }),
-        "perplexity" => Some(AdHocProviderDefaults {
-            api: "openai-completions",
-            base_url: "https://api.perplexity.ai",
-            reasoning: true,
-            input: &INPUT_TEXT,
-            context_window: 128_000,
-            max_tokens: 16_384,
-        }),
-        "xai" => Some(AdHocProviderDefaults {
-            api: "openai-completions",
-            base_url: "https://api.x.ai/v1",
-            reasoning: true,
-            input: &INPUT_TEXT,
-            context_window: 128_000,
-            max_tokens: 16_384,
-        }),
-        _ => None,
+impl From<ProviderRoutingDefaults> for AdHocProviderDefaults {
+    fn from(value: ProviderRoutingDefaults) -> Self {
+        Self {
+            api: value.api,
+            base_url: value.base_url,
+            auth_header: value.auth_header,
+            reasoning: value.reasoning,
+            input: value.input,
+            context_window: value.context_window,
+            max_tokens: value.max_tokens,
+        }
     }
+}
+
+fn ad_hoc_provider_defaults(provider: &str) -> Option<AdHocProviderDefaults> {
+    provider_routing_defaults(provider).map(AdHocProviderDefaults::from)
 }
 
 pub(crate) fn ad_hoc_model_entry(provider: &str, model_id: &str) -> Option<ModelEntry> {
@@ -671,7 +568,7 @@ pub(crate) fn ad_hoc_model_entry(provider: &str, model_id: &str) -> Option<Model
         },
         api_key: None,
         headers: HashMap::new(),
-        auth_header: defaults.api.starts_with("openai-"),
+        auth_header: defaults.auth_header,
         compat: None,
         oauth_config: None,
     })
@@ -810,6 +707,70 @@ mod tests {
                     .unwrap_or(false)
             );
         }
+    }
+
+    #[test]
+    fn apply_custom_models_uses_schema_defaults_for_provider_models() {
+        let (_dir, auth) = test_auth_storage();
+        let mut models = Vec::new();
+        let config = ModelsConfig {
+            providers: HashMap::from([(
+                "cohere".to_string(),
+                ProviderConfig {
+                    models: Some(vec![ModelConfig {
+                        id: "command-r-plus".to_string(),
+                        ..ModelConfig::default()
+                    }]),
+                    ..ProviderConfig::default()
+                },
+            )]),
+        };
+
+        apply_custom_models(&auth, &mut models, &config);
+
+        let cohere = models
+            .iter()
+            .find(|entry| entry.model.provider == "cohere")
+            .expect("cohere model should be added");
+        assert_eq!(cohere.model.api, "cohere-chat");
+        assert_eq!(cohere.model.base_url, "https://api.cohere.com/v2");
+        assert!(!cohere.auth_header);
+    }
+
+    #[test]
+    fn apply_custom_models_alias_resolves_canonical_provider_api_key() {
+        let (_dir, mut auth) = test_auth_storage();
+        auth.set(
+            "moonshotai",
+            AuthCredential::ApiKey {
+                key: "moonshot-auth-key".to_string(),
+            },
+        );
+
+        let mut models = Vec::new();
+        let config = ModelsConfig {
+            providers: HashMap::from([(
+                "kimi".to_string(),
+                ProviderConfig {
+                    models: Some(vec![ModelConfig {
+                        id: "kimi-k2-instruct".to_string(),
+                        ..ModelConfig::default()
+                    }]),
+                    ..ProviderConfig::default()
+                },
+            )]),
+        };
+
+        apply_custom_models(&auth, &mut models, &config);
+
+        let kimi = models
+            .iter()
+            .find(|entry| entry.model.provider == "kimi")
+            .expect("kimi model should be added");
+        assert_eq!(kimi.model.api, "openai-completions");
+        assert_eq!(kimi.model.base_url, "https://api.moonshot.ai/v1");
+        assert_eq!(kimi.api_key.as_deref(), Some("moonshot-auth-key"));
+        assert!(kimi.auth_header);
     }
 
     #[test]

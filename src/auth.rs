@@ -3,6 +3,7 @@
 //! Auth file: ~/.pi/agent/auth.json
 
 use crate::error::{Error, Result};
+use crate::provider_metadata::provider_auth_env_keys;
 use base64::Engine as _;
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
@@ -361,31 +362,7 @@ fn env_key_for_provider(provider: &str) -> Option<&'static str> {
 }
 
 fn env_keys_for_provider(provider: &str) -> &'static [&'static str] {
-    match provider {
-        "anthropic" => &["ANTHROPIC_API_KEY"],
-        "openai" => &["OPENAI_API_KEY"],
-        "google" => &["GOOGLE_API_KEY"],
-        "google-vertex" => &["GOOGLE_CLOUD_API_KEY"],
-        "amazon-bedrock" => &["AWS_ACCESS_KEY_ID"],
-        "azure-openai" => &["AZURE_OPENAI_API_KEY"],
-        "github-copilot" => &["GITHUB_COPILOT_API_KEY"],
-        "xai" => &["XAI_API_KEY"],
-        "groq" => &["GROQ_API_KEY"],
-        "deepinfra" => &["DEEPINFRA_API_KEY"],
-        "cerebras" => &["CEREBRAS_API_KEY"],
-        "openrouter" => &["OPENROUTER_API_KEY"],
-        "mistral" => &["MISTRAL_API_KEY"],
-        "cohere" => &["COHERE_API_KEY"],
-        "perplexity" => &["PERPLEXITY_API_KEY"],
-        "deepseek" => &["DEEPSEEK_API_KEY"],
-        "fireworks" => &["FIREWORKS_API_KEY"],
-        "togetherai" => &["TOGETHER_API_KEY", "TOGETHER_AI_API_KEY"],
-        // MoonshotAI is the API behind "Kimi".
-        "moonshotai" | "moonshot" | "kimi" => &["MOONSHOT_API_KEY"],
-        // Qwen models are served via Alibaba Cloud DashScope (OpenAI compatible mode).
-        "alibaba" | "dashscope" | "qwen" => &["DASHSCOPE_API_KEY"],
-        _ => &[],
-    }
+    provider_auth_env_keys(provider)
 }
 
 fn redact_known_secrets(text: &str, secrets: &[&str]) -> String {

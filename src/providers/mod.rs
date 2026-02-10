@@ -424,6 +424,7 @@ impl Provider for ExtensionStreamSimpleProvider {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn create_provider(
     entry: &ModelEntry,
     extensions: Option<&ExtensionManager>,
@@ -445,6 +446,13 @@ pub fn create_provider(
 
     let vcr_client = vcr_client_if_enabled()?;
     let client = vcr_client.unwrap_or_else(Client::new);
+    tracing::debug!(
+        event = "pi.provider.factory.select",
+        provider = %entry.model.provider,
+        api = %entry.model.api,
+        base_url = %entry.model.base_url,
+        "Selecting provider implementation"
+    );
     // Try matching on known provider name first.
     match entry.model.provider.as_str() {
         "anthropic" => {
