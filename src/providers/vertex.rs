@@ -176,7 +176,7 @@ impl VertexProvider {
 
     /// Build the Gemini-format request body (for Google-native models).
     #[allow(clippy::unused_self)]
-    fn build_gemini_request(&self, context: &Context, options: &StreamOptions) -> GeminiRequest {
+    pub fn build_gemini_request(&self, context: &Context, options: &StreamOptions) -> GeminiRequest {
         let contents = Self::build_contents(context);
         let system_instruction = context.system_prompt.as_ref().map(|s| GeminiContent {
             role: None,

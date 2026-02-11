@@ -37,7 +37,7 @@ const CHAT_API_PATH: &str = "/api/v4/chat/completions";
 
 /// GitLab Duo Chat request body.
 #[derive(Debug, Serialize)]
-struct GitLabChatRequest {
+pub struct GitLabChatRequest {
     /// The user's question/prompt.
     content: String,
     /// Additional context items (files, MRs, issues).
@@ -134,7 +134,7 @@ impl GitLabProvider {
     }
 
     /// Build a GitLab Chat request from the agent context.
-    fn build_request(context: &Context) -> GitLabChatRequest {
+    pub fn build_request(context: &Context) -> GitLabChatRequest {
         // Extract the last user message as the primary content.
         let mut content = String::new();
         let mut additional_context = Vec::new();

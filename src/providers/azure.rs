@@ -97,7 +97,7 @@ impl AzureOpenAIProvider {
 
     /// Build the request body for Azure OpenAI (same format as OpenAI).
     #[allow(clippy::unused_self)]
-    fn build_request(&self, context: &Context, options: &StreamOptions) -> AzureRequest {
+    pub fn build_request(&self, context: &Context, options: &StreamOptions) -> AzureRequest {
         let messages = Self::build_messages(context);
 
         let tools: Option<Vec<AzureTool>> = if context.tools.is_empty() {
@@ -514,7 +514,7 @@ where
 // ============================================================================
 
 #[derive(Debug, Serialize)]
-struct AzureRequest {
+pub struct AzureRequest {
     messages: Vec<AzureMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,

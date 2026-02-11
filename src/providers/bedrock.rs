@@ -214,7 +214,7 @@ impl BedrockProvider {
         Ok(url)
     }
 
-    fn build_request(context: &Context, options: &StreamOptions) -> BedrockConverseRequest {
+    pub fn build_request(context: &Context, options: &StreamOptions) -> BedrockConverseRequest {
         let mut system = Vec::new();
         if let Some(system_prompt) = context
             .system_prompt
@@ -467,7 +467,7 @@ impl Provider for BedrockProvider {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct BedrockConverseRequest {
+pub struct BedrockConverseRequest {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     system: Vec<BedrockSystemContent>,
     messages: Vec<BedrockMessage>,
