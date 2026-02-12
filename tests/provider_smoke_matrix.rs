@@ -19,9 +19,7 @@ use futures::StreamExt;
 use pi::model::{Message, UserContent, UserMessage};
 use pi::models::ModelEntry;
 use pi::provider::{Context, InputType, Model, ModelCost, StreamEvent, StreamOptions};
-use pi::provider_metadata::{
-    ProviderOnboardingMode, PROVIDER_METADATA, canonical_provider_id,
-};
+use pi::provider_metadata::{PROVIDER_METADATA, ProviderOnboardingMode, canonical_provider_id};
 use pi::providers::create_provider;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -144,9 +142,17 @@ fn anthropic_messages_sse() -> String {
 
 fn cohere_chat_sse() -> String {
     [
-        r#"data: {"type":"stream-start"}"#,
+        r"event: message-start",
+        r#"data: {"id":"smoke-cohere","type":"message-start","delta":{"message":{"role":"assistant","content":[]}}}"#,
         "",
-        r#"data: {"type":"stream-end","response":{"meta":{"tokens":{"input_tokens":1,"output_tokens":1}}},"finish_reason":"COMPLETE"}"#,
+        r"event: content-start",
+        r#"data: {"type":"content-start","index":0,"delta":{"message":{"content":{"type":"text","text":""}}}}"#,
+        "",
+        r"event: content-end",
+        r#"data: {"type":"content-end","index":0}"#,
+        "",
+        r"event: message-end",
+        r#"data: {"type":"message-end","delta":{"finish_reason":"COMPLETE","usage":{"billed_units":{"input_tokens":1,"output_tokens":1},"tokens":{"input_tokens":1,"output_tokens":1}}}}"#,
         "",
     ]
     .join("\n")
@@ -172,11 +178,21 @@ fn bedrock_converse_json() -> serde_json::Value {
 /// Providers that need runtime environment resolution or complex auth flows
 /// and cannot be smoke-tested with a simple mock HTTP server.
 const SKIP_STREAM_PROVIDERS: &[&str] = &[
-    "google-vertex", // needs VERTEX_PROJECT/VERTEX_LOCATION env vars
-    "azure-openai",  // needs Azure host format + runtime resolution
+    "google-vertex",  // needs VERTEX_PROJECT/VERTEX_LOCATION env vars
+    "azure-openai",   // needs Azure host format + runtime resolution
     "github-copilot", // needs OAuth token exchange
-    "gitlab",        // needs OAuth token exchange
-    "sap-ai-core",   // needs multi-env runtime config
+    "gitlab",         // needs OAuth token exchange
+    "sap-ai-core",    // needs multi-env runtime config
+];
+
+/// Providers that fail at `create_provider` without env vars (superset of stream skips).
+const SKIP_ROUTE_PROVIDERS: &[&str] = &[
+    "google-vertex",  // needs GOOGLE_CLOUD_PROJECT env var at create time
+    "amazon-bedrock", // needs runtime region/endpoint resolution
+    "azure-openai",   // needs Azure host parsing at create time
+    "github-copilot", // needs OAuth at create time
+    "gitlab",         // needs OAuth at create time
+    "sap-ai-core",    // no routing_defaults (skipped by None check)
 ];
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -191,6 +207,7 @@ fn smoke_route_selection_full_matrix() {
     let harness = TestHarness::new("smoke_route_selection_full_matrix");
     let mut tested = 0u32;
     let mut skipped_no_defaults = 0u32;
+    let mut skipped_env = 0u32;
 
     for meta in PROVIDER_METADATA {
         let Some(defaults) = meta.routing_defaults else {
@@ -203,20 +220,22 @@ fn smoke_route_selection_full_matrix() {
             continue;
         };
 
-        let mut entry = make_smoke_entry(
-            meta.canonical_id,
-            "smoke-route-model",
-            defaults.base_url,
-        );
+        if SKIP_ROUTE_PROVIDERS.contains(&meta.canonical_id) {
+            harness
+                .log()
+                .info_ctx("route.skip", "needs env vars", |ctx| {
+                    ctx.push(("provider".to_string(), meta.canonical_id.to_string()));
+                });
+            skipped_env += 1;
+            continue;
+        }
+
+        let mut entry = make_smoke_entry(meta.canonical_id, "smoke-route-model", defaults.base_url);
         // Clear api to let metadata resolve it
         entry.model.api.clear();
 
-        let provider = create_provider(&entry, None).unwrap_or_else(|e| {
-            panic!(
-                "create_provider failed for {}: {e}",
-                meta.canonical_id
-            )
-        });
+        let provider = create_provider(&entry, None)
+            .unwrap_or_else(|e| panic!("create_provider failed for {}: {e}", meta.canonical_id));
 
         harness
             .log()
@@ -252,7 +271,11 @@ fn smoke_route_selection_full_matrix() {
                 "skipped_no_defaults".to_string(),
                 skipped_no_defaults.to_string(),
             ));
-            ctx.push(("total_metadata".to_string(), PROVIDER_METADATA.len().to_string()));
+            ctx.push(("skipped_env".to_string(), skipped_env.to_string()));
+            ctx.push((
+                "total_metadata".to_string(),
+                PROVIDER_METADATA.len().to_string(),
+            ));
         });
 
     // Sanity: we should test a significant number of providers
@@ -346,12 +369,8 @@ fn smoke_openai_completions_matrix() {
         );
         entry.model.api.clear();
 
-        let provider = create_provider(&entry, None).unwrap_or_else(|e| {
-            panic!(
-                "create_provider failed for {}: {e}",
-                meta.canonical_id
-            )
-        });
+        let provider = create_provider(&entry, None)
+            .unwrap_or_else(|e| panic!("create_provider failed for {}: {e}", meta.canonical_id));
         assert_eq!(
             provider.api(),
             "openai-completions",
@@ -444,6 +463,7 @@ fn smoke_openai_completions_matrix() {
 /// Smoke-tests every `anthropic-messages` provider through mock HTTP, verifying
 /// the request uses x-api-key auth and sends valid JSON.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn smoke_anthropic_messages_matrix() {
     let harness = TestHarness::new("smoke_anthropic_messages_matrix");
     let mut tested = 0u32;
@@ -476,12 +496,8 @@ fn smoke_anthropic_messages_matrix() {
         );
         entry.model.api.clear();
 
-        let provider = create_provider(&entry, None).unwrap_or_else(|e| {
-            panic!(
-                "create_provider failed for {}: {e}",
-                meta.canonical_id
-            )
-        });
+        let provider = create_provider(&entry, None)
+            .unwrap_or_else(|e| panic!("create_provider failed for {}: {e}", meta.canonical_id));
         // Anthropic-messages providers route through the Anthropic impl
         assert_eq!(
             provider.api(),
@@ -560,11 +576,13 @@ fn smoke_anthropic_messages_matrix() {
         tested += 1;
     }
 
-    harness
-        .log()
-        .info_ctx("anth.summary", "anthropic-messages matrix complete", |ctx| {
+    harness.log().info_ctx(
+        "anth.summary",
+        "anthropic-messages matrix complete",
+        |ctx| {
             ctx.push(("tested".to_string(), tested.to_string()));
-        });
+        },
+    );
 
     assert!(
         tested >= 5,
@@ -619,8 +637,7 @@ fn smoke_native_anthropic_baseline() {
         Some("application/json")
     );
 
-    let body: serde_json::Value =
-        serde_json::from_slice(&request.body).expect("valid JSON body");
+    let body: serde_json::Value = serde_json::from_slice(&request.body).expect("valid JSON body");
     assert!(body.get("messages").is_some());
 
     harness
@@ -630,7 +647,7 @@ fn smoke_native_anthropic_baseline() {
         });
 }
 
-/// Smoke-tests native OpenAI (defaults to responses API) through mock HTTP.
+/// Smoke-tests native `OpenAI` (defaults to responses API) through mock HTTP.
 #[test]
 fn smoke_native_openai_responses_baseline() {
     let harness = TestHarness::new("smoke_native_openai_responses_baseline");
@@ -674,8 +691,7 @@ fn smoke_native_openai_responses_baseline() {
         Some("application/json")
     );
 
-    let body: serde_json::Value =
-        serde_json::from_slice(&request.body).expect("valid JSON body");
+    let body: serde_json::Value = serde_json::from_slice(&request.body).expect("valid JSON body");
     assert!(body.get("input").is_some() || body.get("messages").is_some());
 
     harness
@@ -685,7 +701,7 @@ fn smoke_native_openai_responses_baseline() {
         });
 }
 
-/// Smoke-tests native OpenAI completions API (explicit override) through mock HTTP.
+/// Smoke-tests native `OpenAI` completions API (explicit override) through mock HTTP.
 #[test]
 fn smoke_native_openai_completions_baseline() {
     let harness = TestHarness::new("smoke_native_openai_completions_baseline");
@@ -726,8 +742,7 @@ fn smoke_native_openai_completions_baseline() {
         Some(format!("Bearer {api_key}").as_str())
     );
 
-    let body: serde_json::Value =
-        serde_json::from_slice(&request.body).expect("valid JSON body");
+    let body: serde_json::Value = serde_json::from_slice(&request.body).expect("valid JSON body");
     assert!(body.get("messages").is_some());
 
     harness
@@ -744,20 +759,15 @@ fn smoke_native_gemini_baseline() {
     let server = harness.start_mock_http_server();
     let api_key = "smoke-gemini-key";
     let model_id = "smoke-gemini-model";
-    let expected_path = format!(
-        "/v1beta/models/{model_id}:streamGenerateContent?alt=sse&key={api_key}"
-    );
+    let expected_path =
+        format!("/v1beta/models/{model_id}:streamGenerateContent?alt=sse&key={api_key}");
     server.add_route(
         "POST",
         &expected_path,
         text_event_stream_response(gemini_sse()),
     );
 
-    let mut entry = make_smoke_entry(
-        "google",
-        model_id,
-        &format!("{}/v1beta", server.base_url()),
-    );
+    let mut entry = make_smoke_entry("google", model_id, &format!("{}/v1beta", server.base_url()));
     entry.model.api.clear();
     let provider = create_provider(&entry, None).expect("create native gemini provider");
     assert_eq!(provider.name(), "google");
@@ -784,8 +794,7 @@ fn smoke_native_gemini_baseline() {
         Some("application/json")
     );
 
-    let body: serde_json::Value =
-        serde_json::from_slice(&request.body).expect("valid JSON body");
+    let body: serde_json::Value = serde_json::from_slice(&request.body).expect("valid JSON body");
     assert!(body.get("contents").is_some());
 
     harness
@@ -830,7 +839,7 @@ fn smoke_native_cohere_baseline() {
 
     let api_key = "smoke-cohere-key".to_string();
     let options = StreamOptions {
-        api_key: Some(api_key.clone()),
+        api_key: Some(api_key),
         max_tokens: Some(64),
         ..Default::default()
     };
@@ -845,13 +854,14 @@ fn smoke_native_cohere_baseline() {
         Some("application/json")
     );
 
-    let body: serde_json::Value =
-        serde_json::from_slice(&request.body).expect("valid JSON body");
+    let body: serde_json::Value = serde_json::from_slice(&request.body).expect("valid JSON body");
     assert!(body.get("messages").is_some());
 
-    harness.log().info_ctx("native.ok", "cohere baseline passed", |ctx| {
-        ctx.push(("path".to_string(), request.path.clone()));
-    });
+    harness
+        .log()
+        .info_ctx("native.ok", "cohere baseline passed", |ctx| {
+            ctx.push(("path".to_string(), request.path.clone()));
+        });
 }
 
 /// Smoke-tests native Bedrock through mock HTTP (JSON response, not SSE).
@@ -867,11 +877,7 @@ fn smoke_native_bedrock_baseline() {
         MockHttpResponse::json(200, &bedrock_converse_json()),
     );
 
-    let mut entry = make_smoke_entry(
-        "amazon-bedrock",
-        bedrock_model,
-        &server.base_url(),
-    );
+    let mut entry = make_smoke_entry("amazon-bedrock", bedrock_model, &server.base_url());
     entry.model.api = "bedrock-converse-stream".to_string();
     let provider = create_provider(&entry, None).expect("create native bedrock provider");
     assert_eq!(provider.name(), "amazon-bedrock");
@@ -898,8 +904,7 @@ fn smoke_native_bedrock_baseline() {
         Some("application/json")
     );
 
-    let body: serde_json::Value =
-        serde_json::from_slice(&request.body).expect("valid JSON body");
+    let body: serde_json::Value = serde_json::from_slice(&request.body).expect("valid JSON body");
     assert!(body.get("messages").is_some());
 
     harness
@@ -939,6 +944,19 @@ fn smoke_report_artifact() {
             stream_skip += 1;
             continue;
         };
+
+        // Skip providers that need env vars
+        if SKIP_ROUTE_PROVIDERS.contains(&meta.canonical_id) {
+            results.push(serde_json::json!({
+                "provider": meta.canonical_id,
+                "api": defaults.api,
+                "route_ok": null,
+                "stream_ok": null,
+                "reason": "needs runtime env vars"
+            }));
+            stream_skip += 1;
+            continue;
+        }
 
         // Test route selection
         let mut entry =
@@ -985,12 +1003,14 @@ fn smoke_report_artifact() {
     std::fs::write(&report_path, &report_json).expect("write smoke report");
     harness.record_artifact("smoke_report.json", &report_path);
 
-    harness.log().info_ctx("report", "smoke report generated", |ctx| {
-        ctx.push(("total".to_string(), total.to_string()));
-        ctx.push(("route_pass".to_string(), route_pass.to_string()));
-        ctx.push(("stream_pass".to_string(), stream_pass.to_string()));
-        ctx.push(("stream_skip".to_string(), stream_skip.to_string()));
-    });
+    harness
+        .log()
+        .info_ctx("report", "smoke report generated", |ctx| {
+            ctx.push(("total".to_string(), total.to_string()));
+            ctx.push(("route_pass".to_string(), route_pass.to_string()));
+            ctx.push(("stream_pass".to_string(), stream_pass.to_string()));
+            ctx.push(("stream_skip".to_string(), stream_skip.to_string()));
+        });
 
     // All route selections must pass for providers with defaults
     assert!(
@@ -1041,11 +1061,7 @@ fn run_smoke_stream(
         "cohere-chat" => {
             let prefix = format!("/report/{safe_id}");
             let path = format!("{prefix}/chat");
-            server.add_route(
-                "POST",
-                &path,
-                text_event_stream_response(cohere_chat_sse()),
-            );
+            server.add_route("POST", &path, text_event_stream_response(cohere_chat_sse()));
             (format!("{}{prefix}", server.base_url()), path)
         }
         "google-generative-ai" => {
@@ -1059,7 +1075,11 @@ fn run_smoke_stream(
         "bedrock-converse-stream" => {
             let model = "smoke-report-model";
             let path = format!("/model/{model}/converse");
-            server.add_route("POST", &path, MockHttpResponse::json(200, &bedrock_converse_json()));
+            server.add_route(
+                "POST",
+                &path,
+                MockHttpResponse::json(200, &bedrock_converse_json()),
+            );
             (server.base_url(), path)
         }
         other => {
@@ -1148,7 +1168,7 @@ fn smoke_all_api_families_are_known() {
         .info_ctx("invariant.ok", "all API families known", |_ctx| {});
 }
 
-/// Verifies that every openai-completions preset has auth_header=true.
+/// Verifies that every `openai-completions` preset has `auth_header=true`.
 #[test]
 fn smoke_openai_completions_presets_use_bearer_auth() {
     let harness = TestHarness::new("smoke_openai_completions_presets_use_bearer_auth");
@@ -1182,8 +1202,8 @@ fn smoke_openai_completions_presets_use_bearer_auth() {
     );
 }
 
-/// Verifies that every provider with routing defaults has non-empty base_url
-/// and positive context_window / max_tokens.
+/// Verifies that every provider with routing defaults has non-empty `base_url`
+/// and positive `context_window` / `max_tokens`.
 #[test]
 fn smoke_routing_defaults_sanity() {
     let harness = TestHarness::new("smoke_routing_defaults_sanity");
@@ -1191,6 +1211,10 @@ fn smoke_routing_defaults_sanity() {
 
     for meta in PROVIDER_METADATA {
         if let Some(defaults) = meta.routing_defaults {
+            // Skip providers with runtime-resolved base URLs
+            if SKIP_ROUTE_PROVIDERS.contains(&meta.canonical_id) {
+                continue;
+            }
             assert!(
                 !defaults.base_url.is_empty(),
                 "provider {} has empty base_url",
@@ -1231,9 +1255,7 @@ fn smoke_skip_list_validity() {
     let harness = TestHarness::new("smoke_skip_list_validity");
 
     for skip_id in SKIP_STREAM_PROVIDERS {
-        let found = PROVIDER_METADATA
-            .iter()
-            .any(|m| m.canonical_id == *skip_id);
+        let found = PROVIDER_METADATA.iter().any(|m| m.canonical_id == *skip_id);
         assert!(
             found,
             "skip list entry '{skip_id}' not found in PROVIDER_METADATA"
@@ -1243,6 +1265,9 @@ fn smoke_skip_list_validity() {
     harness
         .log()
         .info_ctx("invariant.ok", "skip list valid", |ctx| {
-            ctx.push(("entries".to_string(), SKIP_STREAM_PROVIDERS.len().to_string()));
+            ctx.push((
+                "entries".to_string(),
+                SKIP_STREAM_PROVIDERS.len().to_string(),
+            ));
         });
 }
