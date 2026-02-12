@@ -17,7 +17,9 @@
         }
       },
       "expect": {
-        "content_contains": ["hello multi"]
+        "content_contains": [
+          "hello multi"
+        ]
       }
     },
     {
@@ -26,7 +28,17 @@
       "summary": "Verifies both tool and event hook are registered",
       "expect": {
         "tool_count": 1,
-        "event_hooks_contains": ["agent_start"]
+        "event_hooks_contains": [
+          "agent_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-minimal-multi-neg-001",
+      "kind": "tool",
+      "summary": "Negative: echo tool fails with missing required text argument",
+      "expect": {
+        "is_error": true
       }
     }
   ]

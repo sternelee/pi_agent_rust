@@ -13,7 +13,17 @@
       "provider_id": "mock-provider",
       "expect": {
         "provider_registered": true,
-        "models_contain": ["mock-model"]
+        "models_contain": [
+          "mock-model"
+        ]
+      }
+    },
+    {
+      "id": "scn-minimal-provider-neg-001",
+      "kind": "provider",
+      "summary": "Negative: provider registration fails with missing API key",
+      "expect": {
+        "is_error": true
       }
     }
   ]

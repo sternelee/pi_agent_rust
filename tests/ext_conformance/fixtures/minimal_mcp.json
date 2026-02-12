@@ -13,6 +13,14 @@
       "expect": {
         "mcp_server_registered": true
       }
+    },
+    {
+      "id": "scn-minimal-mcp-neg-001",
+      "kind": "mcp",
+      "summary": "Negative: MCP server registration fails with invalid config",
+      "expect": {
+        "is_error": true
+      }
     }
   ]
 }

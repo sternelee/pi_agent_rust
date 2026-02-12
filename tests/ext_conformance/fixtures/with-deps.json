@@ -107,6 +107,14 @@
           "{\"correlation\":{\"extension_id\":\"with-deps\",\"run_id\":\"<RUN_ID>\",\"scenario_id\":\"scn-with-deps-001\"},\"event\":\"capture\",\"level\":\"info\",\"message\":\"capture.finish\",\"schema\":\"pi.ext.log.v1\",\"source\":{\"component\":\"capture\",\"pid\":2999939},\"ts\":\"2026-02-03T12:37:26.218Z\"}"
         ]
       }
+    },
+    {
+      "id": "scn-with-deps-neg-001",
+      "kind": "tool",
+      "summary": "Negative: parse_duration tool fails with invalid duration string",
+      "expect": {
+        "is_error": true
+      }
     }
   ]
 }

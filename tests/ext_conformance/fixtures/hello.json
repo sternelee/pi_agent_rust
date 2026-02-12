@@ -110,6 +110,14 @@
           "{\"correlation\":{\"extension_id\":\"hello\",\"run_id\":\"<RUN_ID>\",\"scenario_id\":\"scn-hello-001\"},\"event\":\"capture\",\"level\":\"info\",\"message\":\"capture.finish\",\"schema\":\"pi.ext.log.v1\",\"source\":{\"component\":\"capture\",\"pid\":2999939},\"ts\":\"2026-02-03T12:36:47.840Z\"}"
         ]
       }
+    },
+    {
+      "id": "scn-hello-neg-001",
+      "kind": "tool",
+      "summary": "Negative: tool invocation fails with missing required argument",
+      "expect": {
+        "is_error": true
+      }
     }
   ]
 }

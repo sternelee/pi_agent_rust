@@ -11,8 +11,20 @@
       "kind": "resource_discovery",
       "summary": "Discovers bundled prompts and skills",
       "expect": {
-        "prompts_contain": ["test-prompt"],
-        "skills_contain": ["test-skill"]
+        "prompts_contain": [
+          "test-prompt"
+        ],
+        "skills_contain": [
+          "test-skill"
+        ]
+      }
+    },
+    {
+      "id": "scn-minimal-resources-neg-001",
+      "kind": "resource_discovery",
+      "summary": "Negative: resource discovery fails with invalid resource path",
+      "expect": {
+        "is_error": true
       }
     }
   ]

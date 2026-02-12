@@ -149,7 +149,8 @@
           "model",
           "aspectRatio",
           "saveMode"
-        ]
+        ],
+        "no_error": true
       },
       "outputs": {
         "stdout_normalized_jsonl": [

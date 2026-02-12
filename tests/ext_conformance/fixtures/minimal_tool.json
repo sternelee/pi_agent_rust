@@ -17,7 +17,17 @@
         }
       },
       "expect": {
-        "content_contains": ["Hello, Developer!"]
+        "content_contains": [
+          "Hello, Developer!"
+        ]
+      }
+    },
+    {
+      "id": "scn-minimal-tool-neg-001",
+      "kind": "tool",
+      "summary": "Negative: greet tool fails with missing required name argument",
+      "expect": {
+        "is_error": true
       }
     }
   ]

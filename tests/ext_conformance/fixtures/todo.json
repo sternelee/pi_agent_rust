@@ -297,6 +297,14 @@
           "{\"correlation\":{\"extension_id\":\"todo\",\"run_id\":\"<RUN_ID>\",\"scenario_id\":\"scn-todo-003\"},\"event\":\"capture\",\"level\":\"info\",\"message\":\"capture.finish\",\"schema\":\"pi.ext.log.v1\",\"source\":{\"component\":\"capture\",\"pid\":2999939},\"ts\":\"2026-02-03T12:36:45.336Z\"}"
         ]
       }
+    },
+    {
+      "id": "scn-todo-neg-001",
+      "kind": "tool",
+      "summary": "Negative: todo tool fails with invalid action argument",
+      "expect": {
+        "is_error": true
+      }
     }
   ]
 }

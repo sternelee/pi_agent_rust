@@ -40,7 +40,8 @@
       "expect": {
         "ui_notify_contains": [
           "DOOM requires interactive mode"
-        ]
+        ],
+        "no_error": true
       },
       "outputs": {
         "stdout_normalized_jsonl": [
@@ -85,6 +86,14 @@
           "{\"correlation\":{\"extension_id\":\"doom-overlay\",\"run_id\":\"<RUN_ID>\",\"scenario_id\":\"scn-doom-overlay-001\"},\"data\":{\"extension_path\":\"packages/coding-agent/examples/extensions/doom-overlay\",\"legacy_head\":\"df5b0f76c026b35fdd7f0fb78cb0dbaaf939c1b5\",\"manifest_checksum_sha256\":\"e1bfb470c443d962bfca79a8863d0a01caf2c2041ee4b7e93988a94335c69b10\",\"manifest_commit\":\"df5b0f76c026b35fdd7f0fb78cb0dbaaf939c1b5\",\"model\":\"gpt-4o-mini\",\"node_version\":\"v20.19.4\",\"npm_version\":\"9.2.0\",\"pi_mono_root\":\"legacy_pi_mono_code/pi-mono\",\"provider\":\"openai\",\"scenario_command_name\":\"doom-overlay\",\"scenario_event_name\":null,\"scenario_kind\":\"command\",\"scenario_provider_id\":null,\"scenario_tool_name\":null,\"started_at\":\"<TIMESTAMP>\"},\"event\":\"capture\",\"level\":\"info\",\"message\":\"capture.start\",\"schema\":\"pi.ext.log.v1\",\"source\":{\"component\":\"capture\",\"pid\":2999939},\"ts\":\"2026-02-03T12:36:59.703Z\"}",
           "{\"correlation\":{\"extension_id\":\"doom-overlay\",\"run_id\":\"<RUN_ID>\",\"scenario_id\":\"scn-doom-overlay-001\"},\"event\":\"capture\",\"level\":\"info\",\"message\":\"capture.finish\",\"schema\":\"pi.ext.log.v1\",\"source\":{\"component\":\"capture\",\"pid\":2999939},\"ts\":\"2026-02-03T12:37:02.049Z\"}"
         ]
+      }
+    },
+    {
+      "id": "scn-doom-overlay-neg-001",
+      "kind": "command",
+      "summary": "Negative: command fails with unsupported argument",
+      "expect": {
+        "is_error": true
       }
     }
   ]

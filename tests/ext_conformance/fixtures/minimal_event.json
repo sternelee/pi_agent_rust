@@ -15,7 +15,17 @@
         "session_id": "test-session"
       },
       "expect": {
-        "log_contains": ["Agent started!"]
+        "log_contains": [
+          "Agent started!"
+        ]
+      }
+    },
+    {
+      "id": "scn-minimal-event-neg-001",
+      "kind": "event",
+      "summary": "Negative: event handler errors on unsupported event",
+      "expect": {
+        "is_error": true
       }
     }
   ]

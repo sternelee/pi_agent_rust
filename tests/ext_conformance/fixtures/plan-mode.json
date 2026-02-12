@@ -48,7 +48,8 @@
         ],
         "ui_notify_contains": [
           "Plan mode enabled"
-        ]
+        ],
+        "no_error": true
       },
       "outputs": {
         "stdout_normalized_jsonl": [
@@ -199,6 +200,14 @@
           "{\"correlation\":{\"extension_id\":\"plan-mode\",\"run_id\":\"<RUN_ID>\",\"scenario_id\":\"scn-plan-mode-002\"},\"data\":{\"extension_path\":\"packages/coding-agent/examples/extensions/plan-mode\",\"legacy_head\":\"df5b0f76c026b35fdd7f0fb78cb0dbaaf939c1b5\",\"manifest_checksum_sha256\":\"509b3f4365c9c2c556ab1e96e5124dac41e7a70e627d6a593c4e2e5086d3aed9\",\"manifest_commit\":\"df5b0f76c026b35fdd7f0fb78cb0dbaaf939c1b5\",\"model\":\"gpt-4o-mini\",\"node_version\":\"v20.19.4\",\"npm_version\":\"9.2.0\",\"pi_mono_root\":\"legacy_pi_mono_code/pi-mono\",\"provider\":\"openai\",\"scenario_command_name\":null,\"scenario_event_name\":\"tool_call\",\"scenario_kind\":\"event\",\"scenario_provider_id\":null,\"scenario_tool_name\":null,\"started_at\":\"<TIMESTAMP>\"},\"event\":\"capture\",\"level\":\"info\",\"message\":\"capture.start\",\"schema\":\"pi.ext.log.v1\",\"source\":{\"component\":\"capture\",\"pid\":2999939},\"ts\":\"2026-02-03T12:36:55.130Z\"}",
           "{\"correlation\":{\"extension_id\":\"plan-mode\",\"run_id\":\"<RUN_ID>\",\"scenario_id\":\"scn-plan-mode-002\"},\"event\":\"capture\",\"level\":\"info\",\"message\":\"capture.finish\",\"schema\":\"pi.ext.log.v1\",\"source\":{\"component\":\"capture\",\"pid\":2999939},\"ts\":\"2026-02-03T12:36:57.339Z\"}"
         ]
+      }
+    },
+    {
+      "id": "scn-plan-mode-neg-001",
+      "kind": "command",
+      "summary": "Negative: plan command fails with invalid mode argument",
+      "expect": {
+        "is_error": true
       }
     }
   ]

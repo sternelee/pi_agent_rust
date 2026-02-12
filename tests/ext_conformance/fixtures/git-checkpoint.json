@@ -105,7 +105,8 @@
         ],
         "ui_notify_contains": [
           "Code restored to checkpoint"
-        ]
+        ],
+        "no_error": true
       },
       "outputs": {
         "stdout_normalized_jsonl": [
@@ -191,6 +192,14 @@
           "{\"correlation\":{\"extension_id\":\"git-checkpoint\",\"run_id\":\"<RUN_ID>\",\"scenario_id\":\"scn-git-checkpoint-001\"},\"data\":{\"extension_path\":\"packages/coding-agent/examples/extensions/git-checkpoint.ts\",\"legacy_head\":\"df5b0f76c026b35fdd7f0fb78cb0dbaaf939c1b5\",\"manifest_checksum_sha256\":\"89e80e550029c4b9ae6266d7a20f78f8ca14253f5ae0cc0c4eff0bd43dced7c6\",\"manifest_commit\":\"df5b0f76c026b35fdd7f0fb78cb0dbaaf939c1b5\",\"model\":\"gpt-4o-mini\",\"node_version\":\"v20.19.4\",\"npm_version\":\"9.2.0\",\"pi_mono_root\":\"legacy_pi_mono_code/pi-mono\",\"provider\":\"openai\",\"scenario_command_name\":null,\"scenario_event_name\":\"session_before_fork\",\"scenario_kind\":\"event\",\"scenario_provider_id\":null,\"scenario_tool_name\":null,\"started_at\":\"<TIMESTAMP>\"},\"event\":\"capture\",\"level\":\"info\",\"message\":\"capture.start\",\"schema\":\"pi.ext.log.v1\",\"source\":{\"component\":\"capture\",\"pid\":2999939},\"ts\":\"2026-02-03T12:37:28.540Z\"}",
           "{\"correlation\":{\"extension_id\":\"git-checkpoint\",\"run_id\":\"<RUN_ID>\",\"scenario_id\":\"scn-git-checkpoint-001\"},\"event\":\"capture\",\"level\":\"info\",\"message\":\"capture.finish\",\"schema\":\"pi.ext.log.v1\",\"source\":{\"component\":\"capture\",\"pid\":2999939},\"ts\":\"2026-02-03T12:37:30.932Z\"}"
         ]
+      }
+    },
+    {
+      "id": "scn-git-checkpoint-neg-001",
+      "kind": "event",
+      "summary": "Negative: checkpoint restore fails when git stash returns error",
+      "expect": {
+        "is_error": true
       }
     }
   ]
