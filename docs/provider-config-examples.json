@@ -1,0 +1,163 @@
+{
+  "schema": "pi.provider_config_examples.v1",
+  "bead_id": "bd-3uqg.11.12.1",
+  "last_verified_utc": "2026-02-13T10:00:00Z",
+  "description": "Copy-paste-ready configuration examples for all gap providers. Each entry includes minimal env setup, CLI invocation, and expected behavior.",
+
+  "providers": [
+    {
+      "provider_id": "groq",
+      "display_name": "Groq (LPU Inference)",
+      "api_type": "openai-completions",
+      "env_required": {
+        "GROQ_API_KEY": "gsk_your_api_key_here"
+      },
+      "env_optional": {},
+      "minimal_cli": "pi --provider groq --model llama-3.3-70b-versatile",
+      "advanced_cli": [
+        "pi --provider groq --model deepseek-r1-distill-llama-70b"
+      ],
+      "expected_behavior": {
+        "auth_success": "200 OK with streaming SSE response",
+        "auth_failure": "401 with error.message containing 'Invalid API Key'",
+        "rate_limit": "429 with x-ratelimit-remaining-requests header"
+      },
+      "key_caveats": [
+        "temperature=0 normalized to 1e-8 server-side",
+        "logprobs, logit_bias, messages[].name silently ignored"
+      ],
+      "setup_doc": "docs/provider-groq-setup.json"
+    },
+    {
+      "provider_id": "cerebras",
+      "display_name": "Cerebras (WSE Hardware)",
+      "api_type": "openai-completions",
+      "env_required": {
+        "CEREBRAS_API_KEY": "csk-your_api_key_here"
+      },
+      "env_optional": {},
+      "minimal_cli": "pi --provider cerebras --model llama-3.3-70b",
+      "advanced_cli": [
+        "pi --provider cerebras --model qwen-3-32b"
+      ],
+      "expected_behavior": {
+        "auth_success": "200 OK with streaming SSE including time_info",
+        "auth_failure": "401 with Invalid API key message",
+        "rate_limit": "429 with x-ratelimit-remaining-requests-day header"
+      },
+      "key_caveats": [
+        "Tool calling only on gpt-oss-120b, qwen-3-32b, zai-glm-4.7",
+        "Non-standard rate limit headers (per-day and per-minute)",
+        "WSE time_info fields in final streaming chunk"
+      ],
+      "setup_doc": "docs/provider-cerebras-setup.json"
+    },
+    {
+      "provider_id": "openrouter",
+      "display_name": "OpenRouter (Model Aggregator)",
+      "api_type": "openai-completions",
+      "env_required": {
+        "OPENROUTER_API_KEY": "sk-or-v1-your_api_key_here"
+      },
+      "env_optional": {},
+      "minimal_cli": "pi --provider openrouter --model openai/gpt-4o-mini",
+      "advanced_cli": [
+        "pi --provider openrouter --model anthropic/claude-sonnet-4",
+        "pi --provider openrouter --model meta-llama/llama-3.3-70b-instruct"
+      ],
+      "expected_behavior": {
+        "auth_success": "200 OK with streaming SSE (may include : OPENROUTER PROCESSING comments)",
+        "auth_failure": "401 with error.message",
+        "rate_limit": "429 with error.code"
+      },
+      "key_caveats": [
+        "Model IDs use org/model format (e.g., openai/gpt-4o-mini)",
+        "Serving model may differ from requested (fallback routing)",
+        "Mid-stream errors use HTTP 200 + SSE error payload"
+      ],
+      "setup_doc": "docs/provider-openrouter-setup.json"
+    },
+    {
+      "provider_id": "moonshotai",
+      "display_name": "Kimi / Moonshot AI (Global)",
+      "api_type": "openai-completions",
+      "env_required": {
+        "MOONSHOT_API_KEY": "sk-your_api_key_here"
+      },
+      "env_optional": {
+        "KIMI_API_KEY": "sk-fallback_key (moonshotai global only)"
+      },
+      "minimal_cli": "pi --provider moonshotai --model moonshot-v1-128k",
+      "advanced_cli": [
+        "pi --provider moonshotai --model moonshot-v1-auto",
+        "pi --provider moonshotai-cn --model moonshot-v1-128k",
+        "pi --provider kimi-for-coding --model kimi-k2.5"
+      ],
+      "expected_behavior": {
+        "auth_success": "200 OK with streaming SSE response",
+        "auth_failure": "401 with Invalid API key (key/endpoint mismatch)",
+        "rate_limit": "429 with tier-based rate limits"
+      },
+      "key_caveats": [
+        "Three Pi entries: moonshotai (.ai global), moonshotai-cn (.cn China), kimi-for-coding (Anthropic API)",
+        "Keys NOT interchangeable between .ai and .cn endpoints",
+        "kimi-for-coding uses anthropic-messages API, not openai-completions",
+        "Temperature range 0-1 (not 0-2 like OpenAI)"
+      ],
+      "setup_doc": "docs/provider-kimi-setup.json"
+    },
+    {
+      "provider_id": "alibaba",
+      "display_name": "Qwen / DashScope (International)",
+      "api_type": "openai-completions",
+      "env_required": {
+        "DASHSCOPE_API_KEY": "sk-your_api_key_here"
+      },
+      "env_optional": {
+        "QWEN_API_KEY": "sk-fallback_key (alibaba intl only)"
+      },
+      "minimal_cli": "pi --provider alibaba --model qwen-plus",
+      "advanced_cli": [
+        "pi --provider alibaba --model qwen-max",
+        "pi --provider alibaba --model qwen3-coder-plus",
+        "pi --provider alibaba-cn --model qwen-plus"
+      ],
+      "expected_behavior": {
+        "auth_success": "200 OK with streaming SSE response",
+        "auth_failure": "401 with Invalid API key message",
+        "rate_limit": "429 with code 'qps' (retryable) or 'quota' (non-retryable)"
+      },
+      "key_caveats": [
+        "CRITICAL: Tool calling CANNOT be combined with streaming",
+        "Tool calling only on qwen-turbo, qwen-plus, qwen-max, qwen3-coder-plus",
+        "Two distinct 429 categories: qps (retryable) vs quota (non-retryable)",
+        "QWEN_API_KEY fallback only for alibaba (intl), not alibaba-cn"
+      ],
+      "setup_doc": "docs/provider-qwen-setup.json"
+    }
+  ],
+
+  "env_quick_reference": {
+    "description": "All env vars needed across gap providers. Set only the providers you use.",
+    "vars": [
+      {"var": "GROQ_API_KEY", "provider": "groq", "format": "gsk_...", "source": "https://console.groq.com/keys"},
+      {"var": "CEREBRAS_API_KEY", "provider": "cerebras", "format": "csk-...", "source": "https://cloud.cerebras.ai/"},
+      {"var": "OPENROUTER_API_KEY", "provider": "openrouter", "format": "sk-or-v1-...", "source": "https://openrouter.ai/settings/keys"},
+      {"var": "MOONSHOT_API_KEY", "provider": "moonshotai, moonshotai-cn", "format": "sk-...", "source": "https://platform.moonshot.cn/console/api-keys"},
+      {"var": "KIMI_API_KEY", "provider": "moonshotai (fallback only)", "format": "sk-...", "source": "https://platform.moonshot.cn/console/api-keys"},
+      {"var": "DASHSCOPE_API_KEY", "provider": "alibaba, alibaba-cn", "format": "sk-...", "source": "https://dashscope.console.aliyun.com/apiKey"},
+      {"var": "QWEN_API_KEY", "provider": "alibaba (fallback only)", "format": "sk-...", "source": "https://dashscope.console.aliyun.com/apiKey"}
+    ]
+  },
+
+  "verification_commands": {
+    "description": "Quick commands to verify each provider is working.",
+    "commands": [
+      "pi --provider groq --model llama-3.3-70b-versatile -m 'Say OK'",
+      "pi --provider cerebras --model llama-3.3-70b -m 'Say OK'",
+      "pi --provider openrouter --model openai/gpt-4o-mini -m 'Say OK'",
+      "pi --provider moonshotai --model moonshot-v1-128k -m 'Say OK'",
+      "pi --provider alibaba --model qwen-plus -m 'Say OK'"
+    ]
+  }
+}
