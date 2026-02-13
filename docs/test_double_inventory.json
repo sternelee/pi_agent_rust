@@ -1,6 +1,8 @@
 {
-  "report_id": "bd-1f42.1.1-test-double-inventory-v1",
-  "generated_at_utc": "2026-02-10T04:26:02.571276+00:00",
+  "schema": "pi.qa.test_double_inventory.v2",
+  "report_id": "bd-1f42.8.1-test-double-inventory-v2",
+  "bead_id": "bd-1f42.8.1",
+  "generated_at_utc": "2026-02-13T04:24:50.993406+00:00",
   "source_paths": {
     "tests_root": "tests/**/*.rs",
     "src_root": "src/**/*.rs",
@@ -8,33 +10,42 @@
   },
   "inventory_scope": {
     "patterns": [
-      "Mock[A-Za-z0-9_]+",
-      "Fake[A-Za-z0-9_]+",
-      "Stub[A-Za-z0-9_]+",
-      "PackageCommandStubs",
-      "RecordingSession",
-      "RecordingHostActions",
-      "DummyProvider",
-      "NullSession",
-      "NullUiHandler",
-      "start_mock_http_server"
+      "\\bMock[A-Za-z0-9_]+\\b",
+      "\\bFake[A-Za-z0-9_]+\\b",
+      "\\bStub[A-Za-z0-9_]+\\b",
+      "\\bPackageCommandStubs\\b",
+      "\\bRecordingSession\\b",
+      "\\bRecordingHostActions\\b",
+      "\\bDummyProvider\\b",
+      "\\bNullSession\\b",
+      "\\bNullUiHandler\\b",
+      "\\bstart_mock_http_server\\b"
     ],
     "note": "Inventory is identifier-driven and de-duplicated by (file, test_case, identifier, double_type)."
   },
+  "reproduction": {
+    "snapshot_date_utc": "2026-02-13",
+    "commands": [
+      "rg --line-number --glob '*.rs' '(Mock[A-Za-z0-9_]+|Fake[A-Za-z0-9_]+|Stub[A-Za-z0-9_]+|PackageCommandStubs|RecordingSession|RecordingHostActions|DummyProvider|NullSession|NullUiHandler|start_mock_http_server)' src tests",
+      "cargo test --test non_mock_compliance_gate -- --nocapture",
+      "cargo test --test non_mock_rubric_gate -- --nocapture"
+    ],
+    "notes": "Entries are deduplicated by (file,module,test_case,double_identifier,double_type) and then aggregated into risk/suite cluster summaries."
+  },
   "summary": {
-    "entry_count": 201,
-    "module_count": 16,
+    "entry_count": 267,
+    "module_count": 21,
     "suite_counts": {
-      "vcr": 46,
-      "unclassified": 23,
-      "e2e": 3,
-      "unit": 13,
-      "unit-inline": 116
+      "unit-inline": 116,
+      "vcr": 73,
+      "unclassified": 36,
+      "e2e": 26,
+      "unit": 16
     },
     "risk_counts": {
-      "medium": 49,
-      "low": 23,
-      "high": 129
+      "high": 132,
+      "medium": 99,
+      "low": 36
     },
     "top_risk_clusters": [
       {
@@ -51,7 +62,8 @@
           "stub": 86
         },
         "risk_score": 258,
-        "risk_level": "high"
+        "risk_level": "high",
+        "remediation_issue_id": "bd-1f42.8.2.1"
       },
       {
         "module": "src/extensions",
@@ -67,7 +79,8 @@
           "mock": 22
         },
         "risk_score": 66,
-        "risk_level": "high"
+        "risk_level": "high",
+        "remediation_issue_id": "bd-1f42.8.2.2"
       },
       {
         "module": "tests/extensions_provider_oauth",
@@ -84,7 +97,26 @@
           "mock-server-helper": 9
         },
         "risk_score": 56,
-        "risk_level": "high"
+        "risk_level": "high",
+        "remediation_issue_id": "bd-1f42.8.2.2"
+      },
+      {
+        "module": "tests/e2e_provider_scenarios",
+        "entries": 23,
+        "unique_test_cases": 20,
+        "risk_counts": {
+          "medium": 23
+        },
+        "suite_counts": {
+          "e2e": 23
+        },
+        "double_type_counts": {
+          "mock": 14,
+          "mock-server-helper": 9
+        },
+        "risk_score": 46,
+        "risk_level": "high",
+        "remediation_issue_id": "bd-1f42.8.5.2"
       },
       {
         "module": "tests/mock_spec_validation",
@@ -100,7 +132,44 @@
           "mock": 11
         },
         "risk_score": 33,
-        "risk_level": "high"
+        "risk_level": "high",
+        "remediation_issue_id": "bd-1f42.8.3"
+      },
+      {
+        "module": "tests/provider_native_contract",
+        "entries": 14,
+        "unique_test_cases": 13,
+        "risk_counts": {
+          "medium": 14
+        },
+        "suite_counts": {
+          "vcr": 14
+        },
+        "double_type_counts": {
+          "mock": 4,
+          "mock-server-helper": 10
+        },
+        "risk_score": 28,
+        "risk_level": "high",
+        "remediation_issue_id": "bd-1f42.8.4.2"
+      },
+      {
+        "module": "tests/provider_factory",
+        "entries": 13,
+        "unique_test_cases": 12,
+        "risk_counts": {
+          "medium": 13
+        },
+        "suite_counts": {
+          "vcr": 13
+        },
+        "double_type_counts": {
+          "mock": 3,
+          "mock-server-helper": 10
+        },
+        "risk_score": 26,
+        "risk_level": "high",
+        "remediation_issue_id": "bd-1f42.8.4.2"
       },
       {
         "module": "tests/common",
@@ -113,12 +182,13 @@
           "unclassified": 23
         },
         "double_type_counts": {
-          "mock-server-helper": 2,
           "mock": 15,
+          "mock-server-helper": 2,
           "recording-double": 6
         },
         "risk_score": 23,
-        "risk_level": "high"
+        "risk_level": "high",
+        "remediation_issue_id": "bd-1f42.8.3"
       },
       {
         "module": "src/bin",
@@ -153,6 +223,23 @@
         "risk_level": "medium"
       },
       {
+        "module": "tests/provider_smoke_matrix",
+        "entries": 13,
+        "unique_test_cases": 11,
+        "risk_counts": {
+          "low": 13
+        },
+        "suite_counts": {
+          "unclassified": 13
+        },
+        "double_type_counts": {
+          "mock": 4,
+          "mock-server-helper": 9
+        },
+        "risk_score": 13,
+        "risk_level": "medium"
+      },
+      {
         "module": "tests/tui_state",
         "entries": 5,
         "unique_test_cases": 5,
@@ -167,6 +254,22 @@
         },
         "risk_score": 10,
         "risk_level": "medium"
+      },
+      {
+        "module": "tests/non_mock_compliance_gate",
+        "entries": 3,
+        "unique_test_cases": 1,
+        "risk_counts": {
+          "high": 3
+        },
+        "suite_counts": {
+          "unit": 3
+        },
+        "double_type_counts": {
+          "stub": 3
+        },
+        "risk_score": 9,
+        "risk_level": "low"
       },
       {
         "module": "tests/e2e_message_session_control",
@@ -198,86 +301,6 @@
           "stub": 2
         },
         "risk_score": 6,
-        "risk_level": "low"
-      },
-      {
-        "module": "tests/capability_prompt",
-        "entries": 2,
-        "unique_test_cases": 2,
-        "risk_counts": {
-          "medium": 2
-        },
-        "suite_counts": {
-          "vcr": 2
-        },
-        "double_type_counts": {
-          "stub": 2
-        },
-        "risk_score": 4,
-        "risk_level": "low"
-      },
-      {
-        "module": "tests/tui_snapshot",
-        "entries": 2,
-        "unique_test_cases": 2,
-        "risk_counts": {
-          "medium": 2
-        },
-        "suite_counts": {
-          "vcr": 2
-        },
-        "double_type_counts": {
-          "stub": 2
-        },
-        "risk_score": 4,
-        "risk_level": "low"
-      },
-      {
-        "module": "src/conformance_shapes",
-        "entries": 1,
-        "unique_test_cases": 1,
-        "risk_counts": {
-          "high": 1
-        },
-        "suite_counts": {
-          "unit-inline": 1
-        },
-        "double_type_counts": {
-          "mock": 1
-        },
-        "risk_score": 3,
-        "risk_level": "low"
-      },
-      {
-        "module": "src/extensions_js",
-        "entries": 1,
-        "unique_test_cases": 1,
-        "risk_counts": {
-          "high": 1
-        },
-        "suite_counts": {
-          "unit-inline": 1
-        },
-        "double_type_counts": {
-          "stub": 1
-        },
-        "risk_score": 3,
-        "risk_level": "low"
-      },
-      {
-        "module": "tests/extensions_repair_events",
-        "entries": 1,
-        "unique_test_cases": 1,
-        "risk_counts": {
-          "medium": 1
-        },
-        "suite_counts": {
-          "vcr": 1
-        },
-        "double_type_counts": {
-          "stub": 1
-        },
-        "risk_score": 2,
         "risk_level": "low"
       }
     ]
@@ -367,7 +390,7 @@
       "test_case": "ui_confirm_cancel_defaults_to_false",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 1475,
+      "line": 1516,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -378,7 +401,7 @@
       "test_case": "set_label",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 1532,
+      "line": 1573,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -389,7 +412,7 @@
       "test_case": "build_dispatcher_with_policy",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 1693,
+      "line": 1734,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -400,7 +423,7 @@
       "test_case": "build_dispatcher_with_policy",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 1694,
+      "line": 1735,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -411,7 +434,7 @@
       "test_case": "dispatcher_tool_hostcall_executes_and_resolves_promise",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 1793,
+      "line": 1834,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -422,7 +445,7 @@
       "test_case": "dispatcher_tool_hostcall_executes_and_resolves_promise",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 1794,
+      "line": 1835,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -433,7 +456,7 @@
       "test_case": "dispatcher_session_hostcall_resolves_state_and_set_name",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 1912,
+      "line": 1953,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -444,7 +467,7 @@
       "test_case": "dispatcher_session_hostcall_get_messages_entries_branch",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 2007,
+      "line": 2048,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -455,7 +478,7 @@
       "test_case": "dispatcher_session_hostcall_append_message_and_entry",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 2103,
+      "line": 2144,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -466,7 +489,7 @@
       "test_case": "dispatcher_http_hostcall_executes_and_resolves_promise",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 2595,
+      "line": 2636,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -477,7 +500,7 @@
       "test_case": "dispatcher_http_hostcall_executes_and_resolves_promise",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 2596,
+      "line": 2637,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -488,7 +511,7 @@
       "test_case": "dispatcher_http_hostcall_invalid_method_rejects_promise",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 2654,
+      "line": 2695,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -499,7 +522,7 @@
       "test_case": "dispatcher_http_hostcall_invalid_method_rejects_promise",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 2655,
+      "line": 2696,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -510,7 +533,7 @@
       "test_case": "dispatcher_ui_hostcall_executes_and_resolves_promise",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 2706,
+      "line": 2747,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -521,7 +544,7 @@
       "test_case": "dispatcher_extension_ui_set_status_includes_text_field",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 2764,
+      "line": 2805,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -532,7 +555,7 @@
       "test_case": "dispatcher_extension_ui_set_widget_includes_widget_lines_and_content",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 2823,
+      "line": 2864,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -543,7 +566,7 @@
       "test_case": "dispatcher_session_set_model_resolves_and_persists",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 2986,
+      "line": 3027,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -554,7 +577,7 @@
       "test_case": "dispatcher_session_get_model_resolves_provider_and_model_id",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 3063,
+      "line": 3104,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -565,7 +588,7 @@
       "test_case": "dispatcher_session_set_then_get_model_round_trip",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 3191,
+      "line": 3232,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -576,7 +599,7 @@
       "test_case": "dispatcher_session_set_thinking_level_resolves",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 3283,
+      "line": 3324,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -587,7 +610,7 @@
       "test_case": "dispatcher_session_get_thinking_level_resolves",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 3356,
+      "line": 3397,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -598,7 +621,7 @@
       "test_case": "dispatcher_session_set_then_get_thinking_level_round_trip",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 3513,
+      "line": 3554,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -609,7 +632,7 @@
       "test_case": "dispatcher_session_model_ops_accept_camel_case_aliases",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 3608,
+      "line": 3649,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -620,7 +643,7 @@
       "test_case": "dispatcher_session_set_model_accepts_model_id_snake_case",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 3672,
+      "line": 3713,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -631,7 +654,7 @@
       "test_case": "dispatcher_session_set_thinking_level_accepts_alt_keys",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 3745,
+      "line": 3786,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -642,7 +665,7 @@
       "test_case": "dispatcher_session_get_model_null_when_unset",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 3799,
+      "line": 3840,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -653,7 +676,7 @@
       "test_case": "dispatcher_session_set_label_resolves_and_persists",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 3868,
+      "line": 3909,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -664,7 +687,7 @@
       "test_case": "dispatcher_session_set_label_remove_label_with_null",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 3929,
+      "line": 3970,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -675,7 +698,7 @@
       "test_case": "dispatcher_session_set_label_accepts_snake_case_target_id",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 4040,
+      "line": 4081,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -686,7 +709,7 @@
       "test_case": "dispatcher_session_set_label_camel_case_op_alias",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 4101,
+      "line": 4142,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -697,7 +720,7 @@
       "test_case": "dispatcher_tool_write_creates_file_and_resolves",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 4153,
+      "line": 4194,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -708,7 +731,7 @@
       "test_case": "dispatcher_tool_write_creates_file_and_resolves",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 4154,
+      "line": 4195,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -719,7 +742,7 @@
       "test_case": "dispatcher_tool_ls_lists_directory",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 4205,
+      "line": 4246,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -730,7 +753,7 @@
       "test_case": "dispatcher_tool_ls_lists_directory",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 4206,
+      "line": 4247,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -741,7 +764,7 @@
       "test_case": "dispatcher_tool_grep_searches_content",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 4267,
+      "line": 4308,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -752,7 +775,7 @@
       "test_case": "dispatcher_tool_grep_searches_content",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 4268,
+      "line": 4309,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -763,7 +786,7 @@
       "test_case": "dispatcher_tool_edit_modifies_file_content",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 4326,
+      "line": 4367,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -774,7 +797,7 @@
       "test_case": "dispatcher_tool_edit_modifies_file_content",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 4327,
+      "line": 4368,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -785,7 +808,7 @@
       "test_case": "dispatcher_tool_find_discovers_files",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 4380,
+      "line": 4421,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -796,7 +819,7 @@
       "test_case": "dispatcher_tool_find_discovers_files",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 4381,
+      "line": 4422,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -807,7 +830,7 @@
       "test_case": "dispatcher_tool_multiple_tools_sequentially",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 4446,
+      "line": 4487,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -818,7 +841,7 @@
       "test_case": "dispatcher_tool_multiple_tools_sequentially",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 4447,
+      "line": 4488,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -829,7 +852,7 @@
       "test_case": "dispatcher_tool_error_propagates_to_js",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 4503,
+      "line": 4544,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -840,7 +863,7 @@
       "test_case": "dispatcher_tool_error_propagates_to_js",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 4504,
+      "line": 4545,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -851,7 +874,7 @@
       "test_case": "dispatcher_http_post_sends_body",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 4587,
+      "line": 4628,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -862,7 +885,7 @@
       "test_case": "dispatcher_http_post_sends_body",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 4588,
+      "line": 4629,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -873,7 +896,7 @@
       "test_case": "dispatcher_http_missing_url_rejects",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 4647,
+      "line": 4688,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -884,7 +907,7 @@
       "test_case": "dispatcher_http_missing_url_rejects",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 4648,
+      "line": 4689,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -895,7 +918,7 @@
       "test_case": "dispatcher_http_custom_headers",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 4709,
+      "line": 4750,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -906,7 +929,7 @@
       "test_case": "dispatcher_http_custom_headers",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 4710,
+      "line": 4751,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -917,7 +940,7 @@
       "test_case": "dispatcher_http_connection_refused_rejects",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 4770,
+      "line": 4811,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -928,7 +951,7 @@
       "test_case": "dispatcher_http_connection_refused_rejects",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 4771,
+      "line": 4812,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -939,7 +962,7 @@
       "test_case": "dispatcher_ui_spinner_method",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 4832,
+      "line": 4873,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -950,7 +973,7 @@
       "test_case": "dispatcher_ui_progress_method",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 4886,
+      "line": 4927,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -961,7 +984,7 @@
       "test_case": "dispatcher_ui_notification_method",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 4941,
+      "line": 4982,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -972,7 +995,7 @@
       "test_case": "dispatcher_ui_null_handler_returns_null",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 4986,
+      "line": 5027,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -983,7 +1006,7 @@
       "test_case": "dispatcher_ui_multiple_calls_captured",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 5047,
+      "line": 5088,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -994,7 +1017,7 @@
       "test_case": "dispatcher_session_get_file_isolated",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 5324,
+      "line": 5365,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1005,7 +1028,7 @@
       "test_case": "dispatcher_session_get_name_isolated",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 5392,
+      "line": 5433,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1016,7 +1039,7 @@
       "test_case": "dispatcher_session_append_entry_custom_type_edge_cases",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 5461,
+      "line": 5502,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1027,7 +1050,7 @@
       "test_case": "dispatcher_http_invalid_url_format_rejects",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 5995,
+      "line": 6036,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1038,7 +1061,7 @@
       "test_case": "dispatcher_http_invalid_url_format_rejects",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 5996,
+      "line": 6037,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1049,7 +1072,7 @@
       "test_case": "dispatcher_http_response_body_returned",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 6109,
+      "line": 6150,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1060,7 +1083,7 @@
       "test_case": "dispatcher_http_response_body_returned",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 6110,
+      "line": 6151,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1071,7 +1094,7 @@
       "test_case": "dispatcher_http_error_status_code_returned",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 6175,
+      "line": 6216,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1082,7 +1105,7 @@
       "test_case": "dispatcher_http_error_status_code_returned",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 6176,
+      "line": 6217,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1093,7 +1116,7 @@
       "test_case": "dispatcher_http_unsupported_scheme_rejects",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 6236,
+      "line": 6277,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1104,7 +1127,7 @@
       "test_case": "dispatcher_http_unsupported_scheme_rejects",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 6237,
+      "line": 6278,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1115,7 +1138,7 @@
       "test_case": "dispatcher_ui_arbitrary_method_passthrough",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 6302,
+      "line": 6343,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1126,7 +1149,7 @@
       "test_case": "dispatcher_ui_payload_passthrough_complex",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 6362,
+      "line": 6403,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1137,7 +1160,7 @@
       "test_case": "dispatcher_ui_handler_returns_value",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 6419,
+      "line": 6460,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1148,7 +1171,7 @@
       "test_case": "dispatcher_ui_set_status_empty_text",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 6483,
+      "line": 6524,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1159,7 +1182,7 @@
       "test_case": "dispatcher_ui_empty_payload",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 6537,
+      "line": 6578,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1170,7 +1193,7 @@
       "test_case": "dispatcher_ui_concurrent_different_methods",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 6594,
+      "line": 6635,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1181,7 +1204,7 @@
       "test_case": "dispatcher_ui_notification_with_severity",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 6650,
+      "line": 6691,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1192,7 +1215,7 @@
       "test_case": "dispatcher_ui_widget_with_lines_array",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 6711,
+      "line": 6752,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1203,7 +1226,7 @@
       "test_case": "dispatcher_ui_progress_with_percentage",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 6768,
+      "line": 6809,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1214,7 +1237,7 @@
       "test_case": "dispatcher_tool_read_returns_file_content",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 7169,
+      "line": 7210,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1225,7 +1248,7 @@
       "test_case": "dispatcher_tool_read_returns_file_content",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 7170,
+      "line": 7211,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1236,7 +1259,7 @@
       "test_case": "request_ui",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 7619,
+      "line": 7660,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1247,7 +1270,7 @@
       "test_case": "protocol_dispatch_tool_success",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 8527,
+      "line": 8568,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1258,7 +1281,7 @@
       "test_case": "protocol_dispatch_tool_success",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 8528,
+      "line": 8569,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1269,7 +1292,7 @@
       "test_case": "protocol_dispatch_http_success",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 8665,
+      "line": 8706,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1280,7 +1303,7 @@
       "test_case": "protocol_dispatch_http_success",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 8666,
+      "line": 8707,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1291,7 +1314,7 @@
       "test_case": "protocol_dispatch_ui_success",
       "double_identifier": "NullSession",
       "double_type": "stub",
-      "line": 8714,
+      "line": 8755,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1302,7 +1325,7 @@
       "test_case": "protocol_dispatch_ui_success",
       "double_identifier": "NullUiHandler",
       "double_type": "stub",
-      "line": 8715,
+      "line": 8756,
       "risk": "high",
       "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
@@ -1403,7 +1426,7 @@
       "double_type": "mock",
       "line": 13796,
       "risk": "high",
-      "rationale": "In-module host-actions mock for extension unit tests of sendMessage/sendUserMessage paths."
+      "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
     {
       "file": "src/extensions.rs",
@@ -1414,7 +1437,7 @@
       "double_type": "mock",
       "line": 13814,
       "risk": "high",
-      "rationale": "In-module host-actions mock for extension unit tests of sendMessage/sendUserMessage paths."
+      "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
     {
       "file": "src/extensions.rs",
@@ -1425,7 +1448,7 @@
       "double_type": "mock",
       "line": 13834,
       "risk": "high",
-      "rationale": "In-module host-actions mock for extension unit tests of sendMessage/sendUserMessage paths."
+      "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
     {
       "file": "src/extensions.rs",
@@ -1436,7 +1459,7 @@
       "double_type": "mock",
       "line": 13876,
       "risk": "high",
-      "rationale": "In-module host-actions mock for extension unit tests of sendMessage/sendUserMessage paths."
+      "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
     {
       "file": "src/extensions.rs",
@@ -1447,7 +1470,7 @@
       "double_type": "mock",
       "line": 13931,
       "risk": "high",
-      "rationale": "In-module host-actions mock for extension unit tests of sendMessage/sendUserMessage paths."
+      "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
     {
       "file": "src/extensions.rs",
@@ -1458,7 +1481,7 @@
       "double_type": "mock",
       "line": 13963,
       "risk": "high",
-      "rationale": "In-module host-actions mock for extension unit tests of sendMessage/sendUserMessage paths."
+      "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
     {
       "file": "src/extensions.rs",
@@ -1513,7 +1536,7 @@
       "double_type": "mock",
       "line": 15363,
       "risk": "high",
-      "rationale": "In-module host-actions mock for extension unit tests of sendMessage/sendUserMessage paths."
+      "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
     },
     {
       "file": "src/extensions.rs",
@@ -1568,7 +1591,7 @@
       "double_type": "stub",
       "line": 50,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/capability_prompt.rs",
@@ -1579,7 +1602,7 @@
       "double_type": "stub",
       "line": 111,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/common/harness.rs",
@@ -1588,9 +1611,9 @@
       "test_case": "start_mock_http_server",
       "double_identifier": "MockHttpServer",
       "double_type": "mock",
-      "line": 284,
+      "line": 285,
       "risk": "low",
-      "rationale": "Real local TCP server used for deterministic byte-level harness cases where VCR cannot represent payloads."
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
     },
     {
       "file": "tests/common/harness.rs",
@@ -1599,9 +1622,9 @@
       "test_case": "start_mock_http_server",
       "double_identifier": "start_mock_http_server",
       "double_type": "mock-server-helper",
-      "line": 284,
+      "line": 285,
       "risk": "low",
-      "rationale": "Helper that provisions deterministic local mock HTTP endpoint for fixture-like network tests."
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
     },
     {
       "file": "tests/common/harness.rs",
@@ -1610,9 +1633,9 @@
       "test_case": "apply_to",
       "double_identifier": "MockHttpResponse",
       "double_type": "mock",
-      "line": 518,
+      "line": 519,
       "risk": "low",
-      "rationale": "Companion response builder for MockHttpServer harness fixtures."
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
     },
     {
       "file": "tests/common/harness.rs",
@@ -1621,9 +1644,9 @@
       "test_case": "json",
       "double_identifier": "MockHttpRequest",
       "double_type": "mock",
-      "line": 545,
+      "line": 546,
       "risk": "low",
-      "rationale": "Companion request builder for MockHttpServer harness fixtures."
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
     },
     {
       "file": "tests/common/harness.rs",
@@ -1632,9 +1655,9 @@
       "test_case": "json",
       "double_identifier": "MockHttpServer",
       "double_type": "mock",
-      "line": 558,
+      "line": 559,
       "risk": "low",
-      "rationale": "Real local TCP server used for deterministic byte-level harness cases where VCR cannot represent payloads."
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
     },
     {
       "file": "tests/common/harness.rs",
@@ -1643,9 +1666,9 @@
       "test_case": "json",
       "double_identifier": "MockHttpResponse",
       "double_type": "mock",
-      "line": 560,
+      "line": 561,
       "risk": "low",
-      "rationale": "Companion response builder for MockHttpServer harness fixtures."
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
     },
     {
       "file": "tests/common/harness.rs",
@@ -1654,9 +1677,9 @@
       "test_case": "add_route",
       "double_identifier": "MockHttpResponse",
       "double_type": "mock",
-      "line": 658,
+      "line": 659,
       "risk": "low",
-      "rationale": "Companion response builder for MockHttpServer harness fixtures."
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
     },
     {
       "file": "tests/common/harness.rs",
@@ -1665,9 +1688,9 @@
       "test_case": "add_route_queue",
       "double_identifier": "MockHttpResponse",
       "double_type": "mock",
-      "line": 668,
+      "line": 669,
       "risk": "low",
-      "rationale": "Companion response builder for MockHttpServer harness fixtures."
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
     },
     {
       "file": "tests/common/harness.rs",
@@ -1676,9 +1699,9 @@
       "test_case": "requests",
       "double_identifier": "MockHttpRequest",
       "double_type": "mock",
-      "line": 680,
+      "line": 681,
       "risk": "low",
-      "rationale": "Companion request builder for MockHttpServer harness fixtures."
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
     },
     {
       "file": "tests/common/harness.rs",
@@ -1687,9 +1710,9 @@
       "test_case": "requests",
       "double_identifier": "MockHttpServer",
       "double_type": "mock",
-      "line": 685,
+      "line": 686,
       "risk": "low",
-      "rationale": "Real local TCP server used for deterministic byte-level harness cases where VCR cannot represent payloads."
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
     },
     {
       "file": "tests/common/harness.rs",
@@ -1698,9 +1721,9 @@
       "test_case": "handle_connection",
       "double_identifier": "MockHttpResponse",
       "double_type": "mock",
-      "line": 710,
+      "line": 711,
       "risk": "low",
-      "rationale": "Companion response builder for MockHttpServer harness fixtures."
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
     },
     {
       "file": "tests/common/harness.rs",
@@ -1709,9 +1732,9 @@
       "test_case": "handle_connection",
       "double_identifier": "MockHttpRequest",
       "double_type": "mock",
-      "line": 714,
+      "line": 715,
       "risk": "low",
-      "rationale": "Companion request builder for MockHttpServer harness fixtures."
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
     },
     {
       "file": "tests/common/harness.rs",
@@ -1720,9 +1743,9 @@
       "test_case": "write_response",
       "double_identifier": "MockHttpResponse",
       "double_type": "mock",
-      "line": 863,
+      "line": 864,
       "risk": "low",
-      "rationale": "Companion response builder for MockHttpServer harness fixtures."
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
     },
     {
       "file": "tests/common/harness.rs",
@@ -1731,9 +1754,9 @@
       "test_case": "test_mock_http_server_records_requests_and_redacts",
       "double_identifier": "start_mock_http_server",
       "double_type": "mock-server-helper",
-      "line": 1781,
+      "line": 1813,
       "risk": "low",
-      "rationale": "Helper that provisions deterministic local mock HTTP endpoint for fixture-like network tests."
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
     },
     {
       "file": "tests/common/harness.rs",
@@ -1742,20 +1765,20 @@
       "test_case": "test_mock_http_server_records_requests_and_redacts",
       "double_identifier": "MockHttpResponse",
       "double_type": "mock",
-      "line": 1782,
+      "line": 1814,
       "risk": "low",
-      "rationale": "Companion response builder for MockHttpServer harness fixtures."
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
     },
     {
       "file": "tests/common/mocks.rs",
       "suite": "unclassified",
       "module": "tests/common",
-      "test_case": "<module-scope>",
+      "test_case": "<module>",
       "double_identifier": "RecordingSession",
       "double_type": "recording-double",
       "line": 5,
       "risk": "low",
-      "rationale": "Captures host/session side effects for contract assertions without full runtime orchestration."
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
     },
     {
       "file": "tests/common/mocks.rs",
@@ -1766,7 +1789,7 @@
       "double_type": "recording-double",
       "line": 331,
       "risk": "low",
-      "rationale": "Captures host/session side effects for contract assertions without full runtime orchestration."
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
     },
     {
       "file": "tests/common/mocks.rs",
@@ -1777,7 +1800,7 @@
       "double_type": "recording-double",
       "line": 453,
       "risk": "low",
-      "rationale": "Captures host/session side effects for contract assertions without full runtime orchestration."
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
     },
     {
       "file": "tests/common/mocks.rs",
@@ -1788,7 +1811,7 @@
       "double_type": "recording-double",
       "line": 930,
       "risk": "low",
-      "rationale": "Captures host/session side effects for contract assertions without full runtime orchestration."
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
     },
     {
       "file": "tests/common/mocks.rs",
@@ -1799,7 +1822,7 @@
       "double_type": "recording-double",
       "line": 965,
       "risk": "low",
-      "rationale": "Captures host/session side effects for contract assertions without full runtime orchestration."
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
     },
     {
       "file": "tests/common/mocks.rs",
@@ -1810,40 +1833,40 @@
       "double_type": "recording-double",
       "line": 1124,
       "risk": "low",
-      "rationale": "Captures host/session side effects for contract assertions without full runtime orchestration."
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
     },
     {
       "file": "tests/common/mod.rs",
       "suite": "unclassified",
       "module": "tests/common",
-      "test_case": "<module-scope>",
+      "test_case": "<module>",
       "double_identifier": "MockHttpResponse",
       "double_type": "mock",
-      "line": 41,
+      "line": 43,
       "risk": "low",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
     },
     {
       "file": "tests/common/mod.rs",
       "suite": "unclassified",
       "module": "tests/common",
-      "test_case": "<module-scope>",
+      "test_case": "<module>",
       "double_identifier": "MockHttpServer",
       "double_type": "mock",
-      "line": 41,
+      "line": 43,
       "risk": "low",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
     },
     {
       "file": "tests/e2e_message_session_control.rs",
       "suite": "e2e",
       "module": "tests/e2e_message_session_control",
-      "test_case": "<module-scope>",
+      "test_case": "<module>",
       "double_identifier": "RecordingHostActions",
       "double_type": "recording-double",
       "line": 11,
       "risk": "medium",
-      "rationale": "Host action recording double used to assert message/session control wiring."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/e2e_message_session_control.rs",
@@ -1854,7 +1877,7 @@
       "double_type": "recording-double",
       "line": 57,
       "risk": "medium",
-      "rationale": "Host action recording double used to assert message/session control wiring."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/e2e_message_session_control.rs",
@@ -1865,7 +1888,260 @@
       "double_type": "recording-double",
       "line": 67,
       "risk": "medium",
-      "rationale": "Host action recording double used to assert message/session control wiring."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/e2e_provider_scenarios.rs",
+      "suite": "e2e",
+      "module": "tests/e2e_provider_scenarios",
+      "test_case": "<module>",
+      "double_identifier": "MockHttpServer",
+      "double_type": "mock",
+      "line": 5,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/e2e_provider_scenarios.rs",
+      "suite": "e2e",
+      "module": "tests/e2e_provider_scenarios",
+      "test_case": "<module>",
+      "double_identifier": "MockHttpResponse",
+      "double_type": "mock",
+      "line": 12,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/e2e_provider_scenarios.rs",
+      "suite": "e2e",
+      "module": "tests/e2e_provider_scenarios",
+      "test_case": "text_event_stream",
+      "double_identifier": "MockHttpResponse",
+      "double_type": "mock",
+      "line": 99,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/e2e_provider_scenarios.rs",
+      "suite": "e2e",
+      "module": "tests/e2e_provider_scenarios",
+      "test_case": "json_response",
+      "double_identifier": "MockHttpResponse",
+      "double_type": "mock",
+      "line": 107,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/e2e_provider_scenarios.rs",
+      "suite": "e2e",
+      "module": "tests/e2e_provider_scenarios",
+      "test_case": "openai_error_401",
+      "double_identifier": "MockHttpResponse",
+      "double_type": "mock",
+      "line": 335,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/e2e_provider_scenarios.rs",
+      "suite": "e2e",
+      "module": "tests/e2e_provider_scenarios",
+      "test_case": "anthropic_error_401",
+      "double_identifier": "MockHttpResponse",
+      "double_type": "mock",
+      "line": 342,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/e2e_provider_scenarios.rs",
+      "suite": "e2e",
+      "module": "tests/e2e_provider_scenarios",
+      "test_case": "gemini_error_401",
+      "double_identifier": "MockHttpResponse",
+      "double_type": "mock",
+      "line": 349,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/e2e_provider_scenarios.rs",
+      "suite": "e2e",
+      "module": "tests/e2e_provider_scenarios",
+      "test_case": "cohere_error_401",
+      "double_identifier": "MockHttpResponse",
+      "double_type": "mock",
+      "line": 356,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/e2e_provider_scenarios.rs",
+      "suite": "e2e",
+      "module": "tests/e2e_provider_scenarios",
+      "test_case": "bedrock_error_401",
+      "double_identifier": "MockHttpResponse",
+      "double_type": "mock",
+      "line": 361,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/e2e_provider_scenarios.rs",
+      "suite": "e2e",
+      "module": "tests/e2e_provider_scenarios",
+      "test_case": "summarize_events",
+      "double_identifier": "MockHttpResponse",
+      "double_type": "mock",
+      "line": 553,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/e2e_provider_scenarios.rs",
+      "suite": "e2e",
+      "module": "tests/e2e_provider_scenarios",
+      "test_case": "cohere_base",
+      "double_identifier": "MockHttpServer",
+      "double_type": "mock",
+      "line": 655,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/e2e_provider_scenarios.rs",
+      "suite": "e2e",
+      "module": "tests/e2e_provider_scenarios",
+      "test_case": "setup_mock_route",
+      "double_identifier": "MockHttpServer",
+      "double_type": "mock",
+      "line": 669,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/e2e_provider_scenarios.rs",
+      "suite": "e2e",
+      "module": "tests/e2e_provider_scenarios",
+      "test_case": "setup_mock_route",
+      "double_identifier": "MockHttpResponse",
+      "double_type": "mock",
+      "line": 670,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/e2e_provider_scenarios.rs",
+      "suite": "e2e",
+      "module": "tests/e2e_provider_scenarios",
+      "test_case": "e2e_simple_text_all_families",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 690,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/e2e_provider_scenarios.rs",
+      "suite": "e2e",
+      "module": "tests/e2e_provider_scenarios",
+      "test_case": "e2e_tool_call_all_families",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 793,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/e2e_provider_scenarios.rs",
+      "suite": "e2e",
+      "module": "tests/e2e_provider_scenarios",
+      "test_case": "e2e_error_auth_all_families",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 897,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/e2e_provider_scenarios.rs",
+      "suite": "e2e",
+      "module": "tests/e2e_provider_scenarios",
+      "test_case": "e2e_multi_turn_conversation",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 1030,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/e2e_provider_scenarios.rs",
+      "suite": "e2e",
+      "module": "tests/e2e_provider_scenarios",
+      "test_case": "e2e_event_ordering_all_families",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 1219,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/e2e_provider_scenarios.rs",
+      "suite": "e2e",
+      "module": "tests/e2e_provider_scenarios",
+      "test_case": "e2e_event_ordering_all_families",
+      "double_identifier": "MockHttpServer",
+      "double_type": "mock",
+      "line": 1281,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/e2e_provider_scenarios.rs",
+      "suite": "e2e",
+      "module": "tests/e2e_provider_scenarios",
+      "test_case": "e2e_determinism_proof",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 1291,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/e2e_provider_scenarios.rs",
+      "suite": "e2e",
+      "module": "tests/e2e_provider_scenarios",
+      "test_case": "e2e_openai_compatible_wave_presets",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 1349,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/e2e_provider_scenarios.rs",
+      "suite": "e2e",
+      "module": "tests/e2e_provider_scenarios",
+      "test_case": "e2e_comprehensive_report",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 1437,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/e2e_provider_scenarios.rs",
+      "suite": "e2e",
+      "module": "tests/e2e_provider_scenarios",
+      "test_case": "e2e_request_body_stability",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 1611,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/ext_conformance_scenarios.rs",
@@ -1874,9 +2150,9 @@
       "test_case": "check_expectations_inner",
       "double_identifier": "MockSpecInterceptor",
       "double_type": "mock",
-      "line": 550,
+      "line": 691,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/ext_conformance_scenarios.rs",
@@ -1885,9 +2161,9 @@
       "test_case": "json_contains_inner",
       "double_identifier": "MockSpecInterceptor",
       "double_type": "mock",
-      "line": 1090,
+      "line": 1231,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/ext_conformance_scenarios.rs",
@@ -1896,9 +2172,9 @@
       "test_case": "match_http",
       "double_identifier": "MockSpecInterceptor",
       "double_type": "mock",
-      "line": 1322,
+      "line": 1463,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/ext_conformance_scenarios.rs",
@@ -1907,9 +2183,9 @@
       "test_case": "set_label",
       "double_identifier": "MockSpecInterceptor",
       "double_type": "mock",
-      "line": 1556,
+      "line": 1697,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/ext_conformance_scenarios.rs",
@@ -1918,9 +2194,9 @@
       "test_case": "load_extension_with_mocks",
       "double_identifier": "MockSpecInterceptor",
       "double_type": "mock",
-      "line": 1581,
+      "line": 1722,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/ext_conformance_scenarios.rs",
@@ -1929,9 +2205,9 @@
       "test_case": "build_ctx_payload_with_mocks",
       "double_identifier": "MockSpecInterceptor",
       "double_type": "mock",
-      "line": 1792,
+      "line": 1933,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/ext_conformance_scenarios.rs",
@@ -1940,20 +2216,20 @@
       "test_case": "mock_http_vcr_or_stub_default_emits_sse_data_line",
       "double_identifier": "MockSpecInterceptor",
       "double_type": "mock",
-      "line": 2838,
+      "line": 3080,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
       "suite": "vcr",
       "module": "tests/extensions_provider_oauth",
-      "test_case": "<module-scope>",
+      "test_case": "<module>",
       "double_identifier": "MockHttpResponse",
       "double_type": "mock",
       "line": 14,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -1964,7 +2240,7 @@
       "double_type": "mock",
       "line": 267,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -1975,7 +2251,7 @@
       "double_type": "mock-server-helper",
       "line": 272,
       "risk": "medium",
-      "rationale": "Helper that provisions deterministic local mock HTTP endpoint for fixture-like network tests."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -1986,7 +2262,7 @@
       "double_type": "mock",
       "line": 276,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -1995,9 +2271,9 @@
       "test_case": "complete_extension_oauth_exchanges_code_for_tokens",
       "double_identifier": "MockHttpServer",
       "double_type": "mock",
-      "line": 321,
+      "line": 322,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -2006,9 +2282,9 @@
       "test_case": "complete_extension_oauth_includes_redirect_uri_in_body",
       "double_identifier": "start_mock_http_server",
       "double_type": "mock-server-helper",
-      "line": 326,
+      "line": 327,
       "risk": "medium",
-      "rationale": "Helper that provisions deterministic local mock HTTP endpoint for fixture-like network tests."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -2017,9 +2293,9 @@
       "test_case": "complete_extension_oauth_includes_redirect_uri_in_body",
       "double_identifier": "MockHttpResponse",
       "double_type": "mock",
-      "line": 330,
+      "line": 331,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -2028,9 +2304,9 @@
       "test_case": "complete_extension_oauth_includes_redirect_uri_in_body",
       "double_identifier": "MockHttpServer",
       "double_type": "mock",
-      "line": 357,
+      "line": 358,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -2039,9 +2315,9 @@
       "test_case": "complete_extension_oauth_error_on_server_400",
       "double_identifier": "start_mock_http_server",
       "double_type": "mock-server-helper",
-      "line": 362,
+      "line": 363,
       "risk": "medium",
-      "rationale": "Helper that provisions deterministic local mock HTTP endpoint for fixture-like network tests."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -2050,9 +2326,9 @@
       "test_case": "complete_extension_oauth_error_on_server_400",
       "double_identifier": "MockHttpResponse",
       "double_type": "mock",
-      "line": 366,
+      "line": 367,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -2061,9 +2337,9 @@
       "test_case": "complete_extension_oauth_error_on_missing_code",
       "double_identifier": "MockHttpServer",
       "double_type": "mock",
-      "line": 405,
+      "line": 406,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -2072,9 +2348,9 @@
       "test_case": "complete_extension_oauth_parses_url_callback_input",
       "double_identifier": "start_mock_http_server",
       "double_type": "mock-server-helper",
-      "line": 410,
+      "line": 411,
       "risk": "medium",
-      "rationale": "Helper that provisions deterministic local mock HTTP endpoint for fixture-like network tests."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -2083,9 +2359,9 @@
       "test_case": "complete_extension_oauth_parses_url_callback_input",
       "double_identifier": "MockHttpResponse",
       "double_type": "mock",
-      "line": 414,
+      "line": 415,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -2094,9 +2370,9 @@
       "test_case": "complete_extension_oauth_parses_url_callback_input",
       "double_identifier": "MockHttpServer",
       "double_type": "mock",
-      "line": 463,
+      "line": 464,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -2105,9 +2381,9 @@
       "test_case": "refresh_expired_extension_oauth_token_succeeds",
       "double_identifier": "start_mock_http_server",
       "double_type": "mock-server-helper",
-      "line": 468,
+      "line": 469,
       "risk": "medium",
-      "rationale": "Helper that provisions deterministic local mock HTTP endpoint for fixture-like network tests."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -2116,9 +2392,9 @@
       "test_case": "refresh_expired_extension_oauth_token_succeeds",
       "double_identifier": "MockHttpResponse",
       "double_type": "mock",
-      "line": 472,
+      "line": 473,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -2127,9 +2403,9 @@
       "test_case": "refresh_expired_extension_oauth_token_succeeds",
       "double_identifier": "MockHttpServer",
       "double_type": "mock",
-      "line": 522,
+      "line": 525,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -2138,9 +2414,9 @@
       "test_case": "refresh_extension_oauth_skips_anthropic_provider",
       "double_identifier": "start_mock_http_server",
       "double_type": "mock-server-helper",
-      "line": 527,
+      "line": 530,
       "risk": "medium",
-      "rationale": "Helper that provisions deterministic local mock HTTP endpoint for fixture-like network tests."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -2149,9 +2425,9 @@
       "test_case": "refresh_extension_oauth_skips_anthropic_provider",
       "double_identifier": "MockHttpResponse",
       "double_type": "mock",
-      "line": 532,
+      "line": 535,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -2160,20 +2436,20 @@
       "test_case": "refresh_extension_oauth_skips_anthropic_provider",
       "double_identifier": "MockHttpServer",
       "double_type": "mock",
-      "line": 581,
-      "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
-    },
-    {
-      "file": "tests/extensions_provider_oauth.rs",
-      "suite": "vcr",
-      "module": "tests/extensions_provider_oauth",
-      "test_case": "refresh_extension_oauth_skips_unexpired_token",
-      "double_identifier": "start_mock_http_server",
-      "double_type": "mock-server-helper",
       "line": 586,
       "risk": "medium",
-      "rationale": "Helper that provisions deterministic local mock HTTP endpoint for fixture-like network tests."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/extensions_provider_oauth.rs",
+      "suite": "vcr",
+      "module": "tests/extensions_provider_oauth",
+      "test_case": "refresh_extension_oauth_skips_unexpired_token",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 591,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -2182,9 +2458,9 @@
       "test_case": "refresh_extension_oauth_skips_unexpired_token",
       "double_identifier": "MockHttpResponse",
       "double_type": "mock",
-      "line": 590,
+      "line": 595,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -2193,9 +2469,9 @@
       "test_case": "refresh_extension_oauth_skips_unexpired_token",
       "double_identifier": "MockHttpServer",
       "double_type": "mock",
-      "line": 634,
+      "line": 641,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -2204,9 +2480,9 @@
       "test_case": "refresh_extension_oauth_error_propagated",
       "double_identifier": "start_mock_http_server",
       "double_type": "mock-server-helper",
-      "line": 639,
+      "line": 646,
       "risk": "medium",
-      "rationale": "Helper that provisions deterministic local mock HTTP endpoint for fixture-like network tests."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -2215,9 +2491,9 @@
       "test_case": "refresh_extension_oauth_error_propagated",
       "double_identifier": "MockHttpResponse",
       "double_type": "mock",
-      "line": 643,
+      "line": 650,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -2226,9 +2502,9 @@
       "test_case": "oauth_configs_from_entries_extracts_providers_with_oauth",
       "double_identifier": "MockHttpServer",
       "double_type": "mock",
-      "line": 854,
+      "line": 871,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -2237,9 +2513,9 @@
       "test_case": "full_wiring_refresh_expired_token_via_mock_server",
       "double_identifier": "start_mock_http_server",
       "double_type": "mock-server-helper",
-      "line": 859,
+      "line": 876,
       "risk": "medium",
-      "rationale": "Helper that provisions deterministic local mock HTTP endpoint for fixture-like network tests."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_provider_oauth.rs",
@@ -2248,9 +2524,9 @@
       "test_case": "full_wiring_refresh_expired_token_via_mock_server",
       "double_identifier": "MockHttpResponse",
       "double_type": "mock",
-      "line": 863,
+      "line": 880,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/extensions_repair_events.rs",
@@ -2261,13 +2537,13 @@
       "double_type": "stub",
       "line": 3537,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/mock_spec_validation.rs",
       "suite": "unit",
       "module": "tests/mock_spec_validation",
-      "test_case": "<module-scope>",
+      "test_case": "<module>",
       "double_identifier": "MockSpec",
       "double_type": "mock",
       "line": 20,
@@ -2415,7 +2691,480 @@
       "double_type": "mock",
       "line": 354,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/non_mock_compliance_gate.rs",
+      "suite": "unit",
+      "module": "tests/non_mock_compliance_gate",
+      "test_case": "no_disallowed_doubles_in_unit_suite",
+      "double_identifier": "DummyProvider",
+      "double_type": "stub",
+      "line": 569,
+      "risk": "high",
+      "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
+    },
+    {
+      "file": "tests/non_mock_compliance_gate.rs",
+      "suite": "unit",
+      "module": "tests/non_mock_compliance_gate",
+      "test_case": "no_disallowed_doubles_in_unit_suite",
+      "double_identifier": "NullSession",
+      "double_type": "stub",
+      "line": 569,
+      "risk": "high",
+      "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
+    },
+    {
+      "file": "tests/non_mock_compliance_gate.rs",
+      "suite": "unit",
+      "module": "tests/non_mock_compliance_gate",
+      "test_case": "no_disallowed_doubles_in_unit_suite",
+      "double_identifier": "NullUiHandler",
+      "double_type": "stub",
+      "line": 569,
+      "risk": "high",
+      "rationale": "Double usage in unit scope; verify it does not hide critical behavior and keep exceptions explicitly justified."
+    },
+    {
+      "file": "tests/provider_factory.rs",
+      "suite": "vcr",
+      "module": "tests/provider_factory",
+      "test_case": "<module>",
+      "double_identifier": "MockHttpResponse",
+      "double_type": "mock",
+      "line": 5,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_factory.rs",
+      "suite": "vcr",
+      "module": "tests/provider_factory",
+      "test_case": "text_event_stream_response",
+      "double_identifier": "MockHttpResponse",
+      "double_type": "mock",
+      "line": 67,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_factory.rs",
+      "suite": "vcr",
+      "module": "tests/provider_factory",
+      "test_case": "schema_compat_overrides_flow_through_factory_for_openai_completions",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 722,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_factory.rs",
+      "suite": "vcr",
+      "module": "tests/provider_factory",
+      "test_case": "schema_compat_headers_respect_precedence_for_openai_responses",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 845,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_factory.rs",
+      "suite": "vcr",
+      "module": "tests/provider_factory",
+      "test_case": "bedrock_provider_uses_bearer_auth_and_converse_payload",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 1033,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_factory.rs",
+      "suite": "vcr",
+      "module": "tests/provider_factory",
+      "test_case": "bedrock_provider_uses_bearer_auth_and_converse_payload",
+      "double_identifier": "MockHttpResponse",
+      "double_type": "mock",
+      "line": 1038,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_factory.rs",
+      "suite": "vcr",
+      "module": "tests/provider_factory",
+      "test_case": "wave_a_openai_compat_streams_use_chat_completions_path_and_bearer_auth",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 1197,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_factory.rs",
+      "suite": "vcr",
+      "module": "tests/provider_factory",
+      "test_case": "wave_b1_alibaba_cn_openai_compat_streams_use_chat_completions_path_and_bearer_auth",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 1307,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_factory.rs",
+      "suite": "vcr",
+      "module": "tests/provider_factory",
+      "test_case": "wave_b1_anthropic_compat_streams_use_messages_path_and_x_api_key",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 1366,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_factory.rs",
+      "suite": "vcr",
+      "module": "tests/provider_factory",
+      "test_case": "wave_b2_openai_compat_streams_use_chat_completions_path_and_bearer_auth",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 1515,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_factory.rs",
+      "suite": "vcr",
+      "module": "tests/provider_factory",
+      "test_case": "wave_b3_openai_compat_streams_use_chat_completions_path_and_bearer_auth",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 1638,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_factory.rs",
+      "suite": "vcr",
+      "module": "tests/provider_factory",
+      "test_case": "special_routing_default_streams_cover_success_paths",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 1804,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_factory.rs",
+      "suite": "vcr",
+      "module": "tests/provider_factory",
+      "test_case": "special_routing_metadata_api_overrides_change_route_kind",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 1912,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_native_contract.rs",
+      "suite": "vcr",
+      "module": "tests/provider_native_contract",
+      "test_case": "<module>",
+      "double_identifier": "MockHttpRequest",
+      "double_type": "mock",
+      "line": 14,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_native_contract.rs",
+      "suite": "vcr",
+      "module": "tests/provider_native_contract",
+      "test_case": "<module>",
+      "double_identifier": "MockHttpResponse",
+      "double_type": "mock",
+      "line": 15,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_native_contract.rs",
+      "suite": "vcr",
+      "module": "tests/provider_native_contract",
+      "test_case": "text_event_stream_response",
+      "double_identifier": "MockHttpResponse",
+      "double_type": "mock",
+      "line": 67,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_native_contract.rs",
+      "suite": "vcr",
+      "module": "tests/provider_native_contract",
+      "test_case": "request_body_json",
+      "double_identifier": "MockHttpRequest",
+      "double_type": "mock",
+      "line": 83,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_native_contract.rs",
+      "suite": "vcr",
+      "module": "tests/provider_native_contract",
+      "test_case": "request_payload_shape",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 290,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_native_contract.rs",
+      "suite": "vcr",
+      "module": "tests/provider_native_contract",
+      "test_case": "auth_header_x_api_key",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 360,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_native_contract.rs",
+      "suite": "vcr",
+      "module": "tests/provider_native_contract",
+      "test_case": "tool_schema_translation",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 403,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_native_contract.rs",
+      "suite": "vcr",
+      "module": "tests/provider_native_contract",
+      "test_case": "response_event_decoding_text",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 452,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_native_contract.rs",
+      "suite": "vcr",
+      "module": "tests/provider_native_contract",
+      "test_case": "response_event_decoding_tool_call",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 492,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_native_contract.rs",
+      "suite": "vcr",
+      "module": "tests/provider_native_contract",
+      "test_case": "auth_header_bearer",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 594,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_native_contract.rs",
+      "suite": "vcr",
+      "module": "tests/provider_native_contract",
+      "test_case": "auth_via_query_param",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 814,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_native_contract.rs",
+      "suite": "vcr",
+      "module": "tests/provider_native_contract",
+      "test_case": "preset_providers_use_bearer_auth_and_chat_completions",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 1067,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_native_contract.rs",
+      "suite": "vcr",
+      "module": "tests/provider_native_contract",
+      "test_case": "all_native_providers_produce_done_event",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 1148,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_native_contract.rs",
+      "suite": "vcr",
+      "module": "tests/provider_native_contract",
+      "test_case": "all_native_providers_send_json_content_type",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 1202,
+      "risk": "medium",
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
+    },
+    {
+      "file": "tests/provider_smoke_matrix.rs",
+      "suite": "unclassified",
+      "module": "tests/provider_smoke_matrix",
+      "test_case": "<module>",
+      "double_identifier": "MockHttpResponse",
+      "double_type": "mock",
+      "line": 17,
+      "risk": "low",
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
+    },
+    {
+      "file": "tests/provider_smoke_matrix.rs",
+      "suite": "unclassified",
+      "module": "tests/provider_smoke_matrix",
+      "test_case": "text_event_stream_response",
+      "double_identifier": "MockHttpResponse",
+      "double_type": "mock",
+      "line": 97,
+      "risk": "low",
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
+    },
+    {
+      "file": "tests/provider_smoke_matrix.rs",
+      "suite": "unclassified",
+      "module": "tests/provider_smoke_matrix",
+      "test_case": "smoke_openai_completions_matrix",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 355,
+      "risk": "low",
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
+    },
+    {
+      "file": "tests/provider_smoke_matrix.rs",
+      "suite": "unclassified",
+      "module": "tests/provider_smoke_matrix",
+      "test_case": "smoke_anthropic_messages_matrix",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 482,
+      "risk": "low",
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
+    },
+    {
+      "file": "tests/provider_smoke_matrix.rs",
+      "suite": "unclassified",
+      "module": "tests/provider_smoke_matrix",
+      "test_case": "smoke_native_anthropic_baseline",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 601,
+      "risk": "low",
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
+    },
+    {
+      "file": "tests/provider_smoke_matrix.rs",
+      "suite": "unclassified",
+      "module": "tests/provider_smoke_matrix",
+      "test_case": "smoke_native_openai_responses_baseline",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 654,
+      "risk": "low",
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
+    },
+    {
+      "file": "tests/provider_smoke_matrix.rs",
+      "suite": "unclassified",
+      "module": "tests/provider_smoke_matrix",
+      "test_case": "smoke_native_openai_completions_baseline",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 708,
+      "risk": "low",
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
+    },
+    {
+      "file": "tests/provider_smoke_matrix.rs",
+      "suite": "unclassified",
+      "module": "tests/provider_smoke_matrix",
+      "test_case": "smoke_native_gemini_baseline",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 759,
+      "risk": "low",
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
+    },
+    {
+      "file": "tests/provider_smoke_matrix.rs",
+      "suite": "unclassified",
+      "module": "tests/provider_smoke_matrix",
+      "test_case": "smoke_native_cohere_baseline",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 821,
+      "risk": "low",
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
+    },
+    {
+      "file": "tests/provider_smoke_matrix.rs",
+      "suite": "unclassified",
+      "module": "tests/provider_smoke_matrix",
+      "test_case": "smoke_native_bedrock_baseline",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 871,
+      "risk": "low",
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
+    },
+    {
+      "file": "tests/provider_smoke_matrix.rs",
+      "suite": "unclassified",
+      "module": "tests/provider_smoke_matrix",
+      "test_case": "smoke_native_bedrock_baseline",
+      "double_identifier": "MockHttpResponse",
+      "double_type": "mock",
+      "line": 877,
+      "risk": "low",
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
+    },
+    {
+      "file": "tests/provider_smoke_matrix.rs",
+      "suite": "unclassified",
+      "module": "tests/provider_smoke_matrix",
+      "test_case": "run_smoke_stream",
+      "double_identifier": "start_mock_http_server",
+      "double_type": "mock-server-helper",
+      "line": 1032,
+      "risk": "low",
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
+    },
+    {
+      "file": "tests/provider_smoke_matrix.rs",
+      "suite": "unclassified",
+      "module": "tests/provider_smoke_matrix",
+      "test_case": "run_smoke_stream",
+      "double_identifier": "MockHttpResponse",
+      "double_type": "mock",
+      "line": 1081,
+      "risk": "low",
+      "rationale": "Helper or unclassified double usage; track and reduce where feasible with explicit justification."
     },
     {
       "file": "tests/tui_snapshot.rs",
@@ -2426,7 +3175,7 @@
       "double_type": "stub",
       "line": 38,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/tui_snapshot.rs",
@@ -2437,7 +3186,7 @@
       "double_type": "stub",
       "line": 102,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/tui_state.rs",
@@ -2446,9 +3195,9 @@
       "test_case": "test_runtime_handle",
       "double_identifier": "DummyProvider",
       "double_type": "stub",
-      "line": 54,
+      "line": 56,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/tui_state.rs",
@@ -2457,9 +3206,9 @@
       "test_case": "build_app_with_session_and_config",
       "double_identifier": "DummyProvider",
       "double_type": "stub",
-      "line": 135,
+      "line": 137,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/tui_state.rs",
@@ -2468,9 +3217,9 @@
       "test_case": "build_app_with_session_and_events_and_extension",
       "double_identifier": "DummyProvider",
       "double_type": "stub",
-      "line": 187,
+      "line": 189,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/tui_state.rs",
@@ -2479,9 +3228,9 @@
       "test_case": "build_app_with_models",
       "double_identifier": "DummyProvider",
       "double_type": "stub",
-      "line": 270,
+      "line": 272,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     },
     {
       "file": "tests/tui_state.rs",
@@ -2490,9 +3239,9 @@
       "test_case": "build_app_with_session_and_events_and_config",
       "double_identifier": "DummyProvider",
       "double_type": "stub",
-      "line": 339,
+      "line": 341,
       "risk": "medium",
-      "rationale": "Used for deterministic fixture/VCR/conformance orchestration where full live dependency would be noisy or non-reproducible."
+      "rationale": "Double usage in integration/e2e scope; ensure deterministic fixtures and coverage parity are maintained."
     }
   ]
 }

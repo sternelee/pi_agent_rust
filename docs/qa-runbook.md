@@ -70,6 +70,7 @@ Every test file belongs to exactly one suite. See `tests/suite_classification.to
 | Smoke event log | `tests/smoke_results/<ts>/smoke_log.jsonl` | Per-event structured log |
 | E2E summary | `tests/e2e_results/<ts>/summary.json` | Full run summary |
 | E2E evidence | `tests/e2e_results/<ts>/evidence_contract.json` | Evidence contract |
+| E2E scenario matrix | `docs/e2e_scenario_matrix.json` | Canonical workflow->suite->artifact coverage map |
 | Conformance report | `tests/ext_conformance/reports/conformance_summary.json` | Extension conformance |
 | CI gate verdict | `tests/e2e_results/<ts>/ci_gate_promotion_v1.json` | Promotion gate result |
 | Compliance report | `target/compliance-report.json` | Module compliance (set `COMPLIANCE_REPORT=1`) |

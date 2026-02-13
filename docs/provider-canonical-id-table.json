@@ -146,7 +146,8 @@
         "kimi"
       ],
       "auth_env_keys": [
-        "MOONSHOT_API_KEY"
+        "MOONSHOT_API_KEY",
+        "KIMI_API_KEY"
       ],
       "canonical_id": "moonshotai",
       "onboarding_mode": "oai-compatible-preset",
@@ -164,7 +165,8 @@
         "qwen"
       ],
       "auth_env_keys": [
-        "DASHSCOPE_API_KEY"
+        "DASHSCOPE_API_KEY",
+        "QWEN_API_KEY"
       ],
       "canonical_id": "alibaba",
       "onboarding_mode": "oai-compatible-preset",
@@ -932,6 +934,21 @@
     {
       "aliases": [],
       "auth_env_keys": [
+        "STACKIT_API_KEY"
+      ],
+      "canonical_id": "stackit",
+      "onboarding_mode": "oai-compatible-preset",
+      "routing": {
+        "api": "openai-completions",
+        "auth_header": true,
+        "base_url": "https://api.openai-compat.model-serving.eu01.onstackit.cloud/v1",
+        "context_window": 128000,
+        "max_tokens": 8192
+      }
+    },
+    {
+      "aliases": [],
+      "auth_env_keys": [
         "SILICONFLOW_API_KEY"
       ],
       "canonical_id": "siliconflow",
@@ -1096,6 +1113,19 @@
     },
     {
       "aliases": [],
+      "auth_env_keys": [],
+      "canonical_id": "ollama",
+      "onboarding_mode": "oai-compatible-preset",
+      "routing": {
+        "api": "openai-completions",
+        "auth_header": false,
+        "base_url": "http://127.0.0.1:11434/v1",
+        "context_window": 131072,
+        "max_tokens": 32768
+      }
+    },
+    {
+      "aliases": [],
       "auth_env_keys": [
         "OLLAMA_API_KEY"
       ],
@@ -1186,7 +1216,8 @@
     },
     {
       "aliases": [
-        "vertexai"
+        "vertexai",
+        "google-vertex-anthropic"
       ],
       "auth_env_keys": [
         "GOOGLE_CLOUD_API_KEY",
@@ -1239,6 +1270,14 @@
       "onboarding_mode": "native-adapter-required"
     },
     {
+      "aliases": [],
+      "auth_env_keys": [
+        "V0_API_KEY"
+      ],
+      "canonical_id": "v0",
+      "onboarding_mode": "native-adapter-required"
+    },
+    {
       "aliases": [
         "azure",
         "azure-cognitive-services"
@@ -1251,7 +1290,8 @@
     },
     {
       "aliases": [
-        "copilot"
+        "copilot",
+        "github-copilot-enterprise"
       ],
       "auth_env_keys": [
         "GITHUB_COPILOT_API_KEY",
@@ -1273,6 +1313,6 @@
     }
   ],
   "schema_version": "1.0",
-  "total_aliases": 13,
-  "total_providers": 84
+  "total_aliases": 15,
+  "total_providers": 87
 }

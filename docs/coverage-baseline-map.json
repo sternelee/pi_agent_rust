@@ -1,8 +1,8 @@
 {
   "schema": "pi.qa.coverage_baseline.v1",
-  "bead_id": "bd-1f42.1.2.1",
+  "bead_id": "bd-1f42.8.1",
   "status": "complete_with_branch_metric_gap",
-  "generated_at": "2026-02-12T17:07:40Z",
+  "generated_at": "2026-02-13T04:18:00Z",
   "workspace": "/data/projects/pi_agent_rust",
   "collection": {
     "status": "complete_with_limits",
@@ -28,16 +28,16 @@
     }
   },
   "summary": {
-    "line_pct": 78.63711922255993,
+    "line_pct": 78.5905941323898,
     "branch_pct": null,
-    "function_pct": 77.35747386571829,
-    "region_pct": 78.2562918868574,
-    "line_count": 101667,
-    "covered_line_count": 79948,
-    "uncovered_line_count": 21719,
-    "function_count": 9279,
-    "covered_function_count": 7178,
-    "uncovered_function_count": 2101,
+    "function_pct": 77.3515784936968,
+    "region_pct": 78.18185496378815,
+    "line_count": 101745,
+    "covered_line_count": 79962,
+    "uncovered_line_count": 21783,
+    "function_count": 9281,
+    "covered_function_count": 7179,
+    "uncovered_function_count": 2102,
     "branch_count": 0,
     "covered_branch_count": 0,
     "notes": "Line/function/region baselines are complete from llvm-cov JSON summary. Branch summary remains unavailable because branch-mode export crashes with SIGSEGV in this environment."
@@ -49,12 +49,12 @@
         "src/agent.rs"
       ],
       "coverage": {
-        "line_pct": 79.541047188106,
+        "line_pct": 79.57336780866193,
         "branch_pct": null,
         "function_pct": 74.76340694006309,
         "line_count": 3094,
-        "covered_line_count": 2461,
-        "uncovered_line_count": 633,
+        "covered_line_count": 2462,
+        "uncovered_line_count": 632,
         "function_count": 317,
         "covered_function_count": 237,
         "uncovered_function_count": 80,
@@ -69,15 +69,15 @@
         "src/tools.rs"
       ],
       "coverage": {
-        "line_pct": 78.95778364116094,
+        "line_pct": 78.99076517150395,
         "branch_pct": null,
-        "function_pct": 76.65847665847666,
+        "function_pct": 76.90417690417691,
         "line_count": 3032,
-        "covered_line_count": 2394,
-        "uncovered_line_count": 638,
+        "covered_line_count": 2395,
+        "uncovered_line_count": 637,
         "function_count": 407,
-        "covered_function_count": 312,
-        "uncovered_function_count": 95,
+        "covered_function_count": 313,
+        "uncovered_function_count": 94,
         "branch_count": 0,
         "covered_branch_count": 0
       },
@@ -91,12 +91,12 @@
         "src/providers/mod.rs"
       ],
       "coverage": {
-        "line_pct": 86.30014526762767,
+        "line_pct": 86.34484299921779,
         "branch_pct": null,
         "function_pct": 83.311432325887,
         "line_count": 8949,
-        "covered_line_count": 7723,
-        "uncovered_line_count": 1226,
+        "covered_line_count": 7727,
+        "uncovered_line_count": 1222,
         "function_count": 761,
         "covered_function_count": 634,
         "uncovered_function_count": 127,
@@ -148,6 +148,93 @@
       "status": "baseline_captured_branch_unavailable"
     }
   ],
+  "critical_gap_matrix": [
+    {
+      "area": "agent_loop",
+      "current": {
+        "line_pct": 79.57336780866193,
+        "function_pct": 74.76340694006309
+      },
+      "target": {
+        "line_pct": 85.0,
+        "function_pct": 80.0
+      },
+      "delta_to_target": {
+        "line_pct": 5.42663219133807,
+        "function_pct": 5.23659305993691
+      },
+      "blocker": "Abort/retry/interrupt control-flow paths remain under-covered; branch-depth signal is still blocked by llvm-cov branch-summary SIGSEGV.",
+      "owning_bead_id": "bd-1f42.8.4.1"
+    },
+    {
+      "area": "tools",
+      "current": {
+        "line_pct": 78.99076517150395,
+        "function_pct": 76.90417690417691
+      },
+      "target": {
+        "line_pct": 85.0,
+        "function_pct": 82.0
+      },
+      "delta_to_target": {
+        "line_pct": 6.00923482849605,
+        "function_pct": 5.09582309582309
+      },
+      "blocker": "Tool error-path and threshold contract cases are still incomplete; branch-depth signal is blocked by llvm-cov branch-summary SIGSEGV.",
+      "owning_bead_id": "bd-1f42.8.4.1"
+    },
+    {
+      "area": "providers",
+      "current": {
+        "line_pct": 86.34484299921779,
+        "function_pct": 83.311432325887
+      },
+      "target": {
+        "line_pct": 90.0,
+        "function_pct": 88.0
+      },
+      "delta_to_target": {
+        "line_pct": 3.6551570007822096,
+        "function_pct": 4.688567674113001
+      },
+      "blocker": "Provider routing and adapter coverage still misses key normalization/auth permutations across provider families.",
+      "owning_bead_id": "bd-1f42.8.4.2"
+    },
+    {
+      "area": "session",
+      "current": {
+        "line_pct": 80.49965301873699,
+        "function_pct": 77.87878787878788
+      },
+      "target": {
+        "line_pct": 85.0,
+        "function_pct": 82.0
+      },
+      "delta_to_target": {
+        "line_pct": 4.500346981263014,
+        "function_pct": 4.121212121212125
+      },
+      "blocker": "Interruption/replay/index recovery paths remain shallow relative to target threshold depth.",
+      "owning_bead_id": "bd-1f42.8.4.2"
+    },
+    {
+      "area": "extensions",
+      "current": {
+        "line_pct": 85.01170219495224,
+        "function_pct": 73.5281290885303
+      },
+      "target": {
+        "line_pct": 88.0,
+        "function_pct": 80.0
+      },
+      "delta_to_target": {
+        "line_pct": 2.988297805047758,
+        "function_pct": 6.471870911469704
+      },
+      "blocker": "Dispatcher/runtime/JS bridge has the largest remaining uncovered function surface and needs targeted non-mock expansion.",
+      "owning_bead_id": "bd-1f42.8.4.3"
+    }
+  ],
   "risk_ranked_gap_backlog": [
     {
       "rank": 1,
@@ -161,7 +248,7 @@
         "uncovered_line_count": 4739,
         "uncovered_function_count": 607
       },
-      "mapped_issue_id": "bd-1f42.4.2"
+      "mapped_issue_id": "bd-1f42.8.4.3"
     },
     {
       "rank": 2,
@@ -172,10 +259,10 @@
       "target_test_type": "contract+conformance+smoke_e2e",
       "evidence": {
         "critical_path": "providers",
-        "uncovered_line_count": 1226,
+        "uncovered_line_count": 1222,
         "uncovered_function_count": 127
       },
-      "mapped_issue_id": "bd-3uqg.8"
+      "mapped_issue_id": "bd-1f42.8.4.2"
     },
     {
       "rank": 3,
@@ -186,10 +273,10 @@
       "target_test_type": "scenario_e2e+soak",
       "evidence": {
         "critical_path": "agent_loop",
-        "uncovered_line_count": 633,
+        "uncovered_line_count": 632,
         "uncovered_function_count": 80
       },
-      "mapped_issue_id": "bd-1f42.3.5"
+      "mapped_issue_id": "bd-1f42.8.4.1"
     },
     {
       "rank": 4,
@@ -200,10 +287,10 @@
       "target_test_type": "unit+integration_policy",
       "evidence": {
         "critical_path": "tools",
-        "uncovered_line_count": 638,
-        "uncovered_function_count": 95
+        "uncovered_line_count": 637,
+        "uncovered_function_count": 94
       },
-      "mapped_issue_id": "bd-1f42.2.8"
+      "mapped_issue_id": "bd-1f42.8.4.1"
     },
     {
       "rank": 5,
@@ -217,7 +304,7 @@
         "uncovered_line_count": 562,
         "uncovered_function_count": 73
       },
-      "mapped_issue_id": "bd-1f42.3.5"
+      "mapped_issue_id": "bd-1f42.8.4.2"
     },
     {
       "rank": 6,

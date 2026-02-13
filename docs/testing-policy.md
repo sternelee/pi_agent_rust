@@ -76,6 +76,11 @@ VCR_MODE=playback cargo test --test e2e_provider_streaming --test agent_loop_vcr
 **Identifying tests:** Files listed in `[suite.e2e]` of `tests/suite_classification.toml`, or any
 test file prefixed with `e2e_`.
 
+Canonical scenario coverage mapping for this suite lives in:
+
+- `docs/e2e_scenario_matrix.json` (schema `pi.e2e.scenario_matrix.v1`)
+- Drift and schema enforcement: `python3 scripts/check_traceability_matrix.py`
+
 ### Live Provider Credential + Replay Policy (bd-1f42.2.7)
 
 This policy applies to `tests/e2e_live_harness.rs` and shared helpers in
@@ -116,7 +121,7 @@ This policy applies to `tests/e2e_live_harness.rs` and shared helpers in
 
 ---
 
-## Test-Double Inventory Baseline (bd-1f42.1.1)
+## Test-Double Inventory Baseline (bd-1f42.8.1)
 
 Machine-readable inventory artifact:
 
@@ -131,24 +136,27 @@ The report tags test-double usage by:
 - `double_identifier` and `double_type`
 - `risk` and rationale
 
-Current baseline snapshot (from `report_id=bd-1f42.1.1-test-double-inventory-v1`):
+Current baseline snapshot (from `report_id=bd-1f42.8.1-test-double-inventory-v2`, generated `2026-02-13T04:24:50Z`):
 
-- `entry_count`: 201
-- `module_count`: 16
+- `entry_count`: 267
+- `module_count`: 21
 - suite distribution:
   - `unit-inline`: 116
-  - `vcr`: 46
-  - `unit`: 13
-  - `e2e`: 3
-  - `unclassified`: 23 (helper modules under `tests/common`)
+  - `vcr`: 73
+  - `unit`: 16
+  - `e2e`: 26
+  - `unclassified`: 36
 
 Top risk clusters:
 
 - `src/extension_dispatcher` (86 entries, high)
 - `src/extensions` (22 entries, high)
 - `tests/extensions_provider_oauth` (28 entries, high)
+- `tests/e2e_provider_scenarios` (23 entries, high)
 - `tests/mock_spec_validation` (11 entries, high)
-- `tests/common` (23 entries, helper module inventory; unclassified in suite mapping)
+- `tests/provider_native_contract` (14 entries, high)
+- `tests/provider_factory` (13 entries, high)
+- `tests/common` (23 entries, high; helper module inventory, currently unclassified)
 
 Interpretation notes:
 
