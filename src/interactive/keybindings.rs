@@ -66,6 +66,55 @@ impl PiApp {
         Some(first)
     }
 
+    pub(super) fn handle_capability_prompt_key(&mut self, key: &KeyMsg) -> Option<Cmd> {
+        let prompt = self.capability_prompt.as_mut()?;
+
+        match key.key_type {
+            // Navigate between buttons.
+            KeyType::Right | KeyType::Tab => prompt.focus_next(),
+            KeyType::Left => prompt.focus_prev(),
+            KeyType::Runes if key.runes == ['l'] => prompt.focus_next(),
+            KeyType::Runes if key.runes == ['h'] => prompt.focus_prev(),
+
+            // Confirm selection.
+            KeyType::Enter => {
+                let action = prompt.selected_action();
+                let response = ExtensionUiResponse {
+                    id: prompt.request.id.clone(),
+                    value: Some(Value::Bool(action.is_allow())),
+                    cancelled: false,
+                };
+                // Record persistent decisions for "Always" choices.
+                if action.is_persistent() {
+                    if let Ok(mut store) = crate::permissions::PermissionStore::open_default() {
+                        let _ = store.record(
+                            &prompt.extension_id,
+                            &prompt.capability,
+                            action.is_allow(),
+                        );
+                    }
+                }
+                self.capability_prompt = None;
+                self.send_extension_ui_response(response);
+            }
+
+            // Escape = deny once.
+            KeyType::Esc => {
+                let response = ExtensionUiResponse {
+                    id: prompt.request.id.clone(),
+                    value: Some(Value::Bool(false)),
+                    cancelled: true,
+                };
+                self.capability_prompt = None;
+                self.send_extension_ui_response(response);
+            }
+
+            _ => {}
+        }
+
+        None
+    }
+
     pub(super) fn handle_paste_event(&mut self, key: &KeyMsg) -> bool {
         if key.key_type != KeyType::Runes || key.runes.is_empty() {
             return false;
@@ -129,6 +178,100 @@ impl PiApp {
         }
 
         Some(path_for_display(&resolved, &self.cwd))
+    }
+
+    pub(super) fn insert_file_ref_path(&mut self, path: &Path) {
+        let display = path_for_display(path, &self.cwd);
+        let mut insert_text = format_file_ref(&display);
+        if !insert_text.ends_with(' ') {
+            insert_text.push(' ');
+        }
+        self.input.insert_string(&insert_text);
+    }
+
+    pub(super) fn paste_image_from_clipboard() -> Option<PathBuf> {
+        #[cfg(all(feature = "clipboard", feature = "image-resize"))]
+        {
+            use image::ImageEncoder;
+
+            let mut clipboard = ArboardClipboard::new().ok()?;
+            let image = clipboard.get_image().ok()?;
+
+            let width = u32::try_from(image.width).ok()?;
+            let height = u32::try_from(image.height).ok()?;
+            let bytes = image.bytes.into_owned();
+            let width_usize = usize::try_from(width).ok()?;
+            let height_usize = usize::try_from(height).ok()?;
+            let expected = width_usize.checked_mul(height_usize)?.checked_mul(4)?;
+            if bytes.len() != expected {
+                return None;
+            }
+
+            let mut temp_file = tempfile::Builder::new()
+                .prefix("pi-paste-")
+                .suffix(".png")
+                .tempfile()
+                .ok()?;
+            let encoder = image::codecs::png::PngEncoder::new(&mut temp_file);
+            if encoder
+                .write_image(&bytes, width, height, image::ExtendedColorType::Rgba8)
+                .is_err()
+            {
+                return None;
+            }
+            let (_file, path) = temp_file.keep().ok()?;
+            Some(path)
+        }
+
+        #[cfg(not(all(feature = "clipboard", feature = "image-resize")))]
+        {
+            None
+        }
+    }
+
+    /// Open external editor with current input text.
+    ///
+    /// Uses $VISUAL if set, otherwise $EDITOR, otherwise "vi".
+    /// Supports editors with arguments like "code --wait" or "vim -u NONE".
+    pub(super) fn open_external_editor(&self) -> std::io::Result<String> {
+        use std::io::Write;
+
+        // Determine editor command
+        let editor = std::env::var("VISUAL")
+            .or_else(|_| std::env::var("EDITOR"))
+            .unwrap_or_else(|_| "vi".to_string());
+
+        // Create temp file with current editor content
+        let mut temp_file = tempfile::NamedTempFile::new()?;
+        let current_text = self.input.value();
+        temp_file.write_all(current_text.as_bytes())?;
+        temp_file.flush()?;
+
+        let temp_path = temp_file.path().to_path_buf();
+
+        // Spawn editor via shell to handle EDITOR with arguments (e.g., "code --wait")
+        // The shell properly handles quoting, arguments, and PATH lookup
+        #[cfg(unix)]
+        let status = std::process::Command::new("sh")
+            .args(["-c", &format!("{editor} \"$1\"")])
+            .arg("--") // separator for positional args
+            .arg(&temp_path)
+            .status()?;
+
+        #[cfg(not(unix))]
+        let status = std::process::Command::new("cmd")
+            .args(["/c", &format!("{} \"{}\"", editor, temp_path.display())])
+            .status()?;
+
+        if !status.success() {
+            return Err(std::io::Error::other(format!(
+                "Editor exited with status: {status}"
+            )));
+        }
+
+        // Read back the edited content
+        let new_text = std::fs::read_to_string(&temp_path)?;
+        Ok(new_text)
     }
 
     fn handle_double_escape_action(&mut self) -> (bool, Option<Cmd>) {

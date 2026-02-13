@@ -3,6 +3,7 @@ use std::fmt::Write as _;
 
 use crate::model::{ContentBlock, UserContent};
 use crate::session::{Session, SessionEntry, SessionMessage};
+use crate::theme::TuiStyles;
 
 use super::conversation::assistant_content_to_text;
 
@@ -84,7 +85,11 @@ pub(super) struct TreeCustomPromptState {
 }
 
 impl TreeSelectorState {
-    pub(super) fn new(session: &Session, term_height: usize, initial_selected_id: Option<&str>) -> Self {
+    pub(super) fn new(
+        session: &Session,
+        term_height: usize,
+        initial_selected_id: Option<&str>,
+    ) -> Self {
         let max_visible_lines = (term_height / 2).max(5);
         let current_leaf_id = session.leaf_id.clone();
 
@@ -574,4 +579,114 @@ pub(super) fn collect_tree_branch_entries(
         .or(common_ancestor_id)
         .unwrap_or_else(|| "root".to_string());
     (entries_rev, boundary)
+}
+
+pub(super) fn view_tree_ui(tree_ui: &TreeUiState, styles: &TuiStyles) -> String {
+    match tree_ui {
+        TreeUiState::Selector(state) => view_tree_selector(state, styles),
+        TreeUiState::SummaryPrompt(state) => view_tree_summary_prompt(state, styles),
+        TreeUiState::CustomPrompt(state) => view_tree_custom_prompt(state, styles),
+    }
+}
+
+fn view_tree_selector(state: &TreeSelectorState, styles: &TuiStyles) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "  {}", styles.title.render("Session Tree"));
+
+    let filters = format!(
+        "  Filters: user-only={}  show-all={}",
+        if state.user_only { "on" } else { "off" },
+        if state.show_all { "on" } else { "off" }
+    );
+    let _ = writeln!(out, "{}", styles.muted.render(&filters));
+    out.push('\n');
+
+    if state.rows.is_empty() {
+        let _ = writeln!(out, "  {}", styles.muted_italic.render("(no entries)"));
+    } else {
+        let start = state.scroll.min(state.rows.len().saturating_sub(1));
+        let end = (start + state.max_visible_lines).min(state.rows.len());
+
+        for (idx, row) in state.rows.iter().enumerate().take(end).skip(start) {
+            let prefix = if idx == state.selected { ">" } else { " " };
+            let rendered = if idx == state.selected {
+                styles.selection.render(&row.display)
+            } else {
+                row.display.clone()
+            };
+            let _ = writeln!(out, "{prefix} {rendered}");
+        }
+    }
+
+    out.push('\n');
+    let _ = writeln!(
+        out,
+        "  {}",
+        styles.muted.render(
+            "↑/↓: navigate  Enter: select  Esc: cancel  Ctrl+U: user-only  Ctrl+O: show-all"
+        )
+    );
+    out
+}
+
+fn view_tree_summary_prompt(state: &TreeSummaryPromptState, styles: &TuiStyles) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "  {}", styles.title.render("Branch Summary"));
+    out.push('\n');
+
+    if !state.pending.api_key_present {
+        let _ = writeln!(
+            out,
+            "  {}",
+            styles.warning.render(
+                "Note: no API key configured; summarize options will behave like no summary."
+            )
+        );
+        out.push('\n');
+    }
+
+    let options = TreeSummaryChoice::all();
+    for (idx, opt) in options.iter().enumerate() {
+        let prefix = if idx == state.selected { ">" } else { " " };
+        let label = opt.label();
+        let rendered = if idx == state.selected {
+            styles.selection.render(label)
+        } else {
+            label.to_string()
+        };
+        let _ = writeln!(out, "  {prefix} {rendered}");
+    }
+
+    out.push('\n');
+    let _ = writeln!(
+        out,
+        "  {}",
+        styles
+            .muted
+            .render("↑/↓: choose  Enter: confirm  Esc: cancel")
+    );
+    out
+}
+
+fn view_tree_custom_prompt(state: &TreeCustomPromptState, styles: &TuiStyles) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "  {}", styles.title.render("Custom Summary Prompt"));
+    out.push('\n');
+
+    let _ = writeln!(
+        out,
+        "  {}",
+        styles
+            .muted
+            .render("Type extra instructions to guide the summary. Enter: run  Esc: back")
+    );
+    out.push('\n');
+
+    let shown = if state.instructions.is_empty() {
+        "(empty)".to_string()
+    } else {
+        state.instructions.clone()
+    };
+    let _ = writeln!(out, "  {}", styles.accent.render(&shown));
+    out
 }

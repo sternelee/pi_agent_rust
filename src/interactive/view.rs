@@ -58,6 +58,384 @@ pub(super) fn normalize_raw_terminal_newlines(input: String) -> String {
 }
 
 impl PiApp {
+    fn header_binding_hint(&self, action: AppAction, fallback: &str) -> String {
+        self.keybindings
+            .get_bindings(action)
+            .first()
+            .map_or_else(|| fallback.to_string(), std::string::ToString::to_string)
+    }
+
+    pub(super) fn render_header(&self) -> String {
+        let model_label = format!("({})", self.model);
+
+        // Branch indicator: show "Branch N/M" when session has multiple leaves.
+        let branch_indicator = self
+            .session
+            .try_lock()
+            .ok()
+            .and_then(|guard| {
+                let info = guard.branch_summary();
+                if info.leaf_count <= 1 {
+                    return None;
+                }
+                let current_idx = info
+                    .current_leaf
+                    .as_ref()
+                    .and_then(|leaf| info.leaves.iter().position(|l| l == leaf))
+                    .map_or(1, |i| i + 1);
+                Some(format!(" [branch {current_idx}/{}]", info.leaf_count))
+            })
+            .unwrap_or_default();
+
+        let model_key = self.header_binding_hint(AppAction::SelectModel, "ctrl+l");
+        let next_model_key = self.header_binding_hint(AppAction::CycleModelForward, "ctrl+p");
+        let prev_model_key =
+            self.header_binding_hint(AppAction::CycleModelBackward, "ctrl+shift+p");
+        let tools_key = self.header_binding_hint(AppAction::ExpandTools, "ctrl+o");
+        let thinking_key = self.header_binding_hint(AppAction::ToggleThinking, "ctrl+t");
+        let max_width = self.term_width.saturating_sub(2);
+
+        let hints_line = truncate(
+            &format!(
+                "{model_key}: model  {next_model_key}: next  {prev_model_key}: prev  \
+                 {tools_key}: tools  {thinking_key}: thinking"
+            ),
+            max_width,
+        );
+
+        let resources_line = truncate(
+            &format!(
+                "resources: {} skills, {} prompts, {} themes, {} extensions",
+                self.resources.skills().len(),
+                self.resources.prompts().len(),
+                self.resources.themes().len(),
+                self.resources.extensions().len()
+            ),
+            max_width,
+        );
+
+        format!(
+            "  {} {}{}\n  {}\n  {}\n",
+            self.styles.title.render("Pi"),
+            self.styles.muted.render(&model_label),
+            self.styles.accent.render(&branch_indicator),
+            self.styles.muted.render(&hints_line),
+            self.styles.muted.render(&resources_line),
+        )
+    }
+
+    pub(super) fn render_input(&self) -> String {
+        let mut output = String::new();
+
+        let thinking_level = self
+            .session
+            .try_lock()
+            .ok()
+            .and_then(|guard| guard.header.thinking_level.clone())
+            .and_then(|level| level.parse::<ThinkingLevel>().ok())
+            .or_else(|| {
+                self.config
+                    .default_thinking_level
+                    .as_deref()
+                    .and_then(|level| level.parse::<ThinkingLevel>().ok())
+            })
+            .unwrap_or(ThinkingLevel::Off);
+
+        let input_text = self.input.value();
+        let is_bash_mode = parse_bash_command(&input_text).is_some();
+
+        let (thinking_label, thinking_style, thinking_border_style) = match thinking_level {
+            ThinkingLevel::Off => (
+                "off",
+                self.styles.muted_bold.clone(),
+                self.styles.border.clone(),
+            ),
+            ThinkingLevel::Minimal => (
+                "minimal",
+                self.styles.accent.clone(),
+                self.styles.accent.clone(),
+            ),
+            ThinkingLevel::Low => (
+                "low",
+                self.styles.accent.clone(),
+                self.styles.accent.clone(),
+            ),
+            ThinkingLevel::Medium => (
+                "medium",
+                self.styles.accent_bold.clone(),
+                self.styles.accent.clone(),
+            ),
+            ThinkingLevel::High => (
+                "high",
+                self.styles.warning_bold.clone(),
+                self.styles.warning.clone(),
+            ),
+            ThinkingLevel::XHigh => (
+                "xhigh",
+                self.styles.error_bold.clone(),
+                self.styles.error_bold.clone(),
+            ),
+        };
+
+        let thinking_plain = format!("[thinking: {thinking_label}]");
+        let thinking_badge = thinking_style.render(&thinking_plain);
+        let bash_badge = is_bash_mode.then(|| self.styles.warning_bold.render("[bash]"));
+
+        let max_width = self.term_width.saturating_sub(2);
+        let reserved = 2
+            + thinking_plain.chars().count()
+            + if is_bash_mode {
+                2 + "[bash]".chars().count()
+            } else {
+                0
+            };
+        let available_for_mode = max_width.saturating_sub(reserved);
+        let mut mode_text = match self.input_mode {
+            InputMode::SingleLine => "Enter: send  Shift+Enter: newline  Alt+Enter: multi-line",
+            InputMode::MultiLine => "Alt+Enter: send  Enter: newline  Esc: single-line",
+        }
+        .to_string();
+        if mode_text.chars().count() > available_for_mode {
+            mode_text = truncate(&mode_text, available_for_mode);
+        }
+        let mut header_line = String::new();
+        header_line.push_str(&self.styles.muted.render(&mode_text));
+        header_line.push_str("  ");
+        header_line.push_str(&thinking_badge);
+        if let Some(bash_badge) = bash_badge {
+            header_line.push_str("  ");
+            header_line.push_str(&bash_badge);
+        }
+        let _ = writeln!(output, "\n  {header_line}");
+
+        let padding = " ".repeat(self.editor_padding_x);
+        let line_prefix = format!("  {padding}");
+        let border_style = if is_bash_mode {
+            self.styles.warning_bold.clone()
+        } else {
+            thinking_border_style
+        };
+        let border = border_style.render("│");
+        for line in self.input.view().lines() {
+            output.push_str(&line_prefix);
+            output.push_str(&border);
+            output.push(' ');
+            output.push_str(line);
+            output.push('\n');
+        }
+
+        output
+    }
+
+    pub(super) fn render_footer(&self) -> String {
+        let total_cost = self.total_usage.cost.total;
+        let cost_str = if total_cost > 0.0 {
+            format!(" (${total_cost:.4})")
+        } else {
+            String::new()
+        };
+
+        let input = self.total_usage.input;
+        let output_tokens = self.total_usage.output;
+        let mode_hint = match self.input_mode {
+            InputMode::SingleLine => "Shift+Enter: newline  |  Alt+Enter: multi-line",
+            InputMode::MultiLine => "Enter: newline  |  Alt+Enter: send  |  Esc: single-line",
+        };
+        let footer_long = format!(
+            "Tokens: {input} in / {output_tokens} out{cost_str}  |  {mode_hint}  |  /help  |  Ctrl+C: quit"
+        );
+        let footer_short = format!(
+            "Tokens: {input} in / {output_tokens} out{cost_str}  |  /help  |  Ctrl+C: quit"
+        );
+        let max_width = self.term_width.saturating_sub(2);
+        let mut footer = if footer_long.chars().count() <= max_width {
+            footer_long
+        } else {
+            footer_short
+        };
+        if footer.chars().count() > max_width {
+            footer = truncate(&footer, max_width);
+        }
+        format!("\n  {}\n", self.styles.muted.render(&footer))
+    }
+
+    pub(super) fn render_pending_message_queue(&self) -> Option<String> {
+        if self.agent_state == AgentState::Idle {
+            return None;
+        }
+
+        let Ok(queue) = self.message_queue.lock() else {
+            return None;
+        };
+
+        let steering_len = queue.steering_len();
+        let follow_len = queue.follow_up_len();
+        if steering_len == 0 && follow_len == 0 {
+            return None;
+        }
+
+        let max_preview = self.term_width.saturating_sub(24).max(20);
+
+        let mut out = String::new();
+        out.push_str("\n  ");
+        out.push_str(&self.styles.muted_bold.render("Pending:"));
+        out.push(' ');
+        out.push_str(
+            &self
+                .styles
+                .accent_bold
+                .render(&format!("{steering_len} steering")),
+        );
+        out.push_str(&self.styles.muted.render(", "));
+        out.push_str(&self.styles.muted.render(&format!("{follow_len} follow-up")));
+        out.push('\n');
+
+        if let Some(text) = queue.steering_front() {
+            let preview = queued_message_preview(text, max_preview);
+            out.push_str("  ");
+            out.push_str(&self.styles.accent_bold.render("steering →"));
+            out.push(' ');
+            out.push_str(&preview);
+            out.push('\n');
+        }
+
+        if let Some(text) = queue.follow_up_front() {
+            let preview = queued_message_preview(text, max_preview);
+            out.push_str("  ");
+            out.push_str(&self.styles.muted_bold.render("follow-up →"));
+            out.push(' ');
+            out.push_str(&self.styles.muted.render(&preview));
+            out.push('\n');
+        }
+
+        Some(out)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn render_autocomplete_dropdown(&self) -> String {
+        let mut output = String::new();
+
+        let offset = self.autocomplete.scroll_offset();
+        let visible_count = self
+            .autocomplete
+            .max_visible
+            .min(self.autocomplete.items.len());
+        let end = (offset + visible_count).min(self.autocomplete.items.len());
+
+        // Styles
+        let border_style = &self.styles.border;
+        let selected_style = &self.styles.selection;
+        let kind_style = &self.styles.warning;
+        let desc_style = &self.styles.muted_italic;
+
+        // Top border
+        let width = 60;
+        let _ = write!(
+            output,
+            "\n  {}",
+            border_style.render(&format!("┌{:─<width$}┐", ""))
+        );
+
+        for (idx, item) in self.autocomplete.items[offset..end].iter().enumerate() {
+            let global_idx = offset + idx;
+            let is_selected = global_idx == self.autocomplete.selected;
+
+            let kind_icon = match item.kind {
+                AutocompleteItemKind::SlashCommand => "⚡",
+                AutocompleteItemKind::ExtensionCommand => "🧩",
+                AutocompleteItemKind::PromptTemplate => "📄",
+                AutocompleteItemKind::Skill => "🔧",
+                AutocompleteItemKind::File => "📁",
+                AutocompleteItemKind::Path => "📂",
+            };
+
+            let max_label_len = width.saturating_sub(6);
+            let label = if item.label.chars().count() > max_label_len {
+                let mut out = item
+                    .label
+                    .chars()
+                    .take(max_label_len.saturating_sub(1))
+                    .collect::<String>();
+                out.push('…');
+                out
+            } else {
+                item.label.clone()
+            };
+
+            let line_content = format!("{kind_icon} {label:<max_label_len$}");
+            let styled_line = if is_selected {
+                selected_style.render(&line_content)
+            } else {
+                format!("{} {label:<max_label_len$}", kind_style.render(kind_icon))
+            };
+
+            let _ = write!(
+                output,
+                "\n  {}{}{}",
+                border_style.render("│"),
+                styled_line,
+                border_style.render("│")
+            );
+
+            if is_selected {
+                if let Some(desc) = &item.description {
+                    let truncated_desc = if desc.chars().count() > width.saturating_sub(4) {
+                        let mut out = desc
+                            .chars()
+                            .take(width.saturating_sub(5))
+                            .collect::<String>();
+                        out.push('…');
+                        out
+                    } else {
+                        desc.clone()
+                    };
+
+                    let _ = write!(
+                        output,
+                        "\n  {}  {}{}",
+                        border_style.render("│"),
+                        desc_style.render(&truncated_desc),
+                        border_style.render(&format!(
+                            "{:>pad$}│",
+                            "",
+                            pad = width.saturating_sub(2).saturating_sub(truncated_desc.len())
+                        ))
+                    );
+                }
+            }
+        }
+
+        if self.autocomplete.items.len() > visible_count {
+            let shown = format!(
+                "{}-{} of {}",
+                offset + 1,
+                end,
+                self.autocomplete.items.len()
+            );
+            let _ = write!(
+                output,
+                "\n  {}",
+                border_style.render(&format!("│{shown:^width$}│"))
+            );
+        }
+
+        let _ = write!(
+            output,
+            "\n  {}",
+            border_style.render(&format!("└{:─<width$}┘", ""))
+        );
+
+        let _ = write!(
+            output,
+            "\n  {}",
+            self.styles
+                .muted_italic
+                .render("↑/↓ navigate  Enter/Tab accept  Esc cancel")
+        );
+
+        output
+    }
+
     #[allow(clippy::too_many_lines)]
     pub(super) fn render_session_picker(&self, picker: &SessionPickerOverlay) -> String {
         let mut output = String::new();
