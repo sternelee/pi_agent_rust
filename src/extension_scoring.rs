@@ -435,15 +435,9 @@ fn score_github_stars(signals: &Signals, missing: &mut BTreeSet<String>) -> u32 
         missing.insert("signals.github_stars".to_string());
         return 0;
     };
-    match stars {
-        s if s >= 5_000 => 10,
-        s if s >= 2_000 => 9,
-        s if s >= 1_000 => 8,
-        s if s >= 500 => 6,
-        s if s >= 200 => 4,
-        s if s >= 50 => 2,
-        _ => 0,
-    }
+    // Log-linear: 10 * ln(1 + stars) / ln(1 + 5000), clamped to [0, 10]
+    let score = 10.0 * (1.0 + stars as f64).ln() / (1.0 + 5000_f64).ln();
+    (score.round() as u32).min(10)
 }
 
 fn score_marketplace_visibility(signals: &Signals, missing: &mut BTreeSet<String>) -> u32 {
@@ -491,13 +485,9 @@ fn score_npm_downloads(signals: &Signals, missing: &mut BTreeSet<String>) -> u32
         missing.insert("signals.npm_downloads_month".to_string());
         return 0;
     };
-    match downloads {
-        d if d >= 50_000 => 8,
-        d if d >= 10_000 => 6,
-        d if d >= 2_000 => 4,
-        d if d >= 500 => 2,
-        _ => 0,
-    }
+    // Log-linear: 8 * ln(1 + downloads) / ln(1 + 50_000), clamped to [0, 8]
+    let score = 8.0 * (1.0 + downloads as f64).ln() / (1.0 + 50_000_f64).ln();
+    (score.round() as u32).min(8)
 }
 
 fn score_marketplace_installs(signals: &Signals, missing: &mut BTreeSet<String>) -> u32 {
@@ -597,15 +587,11 @@ fn score_activity(recency: &Recency, as_of: DateTime<Utc>, missing: &mut BTreeSe
         return 0;
     };
     let updated_at = parsed.with_timezone(&Utc);
-    let days = (as_of - updated_at).num_days();
-    match days {
-        d if d <= 30 => 15,
-        d if d <= 90 => 12,
-        d if d <= 180 => 9,
-        d if d <= 365 => 6,
-        d if d <= 730 => 3,
-        _ => 0,
-    }
+    let days = (as_of - updated_at).num_days().max(0) as f64;
+    // Exponential decay: 15 * exp(-ln(2) * days / half_life), half_life = 180 days
+    let half_life = 180.0_f64;
+    let score = 15.0 * (-std::f64::consts::LN_2 * days / half_life).exp();
+    (score.round() as u32).min(15)
 }
 
 fn score_compatibility(compat: &Compatibility) -> u32 {
@@ -810,17 +796,17 @@ mod tests {
     fn github_stars_tiers() {
         let cases = [
             (0, 0),
-            (49, 0),
-            (50, 2),
-            (199, 2),
-            (200, 4),
-            (499, 4),
-            (500, 6),
-            (999, 6),
+            (49, 5),
+            (50, 5),
+            (199, 6),
+            (200, 6),
+            (499, 7),
+            (500, 7),
+            (999, 8),
             (1_000, 8),
-            (1_999, 8),
+            (1_999, 9),
             (2_000, 9),
-            (4_999, 9),
+            (4_999, 10),
             (5_000, 10),
             (100_000, 10),
         ];
@@ -853,10 +839,10 @@ mod tests {
     fn npm_downloads_tiers() {
         let cases = [
             (0, 0),
-            (499, 0),
-            (500, 2),
-            (2_000, 4),
-            (10_000, 6),
+            (499, 5),
+            (500, 5),
+            (2_000, 6),
+            (10_000, 7),
             (50_000, 8),
         ];
         for (dl, expected) in cases {
@@ -1197,18 +1183,18 @@ mod tests {
         let recency = Recency {
             updated_at: Some("2026-01-15T00:00:00Z".to_string()),
         };
-        assert_eq!(score_activity(&recency, as_of, &mut missing), 15);
+        assert_eq!(score_activity(&recency, as_of, &mut missing), 14);
     }
 
     #[test]
     fn activity_tiers() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap();
         let cases = [
-            ("2026-06-15T00:00:00Z", 15), // 16 days
-            ("2026-04-15T00:00:00Z", 12), // ~77 days
-            ("2026-02-01T00:00:00Z", 9),  // ~150 days
-            ("2025-10-01T00:00:00Z", 6),  // ~273 days
-            ("2025-01-01T00:00:00Z", 3),  // ~547 days
+            ("2026-06-15T00:00:00Z", 14), // 16 days
+            ("2026-04-15T00:00:00Z", 11), // ~77 days
+            ("2026-02-01T00:00:00Z", 8),  // ~150 days
+            ("2025-10-01T00:00:00Z", 5),  // ~273 days
+            ("2025-01-01T00:00:00Z", 2),  // ~547 days
             ("2023-01-01T00:00:00Z", 0),  // >730 days
         ];
         for (date, expected) in cases {
