@@ -510,6 +510,76 @@ impl PiApp {
         output
     }
 
+    // ========================================================================
+    // Memory pressure actions (PERF-6)
+    // ========================================================================
+
+    /// Run memory pressure actions: progressive collapse (Pressure) and
+    /// conversation truncation (Critical). Called from update_inner().
+    fn run_memory_pressure_actions(&mut self) {
+        let level = self.memory_monitor.level;
+
+        // Progressive collapse: one tool output per second, oldest first.
+        if self.memory_monitor.collapsing
+            && self.memory_monitor.last_collapse.elapsed() >= std::time::Duration::from_secs(1)
+        {
+            if let Some(idx) = self.find_next_uncollapsed_tool_output() {
+                self.messages[idx].collapsed = true;
+                let placeholder = "[tool output collapsed due to memory pressure]".to_string();
+                self.messages[idx].content = placeholder;
+                self.messages[idx].thinking = None;
+                self.memory_monitor.next_collapse_index = idx + 1;
+                self.memory_monitor.last_collapse = std::time::Instant::now();
+                self.memory_monitor.resample_now();
+            } else {
+                self.memory_monitor.collapsing = false;
+            }
+        }
+
+        // Pressure level: remove thinking from messages older than last 10 turns.
+        if level == MemoryLevel::Pressure || level == MemoryLevel::Critical {
+            let msg_count = self.messages.len();
+            if msg_count > 10 {
+                for msg in &mut self.messages[..msg_count - 10] {
+                    if msg.thinking.is_some() {
+                        msg.thinking = None;
+                    }
+                }
+            }
+        }
+
+        // Critical: truncate old messages (keep last CRITICAL_KEEP_MESSAGES).
+        if level == MemoryLevel::Critical && !self.memory_monitor.truncated {
+            let msg_count = self.messages.len();
+            if msg_count > CRITICAL_KEEP_MESSAGES {
+                let remove_count = msg_count - CRITICAL_KEEP_MESSAGES;
+                self.messages.drain(..remove_count);
+                self.messages.insert(
+                    0,
+                    ConversationMessage::new(
+                        MessageRole::System,
+                        "[conversation history truncated due to memory pressure — see session file for full history]".to_string(),
+                        None,
+                    ),
+                );
+                self.memory_monitor.next_collapse_index = 0;
+            }
+            self.memory_monitor.truncated = true;
+            self.memory_monitor.resample_now();
+        }
+    }
+
+    /// Find the next uncollapsed Tool message starting from `next_collapse_index`.
+    fn find_next_uncollapsed_tool_output(&self) -> Option<usize> {
+        let start = self.memory_monitor.next_collapse_index;
+        for i in start..self.messages.len() {
+            if self.messages[i].role == MessageRole::Tool && !self.messages[i].collapsed {
+                return Some(i);
+            }
+        }
+        None
+    }
+
     fn format_session_info(&self, session: &Session) -> String {
         let file = session.path.as_ref().map_or_else(
             || "(not saved yet)".to_string(),
@@ -544,6 +614,8 @@ impl PiApp {
         );
         info.push_str("\n\n");
         info.push_str(&self.frame_timing.summary());
+        info.push_str("\n\n");
+        info.push_str(&self.memory_monitor.summary());
         info
     }
 
@@ -4729,7 +4801,7 @@ pub enum MemoryLevel {
 }
 
 impl MemoryLevel {
-    fn from_rss_bytes(rss: usize) -> Self {
+    const fn from_rss_bytes(rss: usize) -> Self {
         const MB: usize = 1_000_000;
         if rss >= 200 * MB {
             Self::Critical
@@ -6019,6 +6091,7 @@ impl PiApp {
             branch_picker: None,
             model_selector: None,
             frame_timing: FrameTimingStats::new(),
+            memory_monitor: MemoryMonitor::new_default(),
         };
 
         if let Some(manager) = app.extensions.clone() {
@@ -6050,6 +6123,12 @@ impl PiApp {
     pub fn session_handle(&self) -> Arc<Mutex<Session>> {
         Arc::clone(&self.session)
     }
+
+    /// Run memory-pressure mitigation actions sampled by `MemoryMonitor`.
+    ///
+    /// PERF-6 behavior is being staged incrementally; keep this as a no-op
+    /// until collapse/truncation actions are finalized.
+    fn run_memory_pressure_actions(&mut self) {}
 
     /// Get the current status message (for testing).
     pub fn status_message(&self) -> Option<&str> {
@@ -6109,6 +6188,10 @@ impl PiApp {
     /// Inner update handler (extracted for frame timing instrumentation).
     #[allow(clippy::too_many_lines)]
     fn update_inner(&mut self, msg: Message) -> Option<Cmd> {
+        // Memory pressure sampling + progressive collapse (PERF-6)
+        self.memory_monitor.maybe_sample();
+        self.run_memory_pressure_actions();
+
         // Handle our custom Pi messages
         if let Some(pi_msg) = msg.downcast_ref::<PiMsg>() {
             return self.handle_pi_message(pi_msg.clone());
