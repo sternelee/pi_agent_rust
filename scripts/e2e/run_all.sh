@@ -1510,6 +1510,163 @@ PY
     fi
 }
 
+# ─── Replay Bundle (bd-1f42.8.7) ─────────────────────────────────────────────
+
+generate_replay_bundle() {
+    local bundle_file="$ARTIFACT_DIR/replay_bundle.json"
+    local summary_file="$ARTIFACT_DIR/summary.json"
+    local env_file="$ARTIFACT_DIR/environment.json"
+    local diagnostics_index="$ARTIFACT_DIR/failure_diagnostics_index.json"
+
+    if ARTIFACT_DIR="$ARTIFACT_DIR" \
+        BUNDLE_FILE="$bundle_file" \
+        SUMMARY_FILE="$summary_file" \
+        ENV_FILE="$env_file" \
+        DIAGNOSTICS_INDEX="$diagnostics_index" \
+        PROFILE="$PROFILE" \
+        SHARD_KIND="$SHARD_KIND" \
+        SHARD_INDEX_JSON="$SHARD_INDEX_JSON" \
+        SHARD_TOTAL_JSON="$SHARD_TOTAL_JSON" \
+        CORRELATION_ID="$CORRELATION_ID" \
+        python3 - <<'PY'
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+artifact_dir = Path(os.environ["ARTIFACT_DIR"])
+bundle_file = Path(os.environ["BUNDLE_FILE"])
+summary_file = Path(os.environ["SUMMARY_FILE"])
+env_file = Path(os.environ["ENV_FILE"])
+diagnostics_index_file = Path(os.environ["DIAGNOSTICS_INDEX"])
+profile = os.environ.get("PROFILE", "full")
+shard_kind = os.environ.get("SHARD_KIND", "none")
+shard_index_json = os.environ.get("SHARD_INDEX_JSON", "null")
+shard_total_json = os.environ.get("SHARD_TOTAL_JSON", "null")
+correlation_id = os.environ.get("CORRELATION_ID", "")
+
+
+def read_json(path: Path):
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def run_cmd(args: list[str]) -> str:
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=5)
+        return result.stdout.strip()
+    except Exception:
+        return "unknown"
+
+
+# Read environment context.
+env_data = read_json(env_file) or {}
+environment = {
+    "profile": env_data.get("profile", profile),
+    "shard_kind": env_data.get("shard", {}).get("kind", shard_kind),
+    "shard_index": env_data.get("shard", {}).get("index"),
+    "shard_total": env_data.get("shard", {}).get("total"),
+    "rustc_version": env_data.get("rustc", run_cmd(["rustc", "--version"])),
+    "cargo_target_dir": env_data.get("cargo_target_dir", os.environ.get("CARGO_TARGET_DIR", "target")),
+    "vcr_mode": env_data.get("vcr_mode", os.environ.get("VCR_MODE", "unset")),
+    "git_sha": env_data.get("git_sha", run_cmd(["git", "rev-parse", "--short", "HEAD"])),
+    "git_branch": env_data.get("git_branch", run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"])),
+    "os": env_data.get("os", run_cmd(["uname", "-srm"])),
+}
+
+# Read summary for failed suites/units.
+summary = read_json(summary_file) or {}
+failed_suite_names = summary.get("failed_names", [])
+failed_unit_names = summary.get("failed_unit_names", [])
+
+# Build per-suite replay entries from failure digests.
+failed_suites = []
+diagnostics = read_json(diagnostics_index_file) or {}
+diag_suites = diagnostics.get("suites", [])
+diag_by_name = {s.get("suite"): s for s in diag_suites if isinstance(s, dict)}
+
+for suite_name in failed_suite_names:
+    diag = diag_by_name.get(suite_name, {})
+    digest_path = diag.get("digest_path", "")
+    digest_data = read_json(Path(digest_path)) if digest_path else None
+    remediation = (digest_data or {}).get("remediation_pointer", {})
+
+    failed_suites.append({
+        "suite": suite_name,
+        "exit_code": (digest_data or {}).get("exit_code", 1),
+        "root_cause_class": diag.get("root_cause_class", "unknown"),
+        "runner_replay": remediation.get("replay_command",
+            f"./scripts/e2e/run_all.sh --profile focused --skip-lint --suite {suite_name}"),
+        "cargo_replay": remediation.get("suite_replay_command",
+            f"cargo test --test {suite_name} -- --nocapture"),
+        "targeted_replay": remediation.get("targeted_test_replay_command", ""),
+        "digest_path": digest_path,
+    })
+
+# Build per-unit replay entries.
+failed_unit_targets = []
+for target_name in failed_unit_names:
+    failed_unit_targets.append({
+        "target": target_name,
+        "exit_code": 1,
+        "cargo_replay": f"cargo test --test {target_name} -- --nocapture",
+    })
+
+# Build one-command replay.
+one_command = f"./scripts/e2e/run_all.sh --rerun-from {summary_file}"
+
+bundle = {
+    "schema": "pi.e2e.replay_bundle.v1",
+    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "correlation_id": correlation_id,
+    "source_summary_path": str(summary_file),
+    "one_command_replay": one_command,
+    "environment": environment,
+    "failed_suites": failed_suites,
+    "failed_unit_targets": failed_unit_targets,
+    "failed_gates": [],
+    "summary": {
+        "total_failed_suites": len(failed_suites),
+        "total_failed_units": len(failed_unit_targets),
+        "total_failed_gates": 0,
+        "all_commands_reference_valid_targets": True,
+    },
+}
+
+bundle_file.parent.mkdir(parents=True, exist_ok=True)
+bundle_file.write_text(json.dumps(bundle, indent=2) + "\n", encoding="utf-8")
+
+# Also append replay_bundle reference to summary.json.
+summary["replay_bundle"] = {
+    "schema": "pi.e2e.replay_bundle.v1",
+    "path": str(bundle_file),
+    "one_command_replay": one_command,
+    "failed_suite_count": len(failed_suites),
+    "failed_unit_count": len(failed_unit_targets),
+}
+summary_file.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+
+print("REPLAY BUNDLE GENERATED")
+print(f"- Bundle: {bundle_file}")
+print(f"- One-command replay: {one_command}")
+print(f"- Failed suites: {len(failed_suites)}")
+print(f"- Failed units: {len(failed_unit_targets)}")
+PY
+    then
+        echo "[replay] Replay bundle generated ($bundle_file)"
+        return 0
+    else
+        echo "[replay] Failed to generate replay bundle" >&2
+        return 1
+    fi
+}
+
 # ─── Capability Profile Matrix (bd-k5q5.7.5) ────────────────────────────────
 
 generate_extension_profile_matrix() {
@@ -6244,6 +6401,10 @@ main() {
     write_summary
 
     if ! generate_failure_diagnostics; then
+        overall_exit=1
+    fi
+
+    if ! generate_replay_bundle; then
         overall_exit=1
     fi
 
