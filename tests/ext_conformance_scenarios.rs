@@ -23,7 +23,7 @@ use pi::tools::ToolRegistry;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -275,7 +275,148 @@ struct ScenarioResult {
     skip_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     output: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_category: Option<String>,
     duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ScenarioShard {
+    index: usize,
+    total: usize,
+    name: String,
+}
+
+#[derive(Clone, Copy)]
+struct ScenarioPlanEntry<'a> {
+    extension: &'a ScenarioExtension,
+    scenario: &'a Scenario,
+}
+
+fn parse_scenario_shard(
+    index_raw: Option<&str>,
+    total_raw: Option<&str>,
+    name_raw: Option<&str>,
+) -> Result<Option<ScenarioShard>, String> {
+    match (index_raw, total_raw) {
+        (None, None) => Ok(None),
+        (Some(_), None) | (None, Some(_)) => {
+            Err("both PI_SCENARIO_SHARD_INDEX and PI_SCENARIO_SHARD_TOTAL are required".to_string())
+        }
+        (Some(index_raw), Some(total_raw)) => {
+            let index = index_raw
+                .parse::<usize>()
+                .map_err(|err| format!("invalid PI_SCENARIO_SHARD_INDEX='{index_raw}': {err}"))?;
+            let total = total_raw
+                .parse::<usize>()
+                .map_err(|err| format!("invalid PI_SCENARIO_SHARD_TOTAL='{total_raw}': {err}"))?;
+
+            if total == 0 {
+                return Err("PI_SCENARIO_SHARD_TOTAL must be > 0".to_string());
+            }
+            if index >= total {
+                return Err(format!(
+                    "PI_SCENARIO_SHARD_INDEX must be < PI_SCENARIO_SHARD_TOTAL ({index} >= {total})"
+                ));
+            }
+
+            let name = name_raw
+                .filter(|value| !value.trim().is_empty())
+                .map_or_else(
+                    || format!("scenario-{index}-of-{total}"),
+                    ToString::to_string,
+                );
+            Ok(Some(ScenarioShard { index, total, name }))
+        }
+    }
+}
+
+fn scenario_shard_from_env() -> Option<ScenarioShard> {
+    let index = std::env::var("PI_SCENARIO_SHARD_INDEX").ok();
+    let total = std::env::var("PI_SCENARIO_SHARD_TOTAL").ok();
+    let name = std::env::var("PI_SCENARIO_SHARD_NAME").ok();
+    parse_scenario_shard(index.as_deref(), total.as_deref(), name.as_deref())
+        .unwrap_or_else(|message| panic!("{message}"))
+}
+
+fn scenario_matches_filter(
+    ext: &ScenarioExtension,
+    scenario: &Scenario,
+    filter: Option<&str>,
+) -> bool {
+    filter.is_none_or(|needle| scenario.id.contains(needle) || ext.extension_id.contains(needle))
+}
+
+fn sorted_extensions(sample: &SampleJson) -> Vec<&ScenarioExtension> {
+    let mut extensions: Vec<&ScenarioExtension> = sample.scenario_suite.items.iter().collect();
+    extensions.sort_by(|left, right| left.extension_id.cmp(&right.extension_id));
+    extensions
+}
+
+fn sorted_scenarios(extension: &ScenarioExtension) -> Vec<&Scenario> {
+    let mut scenarios: Vec<&Scenario> = extension.scenarios.iter().collect();
+    scenarios.sort_by(|left, right| left.id.cmp(&right.id));
+    scenarios
+}
+
+fn build_scenario_plan<'a>(
+    sample: &'a SampleJson,
+    filter: Option<&str>,
+    shard: Option<&ScenarioShard>,
+) -> Vec<ScenarioPlanEntry<'a>> {
+    let mut plan = Vec::new();
+    for (extension_index, extension) in sorted_extensions(sample).into_iter().enumerate() {
+        if shard.is_some_and(|selection| extension_index % selection.total != selection.index) {
+            continue;
+        }
+
+        for scenario in sorted_scenarios(extension) {
+            if scenario_matches_filter(extension, scenario, filter) {
+                plan.push(ScenarioPlanEntry {
+                    extension,
+                    scenario,
+                });
+            }
+        }
+    }
+    plan
+}
+
+fn classify_scenario_failure(
+    status: &str,
+    diffs: &[String],
+    error: Option<&str>,
+) -> Option<&'static str> {
+    match status {
+        "error" => Some("runtime_error"),
+        "fail" => {
+            if let Some(err) = error {
+                let err_lower = err.to_ascii_lowercase();
+                if err.contains("No image data") || err_lower.contains("parse") {
+                    return Some("vcr_stub_gap");
+                }
+                return Some("mock_gap");
+            }
+
+            let diff_text = diffs.join(" ").to_ascii_lowercase();
+            if diff_text.contains("ui_status")
+                || diff_text.contains("ui_notify")
+                || diff_text.contains("exec_called")
+            {
+                Some("mock_gap")
+            } else {
+                Some("assertion_gap")
+            }
+        }
+        _ => None,
+    }
+}
+
+fn finalize_scenario_result(mut result: ScenarioResult) -> ScenarioResult {
+    result.failure_category =
+        classify_scenario_failure(&result.status, &result.diffs, result.error.as_deref())
+            .map(ToString::to_string);
+    result
 }
 
 // ─── Extension loader ───────────────────────────────────────────────────────
@@ -2170,22 +2311,23 @@ fn run_scenario(
         error: None,
         skip_reason: None,
         output: None,
+        failure_category: None,
         duration_ms: 0,
     };
 
     // Check if scenario is supported
     if let Some(reason) = needs_unsupported_setup(scenario) {
-        return ScenarioResult {
+        return finalize_scenario_result(ScenarioResult {
             status: "skip".to_string(),
             skip_reason: Some(reason),
             duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
             ..base
-        };
+        });
     }
 
     // Resolve extension path
     let Some(ext_path) = resolve_extension_path(&ext.extension_id, items) else {
-        return ScenarioResult {
+        return finalize_scenario_result(ScenarioResult {
             status: "error".to_string(),
             error: Some(format!(
                 "cannot resolve artifact path for '{}'",
@@ -2193,7 +2335,7 @@ fn run_scenario(
             )),
             duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
             ..base
-        };
+        });
     };
 
     // Decide whether to use mock-based or plain loader
@@ -2205,12 +2347,12 @@ fn run_scenario(
     let loaded = match load_extension(&ext_path) {
         Ok(loaded) => loaded,
         Err(err) => {
-            return ScenarioResult {
+            return finalize_scenario_result(ScenarioResult {
                 status: "error".to_string(),
                 error: Some(format!("load_extension: {err}")),
                 duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
                 ..base
-            };
+            });
         }
     };
 
@@ -2221,7 +2363,7 @@ fn run_scenario(
             if scenario.tool_name.is_none() {
                 if let Some(expect) = &scenario.expect {
                     let diffs = check_expectations(expect, &Ok(Value::Null), &loaded);
-                    return ScenarioResult {
+                    return finalize_scenario_result(ScenarioResult {
                         status: if diffs.is_empty() {
                             "pass".to_string()
                         } else {
@@ -2230,16 +2372,16 @@ fn run_scenario(
                         diffs,
                         duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
                         ..base
-                    };
+                    });
                 }
-                return ScenarioResult {
+                return finalize_scenario_result(ScenarioResult {
                     status: "skip".to_string(),
                     skip_reason: Some(
                         "tool scenario with no tool_name and no expectations".to_string(),
                     ),
                     duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
                     ..base
-                };
+                });
             }
             execute_tool_scenario(&loaded, scenario, &ext_path)
         }
@@ -2249,7 +2391,7 @@ fn run_scenario(
             // Provider scenarios check registration, not execution
             if let Some(expect) = &scenario.expect {
                 let diffs = check_expectations(expect, &Ok(Value::Null), &loaded);
-                return ScenarioResult {
+                return finalize_scenario_result(ScenarioResult {
                     status: if diffs.is_empty() {
                         "pass".to_string()
                     } else {
@@ -2258,19 +2400,19 @@ fn run_scenario(
                     diffs,
                     duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
                     ..base
-                };
+                });
             }
-            return ScenarioResult {
+            return finalize_scenario_result(ScenarioResult {
                 status: "pass".to_string(),
                 duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
                 ..base
-            };
+            });
         }
         // Flag/shortcut/registration scenarios: check registration state only
         "flag" | "shortcut" | "registration" => {
             if let Some(expect) = &scenario.expect {
                 let diffs = check_expectations(expect, &Ok(Value::Null), &loaded);
-                return ScenarioResult {
+                return finalize_scenario_result(ScenarioResult {
                     status: if diffs.is_empty() {
                         "pass".to_string()
                     } else {
@@ -2279,21 +2421,21 @@ fn run_scenario(
                     diffs,
                     duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
                     ..base
-                };
+                });
             }
-            return ScenarioResult {
+            return finalize_scenario_result(ScenarioResult {
                 status: "pass".to_string(),
                 duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
                 ..base
-            };
+            });
         }
         other => {
-            return ScenarioResult {
+            return finalize_scenario_result(ScenarioResult {
                 status: "skip".to_string(),
                 skip_reason: Some(format!("unsupported scenario kind: {other}")),
                 duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
                 ..base
-            };
+            });
         }
     };
 
@@ -2308,7 +2450,7 @@ fn run_scenario(
         check_expectations(expect, &result, &loaded)
     });
 
-    ScenarioResult {
+    finalize_scenario_result(ScenarioResult {
         status: if diffs.is_empty() {
             "pass".to_string()
         } else {
@@ -2320,7 +2462,7 @@ fn run_scenario(
         output,
         duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
         ..base
-    }
+    })
 }
 
 /// Run a scenario using mock-based extension loading.
@@ -2338,12 +2480,12 @@ fn run_scenario_with_mocks(
     let loaded = match load_extension_with_mocks(ext_path, scenario.setup.as_ref(), &default_spec) {
         Ok(loaded) => loaded,
         Err(err) => {
-            return ScenarioResult {
+            return finalize_scenario_result(ScenarioResult {
                 status: "error".to_string(),
                 error: Some(format!("load_extension_with_mocks: {err}")),
                 duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
                 ..base
-            };
+            });
         }
     };
 
@@ -2357,7 +2499,7 @@ fn run_scenario_with_mocks(
         let diffs = scenario.expect.as_ref().map_or_else(Vec::new, |expect| {
             check_expectations_with_mocks(expect, &result, &loaded)
         });
-        return ScenarioResult {
+        return finalize_scenario_result(ScenarioResult {
             status: if diffs.is_empty() {
                 "pass".to_string()
             } else {
@@ -2368,7 +2510,7 @@ fn run_scenario_with_mocks(
             output,
             duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
             ..base
-        };
+        });
     }
 
     // Single-step execution by kind
@@ -2377,7 +2519,7 @@ fn run_scenario_with_mocks(
             if scenario.tool_name.is_none() {
                 if let Some(expect) = &scenario.expect {
                     let diffs = check_expectations_with_mocks(expect, &Ok(Value::Null), &loaded);
-                    return ScenarioResult {
+                    return finalize_scenario_result(ScenarioResult {
                         status: if diffs.is_empty() {
                             "pass".to_string()
                         } else {
@@ -2386,16 +2528,16 @@ fn run_scenario_with_mocks(
                         diffs,
                         duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
                         ..base
-                    };
+                    });
                 }
-                return ScenarioResult {
+                return finalize_scenario_result(ScenarioResult {
                     status: "skip".to_string(),
                     skip_reason: Some(
                         "tool scenario with no tool_name and no expectations".to_string(),
                     ),
                     duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
                     ..base
-                };
+                });
             }
             execute_tool_scenario_with_mocks(&loaded, scenario, ext_path)
         }
@@ -2404,7 +2546,7 @@ fn run_scenario_with_mocks(
         "provider" | "flag" | "shortcut" | "registration" => {
             if let Some(expect) = &scenario.expect {
                 let diffs = check_expectations_with_mocks(expect, &Ok(Value::Null), &loaded);
-                return ScenarioResult {
+                return finalize_scenario_result(ScenarioResult {
                     status: if diffs.is_empty() {
                         "pass".to_string()
                     } else {
@@ -2413,21 +2555,21 @@ fn run_scenario_with_mocks(
                     diffs,
                     duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
                     ..base
-                };
+                });
             }
-            return ScenarioResult {
+            return finalize_scenario_result(ScenarioResult {
                 status: "pass".to_string(),
                 duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
                 ..base
-            };
+            });
         }
         other => {
-            return ScenarioResult {
+            return finalize_scenario_result(ScenarioResult {
                 status: "skip".to_string(),
                 skip_reason: Some(format!("unsupported scenario kind: {other}")),
                 duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
                 ..base
-            };
+            });
         }
     };
 
@@ -2440,7 +2582,7 @@ fn run_scenario_with_mocks(
         check_expectations_with_mocks(expect, &result, &loaded)
     });
 
-    ScenarioResult {
+    finalize_scenario_result(ScenarioResult {
         status: if diffs.is_empty() {
             "pass".to_string()
         } else {
@@ -2452,7 +2594,7 @@ fn run_scenario_with_mocks(
         output,
         duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
         ..base
-    }
+    })
 }
 
 // ─── JSONL logging ──────────────────────────────────────────────────────────
@@ -2470,7 +2612,22 @@ fn write_jsonl_report(results: &[ScenarioResult], report_path: &Path) {
     let _ = fs::write(report_path, lines.join("\n") + "\n");
 }
 
-fn write_summary_report(results: &[ScenarioResult], report_path: &Path) {
+fn failure_category_counts(results: &[ScenarioResult]) -> BTreeMap<String, u64> {
+    let mut categories: BTreeMap<String, u64> = BTreeMap::new();
+    for result in results {
+        if let Some(category) = &result.failure_category {
+            let count = categories.entry(category.clone()).or_default();
+            *count = count.saturating_add(1);
+        }
+    }
+    categories
+}
+
+fn write_summary_report(
+    results: &[ScenarioResult],
+    report_path: &Path,
+    shard: Option<&ScenarioShard>,
+) {
     let pass = results.iter().filter(|r| r.status == "pass").count();
     let fail = results.iter().filter(|r| r.status == "fail").count();
     let skip = results.iter().filter(|r| r.status == "skip").count();
@@ -2494,6 +2651,8 @@ fn write_summary_report(results: &[ScenarioResult], report_path: &Path) {
             { (pass as f64) / ((results.len() - skip) as f64) * 100.0 }
         },
         "total_duration_ms": total_ms,
+        "failure_categories": failure_category_counts(results),
+        "shard": shard,
         "results": results,
     });
 
@@ -2507,17 +2666,22 @@ fn write_summary_report(results: &[ScenarioResult], report_path: &Path) {
 }
 
 /// Write per-extension JSONL log files for triage.
-fn write_per_extension_logs(results: &[ScenarioResult], base_dir: &Path) {
+fn write_per_extension_logs(
+    results: &[ScenarioResult],
+    base_dir: &Path,
+    shard: Option<&ScenarioShard>,
+) {
     let ext_dir = base_dir.join("extensions");
     let _ = fs::create_dir_all(&ext_dir);
 
     // Group results by extension_id
-    let mut by_ext: HashMap<String, Vec<&ScenarioResult>> = HashMap::new();
+    let mut by_ext: BTreeMap<String, Vec<&ScenarioResult>> = BTreeMap::new();
     for r in results {
         by_ext.entry(r.extension_id.clone()).or_default().push(r);
     }
 
-    for (ext_id, ext_results) in &by_ext {
+    for (ext_id, ext_results) in &mut by_ext {
+        ext_results.sort_by(|left, right| left.scenario_id.cmp(&right.scenario_id));
         let path = ext_dir.join(format!("{ext_id}.jsonl"));
         let mut lines = Vec::new();
         for r in ext_results {
@@ -2535,6 +2699,8 @@ fn write_per_extension_logs(results: &[ScenarioResult], base_dir: &Path) {
                 "diffs": r.diffs,
                 "error": r.error,
                 "skip_reason": r.skip_reason,
+                "failure_category": r.failure_category,
+                "shard": shard,
             });
             if let Ok(json) = serde_json::to_string(&event) {
                 lines.push(json);
@@ -2545,7 +2711,11 @@ fn write_per_extension_logs(results: &[ScenarioResult], base_dir: &Path) {
 }
 
 /// Write a triage-oriented summary for CI consumption.
-fn write_triage_report(results: &[ScenarioResult], report_path: &Path) {
+fn write_triage_report(
+    results: &[ScenarioResult],
+    report_path: &Path,
+    shard: Option<&ScenarioShard>,
+) {
     let pass = results.iter().filter(|r| r.status == "pass").count();
     let fail = results.iter().filter(|r| r.status == "fail").count();
     let skip = results.iter().filter(|r| r.status == "skip").count();
@@ -2553,7 +2723,7 @@ fn write_triage_report(results: &[ScenarioResult], report_path: &Path) {
     let total_ms: u64 = results.iter().map(|r| r.duration_ms).sum();
 
     // Per-extension summaries
-    let mut ext_summaries: HashMap<String, Value> = HashMap::new();
+    let mut ext_summaries: BTreeMap<String, Value> = BTreeMap::new();
     for r in results {
         let entry = ext_summaries
             .entry(r.extension_id.clone())
@@ -2565,6 +2735,7 @@ fn write_triage_report(results: &[ScenarioResult], report_path: &Path) {
                     "pass": 0, "fail": 0, "skip": 0, "error": 0,
                     "total_ms": 0,
                     "failures": [],
+                    "failure_categories": {},
                 })
             });
         if let Some(obj) = entry.as_object_mut() {
@@ -2575,11 +2746,25 @@ fn write_triage_report(results: &[ScenarioResult], report_path: &Path) {
             if let Some(ms) = obj.get("total_ms").and_then(Value::as_u64) {
                 obj.insert("total_ms".to_string(), Value::from(ms + r.duration_ms));
             }
-            if r.status == "fail" {
+            if let Some(category) = &r.failure_category {
+                if let Some(category_map) = obj
+                    .get_mut("failure_categories")
+                    .and_then(Value::as_object_mut)
+                {
+                    let count = category_map
+                        .get(category)
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    category_map.insert(category.clone(), Value::from(count + 1));
+                }
+            }
+            if r.status == "fail" || r.status == "error" {
                 if let Some(arr) = obj.get_mut("failures").and_then(Value::as_array_mut) {
                     arr.push(serde_json::json!({
                         "scenario_id": r.scenario_id,
                         "diffs": r.diffs,
+                        "error": r.error,
+                        "failure_category": r.failure_category,
                     }));
                 }
             }
@@ -2603,6 +2788,8 @@ fn write_triage_report(results: &[ScenarioResult], report_path: &Path) {
             { (pass as f64) / ((results.len() - skip) as f64) * 100.0 }
         },
         "total_duration_ms": total_ms,
+        "failure_categories": failure_category_counts(results),
+        "shard": shard,
         "extensions": ext_summaries.values().collect::<Vec<_>>(),
     });
 
@@ -2622,6 +2809,38 @@ fn load_sample_json() -> SampleJson {
     serde_json::from_str(&data).expect("parse extension-sample.json")
 }
 
+#[test]
+fn parse_scenario_shard_accepts_valid_values() {
+    let parsed = parse_scenario_shard(Some("1"), Some("4"), Some("matrix-a"))
+        .expect("valid shard config")
+        .expect("expected shard");
+    assert_eq!(parsed.index, 1);
+    assert_eq!(parsed.total, 4);
+    assert_eq!(parsed.name, "matrix-a");
+}
+
+#[test]
+fn parse_scenario_shard_rejects_partial_values() {
+    let err = parse_scenario_shard(Some("1"), None, None).expect_err("expected parse error");
+    assert!(err.contains("both PI_SCENARIO_SHARD_INDEX and PI_SCENARIO_SHARD_TOTAL"));
+}
+
+#[test]
+fn classify_scenario_failure_categories_are_stable() {
+    let ui_diff = vec!["ui_status_contains_sequence: expected".to_string()];
+    assert_eq!(
+        classify_scenario_failure("fail", &ui_diff, None),
+        Some("mock_gap")
+    );
+
+    assert_eq!(
+        classify_scenario_failure("fail", &[], Some("No image data parse failure")),
+        Some("vcr_stub_gap")
+    );
+
+    assert_eq!(classify_scenario_failure("pass", &[], None), None);
+}
+
 /// Run all scenarios from extension-sample.json.
 /// Reports per-scenario pass/fail with structured logging.
 #[test]
@@ -2629,9 +2848,18 @@ fn load_sample_json() -> SampleJson {
 fn scenario_conformance_suite() {
     let sample = load_sample_json();
     let filter = std::env::var("PI_SCENARIO_FILTER").ok();
+    let shard = scenario_shard_from_env();
+    let plan = build_scenario_plan(&sample, filter.as_deref(), shard.as_ref());
+    let mut scenarios_by_extension: BTreeMap<String, usize> = BTreeMap::new();
+    for entry in &plan {
+        let count = scenarios_by_extension
+            .entry(entry.extension.extension_id.clone())
+            .or_default();
+        *count = count.saturating_add(1);
+    }
 
     eprintln!(
-        "[scenario_conformance] Starting ({} extensions, {} total scenarios)",
+        "[scenario_conformance] Starting ({} extensions, {} total scenarios, selected: {} extensions / {} scenarios)",
         sample.scenario_suite.items.len(),
         sample
             .scenario_suite
@@ -2639,43 +2867,57 @@ fn scenario_conformance_suite() {
             .iter()
             .map(|e| e.scenarios.len())
             .sum::<usize>(),
+        scenarios_by_extension.len(),
+        plan.len(),
     );
+    if let Some(needle) = &filter {
+        eprintln!("[scenario_conformance] filter={needle}");
+    }
+    if let Some(selection) = &shard {
+        eprintln!(
+            "[scenario_conformance] shard={} index={} total={}",
+            selection.name, selection.index, selection.total
+        );
+    }
 
     let mut all_results = Vec::new();
 
-    for ext in &sample.scenario_suite.items {
-        for scenario in &ext.scenarios {
-            if let Some(ref f) = filter {
-                if !scenario.id.contains(f) && !ext.extension_id.contains(f) {
-                    continue;
+    for entry in plan {
+        let ext = entry.extension;
+        let scenario = entry.scenario;
+
+        eprintln!(
+            "[scenario_conformance] {} ({}) - {}",
+            scenario.id, ext.extension_id, scenario.summary
+        );
+
+        let result = run_scenario(ext, scenario, &sample.items);
+
+        match result.status.as_str() {
+            "pass" => eprintln!("  PASS ({} ms)", result.duration_ms),
+            "fail" => {
+                eprintln!("  FAIL ({} ms)", result.duration_ms);
+                if let Some(category) = result.failure_category.as_deref() {
+                    eprintln!("    category: {category}");
+                }
+                for diff in &result.diffs {
+                    eprintln!("    - {diff}");
                 }
             }
-
-            eprintln!(
-                "[scenario_conformance] {} ({}) - {}",
-                scenario.id, ext.extension_id, scenario.summary
-            );
-
-            let result = run_scenario(ext, scenario, &sample.items);
-
-            match result.status.as_str() {
-                "pass" => eprintln!("  PASS ({} ms)", result.duration_ms),
-                "fail" => {
-                    eprintln!("  FAIL ({} ms)", result.duration_ms);
-                    for diff in &result.diffs {
-                        eprintln!("    - {diff}");
-                    }
+            "skip" => eprintln!(
+                "  SKIP: {}",
+                result.skip_reason.as_deref().unwrap_or("unknown")
+            ),
+            "error" => {
+                eprintln!("  ERROR: {}", result.error.as_deref().unwrap_or("unknown"));
+                if let Some(category) = result.failure_category.as_deref() {
+                    eprintln!("    category: {category}");
                 }
-                "skip" => eprintln!(
-                    "  SKIP: {}",
-                    result.skip_reason.as_deref().unwrap_or("unknown")
-                ),
-                "error" => eprintln!("  ERROR: {}", result.error.as_deref().unwrap_or("unknown")),
-                _ => {}
             }
-
-            all_results.push(result);
+            _ => {}
         }
+
+        all_results.push(result);
     }
 
     // Write reports
@@ -2683,9 +2925,9 @@ fn scenario_conformance_suite() {
     let summary_path = reports_dir().join("scenario_conformance.json");
     let triage_path = reports_dir().join("smoke_triage.json");
     write_jsonl_report(&all_results, &jsonl_path);
-    write_summary_report(&all_results, &summary_path);
-    write_per_extension_logs(&all_results, &reports_dir());
-    write_triage_report(&all_results, &triage_path);
+    write_summary_report(&all_results, &summary_path, shard.as_ref());
+    write_per_extension_logs(&all_results, &reports_dir(), shard.as_ref());
+    write_triage_report(&all_results, &triage_path, shard.as_ref());
 
     eprintln!(
         "[scenario_conformance] Wrote JSONL to {}",
@@ -2803,7 +3045,7 @@ fn scenario_hello_tool() {
 }
 
 /// Focused regression test: antigravity image scenario should parse synthetic
-/// vcr_or_stub SSE image chunk and pass.
+/// `vcr_or_stub` SSE image chunk and pass.
 #[test]
 fn scenario_antigravity_image_mocked_sse() {
     let sample = load_sample_json();
@@ -2970,16 +3212,26 @@ fn scenario_sandbox_tool_registered() {
 #[allow(clippy::too_many_lines)]
 fn smoke_runtime_suite() {
     let sample = load_sample_json();
+    let filter = std::env::var("PI_SCENARIO_FILTER").ok();
+    let shard = scenario_shard_from_env();
     let run_id = format!(
         "smoke-{}",
         Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
     );
     let smoke_dir = reports_dir().join("smoke");
     let _ = fs::create_dir_all(&smoke_dir);
+    let plan = build_scenario_plan(&sample, filter.as_deref(), shard.as_ref());
+    let mut scenarios_by_extension: BTreeMap<String, usize> = BTreeMap::new();
+    for entry in &plan {
+        let count = scenarios_by_extension
+            .entry(entry.extension.extension_id.clone())
+            .or_default();
+        *count = count.saturating_add(1);
+    }
 
     eprintln!("[smoke] run_id={run_id}");
     eprintln!(
-        "[smoke] extensions={}, scenarios={}",
+        "[smoke] extensions={}, scenarios={}, selected_extensions={}, selected_scenarios={}",
         sample.scenario_suite.items.len(),
         sample
             .scenario_suite
@@ -2987,71 +3239,94 @@ fn smoke_runtime_suite() {
             .iter()
             .map(|e| e.scenarios.len())
             .sum::<usize>(),
+        scenarios_by_extension.len(),
+        plan.len(),
     );
+    if let Some(needle) = &filter {
+        eprintln!("[smoke] filter={needle}");
+    }
+    if let Some(selection) = &shard {
+        eprintln!(
+            "[smoke] shard={} index={} total={}",
+            selection.name, selection.index, selection.total
+        );
+    }
 
     let mut all_results = Vec::new();
     let mut events: Vec<Value> = Vec::new();
+    let mut current_extension: Option<String> = None;
 
-    for ext in &sample.scenario_suite.items {
+    for entry in plan {
+        let ext = entry.extension;
+        let scenario = entry.scenario;
         let item = sample.items.iter().find(|i| i.id == ext.extension_id);
         let source_tier = item.map_or("unknown", |i| &i.source_tier);
         let runtime_tier = item.map_or("unknown", |i| &i.runtime_tier);
 
-        eprintln!(
-            "[smoke] extension={} source_tier={source_tier} runtime_tier={runtime_tier} scenarios={}",
-            ext.extension_id,
-            ext.scenarios.len()
-        );
-
-        for scenario in &ext.scenarios {
-            let event_start = Utc::now();
-            let result = run_scenario(ext, scenario, &sample.items);
-
-            // Build per-event log entry
-            let event = serde_json::json!({
-                "schema": "pi.ext.smoke.v1",
-                "run_id": run_id,
-                "ts": event_start.to_rfc3339_opts(SecondsFormat::Millis, true),
-                "extension_id": ext.extension_id,
-                "scenario_id": scenario.id,
-                "event_type": scenario.kind,
-                "tool_name": scenario.tool_name,
-                "command_name": scenario.command_name,
-                "event_name": scenario.event_name,
-                "source_tier": source_tier,
-                "runtime_tier": runtime_tier,
-                "status": result.status,
-                "duration_ms": result.duration_ms,
-                "output": result.output,
-                "diffs": result.diffs,
-                "error": result.error,
-                "skip_reason": result.skip_reason,
-            });
-            events.push(event);
-
-            // Verbose console output
-            let status_tag = match result.status.as_str() {
-                "pass" => "PASS",
-                "fail" => "FAIL",
-                "skip" => "SKIP",
-                "error" => "ERR ",
-                _ => "????",
-            };
+        if current_extension.as_deref() != Some(ext.extension_id.as_str()) {
+            let selected_count = scenarios_by_extension
+                .get(&ext.extension_id)
+                .copied()
+                .unwrap_or(0);
             eprintln!(
-                "  [{status_tag}] {} ({}) - {} [{}ms]",
-                scenario.id, scenario.kind, scenario.summary, result.duration_ms
+                "[smoke] extension={} source_tier={source_tier} runtime_tier={runtime_tier} selected_scenarios={selected_count}",
+                ext.extension_id
             );
-            if result.status == "fail" {
-                for diff in &result.diffs {
-                    eprintln!("         diff: {diff}");
-                }
-            }
-            if let Some(err) = &result.error {
-                eprintln!("         error: {err}");
-            }
-
-            all_results.push(result);
+            current_extension = Some(ext.extension_id.clone());
         }
+
+        let event_start = Utc::now();
+        let result = run_scenario(ext, scenario, &sample.items);
+
+        // Build per-event log entry
+        let event = serde_json::json!({
+            "schema": "pi.ext.smoke.v1",
+            "run_id": run_id,
+            "ts": event_start.to_rfc3339_opts(SecondsFormat::Millis, true),
+            "extension_id": ext.extension_id,
+            "scenario_id": scenario.id,
+            "event_type": scenario.kind,
+            "tool_name": scenario.tool_name,
+            "command_name": scenario.command_name,
+            "event_name": scenario.event_name,
+            "source_tier": source_tier,
+            "runtime_tier": runtime_tier,
+            "status": result.status,
+            "duration_ms": result.duration_ms,
+            "output": result.output,
+            "diffs": result.diffs,
+            "error": result.error,
+            "skip_reason": result.skip_reason,
+            "failure_category": result.failure_category,
+            "shard": shard.as_ref(),
+        });
+        events.push(event);
+
+        // Verbose console output
+        let status_tag = match result.status.as_str() {
+            "pass" => "PASS",
+            "fail" => "FAIL",
+            "skip" => "SKIP",
+            "error" => "ERR ",
+            _ => "????",
+        };
+        eprintln!(
+            "  [{status_tag}] {} ({}) - {} [{}ms]",
+            scenario.id, scenario.kind, scenario.summary, result.duration_ms
+        );
+        if let Some(category) = result.failure_category.as_deref() {
+            eprintln!("         category: {category}");
+        }
+        if result.status == "fail" {
+            for diff in &result.diffs {
+                eprintln!("         diff: {diff}");
+            }
+        }
+        if let Some(err) = &result.error {
+            eprintln!("         error: {err}");
+        }
+
+        all_results.push(result);
     }
 
     // Write global smoke JSONL (all events)
@@ -3063,11 +3338,11 @@ fn smoke_runtime_suite() {
     let _ = fs::write(&smoke_jsonl, lines.join("\n") + "\n");
 
     // Write per-extension JSONL
-    write_per_extension_logs(&all_results, &smoke_dir);
+    write_per_extension_logs(&all_results, &smoke_dir, shard.as_ref());
 
     // Write triage report
     let triage_path = smoke_dir.join("triage.json");
-    write_triage_report(&all_results, &triage_path);
+    write_triage_report(&all_results, &triage_path, shard.as_ref());
 
     // Summary
     let pass = all_results.iter().filter(|r| r.status == "pass").count();

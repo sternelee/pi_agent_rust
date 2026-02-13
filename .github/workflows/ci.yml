@@ -815,6 +815,29 @@ jobs:
           set -euxo pipefail
           python3 scripts/check_conformance_regression.py
 
+      - name: Must-pass extension gate (208 extensions) [linux]
+        if: runner.os == 'Linux'
+        env:
+          PI_EXT_GATE_MUST_PASS_RATE: ${{ vars.PI_EXT_GATE_MUST_PASS_RATE || '100.0' }}
+          PI_EXT_GATE_MAX_FAILURES: ${{ vars.PI_EXT_GATE_MAX_FAILURES || '0' }}
+          PI_EXT_GATE_MODE: ${{ vars.PI_EXT_GATE_MODE || 'strict' }}
+        run: |
+          set -euxo pipefail
+          cargo test --test ext_conformance_generated --features ext-conformance \
+            -- conformance_must_pass_gate --nocapture --exact
+        continue-on-error: false
+
+      - name: Upload must-pass gate artifacts [linux]
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: must-pass-gate-${{ github.sha }}
+          path: |
+            tests/ext_conformance/reports/gate/must_pass_gate_verdict.json
+            tests/ext_conformance/reports/gate/must_pass_events.jsonl
+            tests/ext_conformance/reports/gate/must_pass_gate_report.md
+          if-no-files-found: warn
+
       - name: Release gate (evidence bundle) [linux]
         if: runner.os == 'Linux'
         run: |
@@ -825,6 +848,63 @@ jobs:
           if [ "$VERDICT" = "fail" ]; then
             echo "::warning::Release gate failed — conformance evidence bundle does not meet thresholds"
           fi
+
+      - name: Cross-platform matrix validation
+        if: always()
+        run: |
+          set -euxo pipefail
+          cargo test --test ci_cross_platform_matrix \
+            -- cross_platform_matrix --nocapture --exact
+        continue-on-error: true
+
+      - name: Upload cross-platform report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-platform-${{ matrix.os }}-${{ github.sha }}
+          path: |
+            tests/cross_platform_reports/**/platform_report.json
+            tests/cross_platform_reports/**/platform_events.jsonl
+            tests/cross_platform_reports/**/platform_report.md
+          if-no-files-found: warn
+
+      - name: Build unified evidence bundle [linux]
+        if: always() && runner.os == 'Linux'
+        run: |
+          set -euxo pipefail
+          cargo test --test ci_evidence_bundle \
+            -- build_evidence_bundle --nocapture --exact
+        continue-on-error: true
+
+      - name: Full-suite gate [linux]
+        if: always() && runner.os == 'Linux'
+        run: |
+          set -euxo pipefail
+          cargo test --test ci_full_suite_gate \
+            -- full_suite_gate --nocapture --exact
+        continue-on-error: true
+
+      - name: Upload unified evidence bundle [linux]
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-bundle-${{ github.sha }}
+          path: |
+            tests/evidence_bundle/index.json
+            tests/evidence_bundle/bundle_report.md
+            tests/evidence_bundle/events.jsonl
+          if-no-files-found: warn
+
+      - name: Upload full-suite gate artifacts [linux]
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-suite-gate-${{ github.sha }}
+          path: |
+            tests/full_suite_gate/full_suite_verdict.json
+            tests/full_suite_gate/full_suite_events.jsonl
+            tests/full_suite_gate/full_suite_report.md
+          if-no-files-found: warn
 
       - name: Reclaim disk space before coverage [linux]
         if: runner.os == 'Linux'

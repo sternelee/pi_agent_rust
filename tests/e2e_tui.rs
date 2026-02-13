@@ -57,10 +57,13 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const VCR_TEST_NAME: &str = "e2e_tui_tool_read";
 const VCR_BASIC_CHAT_TEST_NAME: &str = "e2e_tui_basic_chat";
 const VCR_MULTI_TOOL_CHAIN_TEST_NAME: &str = "e2e_tui_multi_tool_chain";
+const VCR_SCROLL_FINALIZE_TEST_NAME: &str = "e2e_tui_scroll_finalize";
 const VCR_MODEL: &str = "claude-sonnet-4-20250514";
 const VCR_PROMPT: &str = "Read sample.txt";
 const VCR_BASIC_CHAT_PROMPT: &str = "Say hello";
 const VCR_BASIC_CHAT_RESPONSE: &str = "Hello! How can I help you today?";
+const VCR_SCROLL_FINALIZE_PROMPT: &str = "Emit a long scrolling response";
+const VCR_SCROLL_FINALIZE_LAST_LINE: &str = "FINAL-LINE-SCROLL-FINALIZE";
 const SAMPLE_FILE_NAME: &str = "sample.txt";
 const SAMPLE_FILE_CONTENT: &str = "Hello\nWorld\n";
 const TOOL_CALL_ID: &str = "toolu_e2e_read_1";
@@ -165,6 +168,23 @@ fn build_vcr_system_prompt(workdir: &Path, env_root: &Path) -> String {
     build_vcr_system_prompt_for_args(vcr_interactive_args, workdir, env_root)
 }
 
+fn parse_scroll_percent(pane: &str) -> Option<u32> {
+    let marker = pane
+        .lines()
+        .find(|line| line.contains("PgUp/PgDn to scroll"))?;
+    let open = marker.find('[')?;
+    let close = marker[open + 1..].find('%')?;
+    marker[open + 1..open + 1 + close].parse::<u32>().ok()
+}
+
+fn vcr_scroll_finalize_response() -> String {
+    let mut lines = (1..=120)
+        .map(|idx| format!("scroll line {idx:03}"))
+        .collect::<Vec<_>>();
+    lines.push(VCR_SCROLL_FINALIZE_LAST_LINE.to_string());
+    lines.join("\n")
+}
+
 /// Write a VCR cassette for a basic chat interaction (no tools, simple text response).
 fn write_vcr_basic_chat_cassette(dir: &Path, system_prompt: &str) -> PathBuf {
     let cassette_path = dir.join(format!("{VCR_BASIC_CHAT_TEST_NAME}.json"));
@@ -231,6 +251,96 @@ fn write_vcr_basic_chat_cassette(dir: &Path, system_prompt: &str) -> PathBuf {
     let cassette = Cassette {
         version: "1.0".to_string(),
         test_name: VCR_BASIC_CHAT_TEST_NAME.to_string(),
+        recorded_at: "1970-01-01T00:00:00Z".to_string(),
+        interactions: vec![Interaction {
+            request: RecordedRequest {
+                method: "POST".to_string(),
+                url: "https://api.anthropic.com/v1/messages".to_string(),
+                headers: vec![
+                    ("Content-Type".to_string(), "application/json".to_string()),
+                    ("Accept".to_string(), "text/event-stream".to_string()),
+                ],
+                body: Some(request),
+                body_text: None,
+            },
+            response,
+        }],
+    };
+
+    std::fs::create_dir_all(dir).expect("create cassette dir");
+    let json = serde_json::to_string_pretty(&cassette).expect("serialize cassette");
+    std::fs::write(&cassette_path, json).expect("write cassette");
+    cassette_path
+}
+
+/// Write a VCR cassette that returns a long text response to exercise scrolling
+/// and final assistant message finalization behavior.
+fn write_vcr_scroll_finalize_cassette(dir: &Path, system_prompt: &str) -> PathBuf {
+    let cassette_path = dir.join(format!("{VCR_SCROLL_FINALIZE_TEST_NAME}.json"));
+    let response_text = vcr_scroll_finalize_response();
+
+    let request = json!({
+        "model": VCR_MODEL,
+        "messages": [
+            { "role": "user", "content": [ { "type": "text", "text": VCR_SCROLL_FINALIZE_PROMPT } ] }
+        ],
+        "system": system_prompt,
+        "max_tokens": 8192,
+        "stream": true,
+    });
+
+    let sse_chunk = |event: &str, data: serde_json::Value| -> String {
+        let payload = serde_json::to_string(&data).expect("serialize sse payload");
+        format!("event: {event}\ndata: {payload}\n\n")
+    };
+
+    let response = RecordedResponse {
+        status: 200,
+        headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+        body_chunks: vec![
+            sse_chunk(
+                "message_start",
+                json!({
+                    "type": "message_start",
+                    "message": { "usage": { "input_tokens": 16 } }
+                }),
+            ),
+            sse_chunk(
+                "content_block_start",
+                json!({
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": { "type": "text" }
+                }),
+            ),
+            sse_chunk(
+                "content_block_delta",
+                json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": { "type": "text_delta", "text": response_text }
+                }),
+            ),
+            sse_chunk(
+                "content_block_stop",
+                json!({ "type": "content_block_stop", "index": 0 }),
+            ),
+            sse_chunk(
+                "message_delta",
+                json!({
+                    "type": "message_delta",
+                    "delta": { "stop_reason": "end_turn" },
+                    "usage": { "output_tokens": 128 }
+                }),
+            ),
+            sse_chunk("message_stop", json!({ "type": "message_stop" })),
+        ],
+        body_chunks_base64: None,
+    };
+
+    let cassette = Cassette {
+        version: "1.0".to_string(),
+        test_name: VCR_SCROLL_FINALIZE_TEST_NAME.to_string(),
         recorded_at: "1970-01-01T00:00:00Z".to_string(),
         interactions: vec![Interaction {
             request: RecordedRequest {
@@ -1453,6 +1563,100 @@ fn e2e_tui_basic_chat_vcr() {
         "Expected >= 2 steps (startup + prompt), got {}",
         session.steps().len()
     );
+}
+
+/// E2E interactive: regression for long streamed responses.
+/// Verifies final message rendering is stable (no duplicate terminal artifact)
+/// and viewport scrolling remains functional.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn e2e_tui_stream_scroll_and_finalize_vcr() {
+    let Some((_lock, mut session)) =
+        new_locked_tui_session("e2e_tui_stream_scroll_and_finalize_vcr")
+    else {
+        eprintln!("Skipping: tmux not available");
+        return;
+    };
+
+    session.harness.section("setup vcr");
+    let cassette_dir = session.harness.temp_path("vcr");
+    let env_root = session.harness.temp_dir().join("env");
+    let system_prompt = build_vcr_system_prompt_for_args(
+        vcr_interactive_args_no_tools,
+        session.harness.temp_dir(),
+        &env_root,
+    );
+    let cassette_path = write_vcr_scroll_finalize_cassette(&cassette_dir, &system_prompt);
+    let cassette_name = cassette_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("vcr-cassette.json");
+    session
+        .harness
+        .record_artifact(cassette_name, &cassette_path);
+
+    let cassette_dir_str = cassette_dir.display().to_string();
+    session.set_env(VCR_ENV_MODE, "playback");
+    session.set_env(VCR_ENV_DIR, &cassette_dir_str);
+    session.set_env("PI_VCR_TEST_NAME", VCR_SCROLL_FINALIZE_TEST_NAME);
+    session.set_env("PI_TEST_MODE", "1");
+    session.set_env("VCR_DEBUG_BODY", "1");
+
+    session.harness.section("launch");
+    session.launch(&vcr_interactive_args_no_tools());
+    session.wait_and_capture("startup", "Welcome to Pi!", STARTUP_TIMEOUT);
+
+    session.harness.section("long streaming prompt");
+    let pane = session.send_text_and_wait(
+        "prompt",
+        VCR_SCROLL_FINALIZE_PROMPT,
+        VCR_SCROLL_FINALIZE_LAST_LINE,
+        Duration::from_secs(30),
+    );
+
+    assert!(
+        pane.contains(VCR_SCROLL_FINALIZE_LAST_LINE),
+        "Expected final streamed marker in pane.\nPane:\n{pane}"
+    );
+    assert_eq!(
+        pane.matches(VCR_SCROLL_FINALIZE_LAST_LINE).count(),
+        1,
+        "Expected final marker to render exactly once"
+    );
+    let baseline_percent = parse_scroll_percent(&pane).expect("expected scroll indicator");
+    assert_eq!(
+        baseline_percent, 100,
+        "Expected finalized response viewport to be at bottom"
+    );
+
+    session.harness.section("scroll interaction");
+    let page_up =
+        session.send_key_and_wait("page-up", "PageUp", "PgUp/PgDn to scroll", COMMAND_TIMEOUT);
+    let page_up_percent = parse_scroll_percent(&page_up).expect("expected scroll indicator");
+    assert!(
+        page_up_percent < 100,
+        "Expected PageUp to move away from bottom, got {page_up_percent}%"
+    );
+
+    let page_down = session.send_key_and_wait(
+        "page-down",
+        "PageDown",
+        "PgUp/PgDn to scroll",
+        COMMAND_TIMEOUT,
+    );
+    let page_down_percent = parse_scroll_percent(&page_down).expect("expected scroll indicator");
+    assert_eq!(
+        page_down_percent, 100,
+        "Expected PageDown to return to bottom"
+    );
+
+    session.harness.section("exit");
+    session.exit_gracefully();
+    assert!(
+        !session.tmux.session_exists(),
+        "Session did not exit cleanly"
+    );
+    session.write_artifacts();
 }
 
 /// E2E interactive: VCR playback tool call with deterministic artifacts.

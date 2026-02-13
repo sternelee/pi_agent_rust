@@ -2,6 +2,8 @@
 
 mod common;
 
+use std::fmt::Write;
+
 use asupersync::channel::mpsc;
 use asupersync::sync::Mutex;
 use bubbletea::{Cmd, KeyMsg, KeyType, Message, Model as BubbleteaModel, QuitMsg};
@@ -1367,6 +1369,80 @@ fn tui_state_text_delta_renders_while_processing() {
 }
 
 #[test]
+fn tui_state_text_delta_long_response_stays_scrolled_to_bottom() {
+    let harness = TestHarness::new("tui_state_text_delta_long_response_stays_scrolled_to_bottom");
+    let mut app = build_app(&harness, Vec::new());
+    app.set_terminal_size(80, 12);
+    log_initial_state(&harness, &app);
+
+    apply_pi(&harness, &mut app, "PiMsg::AgentStart", PiMsg::AgentStart);
+    let streamed = (1..=80)
+        .map(|idx| format!("stream line {idx:03}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let step = apply_pi(
+        &harness,
+        &mut app,
+        "PiMsg::TextDelta(long)",
+        PiMsg::TextDelta(streamed),
+    );
+
+    let percent = parse_scroll_percent(&step.after).expect("expected scroll indicator");
+    assert_eq!(
+        percent, 100,
+        "Expected long streaming response to remain tail-following"
+    );
+    assert_after_contains(&harness, &step, "stream line 080");
+}
+
+#[test]
+fn tui_state_text_delta_preserves_manual_scroll_position() {
+    let harness = TestHarness::new("tui_state_text_delta_preserves_manual_scroll_position");
+    let mut app = build_app(&harness, Vec::new());
+    app.set_terminal_size(80, 12);
+    log_initial_state(&harness, &app);
+
+    let messages = (0..50)
+        .map(|idx| user_msg(&format!("history {idx:03}")))
+        .collect::<Vec<_>>();
+    apply_pi(
+        &harness,
+        &mut app,
+        "PiMsg::ConversationReset(history)",
+        PiMsg::ConversationReset {
+            messages,
+            usage: Usage::default(),
+            status: None,
+        },
+    );
+
+    let pgup_step = press_pgup(&harness, &mut app);
+    let pgup_percent = parse_scroll_percent(&pgup_step.after).expect("no scroll indicator");
+    assert!(
+        pgup_percent < 100,
+        "Expected to leave bottom after PgUp, got {pgup_percent}%"
+    );
+
+    apply_pi(&harness, &mut app, "PiMsg::AgentStart", PiMsg::AgentStart);
+    let streamed = (1..=40)
+        .map(|idx| format!("delta {idx:03}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let step = apply_pi(
+        &harness,
+        &mut app,
+        "PiMsg::TextDelta(long)",
+        PiMsg::TextDelta(streamed),
+    );
+
+    let after_percent = parse_scroll_percent(&step.after).expect("expected scroll indicator");
+    assert!(
+        after_percent < 100,
+        "Expected streaming update not to yank user back to bottom ({after_percent}%)"
+    );
+}
+
+#[test]
 fn tui_state_thinking_delta_renders_while_processing() {
     let harness = TestHarness::new("tui_state_thinking_delta_renders_while_processing");
     let mut app = build_app(&harness, Vec::new());
@@ -2172,6 +2248,47 @@ fn tui_state_agent_done_appends_assistant_message_and_updates_usage() {
     assert_after_contains(&harness, &step, "Assistant:");
     assert_after_contains(&harness, &step, "final");
     assert_after_contains(&harness, &step, "Tokens: 5 in / 7 out");
+}
+
+#[test]
+fn tui_state_agent_done_replaces_stream_buffer_without_duplicate_marker() {
+    let harness =
+        TestHarness::new("tui_state_agent_done_replaces_stream_buffer_without_duplicate_marker");
+    let mut app = build_app(&harness, Vec::new());
+    app.set_terminal_size(80, 12);
+    log_initial_state(&harness, &app);
+
+    let final_marker: &str = "FINAL-MARKER-AGENT-DONE";
+
+    apply_pi(&harness, &mut app, "PiMsg::AgentStart", PiMsg::AgentStart);
+    let streamed = format!("{}\n{final_marker}", numbered_lines(80));
+    apply_pi(
+        &harness,
+        &mut app,
+        "PiMsg::TextDelta(long+marker)",
+        PiMsg::TextDelta(streamed),
+    );
+    let step = apply_pi(
+        &harness,
+        &mut app,
+        "PiMsg::AgentDone(stop)",
+        PiMsg::AgentDone {
+            usage: None,
+            stop_reason: StopReason::Stop,
+            error_message: None,
+        },
+    );
+
+    assert_after_contains(&harness, &step, final_marker);
+    assert_after_not_contains(&harness, &step, "Processing...");
+    assert_after_contains(&harness, &step, SINGLE_LINE_HINT);
+    assert_eq!(
+        step.after.matches(final_marker).count(),
+        1,
+        "Expected final marker to render once after finalization"
+    );
+    let percent = parse_scroll_percent(&step.after).expect("expected scroll indicator");
+    assert_eq!(percent, 100, "Expected final frame to remain at bottom");
 }
 
 #[test]
@@ -6438,4 +6555,395 @@ fn tui_state_model_selector_no_match_enter_shows_no_model() {
     let step = press_enter(&harness, &mut app);
     assert_after_contains(&harness, &step, "No model selected");
     assert_after_not_contains(&harness, &step, "Select a model");
+}
+
+// ============================================================================
+// Viewport Scrolling Tests
+// ============================================================================
+
+/// Helper: stream enough content to make the viewport scrollable, then finalize.
+fn fill_viewport_with_stream(harness: &TestHarness, app: &mut PiApp, line_count: usize) {
+    apply_pi(harness, app, "AgentStart", PiMsg::AgentStart);
+    let content = numbered_lines(line_count);
+    apply_pi(harness, app, "TextDelta(long)", PiMsg::TextDelta(content));
+}
+
+fn finalize_agent(harness: &TestHarness, app: &mut PiApp) -> StepOutcome {
+    apply_pi(
+        harness,
+        app,
+        "AgentDone(stop)",
+        PiMsg::AgentDone {
+            usage: Some(sample_usage(10, 20)),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+        },
+    )
+}
+
+#[test]
+fn tui_scroll_pageup_moves_viewport_away_from_bottom() {
+    let harness = TestHarness::new("tui_scroll_pageup_moves_viewport_away_from_bottom");
+    let mut app = build_app(&harness, Vec::new());
+    app.set_terminal_size(80, 20);
+    log_initial_state(&harness, &app);
+
+    // Stream enough content to be scrollable (well beyond 20 lines).
+    fill_viewport_with_stream(&harness, &mut app, 80);
+
+    // Before PageUp: should be at 100%.
+    let before_view = normalize_view(&BubbleteaModel::view(&app));
+    let pct_before = parse_scroll_percent(&before_view).expect("scroll indicator before PgUp");
+    assert_eq!(pct_before, 100, "should start at bottom");
+
+    // Press PageUp.
+    let step = press_pgup(&harness, &mut app);
+
+    // After PageUp: scroll position should be less than 100%.
+    let pct_after = parse_scroll_percent(&step.after).expect("scroll indicator after PgUp");
+    assert!(
+        pct_after < 100,
+        "PageUp should scroll away from bottom, got {pct_after}%"
+    );
+}
+
+#[test]
+fn tui_scroll_pagedown_returns_to_bottom() {
+    let harness = TestHarness::new("tui_scroll_pagedown_returns_to_bottom");
+    let mut app = build_app(&harness, Vec::new());
+    app.set_terminal_size(80, 20);
+    log_initial_state(&harness, &app);
+
+    fill_viewport_with_stream(&harness, &mut app, 80);
+
+    // Scroll up first.
+    press_pgup(&harness, &mut app);
+    press_pgup(&harness, &mut app);
+
+    let mid = normalize_view(&BubbleteaModel::view(&app));
+    let pct_mid = parse_scroll_percent(&mid).expect("scroll indicator mid");
+    assert!(pct_mid < 100, "should not be at bottom after two PageUps");
+
+    // Now scroll down repeatedly until we reach bottom.
+    for _ in 0..10 {
+        press_pgdown(&harness, &mut app);
+    }
+
+    let after = normalize_view(&BubbleteaModel::view(&app));
+    let pct_after = parse_scroll_percent(&after).expect("scroll indicator after PgDowns");
+    assert_eq!(pct_after, 100, "should be back at bottom after PageDowns");
+}
+
+#[test]
+fn tui_scroll_pageup_during_stream_disables_auto_follow() {
+    let harness = TestHarness::new("tui_scroll_pageup_during_stream_disables_auto_follow");
+    let mut app = build_app(&harness, Vec::new());
+    app.set_terminal_size(80, 20);
+    log_initial_state(&harness, &app);
+
+    // Start streaming and add enough content to scroll.
+    apply_pi(&harness, &mut app, "AgentStart", PiMsg::AgentStart);
+    apply_pi(
+        &harness,
+        &mut app,
+        "TextDelta(initial)",
+        PiMsg::TextDelta(numbered_lines(80)),
+    );
+
+    // Scroll up while streaming.
+    press_pgup(&harness, &mut app);
+    let view_after_pgup = normalize_view(&BubbleteaModel::view(&app));
+    let pct_after_pgup =
+        parse_scroll_percent(&view_after_pgup).expect("scroll pct after pgup during stream");
+    assert!(pct_after_pgup < 100, "PageUp should scroll away from tail");
+
+    // Send more streaming content — the viewport should NOT jump back to bottom
+    // because the user explicitly scrolled up.
+    apply_pi(
+        &harness,
+        &mut app,
+        "TextDelta(more)",
+        PiMsg::TextDelta("\nExtra line A\nExtra line B\nExtra line C".to_string()),
+    );
+    let view_after_more = normalize_view(&BubbleteaModel::view(&app));
+    let pct_after_more =
+        parse_scroll_percent(&view_after_more).expect("scroll pct after more content");
+    assert!(
+        pct_after_more < 100,
+        "New content should NOT auto-scroll when user scrolled up, got {pct_after_more}%"
+    );
+}
+
+#[test]
+fn tui_scroll_follows_tail_by_default_during_stream() {
+    let harness = TestHarness::new("tui_scroll_follows_tail_by_default_during_stream");
+    let mut app = build_app(&harness, Vec::new());
+    app.set_terminal_size(80, 20);
+    log_initial_state(&harness, &app);
+
+    apply_pi(&harness, &mut app, "AgentStart", PiMsg::AgentStart);
+    apply_pi(
+        &harness,
+        &mut app,
+        "TextDelta(initial)",
+        PiMsg::TextDelta(numbered_lines(80)),
+    );
+
+    // Without user scroll intervention, should stay at bottom.
+    let view = normalize_view(&BubbleteaModel::view(&app));
+    let pct = parse_scroll_percent(&view).expect("scroll pct");
+    assert_eq!(pct, 100, "should auto-follow tail during streaming");
+
+    // More content also stays at bottom.
+    apply_pi(
+        &harness,
+        &mut app,
+        "TextDelta(more)",
+        PiMsg::TextDelta("\nAdded line 81\nAdded line 82".to_string()),
+    );
+    let view2 = normalize_view(&BubbleteaModel::view(&app));
+    let pct2 = parse_scroll_percent(&view2).expect("scroll pct after more");
+    assert_eq!(pct2, 100, "should still auto-follow tail");
+}
+
+// ============================================================================
+// Final Assistant Message Overwrite Tests
+// ============================================================================
+
+#[test]
+fn tui_agent_done_final_message_visible_after_finalization() {
+    // Regression test: the final assistant message must remain visible in the
+    // viewport after AgentDone, not be overwritten or lost.
+    let harness = TestHarness::new("tui_agent_done_final_message_visible_after_finalization");
+    let mut app = build_app(&harness, Vec::new());
+    app.set_terminal_size(80, 30);
+    log_initial_state(&harness, &app);
+
+    let unique_text = "UNIQUE-FINAL-RESPONSE-abcdef123456";
+    apply_pi(&harness, &mut app, "AgentStart", PiMsg::AgentStart);
+    apply_pi(
+        &harness,
+        &mut app,
+        "TextDelta",
+        PiMsg::TextDelta(unique_text.to_string()),
+    );
+
+    let step = finalize_agent(&harness, &mut app);
+
+    // The final response must be present in the finalized view.
+    assert_after_contains(&harness, &step, unique_text);
+    // Must show "Assistant:" label.
+    assert_after_contains(&harness, &step, "Assistant:");
+    // Must show the input prompt (agent is idle).
+    assert_after_contains(&harness, &step, SINGLE_LINE_HINT);
+    // Must NOT show the processing spinner.
+    assert_after_not_contains(&harness, &step, "Processing...");
+}
+
+#[test]
+fn tui_agent_done_no_duplicate_streaming_and_finalized_content() {
+    // Ensure that after AgentDone, the streaming buffer section and the
+    // finalized message section don't both appear (no double render).
+    let harness = TestHarness::new("tui_agent_done_no_duplicate_streaming_and_finalized_content");
+    let mut app = build_app(&harness, Vec::new());
+    app.set_terminal_size(80, 30);
+    log_initial_state(&harness, &app);
+
+    let marker = "DEDUP-MARKER-xyz789";
+    apply_pi(&harness, &mut app, "AgentStart", PiMsg::AgentStart);
+    apply_pi(
+        &harness,
+        &mut app,
+        "TextDelta",
+        PiMsg::TextDelta(marker.to_string()),
+    );
+    let step = finalize_agent(&harness, &mut app);
+
+    // The marker should appear exactly once (finalized message), not twice
+    // (streaming + finalized).
+    let count = step.after.matches(marker).count();
+    assert_eq!(
+        count, 1,
+        "Expected marker to appear exactly once after AgentDone, got {count}"
+    );
+}
+
+#[test]
+fn tui_agent_done_long_response_stays_scrolled_to_bottom() {
+    // When a long response completes, the viewport should remain at the bottom
+    // showing the end of the response, not jump to the top.
+    let harness = TestHarness::new("tui_agent_done_long_response_stays_scrolled_to_bottom");
+    let mut app = build_app(&harness, Vec::new());
+    app.set_terminal_size(80, 15);
+    log_initial_state(&harness, &app);
+
+    let tail_marker = "TAIL-MARKER-LAST-LINE";
+    let mut long_response = numbered_lines(100);
+    long_response.push('\n');
+    long_response.push_str(tail_marker);
+
+    apply_pi(&harness, &mut app, "AgentStart", PiMsg::AgentStart);
+    apply_pi(
+        &harness,
+        &mut app,
+        "TextDelta(long)",
+        PiMsg::TextDelta(long_response),
+    );
+    let step = finalize_agent(&harness, &mut app);
+
+    // The tail marker should be visible (viewport at bottom).
+    assert_after_contains(&harness, &step, tail_marker);
+    let pct = parse_scroll_percent(&step.after).expect("scroll indicator after finalize");
+    assert_eq!(pct, 100, "should be at bottom after finalization");
+}
+
+#[test]
+fn tui_agent_done_user_scrolled_up_preserves_position() {
+    // If the user scrolled up during streaming, AgentDone should NOT force
+    // the viewport back to bottom.
+    //
+    // Use code-fence content so the markdown renderer keeps line breaks
+    // intact (plain numbered lines get joined into paragraphs).
+    let harness = TestHarness::new("tui_agent_done_user_scrolled_up_preserves_position");
+    let mut app = build_app(&harness, Vec::new());
+    app.set_terminal_size(80, 15);
+    log_initial_state(&harness, &app);
+
+    // Build a code block with numbered lines.  Markdown renderers preserve
+    // line structure inside fenced code blocks.
+    let mut code_block = String::from("```\n");
+    for i in 1..=200 {
+        let _ = writeln!(code_block, "code line {i:03}");
+    }
+    code_block.push_str("```\n");
+
+    apply_pi(&harness, &mut app, "AgentStart", PiMsg::AgentStart);
+    apply_pi(
+        &harness,
+        &mut app,
+        "TextDelta(long-code)",
+        PiMsg::TextDelta(code_block),
+    );
+
+    // User scrolls up many pages to get well away from the bottom.
+    // Each page is only ~6 lines on a 15-row terminal, so 20 pages moves
+    // about 120 lines in a 200-line document.
+    for _ in 0..20 {
+        press_pgup(&harness, &mut app);
+    }
+    let mid_view = normalize_view(&BubbleteaModel::view(&app));
+    let pct_mid = parse_scroll_percent(&mid_view).expect("pct after pgup");
+    assert!(pct_mid < 90, "should be above bottom, got {pct_mid}%");
+
+    // Finalize.
+    let step = finalize_agent(&harness, &mut app);
+    let pct_after = parse_scroll_percent(&step.after).expect("pct after finalize");
+    assert!(
+        pct_after < 100,
+        "AgentDone should preserve user's scroll position, got {pct_after}%"
+    );
+}
+
+#[test]
+fn tui_scroll_multiple_pageup_then_back_to_bottom() {
+    // Test that repeated PageUp followed by enough PageDown returns to 100%.
+    let harness = TestHarness::new("tui_scroll_multiple_pageup_then_back_to_bottom");
+    let mut app = build_app(&harness, Vec::new());
+    app.set_terminal_size(80, 20);
+    log_initial_state(&harness, &app);
+
+    fill_viewport_with_stream(&harness, &mut app, 200);
+    finalize_agent(&harness, &mut app);
+
+    // Scroll up 5 pages.
+    for _ in 0..5 {
+        press_pgup(&harness, &mut app);
+    }
+    let mid = normalize_view(&BubbleteaModel::view(&app));
+    let pct_mid = parse_scroll_percent(&mid).expect("pct mid");
+    assert!(pct_mid < 50, "should be well above bottom after 5 PageUps");
+
+    // Scroll down 20 pages (more than enough).
+    for _ in 0..20 {
+        press_pgdown(&harness, &mut app);
+    }
+    let bottom = normalize_view(&BubbleteaModel::view(&app));
+    let pct_bottom = parse_scroll_percent(&bottom).expect("pct bottom");
+    assert_eq!(pct_bottom, 100, "should reach bottom");
+}
+
+#[test]
+fn tui_agent_done_with_thinking_no_stale_thinking_block() {
+    // Verify that thinking content is properly finalized and not duplicated.
+    let harness = TestHarness::new("tui_agent_done_with_thinking_no_stale_thinking_block");
+    let mut app = build_app(&harness, Vec::new());
+    app.set_terminal_size(80, 30);
+    log_initial_state(&harness, &app);
+
+    // Toggle thinking visibility.
+    press_ctrlt(&harness, &mut app);
+
+    apply_pi(&harness, &mut app, "AgentStart", PiMsg::AgentStart);
+    apply_pi(
+        &harness,
+        &mut app,
+        "ThinkingDelta",
+        PiMsg::ThinkingDelta("Let me think step by step...".to_string()),
+    );
+    apply_pi(
+        &harness,
+        &mut app,
+        "TextDelta",
+        PiMsg::TextDelta("Here is the answer.".to_string()),
+    );
+
+    let step = finalize_agent(&harness, &mut app);
+
+    assert_after_contains(&harness, &step, "Here is the answer.");
+    // "Thinking:" label should appear at most once.
+    let thinking_count = step.after.matches("Thinking:").count();
+    assert!(
+        thinking_count <= 1,
+        "Expected at most 1 'Thinking:' block, got {thinking_count}"
+    );
+}
+
+#[test]
+fn tui_scroll_re_enables_follow_when_pagedown_reaches_bottom() {
+    // After scrolling up and then back to bottom, new streaming content should
+    // auto-follow again.
+    let harness = TestHarness::new("tui_scroll_re_enables_follow_when_pagedown_reaches_bottom");
+    let mut app = build_app(&harness, Vec::new());
+    app.set_terminal_size(80, 20);
+    log_initial_state(&harness, &app);
+
+    apply_pi(&harness, &mut app, "AgentStart", PiMsg::AgentStart);
+    apply_pi(
+        &harness,
+        &mut app,
+        "TextDelta(initial)",
+        PiMsg::TextDelta(numbered_lines(80)),
+    );
+
+    // Scroll up.
+    press_pgup(&harness, &mut app);
+
+    // Scroll back down to bottom.
+    for _ in 0..10 {
+        press_pgdown(&harness, &mut app);
+    }
+
+    // Now send more content — should auto-follow since we're back at bottom.
+    apply_pi(
+        &harness,
+        &mut app,
+        "TextDelta(more)",
+        PiMsg::TextDelta("\nRe-follow line A\nRe-follow line B".to_string()),
+    );
+    let view = normalize_view(&BubbleteaModel::view(&app));
+    let pct = parse_scroll_percent(&view).expect("pct");
+    assert_eq!(
+        pct, 100,
+        "should auto-follow after scrolling back to bottom"
+    );
 }

@@ -26,6 +26,7 @@ files = [
     "mock_spec_validation",
     "model_selector_cycling",
     "model_serialization",
+    "non_mock_compliance_gate",
     "non_mock_rubric_gate",
     "perf_budgets",
     "perf_comparison",
@@ -45,6 +46,9 @@ files = [
     "auth_oauth_refresh_vcr",
     "bench_scenario_runner",
     "capability_prompt",
+    "ci_cross_platform_matrix",
+    "ci_evidence_bundle",
+    "ci_full_suite_gate",
     "conformance_comparator",
     "conformance_regression_gate",
     "conformance_fixtures",
@@ -160,6 +164,7 @@ files = [
     "e2e_live",
     "e2e_live_harness",
     "e2e_message_session_control",
+    "e2e_provider_scenarios",
     "e2e_provider_streaming",
     "e2e_rpc",
     "e2e_session_persistence",
@@ -167,6 +172,7 @@ files = [
     "e2e_ts_extension_loading",
     "e2e_tui",
     "e2e_workflow_preflight",
+    "provider_live_verify",
 ]
 
 # Quarantine: flaky tests with tracked expiry and ownership.

@@ -105,19 +105,58 @@ pub enum SlashCommand {
 }
 
 impl PiApp {
+    /// Returns true when the viewport is currently anchored to the tail of the
+    /// conversation content (i.e. the user has not scrolled away from the bottom).
+    fn is_at_bottom(&self) -> bool {
+        let content = self.build_conversation_content();
+        let trimmed = content.trim_end();
+        let line_count = trimmed.lines().count();
+        let visible_rows = self.view_effective_conversation_height().max(1);
+        if line_count <= visible_rows {
+            return true;
+        }
+        let max_offset = line_count.saturating_sub(visible_rows);
+        self.conversation_viewport.y_offset() >= max_offset
+    }
+
+    /// Rebuild viewport content after conversation state changes.
+    /// If `follow_tail` is true the viewport is scrolled to the very bottom;
+    /// otherwise the current scroll position is preserved.
+    fn refresh_conversation_viewport(&mut self, follow_tail: bool) {
+        let content = self.build_conversation_content();
+        // Trim trailing blank/whitespace-only lines so that "scroll to
+        // bottom" lands on the last meaningful content line, not on the
+        // trailing padding the markdown renderer inserts after paragraphs.
+        let trimmed = content.trim_end();
+        // Temporarily align the viewport's internal height to what view()
+        // actually renders.  The stored height (from conversation_viewport_height)
+        // can be larger because it doesn't account for conditional chrome
+        // (scroll indicator, status message, tool bar).  Without this the
+        // viewport's max_y_offset clamp in set_y_offset/goto_bottom is too
+        // conservative and the last meaningful line(s) get clipped.
+        let effective = self.view_effective_conversation_height().max(1);
+        self.conversation_viewport.height = effective;
+        self.conversation_viewport.set_content(trimmed);
+        if follow_tail {
+            self.conversation_viewport.goto_bottom();
+            self.follow_stream_tail = true;
+        }
+    }
+
     /// Scroll the conversation viewport to the bottom.
     fn scroll_to_bottom(&mut self) {
-        let content = self.build_conversation_content();
-        self.conversation_viewport.set_content(&content);
-        self.conversation_viewport.goto_bottom();
+        self.refresh_conversation_viewport(true);
     }
 
     fn scroll_to_last_match(&mut self, needle: &str) {
         let content = self.build_conversation_content();
-        self.conversation_viewport.set_content(&content);
+        let trimmed = content.trim_end();
+        let effective = self.view_effective_conversation_height().max(1);
+        self.conversation_viewport.height = effective;
+        self.conversation_viewport.set_content(trimmed);
 
         let mut last_index = None;
-        for (idx, line) in content.lines().enumerate() {
+        for (idx, line) in trimmed.lines().enumerate() {
             if line.contains(needle) {
                 last_index = Some(idx);
             }
@@ -125,8 +164,10 @@ impl PiApp {
 
         if let Some(idx) = last_index {
             self.conversation_viewport.set_y_offset(idx);
+            self.follow_stream_tail = false;
         } else {
             self.conversation_viewport.goto_bottom();
+            self.follow_stream_tail = true;
         }
     }
 
@@ -138,7 +179,9 @@ impl PiApp {
             SpinnerModel::with_spinner(spinners::dot()).style(self.styles.accent.clone());
 
         let content = self.build_conversation_content();
-        self.conversation_viewport.set_content(&content);
+        let effective = self.view_effective_conversation_height().max(1);
+        self.conversation_viewport.height = effective;
+        self.conversation_viewport.set_content(content.trim_end());
     }
 
     fn format_themes_list(&self) -> String {
@@ -4423,6 +4466,10 @@ pub struct PiApp {
 
     // Display state - viewport for scrollable conversation
     conversation_viewport: Viewport,
+    /// When true, the viewport auto-scrolls to the bottom on new content.
+    /// Set to false when the user manually scrolls up; re-enabled when they
+    /// scroll back to the bottom or a new user message is submitted.
+    follow_stream_tail: bool,
     spinner: SpinnerModel,
     agent_state: AgentState,
 
@@ -5460,6 +5507,7 @@ impl PiApp {
             pending_inputs: VecDeque::from(pending_inputs),
             message_queue,
             conversation_viewport,
+            follow_stream_tail: true,
             spinner,
             agent_state: AgentState::Idle,
             term_width,
@@ -5962,8 +6010,14 @@ impl PiApp {
             return output;
         }
 
-        // Build conversation content for viewport
-        let conversation_content = self.build_conversation_content();
+        // Build conversation content for viewport.
+        // Trim trailing whitespace so the viewport line count matches
+        // what refresh_conversation_viewport() stored — this keeps the
+        // y_offset from goto_bottom() aligned with the visible lines.
+        let conversation_content = {
+            let raw = self.build_conversation_content();
+            raw.trim_end().to_string()
+        };
 
         // Update viewport content (we can't mutate self in view, so we render with current offset)
         // The viewport will be updated in update() when new messages arrive
@@ -7185,9 +7239,13 @@ impl PiApp {
             }
             PiMsg::TextDelta(text) => {
                 self.current_response.push_str(&text);
+                // Keep the viewport content in sync so scroll position math is
+                // correct.  Only auto-scroll if the user hasn't scrolled away.
+                self.refresh_conversation_viewport(self.follow_stream_tail);
             }
             PiMsg::ThinkingDelta(text) => {
                 self.current_thinking.push_str(&text);
+                self.refresh_conversation_viewport(self.follow_stream_tail);
             }
             PiMsg::ToolStart { name, .. } => {
                 self.agent_state = AgentState::ToolRunning;
@@ -7231,7 +7289,13 @@ impl PiApp {
                 stop_reason,
                 error_message,
             } => {
-                // Finalize the response
+                // Snapshot follow-tail *before* we mutate conversation state so
+                // we preserve the user's scroll intent.
+                let follow_tail = self.follow_stream_tail;
+
+                // Finalize the response: move streaming buffers into the
+                // permanent message list and clear them so they are not
+                // double-rendered by build_conversation_content().
                 let had_response = !self.current_response.is_empty();
                 if had_response {
                     self.messages.push(ConversationMessage::new(
@@ -7244,6 +7308,11 @@ impl PiApp {
                         },
                     ));
                 }
+                // Defensively clear both buffers even if they were already
+                // taken — this prevents a stale streaming section from
+                // appearing in the next view() frame.
+                self.current_response.clear();
+                self.current_thinking.clear();
 
                 // Update usage
                 if let Some(ref u) = usage {
@@ -7271,8 +7340,18 @@ impl PiApp {
                     }
                 }
 
-                // Re-focus input
+                // Re-focus input BEFORE syncing the viewport — focus()
+                // can change the input height, and the viewport offset
+                // calculation depends on view_effective_conversation_height()
+                // which accounts for the input area.
                 self.input.focus();
+
+                // Sync the viewport so the finalized (markdown-rendered)
+                // message is visible. This is critical: without it the
+                // viewport's stored content would still reflect the raw
+                // streaming text, causing the final message to appear
+                // overwritten or missing.
+                self.refresh_conversation_viewport(follow_tail);
 
                 if !self.pending_inputs.is_empty() {
                     return Some(Cmd::new(|| Message::new(PiMsg::RunPending)));
@@ -9084,11 +9163,28 @@ impl PiApp {
             // Viewport scrolling
             // =========================================================
             AppAction::PageUp => {
+                // Sync viewport content and height so page_up() has correct
+                // line count and page size.
+                let content = self.build_conversation_content();
+                let effective = self.view_effective_conversation_height().max(1);
+                self.conversation_viewport.height = effective;
+                self.conversation_viewport.set_content(content.trim_end());
                 self.conversation_viewport.page_up();
+                self.follow_stream_tail = false;
                 None
             }
             AppAction::PageDown => {
+                // Sync viewport content and height so page_down() has correct
+                // line count and page size.
+                let content = self.build_conversation_content();
+                let effective = self.view_effective_conversation_height().max(1);
+                self.conversation_viewport.height = effective;
+                self.conversation_viewport.set_content(content.trim_end());
                 self.conversation_viewport.page_down();
+                // Re-enable auto-follow if the user scrolled back to the bottom.
+                if self.is_at_bottom() {
+                    self.follow_stream_tail = true;
+                }
                 None
             }
 
@@ -9153,7 +9249,9 @@ impl PiApp {
             AppAction::ToggleThinking => {
                 self.thinking_visible = !self.thinking_visible;
                 let content = self.build_conversation_content();
-                self.conversation_viewport.set_content(&content);
+                let effective = self.view_effective_conversation_height().max(1);
+                self.conversation_viewport.height = effective;
+                self.conversation_viewport.set_content(content.trim_end());
                 self.status_message = Some(if self.thinking_visible {
                     "Thinking shown".to_string()
                 } else {
@@ -9174,7 +9272,9 @@ impl PiApp {
                     }
                 }
                 let content = self.build_conversation_content();
-                self.conversation_viewport.set_content(&content);
+                let effective = self.view_effective_conversation_height().max(1);
+                self.conversation_viewport.height = effective;
+                self.conversation_viewport.set_content(content.trim_end());
                 self.status_message = Some(if self.tools_expanded {
                     "Tool output expanded".to_string()
                 } else {

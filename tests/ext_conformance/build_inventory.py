@@ -150,6 +150,10 @@ def classify_extension_failure(ext_id: str, reason: str) -> str:
 
 def classify_scenario_failure(result: dict) -> str:
     """Classify a scenario-level failure into a cause code."""
+    existing = result.get("failure_category")
+    if isinstance(existing, str) and existing:
+        return existing
+
     diffs = result.get("diffs", [])
     error = result.get("error", "")
 
