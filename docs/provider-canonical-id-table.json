@@ -111,7 +111,9 @@
       }
     },
     {
-      "aliases": [],
+      "aliases": [
+        "open-router"
+      ],
       "auth_env_keys": [
         "OPENROUTER_API_KEY"
       ],
@@ -1313,6 +1315,6 @@
     }
   ],
   "schema_version": "1.0",
-  "total_aliases": 15,
+  "total_aliases": 16,
   "total_providers": 87
 }

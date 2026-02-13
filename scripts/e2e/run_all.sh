@@ -2855,24 +2855,58 @@ PY
 # ─── Secret Redaction ─────────────────────────────────────────────────────────
 
 redact_secrets() {
-    # Redact common API key patterns from all log files.
-    local patterns=(
-        's/sk-[a-zA-Z0-9_-]{20,}/sk-REDACTED/g'
-        's/key-[a-zA-Z0-9_-]{20,}/key-REDACTED/g'
-        's/ANTHROPIC_API_KEY=[^ ]*/ANTHROPIC_API_KEY=REDACTED/g'
-        's/OPENAI_API_KEY=[^ ]*/OPENAI_API_KEY=REDACTED/g'
-        's/GOOGLE_API_KEY=[^ ]*/GOOGLE_API_KEY=REDACTED/g'
-        's/AZURE_OPENAI_API_KEY=[^ ]*/AZURE_OPENAI_API_KEY=REDACTED/g'
-    )
+    if ARTIFACT_DIR="$ARTIFACT_DIR" python3 - <<'PY'
+import os
+import re
+from pathlib import Path
 
-    local sed_args=()
-    for pattern in "${patterns[@]}"; do
-        sed_args+=(-e "$pattern")
-    done
+artifact_dir = Path(os.environ["ARTIFACT_DIR"])
+if not artifact_dir.exists():
+    raise SystemExit(0)
 
-    # Find all log/jsonl files and redact in-place.
-    find "$ARTIFACT_DIR" -type f \( -name "*.log" -o -name "*.jsonl" \) -print0 | \
-        xargs -0 -r sed -i "${sed_args[@]}" 2>/dev/null || true
+patterns: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"), "sk-REDACTED"),
+    (re.compile(r"\bkey-[A-Za-z0-9_-]{20,}\b", re.IGNORECASE), "key-REDACTED"),
+    (
+        re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/=-]{12,}"),
+        r"\1REDACTED",
+    ),
+    (
+        re.compile(
+            r"(?i)\b(ANTHROPIC_API_KEY|OPENAI_API_KEY|GOOGLE_API_KEY|AZURE_OPENAI_API_KEY)="
+            r"[^\s\"']+"
+        ),
+        lambda match: f"{match.group(1)}=REDACTED",
+    ),
+    (
+        re.compile(
+            r"(?i)(\"?(authorization|x-api-key|api[_-]?key|access[_-]?token|"
+            r"refresh[_-]?token|cookie|password|secret)\"?\s*[:=]\s*\"?)([^\s\",]+)(\"?)"
+        ),
+        r"\1REDACTED\4",
+    ),
+]
+
+for path in artifact_dir.rglob("*"):
+    if not path.is_file():
+        continue
+    if path.suffix not in {".log", ".jsonl", ".json"}:
+        continue
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        continue
+    redacted = text
+    for pattern, replacement in patterns:
+        redacted = pattern.sub(replacement, redacted)
+    if redacted != text:
+        path.write_text(redacted, encoding="utf-8")
+PY
+    then
+        :
+    else
+        echo "[redaction] Python redaction pass failed (continuing with unmodified artifacts)" >&2
+    fi
 }
 
 # ─── Evidence Diff + Triage ──────────────────────────────────────────────────
@@ -3263,6 +3297,7 @@ validate_evidence_contract() {
         python3 - <<'PY'
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -3619,6 +3654,112 @@ LOG_REQUIRED_FIELDS = {
     ],
 }
 ARTIFACT_REQUIRED_FIELDS = ["schema", "type", "seq", "ts", "t_ms", "name", "path"]
+MAX_OUTPUT_LOG_BYTES = 8 * 1024 * 1024
+MAX_TEST_LOG_JSONL_BYTES = 4 * 1024 * 1024
+MAX_ARTIFACT_INDEX_JSONL_BYTES = 4 * 1024 * 1024
+MAX_JSONL_RECORDS = 25_000
+
+LEAK_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("openai_like_key", re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b")),
+    ("generic_key_token", re.compile(r"\bkey-[A-Za-z0-9_-]{20,}\b", re.IGNORECASE)),
+    ("bearer_token", re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{16,}")),
+    (
+        "auth_header_value",
+        re.compile(
+            r"(?i)(authorization|x-api-key|api[_-]?key|access[_-]?token|refresh[_-]?token)"
+            r"\s*[:=]\s*[\"']?[A-Za-z0-9._~+/=-]{12,}"
+        ),
+    ),
+]
+
+
+def normalized_jsonl_path(path: Path) -> Path:
+    file_name = path.name
+    if file_name.endswith(".jsonl"):
+        base = file_name[: -len(".jsonl")]
+    else:
+        base = file_name
+    return path.with_name(f"{base}.normalized.jsonl")
+
+
+def find_sensitive_leaks(text: str, *, limit: int = 3) -> list[str]:
+    hits: list[str] = []
+    for label, pattern in LEAK_PATTERNS:
+        for match in pattern.finditer(text):
+            snippet = match.group(0)
+            upper = snippet.upper()
+            if "REDACTED" in upper or "<TRACE_ID>" in snippet or "<TIMESTAMP>" in snippet:
+                continue
+            hits.append(f"{label}:{snippet[:96]}")
+            if len(hits) >= limit:
+                return hits
+    return hits
+
+
+def validate_text_redaction(
+    *,
+    check_id: str,
+    path: Path,
+    strict: bool,
+) -> None:
+    if not path.exists():
+        return
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:  # pragma: no cover - defensive
+        add_check(check_id, path, False, f"redaction scan failed to read file: {exc}")
+        record_issue(
+            check_id,
+            f"unable to scan file for sensitive leaks ({exc})",
+            strict=strict,
+            remediation=f"Ensure {path.name} is readable before evidence validation.",
+        )
+        return
+    leaks = find_sensitive_leaks(text)
+    require_condition(
+        check_id,
+        path=path,
+        ok=not leaks,
+        ok_msg="no high-confidence secret/token patterns detected",
+        fail_msg=f"potential sensitive leaks detected: {leaks}",
+        strict=strict,
+        remediation=(
+            "Redact authorization/api-key/token values in artifact output and rerun verification."
+        ),
+    )
+
+
+def validate_file_budget(
+    *,
+    check_id: str,
+    path: Path,
+    max_bytes: int,
+    strict: bool,
+    remediation: str,
+) -> None:
+    if not path.exists():
+        return
+    size_bytes = path.stat().st_size
+    require_condition(
+        check_id,
+        path=path,
+        ok=size_bytes <= max_bytes,
+        ok_msg=f"file size {size_bytes} bytes within budget <= {max_bytes}",
+        fail_msg=f"file size {size_bytes} bytes exceeds budget {max_bytes}",
+        strict=strict,
+        remediation=remediation,
+    )
+
+validate_text_redaction(
+    check_id="environment.redaction_scan",
+    path=environment_path,
+    strict=True,
+)
+validate_text_redaction(
+    check_id="summary.redaction_scan",
+    path=summary_path,
+    strict=True,
+)
 
 
 def path_matches(value: object, expected: Path) -> bool:
@@ -3682,7 +3823,19 @@ def validate_jsonl_record_keys(
 
 def parse_test_log_jsonl(check_prefix: str, path: Path) -> dict[str, set[str]]:
     trace_ids_by_test: dict[str, set[str]] = {}
+    observed_categories: set[str] = set()
     lines = read_jsonl_lines(f"{check_prefix}.test_log_jsonl", path, strict=True)
+    require_condition(
+        f"{check_prefix}.test_log_jsonl.record_budget",
+        path=path,
+        ok=len(lines) <= MAX_JSONL_RECORDS,
+        ok_msg=f"test-log record count {len(lines)} within budget <= {MAX_JSONL_RECORDS}",
+        fail_msg=(
+            f"test-log record count {len(lines)} exceeds budget {MAX_JSONL_RECORDS}"
+        ),
+        strict=True,
+        remediation="Reduce noisy log emission or scope logging in tests/common/logging.",
+    )
     require_condition(
         f"{check_prefix}.test_log_jsonl.non_empty",
         path=path,
@@ -3715,16 +3868,35 @@ def parse_test_log_jsonl(check_prefix: str, path: Path) -> dict[str, set[str]]:
             )
             continue
         schema = payload.get("schema")
-        required = LOG_REQUIRED_FIELDS.get(str(schema))
+        schema_text = str(schema)
+        required = LOG_REQUIRED_FIELDS.get(schema_text)
+        is_artifact_record = schema_text == "pi.test.artifact.v1"
         require_condition(
             f"{record_id}.schema_supported",
             path=path,
-            ok=required is not None,
+            ok=required is not None or is_artifact_record,
             ok_msg=f"supported schema {schema!r}",
             fail_msg=f"unsupported test-log schema {schema!r}",
             strict=True,
-            remediation="Use pi.test.log.v2 (or v1 where legacy is explicitly required).",
+            remediation=(
+                "Use pi.test.log.v2 (or v1 where legacy is explicitly required) "
+                "or pi.test.artifact.v1 for inline artifact records."
+            ),
         )
+        if is_artifact_record:
+            validate_jsonl_record_keys(
+                check_id=record_id,
+                path=path,
+                record=payload,
+                required_keys=ARTIFACT_REQUIRED_FIELDS,
+                line_no=line_no,
+                strict=True,
+                remediation=(
+                    "Ensure inline artifact records in test-log.jsonl emit required "
+                    "pi.test.artifact.v1 fields."
+                ),
+            )
+            continue
         if required is None:
             continue
         validate_jsonl_record_keys(
@@ -3736,6 +3908,9 @@ def parse_test_log_jsonl(check_prefix: str, path: Path) -> dict[str, set[str]]:
             strict=True,
             remediation="Ensure tests/common/logging emits required test-log schema fields.",
         )
+        category = payload.get("category")
+        if isinstance(category, str) and category.strip():
+            observed_categories.add(category.strip())
         test_name = payload.get("test")
         if isinstance(test_name, str) and test_name.strip():
             trace_id = payload.get("trace_id")
@@ -3762,6 +3937,19 @@ def parse_test_log_jsonl(check_prefix: str, path: Path) -> dict[str, set[str]]:
         fail_msg=f"multiple trace_id values detected for tests: {multi_trace_tests}",
         strict=strict_conformance,
         remediation="Use a stable trace_id per test invocation.",
+    )
+    require_condition(
+        f"{check_prefix}.test_log_jsonl.minimum_signal_harness_category",
+        path=path,
+        ok="harness" in observed_categories,
+        ok_msg="test-log includes harness category signal",
+        fail_msg=(
+            f"test-log missing harness category signal; observed categories={sorted(observed_categories)}"
+        ),
+        strict=True,
+        remediation=(
+            "Ensure tests/common/harness emits start/completion harness log entries to preserve minimum triage signal."
+        ),
     )
     return trace_ids_by_test
 
@@ -3846,6 +4034,150 @@ def parse_artifact_index_jsonl(
                     "Ensure artifact-index `test` names match test-log records emitted by the same suite/target."
                 ),
             )
+
+
+def validate_normalized_jsonl_pair(
+    *,
+    check_prefix: str,
+    raw_path: Path,
+    normalized_path: Path,
+    allowed_schemas: set[str],
+    enforce_path_placeholder: bool,
+) -> None:
+    raw_lines = read_jsonl_lines(f"{check_prefix}.raw", raw_path, strict=True)
+    normalized_lines = read_jsonl_lines(f"{check_prefix}.normalized", normalized_path, strict=True)
+
+    require_condition(
+        f"{check_prefix}.line_count_matches_raw",
+        path=normalized_path,
+        ok=len(raw_lines) == len(normalized_lines),
+        ok_msg="normalized JSONL line count matches raw JSONL",
+        fail_msg=(
+            f"normalized/raw line-count mismatch: normalized={len(normalized_lines)} raw={len(raw_lines)}"
+        ),
+        strict=True,
+        remediation=(
+            "Emit normalized JSONL as a 1:1 transformation of raw JSONL records "
+            "to preserve retention/index completeness."
+        ),
+    )
+    require_condition(
+        f"{check_prefix}.record_budget",
+        path=normalized_path,
+        ok=len(normalized_lines) <= MAX_JSONL_RECORDS,
+        ok_msg=f"normalized JSONL record count {len(normalized_lines)} within budget <= {MAX_JSONL_RECORDS}",
+        fail_msg=(
+            f"normalized JSONL record count {len(normalized_lines)} exceeds budget {MAX_JSONL_RECORDS}"
+        ),
+        strict=True,
+        remediation="Reduce noisy log/artifact emission or partition runs.",
+    )
+
+    for line_no, line in normalized_lines:
+        record_id = f"{check_prefix}.line_{line_no}"
+        try:
+            payload = json.loads(line)
+        except Exception as exc:  # pragma: no cover - defensive
+            add_check(record_id, normalized_path, False, f"invalid JSON: {exc}")
+            record_issue(
+                record_id,
+                f"invalid JSON: {exc}",
+                strict=True,
+                remediation=(
+                    "Write valid JSON objects to normalized JSONL output files."
+                ),
+            )
+            continue
+        if not isinstance(payload, dict):
+            add_check(record_id, normalized_path, False, "record must be a JSON object")
+            record_issue(
+                record_id,
+                "record must be a JSON object",
+                strict=True,
+                remediation="Emit object records in normalized JSONL output files.",
+            )
+            continue
+
+        schema = str(payload.get("schema", ""))
+        require_condition(
+            f"{record_id}.schema_allowed",
+            path=normalized_path,
+            ok=schema in allowed_schemas,
+            ok_msg=f"schema {schema!r} allowed",
+            fail_msg=f"schema {schema!r} not allowed in normalized JSONL",
+            strict=True,
+            remediation=(
+                "Keep normalized JSONL schema set aligned to test-log/artifact schemas."
+            ),
+        )
+        require_condition(
+            f"{record_id}.timestamp_normalized",
+            path=normalized_path,
+            ok=str(payload.get("ts", "")) == "<TIMESTAMP>",
+            ok_msg="normalized timestamp placeholder is applied",
+            fail_msg=f"normalized ts must be <TIMESTAMP> (got {payload.get('ts')!r})",
+            strict=True,
+            remediation="Normalize timestamps to <TIMESTAMP> in normalized JSONL writers.",
+        )
+        require_condition(
+            f"{record_id}.elapsed_normalized",
+            path=normalized_path,
+            ok=payload.get("t_ms") == 0,
+            ok_msg="normalized elapsed t_ms is 0",
+            fail_msg=f"normalized t_ms must be 0 (got {payload.get('t_ms')!r})",
+            strict=True,
+            remediation="Normalize elapsed timing fields to deterministic placeholder values.",
+        )
+
+        trace_id = payload.get("trace_id")
+        if trace_id is not None:
+            require_condition(
+                f"{record_id}.trace_id_normalized",
+                path=normalized_path,
+                ok=str(trace_id) == "<TRACE_ID>",
+                ok_msg="trace_id normalized to <TRACE_ID>",
+                fail_msg=f"trace_id not normalized (got {trace_id!r})",
+                strict=True,
+                remediation="Normalize trace_id values to <TRACE_ID> in normalized log output.",
+            )
+
+        for field in ("span_id", "parent_span_id"):
+            if payload.get(field) is not None:
+                require_condition(
+                    f"{record_id}.{field}_normalized",
+                    path=normalized_path,
+                    ok=str(payload.get(field)) == "<SPAN_ID>",
+                    ok_msg=f"{field} normalized to <SPAN_ID>",
+                    fail_msg=f"{field} not normalized (got {payload.get(field)!r})",
+                    strict=True,
+                    remediation=f"Normalize {field} values to <SPAN_ID> in normalized log output.",
+                )
+
+        if enforce_path_placeholder and "path" in payload:
+            normalized_path_value = str(payload.get("path", ""))
+            has_placeholder = (
+                "<TEST_ROOT>" in normalized_path_value
+                or "<PROJECT_ROOT>" in normalized_path_value
+            )
+            require_condition(
+                f"{record_id}.path_placeholder",
+                path=normalized_path,
+                ok=has_placeholder or not normalized_path_value.startswith("/"),
+                ok_msg="artifact path uses deterministic placeholders",
+                fail_msg=(
+                    f"normalized path should use placeholders (got {normalized_path_value!r})"
+                ),
+                strict=True,
+                remediation=(
+                    "Normalize artifact paths to <TEST_ROOT> / <PROJECT_ROOT> placeholders."
+                ),
+            )
+
+    validate_text_redaction(
+        check_id=f"{check_prefix}.redaction_scan",
+        path=normalized_path,
+        strict=True,
+    )
 
 
 def validate_result_contract(
@@ -3976,6 +4308,20 @@ def validate_result_contract(
             strict=True,
             remediation="Ensure cargo test output is tee'd into the declared log_file path.",
         )
+        validate_file_budget(
+            check_id=f"{check_prefix}:result.log_file_budget",
+            path=log_file,
+            max_bytes=MAX_OUTPUT_LOG_BYTES,
+            strict=True,
+            remediation=(
+                "Reduce output.log verbosity or split suite execution when logs exceed budget."
+            ),
+        )
+        validate_text_redaction(
+            check_id=f"{check_prefix}:result.log_file_redaction",
+            path=log_file,
+            strict=True,
+        )
 
     test_log_jsonl_path = resolve_required_path_field(
         "test_log_jsonl",
@@ -3997,8 +4343,72 @@ def validate_result_contract(
     if artifact_index_jsonl_path is None:
         return
 
+    validate_file_budget(
+        check_id=f"{check_prefix}.test_log_jsonl.file_budget",
+        path=test_log_jsonl_path,
+        max_bytes=MAX_TEST_LOG_JSONL_BYTES,
+        strict=True,
+        remediation=(
+            "Reduce test-log emission volume or shard runs to keep per-suite/target JSONL within budget."
+        ),
+    )
+    validate_file_budget(
+        check_id=f"{check_prefix}.artifact_index_jsonl.file_budget",
+        path=artifact_index_jsonl_path,
+        max_bytes=MAX_ARTIFACT_INDEX_JSONL_BYTES,
+        strict=True,
+        remediation=(
+            "Reduce artifact-index emission volume or trim duplicate artifact writes."
+        ),
+    )
+    validate_text_redaction(
+        check_id=f"{check_prefix}.test_log_jsonl.redaction_scan",
+        path=test_log_jsonl_path,
+        strict=True,
+    )
+    validate_text_redaction(
+        check_id=f"{check_prefix}.artifact_index_jsonl.redaction_scan",
+        path=artifact_index_jsonl_path,
+        strict=True,
+    )
+
     trace_ids_by_test = parse_test_log_jsonl(check_prefix, test_log_jsonl_path)
     parse_artifact_index_jsonl(check_prefix, artifact_index_jsonl_path, trace_ids_by_test)
+
+    normalized_test_log = normalized_jsonl_path(test_log_jsonl_path)
+    normalized_artifact_index = normalized_jsonl_path(artifact_index_jsonl_path)
+    validate_file_budget(
+        check_id=f"{check_prefix}.test_log_jsonl.normalized_file_budget",
+        path=normalized_test_log,
+        max_bytes=MAX_TEST_LOG_JSONL_BYTES,
+        strict=True,
+        remediation=(
+            "Ensure normalized test-log output remains bounded and does not duplicate excessive payload."
+        ),
+    )
+    validate_file_budget(
+        check_id=f"{check_prefix}.artifact_index_jsonl.normalized_file_budget",
+        path=normalized_artifact_index,
+        max_bytes=MAX_ARTIFACT_INDEX_JSONL_BYTES,
+        strict=True,
+        remediation=(
+            "Ensure normalized artifact-index output remains bounded and deterministic."
+        ),
+    )
+    validate_normalized_jsonl_pair(
+        check_prefix=f"{check_prefix}.test_log_jsonl.normalized_contract",
+        raw_path=test_log_jsonl_path,
+        normalized_path=normalized_test_log,
+        allowed_schemas=set(LOG_REQUIRED_FIELDS.keys()) | {"pi.test.artifact.v1"},
+        enforce_path_placeholder=False,
+    )
+    validate_normalized_jsonl_pair(
+        check_prefix=f"{check_prefix}.artifact_index_jsonl.normalized_contract",
+        raw_path=artifact_index_jsonl_path,
+        normalized_path=normalized_artifact_index,
+        allowed_schemas={"pi.test.artifact.v1"},
+        enforce_path_placeholder=True,
+    )
 
 
 def validate_failure_timeline_file(

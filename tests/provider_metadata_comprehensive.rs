@@ -607,3 +607,354 @@ fn generate_canonical_id_alias_table_json() {
         PROVIDER_METADATA.len()
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Drift-prevention guardrails (bd-3uqg.11.10.4)
+//
+// These tests use hard-coded snapshots so that ANY addition, removal,
+// or mutation of provider metadata produces a clear test failure that
+// forces the developer to intentionally update the snapshot.
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Hard-coded sorted snapshot of every `canonical_id` in `PROVIDER_METADATA`.
+/// Adding or removing a provider without updating this list will fail the
+/// test with a diff showing exactly what changed.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn canonical_id_snapshot_detects_additions_and_removals() {
+    // ── Snapshot: 87 canonical IDs (sorted) ─────────────────────────────
+    // To update: run the failing test, copy the "actual" list printed
+    // below, and replace this array.
+    const EXPECTED: &[&str] = &[
+        "302ai",
+        "abacus",
+        "aihubmix",
+        "alibaba",
+        "alibaba-cn",
+        "amazon-bedrock",
+        "anthropic",
+        "azure-openai",
+        "bailing",
+        "baseten",
+        "berget",
+        "cerebras",
+        "chutes",
+        "cloudflare-ai-gateway",
+        "cloudflare-workers-ai",
+        "cohere",
+        "cortecs",
+        "deepinfra",
+        "deepseek",
+        "fastrouter",
+        "fireworks",
+        "firmware",
+        "friendli",
+        "github-copilot",
+        "github-models",
+        "gitlab",
+        "google",
+        "google-vertex",
+        "groq",
+        "helicone",
+        "huggingface",
+        "iflowcn",
+        "inception",
+        "inference",
+        "io-net",
+        "jiekou",
+        "kimi-for-coding",
+        "llama",
+        "lmstudio",
+        "lucidquery",
+        "minimax",
+        "minimax-cn",
+        "minimax-cn-coding-plan",
+        "minimax-coding-plan",
+        "mistral",
+        "moark",
+        "modelscope",
+        "moonshotai",
+        "moonshotai-cn",
+        "morph",
+        "nano-gpt",
+        "nebius",
+        "nova",
+        "novita-ai",
+        "nvidia",
+        "ollama",
+        "ollama-cloud",
+        "openai",
+        "opencode",
+        "openrouter",
+        "ovhcloud",
+        "perplexity",
+        "poe",
+        "privatemode-ai",
+        "requesty",
+        "sap-ai-core",
+        "scaleway",
+        "siliconflow",
+        "siliconflow-cn",
+        "stackit",
+        "submodel",
+        "synthetic",
+        "togetherai",
+        "upstage",
+        "v0",
+        "venice",
+        "vercel",
+        "vivgrid",
+        "vultr",
+        "wandb",
+        "xai",
+        "xiaomi",
+        "zai",
+        "zai-coding-plan",
+        "zenmux",
+        "zhipuai",
+        "zhipuai-coding-plan",
+    ];
+
+    let mut actual: Vec<&str> = PROVIDER_METADATA.iter().map(|m| m.canonical_id).collect();
+    actual.sort_unstable();
+
+    // Compute diff for readable failure message
+    let expected_set: HashSet<&str> = EXPECTED.iter().copied().collect();
+    let actual_set: HashSet<&str> = actual.iter().copied().collect();
+    let added: Vec<&&str> = actual_set.difference(&expected_set).collect();
+    let removed: Vec<&&str> = expected_set.difference(&actual_set).collect();
+
+    assert_eq!(
+        actual.as_slice(),
+        EXPECTED,
+        "\n\nCanonical ID snapshot mismatch!\n  Added:   {added:?}\n  Removed: {removed:?}\n\n\
+         Update the EXPECTED array in this test to match the current PROVIDER_METADATA.\n\
+         Actual (copy-paste ready):\n{actual:#?}\n"
+    );
+}
+
+/// Snapshot of alias -> `canonical_id` mappings. Catches silent alias
+/// additions, removals, or re-assignments.
+#[test]
+fn alias_mapping_snapshot_is_current() {
+    // ── Snapshot: alias → canonical_id (sorted by alias) ────────────────
+    const EXPECTED_ALIASES: &[(&str, &str)] = &[
+        ("azure", "azure-openai"),
+        ("azure-cognitive-services", "azure-openai"),
+        ("bedrock", "amazon-bedrock"),
+        ("copilot", "github-copilot"),
+        ("dashscope", "alibaba"),
+        ("fireworks-ai", "fireworks"),
+        ("gemini", "google"),
+        ("github-copilot-enterprise", "github-copilot"),
+        ("gitlab-duo", "gitlab"),
+        ("google-vertex-anthropic", "google-vertex"),
+        ("kimi", "moonshotai"),
+        ("moonshot", "moonshotai"),
+        ("open-router", "openrouter"),
+        ("qwen", "alibaba"),
+        ("sap", "sap-ai-core"),
+        ("vertexai", "google-vertex"),
+    ];
+
+    let mut actual: Vec<(&str, &str)> = Vec::new();
+    for meta in PROVIDER_METADATA {
+        for alias in meta.aliases {
+            actual.push((alias, meta.canonical_id));
+        }
+    }
+    actual.sort_by_key(|(alias, _)| *alias);
+
+    assert_eq!(
+        actual.len(),
+        EXPECTED_ALIASES.len(),
+        "Alias count mismatch: expected {}, got {}.\nActual:\n{actual:#?}",
+        EXPECTED_ALIASES.len(),
+        actual.len()
+    );
+
+    for (i, (actual_pair, expected_pair)) in actual.iter().zip(EXPECTED_ALIASES.iter()).enumerate()
+    {
+        assert_eq!(
+            actual_pair, expected_pair,
+            "Alias mapping mismatch at index {i}: actual {actual_pair:?} != expected {expected_pair:?}\n\
+             Full actual list:\n{actual:#?}"
+        );
+    }
+}
+
+/// Snapshot of base URLs for key providers. Catches silent endpoint
+/// changes that could break user configurations.
+#[test]
+fn base_url_snapshot_for_key_providers() {
+    // ── Snapshot: canonical_id → base_url for providers where URL ────────
+    // stability matters most (gap providers + established).
+    const URL_SNAPSHOT: &[(&str, &str)] = &[
+        (
+            "alibaba",
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        ),
+        (
+            "alibaba-cn",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        ),
+        ("anthropic", "https://api.anthropic.com/v1/messages"),
+        ("cerebras", "https://api.cerebras.ai/v1"),
+        ("deepinfra", "https://api.deepinfra.com/v1/openai"),
+        ("deepseek", "https://api.deepseek.com"),
+        ("groq", "https://api.groq.com/openai/v1"),
+        ("mistral", "https://api.mistral.ai/v1"),
+        ("moonshotai", "https://api.moonshot.ai/v1"),
+        ("moonshotai-cn", "https://api.moonshot.cn/v1"),
+        ("openai", "https://api.openai.com/v1"),
+        ("openrouter", "https://openrouter.ai/api/v1"),
+        ("togetherai", "https://api.together.xyz/v1"),
+    ];
+
+    let mut failures = Vec::new();
+    for (provider, expected_url) in URL_SNAPSHOT {
+        let defaults = provider_routing_defaults(provider);
+        match defaults {
+            Some(d) if d.base_url == *expected_url => {} // OK
+            Some(d) => {
+                failures.push(format!(
+                    "  {provider}: expected '{expected_url}', got '{}'",
+                    d.base_url
+                ));
+            }
+            None => {
+                failures.push(format!(
+                    "  {provider}: no routing_defaults (expected url '{expected_url}')"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "\n\nBase URL snapshot mismatch!\n{}\n\n\
+         If URLs changed intentionally, update URL_SNAPSHOT in this test.\n",
+        failures.join("\n")
+    );
+}
+
+/// Validates that core providers (established + `wave_b1`) have at least
+/// a `simple_text` VCR fixture. Catches new provider entries that lack
+/// basic test coverage.
+#[test]
+fn vcr_fixture_coverage_for_core_providers() {
+    // Providers that must have VCR fixtures. Uses the VCR naming
+    // convention (which may use aliases like "gemini", "copilot").
+    const CORE_VCR_PROVIDERS: &[&str] = &[
+        "alibaba",
+        "anthropic",
+        "cerebras",
+        "cohere",
+        "deepinfra",
+        "gemini", // alias for google
+        "groq",
+        "huggingface",
+        "mistral",
+        "moonshotai",
+        "nvidia",
+        "ollama-cloud",
+        "openai",
+        "openrouter",
+        "stackit",
+        "togetherai",
+    ];
+
+    let fixture_dir = format!("{}/tests/fixtures/vcr", env!("CARGO_MANIFEST_DIR"));
+    let mut missing = Vec::new();
+    for provider in CORE_VCR_PROVIDERS {
+        let simple_text = format!("{fixture_dir}/verify_{provider}_simple_text.json");
+        if !std::path::Path::new(&simple_text).exists() {
+            missing.push(*provider);
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "\n\nCore providers missing VCR simple_text fixture: {missing:?}\n\
+         Add fixtures at tests/fixtures/vcr/verify_<provider>_simple_text.json\n"
+    );
+}
+
+/// Validates that gap providers (OAI-compatible with specific setup
+/// documentation) have corresponding setup docs in docs/.
+#[test]
+fn gap_providers_have_setup_documentation() {
+    // Gap providers that should have dedicated setup docs.
+    const GAP_PROVIDERS_WITH_DOCS: &[(&str, &str)] = &[
+        ("cerebras", "docs/provider-cerebras-setup.json"),
+        ("groq", "docs/provider-groq-setup.json"),
+        ("moonshotai", "docs/provider-kimi-setup.json"),
+        ("alibaba", "docs/provider-qwen-setup.json"),
+        ("openrouter", "docs/provider-openrouter-setup.json"),
+    ];
+
+    let root = env!("CARGO_MANIFEST_DIR");
+    let mut missing = Vec::new();
+    for (provider, doc_path) in GAP_PROVIDERS_WITH_DOCS {
+        let full_path = format!("{root}/{doc_path}");
+        if !std::path::Path::new(&full_path).exists() {
+            missing.push(format!("  {provider}: {doc_path}"));
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "\n\nGap providers missing setup documentation:\n{}\n",
+        missing.join("\n")
+    );
+}
+
+/// Validates that no two providers share identical (api, `base_url`)
+/// routing defaults unless they are intentional pairs (e.g. minimax
+/// and minimax-coding-plan). Catches copy-paste errors in new entries.
+#[test]
+fn no_accidental_duplicate_routing_defaults() {
+    let mut seen: HashMap<(&str, &str), Vec<&str>> = HashMap::new();
+    for meta in PROVIDER_METADATA {
+        if let Some(defaults) = &meta.routing_defaults {
+            seen.entry((defaults.api, defaults.base_url))
+                .or_default()
+                .push(meta.canonical_id);
+        }
+    }
+
+    // Known intentional duplicates: coding-plan variants share base_url
+    // with their parent.
+    let intentional_pairs: HashSet<&str> = [
+        "minimax-coding-plan",
+        "minimax-cn-coding-plan",
+        "zai-coding-plan",
+        "zhipuai-coding-plan",
+    ]
+    .iter()
+    .copied()
+    .collect();
+
+    let mut violations = Vec::new();
+    for ((api, url), providers) in &seen {
+        if providers.len() > 1 {
+            // If more than one non-intentional provider shares the
+            // same (api, base_url), flag it.
+            if providers
+                .iter()
+                .filter(|p| !intentional_pairs.contains(**p))
+                .count()
+                > 1
+            {
+                violations.push(format!("  ({api}, {url}): {providers:?}"));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "\n\nProviders sharing identical (api, base_url) routing defaults:\n{}\n\n\
+         If intentional, add the new provider to intentional_pairs in this test.\n",
+        violations.join("\n")
+    );
+}

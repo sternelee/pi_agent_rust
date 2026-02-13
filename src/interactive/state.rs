@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bubbles::list::{DefaultDelegate, Item as ListItem, List};
 
@@ -7,8 +7,13 @@ use crate::agent::QueueMode;
 use crate::autocomplete::{
     AutocompleteCatalog, AutocompleteItem, AutocompleteProvider, AutocompleteResponse,
 };
+use crate::extensions::ExtensionUiRequest;
 use crate::model::{ContentBlock, Message as ModelMessage};
 use crate::models::OAuthConfig;
+use crate::session::SiblingBranch;
+use crate::session_index::{SessionIndex, SessionMeta};
+use crate::session_picker::delete_session_file;
+use crate::theme::Theme;
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +174,458 @@ impl AutocompleteState {
         } else {
             self.selected - self.max_visible + 1
         }
+    }
+}
+
+/// Session picker overlay state for /resume command.
+#[derive(Debug)]
+pub(super) struct SessionPickerOverlay {
+    /// Full list of available sessions.
+    pub(super) all_sessions: Vec<SessionMeta>,
+    /// List of available sessions.
+    pub(super) sessions: Vec<SessionMeta>,
+    /// Query used for typed filtering.
+    query: String,
+    /// Index of the currently selected session.
+    pub(super) selected: usize,
+    /// Maximum number of sessions to display.
+    pub(super) max_visible: usize,
+    /// Whether we're in delete confirmation mode.
+    pub(super) confirm_delete: bool,
+    /// Status message to render in the picker overlay.
+    pub(super) status_message: Option<String>,
+    /// Base directory for session storage (used for index cleanup).
+    sessions_root: Option<PathBuf>,
+}
+
+impl SessionPickerOverlay {
+    pub(super) fn new(sessions: Vec<SessionMeta>) -> Self {
+        Self {
+            all_sessions: sessions.clone(),
+            sessions,
+            query: String::new(),
+            selected: 0,
+            max_visible: 10,
+            confirm_delete: false,
+            status_message: None,
+            sessions_root: None,
+        }
+    }
+
+    pub(super) fn new_with_root(
+        sessions: Vec<SessionMeta>,
+        sessions_root: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            all_sessions: sessions.clone(),
+            sessions,
+            query: String::new(),
+            selected: 0,
+            max_visible: 10,
+            confirm_delete: false,
+            status_message: None,
+            sessions_root,
+        }
+    }
+
+    pub(super) fn select_next(&mut self) {
+        if !self.sessions.is_empty() {
+            self.selected = (self.selected + 1) % self.sessions.len();
+        }
+    }
+
+    pub(super) fn select_prev(&mut self) {
+        if !self.sessions.is_empty() {
+            self.selected = self
+                .selected
+                .checked_sub(1)
+                .unwrap_or(self.sessions.len() - 1);
+        }
+    }
+
+    pub(super) fn selected_session(&self) -> Option<&SessionMeta> {
+        self.sessions.get(self.selected)
+    }
+
+    pub(super) fn query(&self) -> &str {
+        &self.query
+    }
+
+    pub(super) fn has_query(&self) -> bool {
+        !self.query.is_empty()
+    }
+
+    pub(super) fn push_chars<I: IntoIterator<Item = char>>(&mut self, chars: I) {
+        let mut changed = false;
+        for ch in chars {
+            if !ch.is_control() {
+                self.query.push(ch);
+                changed = true;
+            }
+        }
+        if changed {
+            self.rebuild_filtered_sessions();
+        }
+    }
+
+    pub(super) fn pop_char(&mut self) {
+        if self.query.pop().is_some() {
+            self.rebuild_filtered_sessions();
+        }
+    }
+
+    /// Returns the scroll offset for the dropdown view.
+    pub(super) const fn scroll_offset(&self) -> usize {
+        if self.selected < self.max_visible {
+            0
+        } else {
+            self.selected - self.max_visible + 1
+        }
+    }
+
+    /// Remove the selected session from the list and adjust selection.
+    pub(super) fn remove_selected(&mut self) {
+        let Some(selected_session) = self.selected_session().cloned() else {
+            return;
+        };
+        self.all_sessions
+            .retain(|session| session.path != selected_session.path);
+        self.rebuild_filtered_sessions();
+        // Clear confirmation state
+        self.confirm_delete = false;
+    }
+
+    pub(super) fn delete_selected(&mut self) -> crate::error::Result<()> {
+        let Some(session_meta) = self.selected_session().cloned() else {
+            return Ok(());
+        };
+        let path = PathBuf::from(&session_meta.path);
+        delete_session_file(&path)?;
+        if let Some(root) = self.sessions_root.as_ref() {
+            let index = SessionIndex::for_sessions_root(root);
+            let _ = index.delete_session_path(&path);
+        }
+        self.remove_selected();
+        Ok(())
+    }
+
+    fn rebuild_filtered_sessions(&mut self) {
+        let query = self.query.trim().to_ascii_lowercase();
+        if query.is_empty() {
+            self.sessions = self.all_sessions.clone();
+        } else {
+            self.sessions = self
+                .all_sessions
+                .iter()
+                .filter(|session| Self::session_matches_query(session, &query))
+                .cloned()
+                .collect();
+        }
+
+        if self.sessions.is_empty() {
+            self.selected = 0;
+        } else if self.selected >= self.sessions.len() {
+            self.selected = self.sessions.len() - 1;
+        }
+    }
+
+    fn session_matches_query(session: &SessionMeta, query_lower: &str) -> bool {
+        let in_name = session
+            .name
+            .as_deref()
+            .is_some_and(|name| name.to_ascii_lowercase().contains(query_lower));
+        let in_id = session.id.to_ascii_lowercase().contains(query_lower);
+        let in_file_name = Path::new(&session.path)
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|file_name| file_name.to_ascii_lowercase().contains(query_lower));
+        let in_timestamp = session.timestamp.to_ascii_lowercase().contains(query_lower);
+        let in_message_count = session.message_count.to_string().contains(query_lower);
+
+        in_name || in_id || in_file_name || in_timestamp || in_message_count
+    }
+}
+
+/// Settings selector overlay state for /settings command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SettingsUiEntry {
+    Summary,
+    Theme,
+    SteeringMode,
+    FollowUpMode,
+    QuietStartup,
+    CollapseChangelog,
+    HideThinkingBlock,
+    ShowHardwareCursor,
+    DoubleEscapeAction,
+    EditorPaddingX,
+    AutocompleteMaxVisible,
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum ThemePickerItem {
+    BuiltIn(&'static str),
+    File(PathBuf),
+}
+
+#[derive(Debug)]
+pub(super) struct ThemePickerOverlay {
+    pub(super) items: Vec<ThemePickerItem>,
+    pub(super) selected: usize,
+    pub(super) max_visible: usize,
+}
+
+impl ThemePickerOverlay {
+    pub(super) fn new(cwd: &Path) -> Self {
+        let mut items = Vec::new();
+        items.push(ThemePickerItem::BuiltIn("dark"));
+        items.push(ThemePickerItem::BuiltIn("light"));
+        items.push(ThemePickerItem::BuiltIn("solarized"));
+        items.extend(
+            Theme::discover_themes(cwd)
+                .into_iter()
+                .map(ThemePickerItem::File),
+        );
+        Self {
+            items,
+            selected: 0,
+            max_visible: 10,
+        }
+    }
+
+    pub(super) fn select_next(&mut self) {
+        if !self.items.is_empty() {
+            self.selected = (self.selected + 1) % self.items.len();
+        }
+    }
+
+    pub(super) fn select_prev(&mut self) {
+        if !self.items.is_empty() {
+            self.selected = self.selected.checked_sub(1).unwrap_or(self.items.len() - 1);
+        }
+    }
+
+    pub(super) const fn scroll_offset(&self) -> usize {
+        if self.selected < self.max_visible {
+            0
+        } else {
+            self.selected - self.max_visible + 1
+        }
+    }
+
+    pub(super) fn selected_item(&self) -> Option<&ThemePickerItem> {
+        self.items.get(self.selected)
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct SettingsUiState {
+    pub(super) entries: Vec<SettingsUiEntry>,
+    pub(super) selected: usize,
+    pub(super) max_visible: usize,
+}
+
+impl SettingsUiState {
+    pub(super) fn new() -> Self {
+        Self {
+            entries: vec![
+                SettingsUiEntry::Summary,
+                SettingsUiEntry::Theme,
+                SettingsUiEntry::SteeringMode,
+                SettingsUiEntry::FollowUpMode,
+                SettingsUiEntry::QuietStartup,
+                SettingsUiEntry::CollapseChangelog,
+                SettingsUiEntry::HideThinkingBlock,
+                SettingsUiEntry::ShowHardwareCursor,
+                SettingsUiEntry::DoubleEscapeAction,
+                SettingsUiEntry::EditorPaddingX,
+                SettingsUiEntry::AutocompleteMaxVisible,
+            ],
+            selected: 0,
+            max_visible: 10,
+        }
+    }
+
+    pub(super) fn select_next(&mut self) {
+        if !self.entries.is_empty() {
+            self.selected = (self.selected + 1) % self.entries.len();
+        }
+    }
+
+    pub(super) fn select_prev(&mut self) {
+        if !self.entries.is_empty() {
+            self.selected = self
+                .selected
+                .checked_sub(1)
+                .unwrap_or(self.entries.len() - 1);
+        }
+    }
+
+    pub(super) fn selected_entry(&self) -> Option<SettingsUiEntry> {
+        self.entries.get(self.selected).copied()
+    }
+
+    pub(super) const fn scroll_offset(&self) -> usize {
+        if self.selected < self.max_visible {
+            0
+        } else {
+            self.selected - self.max_visible + 1
+        }
+    }
+}
+
+/// User action choices for a capability prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CapabilityAction {
+    AllowOnce,
+    AllowAlways,
+    Deny,
+    DenyAlways,
+}
+
+impl CapabilityAction {
+    pub(super) const ALL: [Self; 4] = [
+        Self::AllowOnce,
+        Self::AllowAlways,
+        Self::Deny,
+        Self::DenyAlways,
+    ];
+
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::AllowOnce => "Allow Once",
+            Self::AllowAlways => "Allow Always",
+            Self::Deny => "Deny",
+            Self::DenyAlways => "Deny Always",
+        }
+    }
+
+    pub(super) const fn is_allow(self) -> bool {
+        matches!(self, Self::AllowOnce | Self::AllowAlways)
+    }
+
+    pub(super) const fn is_persistent(self) -> bool {
+        matches!(self, Self::AllowAlways | Self::DenyAlways)
+    }
+}
+
+/// Modal overlay for extension capability prompts.
+#[derive(Debug)]
+pub(super) struct CapabilityPromptOverlay {
+    /// The underlying UI request (used to send response).
+    pub(super) request: ExtensionUiRequest,
+    /// Extension that requested the capability.
+    pub(super) extension_id: String,
+    /// Capability being requested (e.g. "exec", "http").
+    pub(super) capability: String,
+    /// Human-readable description of what the capability does.
+    pub(super) description: String,
+    /// Which button is focused.
+    pub(super) focused: usize,
+    /// Auto-deny countdown (remaining seconds).  `None` = no timer.
+    pub(super) auto_deny_secs: Option<u32>,
+}
+
+impl CapabilityPromptOverlay {
+    pub(super) fn from_request(request: ExtensionUiRequest) -> Self {
+        let extension_id = request
+            .payload
+            .get("extension_id")
+            .and_then(Value::as_str)
+            .unwrap_or("<unknown>")
+            .to_string();
+        let capability = request
+            .payload
+            .get("capability")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let description = request
+            .payload
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        Self {
+            request,
+            extension_id,
+            capability,
+            description,
+            focused: 0,
+            auto_deny_secs: Some(30),
+        }
+    }
+
+    pub(super) const fn focus_next(&mut self) {
+        self.focused = (self.focused + 1) % CapabilityAction::ALL.len();
+    }
+
+    pub(super) fn focus_prev(&mut self) {
+        self.focused = self
+            .focused
+            .checked_sub(1)
+            .unwrap_or(CapabilityAction::ALL.len() - 1);
+    }
+
+    pub(super) const fn selected_action(&self) -> CapabilityAction {
+        CapabilityAction::ALL[self.focused]
+    }
+
+    /// Returns `true` if this is a capability-specific confirm prompt (not a
+    /// generic extension confirm).
+    pub(super) fn is_capability_prompt(request: &ExtensionUiRequest) -> bool {
+        request.method == "confirm"
+            && request.payload.get("capability").is_some()
+            && request.payload.get("extension_id").is_some()
+    }
+}
+
+/// Branch picker overlay for quick branch switching (Ctrl+B).
+#[derive(Debug)]
+pub(super) struct BranchPickerOverlay {
+    /// Sibling branches at the nearest fork point.
+    pub(super) branches: Vec<SiblingBranch>,
+    /// Which branch is currently selected in the picker.
+    pub(super) selected: usize,
+    /// Maximum visible rows before scrolling.
+    pub(super) max_visible: usize,
+}
+
+impl BranchPickerOverlay {
+    pub(super) fn new(branches: Vec<SiblingBranch>) -> Self {
+        let current_idx = branches.iter().position(|b| b.is_current).unwrap_or(0);
+        Self {
+            branches,
+            selected: current_idx,
+            max_visible: 10,
+        }
+    }
+
+    pub(super) fn select_next(&mut self) {
+        if !self.branches.is_empty() {
+            self.selected = (self.selected + 1) % self.branches.len();
+        }
+    }
+
+    pub(super) fn select_prev(&mut self) {
+        if !self.branches.is_empty() {
+            self.selected = self
+                .selected
+                .checked_sub(1)
+                .unwrap_or(self.branches.len() - 1);
+        }
+    }
+
+    pub(super) const fn scroll_offset(&self) -> usize {
+        if self.selected < self.max_visible {
+            0
+        } else {
+            self.selected - self.max_visible + 1
+        }
+    }
+
+    pub(super) fn selected_branch(&self) -> Option<&SiblingBranch> {
+        self.branches.get(self.selected)
     }
 }
 

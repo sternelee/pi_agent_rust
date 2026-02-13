@@ -14,10 +14,19 @@
 //!
 //! All tests use real filesystem, no mocks/fakes/stubs.
 
+#![allow(
+    clippy::doc_markdown,
+    clippy::needless_collect,
+    clippy::option_if_let_else,
+    clippy::significant_drop_tightening,
+    clippy::too_many_lines,
+    clippy::unnecessary_literal_bound
+)]
+
 mod common;
 
 use async_trait::async_trait;
-use common::{run_async, TestHarness};
+use common::{TestHarness, run_async};
 use futures::Stream;
 use pi::agent::{Agent, AgentConfig, AgentEvent, AgentSession};
 use pi::compaction::ResolvedCompactionSettings;
@@ -29,10 +38,9 @@ use pi::model::{
 use pi::provider::{Context, Provider, StreamOptions};
 use pi::session::Session;
 use pi::tools::{
-    truncate_head, truncate_tail, Tool, ToolOutput, ToolRegistry, ToolUpdate, TruncatedBy,
+    Tool, ToolOutput, ToolRegistry, ToolUpdate, TruncatedBy, truncate_head, truncate_tail,
 };
 use serde_json::json;
-use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -43,41 +51,26 @@ use std::time::Instant;
 // Helpers
 // ===========================================================================
 
-fn make_assistant(
-    text: &str,
-    stop: StopReason,
-    total_tokens: u64,
-) -> AssistantMessage {
-    AssistantMessage {
-        content: vec![ContentBlock::Text(TextContent::new(text))],
-        api: "coverage-api".to_string(),
-        provider: "coverage-provider".to_string(),
-        model: "coverage-model".to_string(),
-        usage: Usage {
-            total_tokens,
-            output: total_tokens,
-            ..Usage::default()
-        },
-        stop_reason: stop,
-        error_message: None,
-        timestamp: 0,
-    }
+/// Unified result from a tool execute() call: either Ok(ToolOutput) or Err(Error).
+/// For testing we treat both as "the tool produced a result" - either explicit
+/// ToolOutput or an error that the agent would wrap.
+struct ToolExecResult {
+    is_error: bool,
+    text: String,
 }
 
-fn make_tool_call_msg(tools: Vec<ToolCall>, total_tokens: u64) -> AssistantMessage {
-    AssistantMessage {
-        content: tools.into_iter().map(ContentBlock::ToolCall).collect(),
-        api: "coverage-api".to_string(),
-        provider: "coverage-provider".to_string(),
-        model: "coverage-model".to_string(),
-        usage: Usage {
-            total_tokens,
-            output: total_tokens,
-            ..Usage::default()
+/// Execute a tool and normalize the result: both Ok(ToolOutput) and Err(Error)
+/// are turned into a ToolExecResult for easy assertion.
+async fn exec_tool(tool: &dyn Tool, call_id: &str, input: serde_json::Value) -> ToolExecResult {
+    match tool.execute(call_id, input, None).await {
+        Ok(output) => ToolExecResult {
+            is_error: output.is_error,
+            text: get_text(&output.content),
         },
-        stop_reason: StopReason::ToolUse,
-        error_message: None,
-        timestamp: 0,
+        Err(e) => ToolExecResult {
+            is_error: true,
+            text: format!("{e}"),
+        },
     }
 }
 
@@ -121,7 +114,6 @@ struct Timeline {
     events: Vec<serde_json::Value>,
     tool_starts: usize,
     tool_ends: usize,
-    messages: Vec<serde_json::Value>,
 }
 
 fn capture_timeline() -> (
@@ -163,11 +155,7 @@ fn make_session(harness: &TestHarness) -> Arc<asupersync::sync::Mutex<Session>> 
     )))
 }
 
-fn make_agent(
-    provider: Arc<dyn Provider>,
-    cwd: &std::path::Path,
-    max_iters: usize,
-) -> Agent {
+fn make_agent(provider: Arc<dyn Provider>, cwd: &std::path::Path, max_iters: usize) -> Agent {
     let tools = ToolRegistry::new(&["read", "write", "bash"], cwd, None);
     let config = AgentConfig {
         system_prompt: None,
@@ -387,142 +375,6 @@ impl Provider for MixedToolCallProvider {
     }
 }
 
-/// Provider that emits a tool call to a tool that will return an Err().
-/// This exercises agent.rs:1349-1356 (tool execution error wrapping).
-#[derive(Debug)]
-struct ErrorToolProvider {
-    stream_calls: AtomicUsize,
-}
-
-#[async_trait]
-#[allow(clippy::unnecessary_literal_bound)]
-impl Provider for ErrorToolProvider {
-    fn name(&self) -> &str {
-        "error-tool-provider"
-    }
-
-    fn api(&self) -> &str {
-        "error-tool-api"
-    }
-
-    fn model_id(&self) -> &str {
-        "error-tool-model"
-    }
-
-    async fn stream(
-        &self,
-        context: &Context,
-        _options: &StreamOptions,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
-        let call_index = self.stream_calls.fetch_add(1, Ordering::SeqCst);
-
-        if call_index == 0 {
-            // Call a tool that will throw an error during execution
-            let msg = AssistantMessage {
-                content: vec![ContentBlock::ToolCall(ToolCall {
-                    id: "bash-err-1".to_string(),
-                    name: "bash".to_string(),
-                    arguments: json!({
-                        "command": "echo hello",
-                        "timeout": -1  // Invalid; bash tool interprets negative as error
-                    }),
-                    thought_signature: None,
-                })],
-                api: self.api().to_string(),
-                provider: self.name().to_string(),
-                model: self.model_id().to_string(),
-                usage: Usage {
-                    total_tokens: 25,
-                    output: 25,
-                    ..Usage::default()
-                },
-                stop_reason: StopReason::ToolUse,
-                error_message: None,
-                timestamp: 0,
-            };
-            let partial = AssistantMessage {
-                content: Vec::new(),
-                api: self.api().to_string(),
-                provider: self.name().to_string(),
-                model: self.model_id().to_string(),
-                usage: Usage::default(),
-                stop_reason: StopReason::Stop,
-                error_message: None,
-                timestamp: 0,
-            };
-            return Ok(Box::pin(EventSequence {
-                events: vec![
-                    Some(StreamEvent::Start { partial }),
-                    Some(StreamEvent::Done {
-                        reason: StopReason::ToolUse,
-                        message: msg,
-                    }),
-                ],
-                index: 0,
-            }));
-        }
-
-        // Second call: check if the error tool result was properly wrapped
-        if call_index == 1 {
-            let results: Vec<&ToolResultMessage> = context
-                .messages
-                .iter()
-                .filter_map(|m| match m {
-                    Message::ToolResult(r) => Some(r),
-                    _ => None,
-                })
-                .collect();
-
-            let msg_text = if let Some(result) = results.iter().find(|r| r.tool_call_id == "bash-err-1") {
-                format!(
-                    "bash_result: is_error={}, text={}",
-                    result.is_error,
-                    tool_result_text(result)
-                )
-            } else {
-                "bash_result: MISSING".to_string()
-            };
-
-            let msg = AssistantMessage {
-                content: vec![ContentBlock::Text(TextContent::new(msg_text))],
-                api: self.api().to_string(),
-                provider: self.name().to_string(),
-                model: self.model_id().to_string(),
-                usage: Usage {
-                    total_tokens: 15,
-                    output: 15,
-                    ..Usage::default()
-                },
-                stop_reason: StopReason::Stop,
-                error_message: None,
-                timestamp: 0,
-            };
-            let partial = AssistantMessage {
-                content: Vec::new(),
-                api: self.api().to_string(),
-                provider: self.name().to_string(),
-                model: self.model_id().to_string(),
-                usage: Usage::default(),
-                stop_reason: StopReason::Stop,
-                error_message: None,
-                timestamp: 0,
-            };
-            return Ok(Box::pin(EventSequence {
-                events: vec![
-                    Some(StreamEvent::Start { partial }),
-                    Some(StreamEvent::Done {
-                        reason: StopReason::Stop,
-                        message: msg,
-                    }),
-                ],
-                index: 0,
-            }));
-        }
-
-        Err(Error::api("unexpected provider call"))
-    }
-}
-
 // ===========================================================================
 // Agent tests
 // ===========================================================================
@@ -536,7 +388,7 @@ fn agent_mixed_tool_batch_success_and_not_found() {
     let harness = TestHarness::new(test_name);
     let target = harness.create_file("test.txt", b"coverage content\n");
 
-    run_async(async {
+    run_async(async move {
         let provider = Arc::new(MixedToolCallProvider {
             stream_calls: AtomicUsize::new(0),
             good_tool_name: "read".to_string(),
@@ -548,7 +400,7 @@ fn agent_mixed_tool_batch_success_and_not_found() {
         let (tl, cb) = capture_timeline();
 
         let result = agent_session
-            .run_text("test mixed tool batch", cb)
+            .run_text("test mixed tool batch".to_string(), cb)
             .await;
 
         let guard = tl.lock().unwrap();
@@ -557,21 +409,43 @@ fn agent_mixed_tool_batch_success_and_not_found() {
         let msg = result.expect("agent should complete");
         let text = assistant_text(&msg);
 
-        harness.log().info_ctx("verify", "mixed batch result", |ctx| {
-            ctx.push(("result_text".into(), text.clone()));
-            ctx.push(("tool_starts".into(), guard.tool_starts.to_string()));
-            ctx.push(("tool_ends".into(), guard.tool_ends.to_string()));
-        });
+        harness
+            .log()
+            .info_ctx("verify", "mixed batch result", |ctx| {
+                ctx.push(("result_text".into(), text.clone()));
+                ctx.push(("tool_starts".into(), guard.tool_starts.to_string()));
+                ctx.push(("tool_ends".into(), guard.tool_ends.to_string()));
+            });
 
         // Both tools should have started and ended
-        assert!(guard.tool_starts >= 2, "both tools should start: got {}", guard.tool_starts);
-        assert!(guard.tool_ends >= 2, "both tools should end: got {}", guard.tool_ends);
+        assert!(
+            guard.tool_starts >= 2,
+            "both tools should start: got {}",
+            guard.tool_starts
+        );
+        assert!(
+            guard.tool_ends >= 2,
+            "both tools should end: got {}",
+            guard.tool_ends
+        );
 
         // The provider's second call should have received both results
-        assert!(text.contains("good_tool:"), "should contain good_tool verification");
-        assert!(text.contains("bad_tool:"), "should contain bad_tool verification");
-        assert!(text.contains("is_error=true"), "bad tool should be marked error");
-        assert!(text.contains("not found"), "bad tool should say 'not found'");
+        assert!(
+            text.contains("good_tool:"),
+            "should contain good_tool verification"
+        );
+        assert!(
+            text.contains("bad_tool:"),
+            "should contain bad_tool verification"
+        );
+        assert!(
+            text.contains("is_error=true"),
+            "bad tool should be marked error"
+        );
+        assert!(
+            text.contains("not found"),
+            "bad tool should say 'not found'"
+        );
     });
 }
 
@@ -580,25 +454,22 @@ fn agent_mixed_tool_batch_success_and_not_found() {
 #[test]
 fn tool_bash_nonexistent_working_directory() {
     asupersync::test_utils::run_test(|| async {
-        let h = TestHarness::new("bash_nonexistent_cwd");
-        let tool = pi::tools::BashTool::new(
-            std::path::Path::new("/nonexistent/path/that/does/not/exist"),
-            None,
-            None,
-        );
+        let _h = TestHarness::new("bash_nonexistent_cwd");
+        let tool = pi::tools::BashTool::new(std::path::Path::new(
+            "/nonexistent/path/that/does/not/exist",
+        ));
         let input = json!({ "command": "echo hello" });
-        let result = tool.execute("bash-cwd-1", input, None).await.unwrap();
-
-        h.log().info_ctx("verify", "bash nonexistent cwd", |ctx| {
-            ctx.push(("is_error".into(), result.is_error.to_string()));
-            ctx.push(("text".into(), get_text(&result.content)));
-        });
+        let result = exec_tool(&tool, "bash-cwd-1", input).await;
 
         assert!(result.is_error, "should error with nonexistent cwd");
-        let text = get_text(&result.content);
+        let text_lower = result.text.to_lowercase();
         assert!(
-            text.contains("not exist") || text.contains("No such") || text.contains("error"),
-            "should mention directory error: got {text}"
+            text_lower.contains("not exist")
+                || text_lower.contains("no such")
+                || text_lower.contains("error")
+                || text_lower.contains("directory"),
+            "should mention directory error: got {}",
+            result.text
         );
     });
 }
@@ -608,26 +479,20 @@ fn tool_bash_nonexistent_working_directory() {
 #[test]
 fn tool_bash_timeout_kills_process() {
     asupersync::test_utils::run_test(|| async {
-        let h = TestHarness::new("bash_timeout_kills");
-        let tool = pi::tools::BashTool::new(h.temp_dir(), None, None);
+        let _h = TestHarness::new("bash_timeout_kills");
+        let tool = pi::tools::BashTool::new(std::path::Path::new("/tmp"));
         let input = json!({
             "command": "sleep 30",
             "timeout": 1
         });
-        let result = tool.execute("bash-timeout-1", input, None).await.unwrap();
+        let result = exec_tool(&tool, "bash-timeout-1", input).await;
 
-        h.log().info_ctx("verify", "bash timeout", |ctx| {
-            ctx.push(("is_error".into(), result.is_error.to_string()));
-            ctx.push(("text".into(), get_text(&result.content)));
-        });
-
-        let text = get_text(&result.content);
-        // The tool should indicate timeout occurred
+        let text_lower = result.text.to_lowercase();
+        // The tool should indicate timeout occurred (either via Ok or Err)
         assert!(
-            text.to_lowercase().contains("timeout")
-                || text.to_lowercase().contains("timed out")
-                || text.contains("killed"),
-            "should mention timeout: got {text}"
+            text_lower.contains("timeout") || text_lower.contains("timed out"),
+            "should mention timeout: got {}",
+            result.text
         );
     });
 }
@@ -644,20 +509,18 @@ fn tool_edit_empty_old_text() {
             "old": "",
             "new": "replacement"
         });
-        let result = tool.execute("edit-empty-1", input, None).await.unwrap();
-
-        h.log().info_ctx("verify", "edit empty old_text", |ctx| {
-            ctx.push(("is_error".into(), result.is_error.to_string()));
-            ctx.push(("text".into(), get_text(&result.content)));
-        });
+        let result = exec_tool(&tool, "edit-empty-1", input).await;
 
         // Empty old_text should either error or be handled gracefully
-        // (the exact behavior depends on implementation)
-        let text = get_text(&result.content);
+        let text_lower = result.text.to_lowercase();
         assert!(
-            result.is_error || text.contains("empty") || text.contains("Error") || text.contains("ambiguous"),
-            "empty old_text should be handled: is_error={}, text={text}",
             result.is_error
+                || text_lower.contains("empty")
+                || text_lower.contains("error")
+                || text_lower.contains("ambiguous"),
+            "empty old_text should be handled: is_error={}, text={}",
+            result.is_error,
+            result.text
         );
     });
 }
@@ -698,23 +561,19 @@ fn tool_read_permission_denied() {
 
         let tool = pi::tools::ReadTool::new(h.temp_dir());
         let input = json!({ "path": target.to_string_lossy() });
-        let result = tool.execute("read-perm-1", input, None).await.unwrap();
+        let result = exec_tool(&tool, "read-perm-1", input).await;
 
         // Restore permissions for cleanup
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        h.log().info_ctx("verify", "read perm denied", |ctx| {
-            ctx.push(("is_error".into(), result.is_error.to_string()));
-            ctx.push(("text".into(), get_text(&result.content)));
-        });
-
         assert!(result.is_error, "reading no-permission file should error");
-        let text = get_text(&result.content);
+        let text_lower = result.text.to_lowercase();
         assert!(
-            text.to_lowercase().contains("permission")
-                || text.to_lowercase().contains("denied")
-                || text.to_lowercase().contains("error"),
-            "should mention permission denied: got {text}"
+            text_lower.contains("permission")
+                || text_lower.contains("denied")
+                || text_lower.contains("error"),
+            "should mention permission denied: got {}",
+            result.text
         );
     });
 }
@@ -736,15 +595,10 @@ fn tool_edit_permission_denied() {
             "old": "old content",
             "new": "new content"
         });
-        let result = tool.execute("edit-perm-1", input, None).await.unwrap();
+        let result = exec_tool(&tool, "edit-perm-1", input).await;
 
         // Restore permissions for cleanup
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
-
-        h.log().info_ctx("verify", "edit perm denied", |ctx| {
-            ctx.push(("is_error".into(), result.is_error.to_string()));
-            ctx.push(("text".into(), get_text(&result.content)));
-        });
 
         assert!(result.is_error, "editing read-only file should error");
     });
@@ -763,8 +617,14 @@ fn truncate_head_first_line_exceeds_byte_limit() {
     let result = truncate_head(&content, 100, 400);
 
     assert!(result.truncated, "should be truncated");
-    assert!(result.first_line_exceeds_limit, "first_line_exceeds_limit should be true");
-    assert_eq!(result.content, "", "content should be empty when first line exceeds limit");
+    assert!(
+        result.first_line_exceeds_limit,
+        "first_line_exceeds_limit should be true"
+    );
+    assert_eq!(
+        result.content, "",
+        "content should be empty when first line exceeds limit"
+    );
     assert_eq!(result.output_lines, 0);
     assert_eq!(result.output_bytes, 0);
     assert_eq!(result.truncated_by, Some(TruncatedBy::Bytes));
@@ -782,7 +642,10 @@ fn truncate_head_multibyte_utf8() {
     assert_eq!(result.truncated_by, Some(TruncatedBy::Bytes));
     // Should get exactly 2 emojis (8 bytes) since 3rd emoji would exceed 12 bytes
     // when including the newline-less single line
-    assert!(result.output_bytes <= 12, "output should fit within byte limit");
+    assert!(
+        result.output_bytes <= 12,
+        "output should fit within byte limit"
+    );
     // Verify valid UTF-8
     assert!(std::str::from_utf8(result.content.as_bytes()).is_ok());
 }
@@ -804,7 +667,10 @@ fn truncate_tail_multibyte_utf8_boundary() {
     assert_eq!(result.output_lines, 2);
     assert!(result.content.contains("line2"), "should include line2");
     assert!(result.content.contains("line3"), "should include line3");
-    assert!(!result.content.contains("line1"), "should NOT include line1");
+    assert!(
+        !result.content.contains("line1"),
+        "should NOT include line1"
+    );
     // Verify valid UTF-8
     assert!(std::str::from_utf8(result.content.as_bytes()).is_ok());
 }
@@ -818,7 +684,10 @@ fn truncate_tail_small_byte_limit() {
     assert!(result.truncated, "should be truncated by bytes");
     assert_eq!(result.truncated_by, Some(TruncatedBy::Bytes));
     assert!(result.output_bytes <= 10, "output should fit in 10 bytes");
-    assert!(result.last_line_partial || result.output_lines <= 1, "should be partial or single line");
+    assert!(
+        result.last_line_partial || result.output_lines <= 1,
+        "should be partial or single line"
+    );
     // Verify valid UTF-8
     assert!(std::str::from_utf8(result.content.as_bytes()).is_ok());
 }
@@ -848,7 +717,10 @@ fn truncate_tail_single_long_line() {
     assert!(result.output_bytes <= 50, "output_bytes should be <= 50");
     assert!(result.last_line_partial, "should be partial line");
     // The output should be a suffix of the input
-    assert!(content.ends_with(&result.content), "output should be a suffix of input");
+    assert!(
+        content.ends_with(&result.content),
+        "output should be a suffix of input"
+    );
 }
 
 /// truncate_head: empty lines (consecutive newlines).
@@ -895,14 +767,9 @@ fn fuzzy_find_normalized_curly_quotes() {
             "old": "\"hello world\"",
             "new": "\"goodbye world\""
         });
-        let result = tool.execute("edit-curly-1", input, None).await.unwrap();
+        let result = exec_tool(&tool, "edit-curly-1", input).await;
 
-        h.log().info_ctx("verify", "fuzzy curly quotes", |ctx| {
-            ctx.push(("is_error".into(), result.is_error.to_string()));
-            ctx.push(("text".into(), get_text(&result.content)));
-        });
-
-        // Should succeed via fuzzy matching
+        // Should succeed via fuzzy matching, or at minimum exercise the path
         if !result.is_error {
             let content = std::fs::read_to_string(&target).unwrap();
             assert!(
@@ -910,8 +777,7 @@ fn fuzzy_find_normalized_curly_quotes() {
                 "should have replaced: got {content}"
             );
         }
-        // Even if it doesn't match due to implementation details, this exercises
-        // the fuzzy matching path
+        // Even if it errors, we exercised the fuzzy matching code path
     });
 }
 
@@ -930,14 +796,9 @@ fn fuzzy_find_normalized_em_dash() {
             "old": "foo-bar",
             "new": "foo_bar"
         });
-        let result = tool.execute("edit-dash-1", input, None).await.unwrap();
+        let result = exec_tool(&tool, "edit-dash-1", input).await;
 
-        h.log().info_ctx("verify", "fuzzy em dash", |ctx| {
-            ctx.push(("is_error".into(), result.is_error.to_string()));
-            ctx.push(("text".into(), get_text(&result.content)));
-        });
-
-        // Should succeed via fuzzy matching
+        // Should succeed via fuzzy matching, or at minimum exercise the path
         if !result.is_error {
             let content = std::fs::read_to_string(&target).unwrap();
             assert!(
@@ -960,13 +821,7 @@ fn tool_read_invalid_json_type() {
         let tool = pi::tools::ReadTool::new(h.temp_dir());
         // Pass a number instead of string for path
         let input = json!({ "path": 42 });
-        let result = tool.execute("read-bad-1", input, None).await.unwrap();
-
-        h.log().info_ctx("verify", "read invalid json type", |ctx| {
-            ctx.push(("is_error".into(), result.is_error.to_string()));
-            ctx.push(("text".into(), get_text(&result.content)));
-        });
-
+        let result = exec_tool(&tool, "read-bad-1", input).await;
         assert!(result.is_error, "invalid json type should be an error");
     });
 }
@@ -979,13 +834,7 @@ fn tool_write_missing_content() {
         let tool = pi::tools::WriteTool::new(h.temp_dir());
         // Missing content field
         let input = json!({ "path": h.temp_dir().join("test.txt").to_string_lossy().to_string() });
-        let result = tool.execute("write-bad-1", input, None).await.unwrap();
-
-        h.log().info_ctx("verify", "write missing content", |ctx| {
-            ctx.push(("is_error".into(), result.is_error.to_string()));
-            ctx.push(("text".into(), get_text(&result.content)));
-        });
-
+        let result = exec_tool(&tool, "write-bad-1", input).await;
         assert!(result.is_error, "missing content field should be an error");
     });
 }
@@ -994,17 +843,11 @@ fn tool_write_missing_content() {
 #[test]
 fn tool_bash_missing_command() {
     asupersync::test_utils::run_test(|| async {
-        let h = TestHarness::new("bash_missing_command");
-        let tool = pi::tools::BashTool::new(h.temp_dir(), None, None);
+        let _h = TestHarness::new("bash_missing_command");
+        let tool = pi::tools::BashTool::new(std::path::Path::new("/tmp"));
         // Missing command field
         let input = json!({ "timeout": 5 });
-        let result = tool.execute("bash-bad-1", input, None).await.unwrap();
-
-        h.log().info_ctx("verify", "bash missing command", |ctx| {
-            ctx.push(("is_error".into(), result.is_error.to_string()));
-            ctx.push(("text".into(), get_text(&result.content)));
-        });
-
+        let result = exec_tool(&tool, "bash-bad-1", input).await;
         assert!(result.is_error, "missing command field should be an error");
     });
 }
@@ -1016,12 +859,7 @@ fn tool_edit_missing_path() {
         let h = TestHarness::new("edit_missing_path");
         let tool = pi::tools::EditTool::new(h.temp_dir());
         let input = json!({ "old": "x", "new": "y" });
-        let result = tool.execute("edit-bad-1", input, None).await.unwrap();
-
-        h.log().info_ctx("verify", "edit missing path", |ctx| {
-            ctx.push(("is_error".into(), result.is_error.to_string()));
-        });
-
+        let result = exec_tool(&tool, "edit-bad-1", input).await;
         assert!(result.is_error, "missing path should be an error");
     });
 }
@@ -1039,21 +877,15 @@ fn tool_grep_invalid_regex() {
             "pattern": "[unclosed",
             "path": h.temp_dir().to_string_lossy()
         });
-        let result = tool.execute("grep-bad-1", input, None).await.unwrap();
-
-        h.log().info_ctx("verify", "grep invalid regex", |ctx| {
-            ctx.push(("is_error".into(), result.is_error.to_string()));
-            ctx.push(("text".into(), get_text(&result.content)));
-        });
+        let result = exec_tool(&tool, "grep-bad-1", input).await;
 
         // rg may handle invalid regex with an error exit code
-        // The tool should propagate this as an error or in the output
-        let text = get_text(&result.content);
-        // Either it's marked as error or the text mentions the problem
+        let text_lower = result.text.to_lowercase();
         assert!(
-            result.is_error || text.to_lowercase().contains("error") || text.to_lowercase().contains("regex"),
-            "invalid regex should produce error indication: is_error={}, text={text}",
-            result.is_error
+            result.is_error || text_lower.contains("error") || text_lower.contains("regex"),
+            "invalid regex should produce error indication: is_error={}, text={}",
+            result.is_error,
+            result.text
         );
     });
 }
@@ -1065,12 +897,7 @@ fn tool_ls_nonexistent_path() {
         let h = TestHarness::new("ls_nonexistent");
         let tool = pi::tools::LsTool::new(h.temp_dir());
         let input = json!({ "path": "/nonexistent/path/that/does/not/exist" });
-        let result = tool.execute("ls-bad-1", input, None).await.unwrap();
-
-        h.log().info_ctx("verify", "ls nonexistent", |ctx| {
-            ctx.push(("is_error".into(), result.is_error.to_string()));
-        });
-
+        let result = exec_tool(&tool, "ls-bad-1", input).await;
         assert!(result.is_error, "ls on nonexistent path should error");
     });
 }
@@ -1085,19 +912,14 @@ fn tool_find_nonexistent_path() {
             "pattern": "*.rs",
             "path": "/nonexistent/path/that/does/not/exist"
         });
-        let result = tool.execute("find-bad-1", input, None).await.unwrap();
-
-        h.log().info_ctx("verify", "find nonexistent", |ctx| {
-            ctx.push(("is_error".into(), result.is_error.to_string()));
-            ctx.push(("text".into(), get_text(&result.content)));
-        });
+        let result = exec_tool(&tool, "find-bad-1", input).await;
 
         // fd with nonexistent path should error or return empty
-        let text = get_text(&result.content);
         assert!(
-            result.is_error || text.is_empty() || text.contains("0 results"),
-            "find on nonexistent path should error or be empty: is_error={}, text={text}",
-            result.is_error
+            result.is_error || result.text.is_empty() || result.text.contains("0 results"),
+            "find on nonexistent path should error or be empty: is_error={}, text={}",
+            result.is_error,
+            result.text
         );
     });
 }
@@ -1116,11 +938,15 @@ impl Tool for FailingTool {
         "failing_tool"
     }
 
+    fn label(&self) -> &str {
+        "failing_tool"
+    }
+
     fn description(&self) -> &str {
         "A tool that always fails for testing"
     }
 
-    fn input_schema(&self) -> serde_json::Value {
+    fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {},
@@ -1134,7 +960,10 @@ impl Tool for FailingTool {
         _input: serde_json::Value,
         _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
     ) -> std::result::Result<ToolOutput, pi::error::Error> {
-        Err(pi::error::Error::tool("failing_tool", "deliberate test failure"))
+        Err(pi::error::Error::tool(
+            "failing_tool",
+            "deliberate test failure",
+        ))
     }
 }
 
@@ -1218,7 +1047,8 @@ impl Provider for FailingToolProvider {
                 })
                 .collect();
 
-            let msg_text = if let Some(result) = results.iter().find(|r| r.tool_call_id == "fail-1") {
+            let msg_text = if let Some(result) = results.iter().find(|r| r.tool_call_id == "fail-1")
+            {
                 format!(
                     "fail_result: is_error={}, text={}",
                     result.is_error,
@@ -1275,14 +1105,14 @@ fn agent_tool_execution_error_wraps_in_output() {
     let test_name = "agent_tool_exec_error";
     let harness = TestHarness::new(test_name);
 
-    run_async(async {
+    run_async(async move {
         let provider = Arc::new(FailingToolProvider {
             stream_calls: AtomicUsize::new(0),
         });
 
         let cwd = harness.temp_dir().to_path_buf();
         let mut tools = ToolRegistry::new(&["read"], &cwd, None);
-        tools.register(Arc::new(FailingTool));
+        tools.push(Box::new(FailingTool));
 
         let config = AgentConfig {
             system_prompt: None,
@@ -1301,7 +1131,7 @@ fn agent_tool_execution_error_wraps_in_output() {
         let (tl, cb) = capture_timeline();
 
         let result = agent_session
-            .run_text("test failing tool", cb)
+            .run_text("test failing tool".to_string(), cb)
             .await;
 
         let guard = tl.lock().unwrap();
@@ -1344,7 +1174,7 @@ fn agent_queue_follow_up_only_at_idle() {
     let test_name = "agent_queue_follow_up_idle";
     let harness = TestHarness::new(test_name);
 
-    run_async(async {
+    run_async(async move {
         // Simple provider that responds once and stops
         let provider = Arc::new(SimpleStopProvider {
             stream_calls: AtomicUsize::new(0),
@@ -1364,10 +1194,17 @@ fn agent_queue_follow_up_only_at_idle() {
 
         // Queue a follow-up before running
         agent.queue_follow_up(Message::User(pi::model::UserMessage {
-            content: vec![ContentBlock::Text(TextContent::new("follow-up message"))],
+            content: pi::model::UserContent::Blocks(vec![ContentBlock::Text(TextContent::new(
+                "follow-up message",
+            ))]),
+            timestamp: 0,
         }));
 
-        assert_eq!(agent.queued_message_count(), 1, "should have 1 queued message");
+        assert_eq!(
+            agent.queued_message_count(),
+            1,
+            "should have 1 queued message"
+        );
 
         let session = make_session(&harness);
         let mut agent_session =
@@ -1376,13 +1213,13 @@ fn agent_queue_follow_up_only_at_idle() {
         let (tl, cb) = capture_timeline();
 
         let result = agent_session
-            .run_text("initial message", cb)
+            .run_text("initial message".to_string(), cb)
             .await;
 
         let guard = tl.lock().unwrap();
         write_timeline_artifact(&harness, test_name, &guard);
 
-        let msg = result.expect("agent should complete");
+        let _msg = result.expect("agent should complete");
 
         // The agent should have processed both messages (initial + follow-up)
         // Count how many turn_start events we got
@@ -1392,10 +1229,12 @@ fn agent_queue_follow_up_only_at_idle() {
             .filter(|e| e["event"] == "turn_start")
             .count();
 
-        harness.log().info_ctx("verify", "follow-up delivery", |ctx| {
-            ctx.push(("turn_starts".into(), turn_starts.to_string()));
-            ctx.push(("total_events".into(), guard.events.len().to_string()));
-        });
+        harness
+            .log()
+            .info_ctx("verify", "follow-up delivery", |ctx| {
+                ctx.push(("turn_starts".into(), turn_starts.to_string()));
+                ctx.push(("total_events".into(), guard.events.len().to_string()));
+            });
 
         // With a follow-up queued, the agent should have at least 2 turns
         // (one for initial, one for follow-up)
@@ -1483,21 +1322,19 @@ fn agent_event_lifecycle_simple() {
     let test_name = "agent_event_lifecycle";
     let harness = TestHarness::new(test_name);
 
-    run_async(async {
+    run_async(async move {
         let provider = Arc::new(SimpleStopProvider {
             stream_calls: AtomicUsize::new(0),
         });
         let mut agent_session = make_agent_session(provider, &harness, 4);
         let (tl, cb) = capture_timeline();
 
-        let result = agent_session
-            .run_text("hello", cb)
-            .await;
+        let result = agent_session.run_text("hello".to_string(), cb).await;
 
         let guard = tl.lock().unwrap();
         write_timeline_artifact(&harness, test_name, &guard);
 
-        let msg = result.expect("should succeed");
+        let _msg = result.expect("should succeed");
 
         let event_types: Vec<String> = guard
             .events
@@ -1510,12 +1347,30 @@ fn agent_event_lifecycle_simple() {
         });
 
         // Verify mandatory events are present in correct order
-        assert!(event_types.contains(&"agent_start".to_string()), "missing agent_start");
-        assert!(event_types.contains(&"turn_start".to_string()), "missing turn_start");
-        assert!(event_types.contains(&"message_start".to_string()), "missing message_start");
-        assert!(event_types.contains(&"message_end".to_string()), "missing message_end");
-        assert!(event_types.contains(&"turn_end".to_string()), "missing turn_end");
-        assert!(event_types.contains(&"agent_end".to_string()), "missing agent_end");
+        assert!(
+            event_types.contains(&"agent_start".to_string()),
+            "missing agent_start"
+        );
+        assert!(
+            event_types.contains(&"turn_start".to_string()),
+            "missing turn_start"
+        );
+        assert!(
+            event_types.contains(&"message_start".to_string()),
+            "missing message_start"
+        );
+        assert!(
+            event_types.contains(&"message_end".to_string()),
+            "missing message_end"
+        );
+        assert!(
+            event_types.contains(&"turn_end".to_string()),
+            "missing turn_end"
+        );
+        assert!(
+            event_types.contains(&"agent_end".to_string()),
+            "missing agent_end"
+        );
 
         // agent_start should be first, agent_end should be last
         assert_eq!(event_types.first().unwrap(), "agent_start");
@@ -1531,7 +1386,7 @@ fn agent_event_lifecycle_with_tools() {
     let harness = TestHarness::new(test_name);
     harness.create_file("target.txt", b"tool content\n");
 
-    run_async(async {
+    run_async(async move {
         // Provider that issues a read tool call
         let provider = Arc::new(MixedToolCallProvider {
             stream_calls: AtomicUsize::new(0),
@@ -1547,13 +1402,13 @@ fn agent_event_lifecycle_with_tools() {
         let (tl, cb) = capture_timeline();
 
         let result = agent_session
-            .run_text("test lifecycle with tools", cb)
+            .run_text("test lifecycle with tools".to_string(), cb)
             .await;
 
         let guard = tl.lock().unwrap();
         write_timeline_artifact(&harness, test_name, &guard);
 
-        let msg = result.expect("should succeed");
+        let _msg = result.expect("should succeed");
 
         let event_types: Vec<String> = guard
             .events
@@ -1561,15 +1416,23 @@ fn agent_event_lifecycle_with_tools() {
             .filter_map(|e| e["event"].as_str().map(String::from))
             .collect();
 
-        harness.log().info_ctx("verify", "tool event lifecycle", |ctx| {
-            ctx.push(("events".into(), format!("{event_types:?}")));
-            ctx.push(("tool_starts".into(), guard.tool_starts.to_string()));
-            ctx.push(("tool_ends".into(), guard.tool_ends.to_string()));
-        });
+        harness
+            .log()
+            .info_ctx("verify", "tool event lifecycle", |ctx| {
+                ctx.push(("events".into(), format!("{event_types:?}")));
+                ctx.push(("tool_starts".into(), guard.tool_starts.to_string()));
+                ctx.push(("tool_ends".into(), guard.tool_ends.to_string()));
+            });
 
         // Verify tool events are present
-        assert!(event_types.contains(&"tool_start".to_string()), "missing tool_start");
-        assert!(event_types.contains(&"tool_end".to_string()), "missing tool_end");
+        assert!(
+            event_types.contains(&"tool_start".to_string()),
+            "missing tool_start"
+        );
+        assert!(
+            event_types.contains(&"tool_end".to_string()),
+            "missing tool_end"
+        );
 
         // tool_start should come after turn_start and before turn_end
         let turn_start_idx = event_types.iter().position(|e| e == "turn_start").unwrap();
@@ -1596,22 +1459,17 @@ fn agent_event_lifecycle_with_tools() {
 #[test]
 fn tool_bash_exit_code_capture() {
     asupersync::test_utils::run_test(|| async {
-        let h = TestHarness::new("bash_exit_code");
-        let tool = pi::tools::BashTool::new(h.temp_dir(), None, None);
+        let _h = TestHarness::new("bash_exit_code");
+        let tool = pi::tools::BashTool::new(std::path::Path::new("/tmp"));
         let input = json!({ "command": "exit 42" });
-        let result = tool.execute("bash-exit-1", input, None).await.unwrap();
+        let result = exec_tool(&tool, "bash-exit-1", input).await;
 
-        h.log().info_ctx("verify", "bash exit code", |ctx| {
-            ctx.push(("is_error".into(), result.is_error.to_string()));
-            ctx.push(("text".into(), get_text(&result.content)));
-        });
-
-        // Non-zero exit should be reported
+        // Non-zero exit should be reported as an error
         assert!(result.is_error, "non-zero exit code should be marked error");
-        let text = get_text(&result.content);
         assert!(
-            text.contains("42") || text.contains("exit"),
-            "should mention exit code: got {text}"
+            result.text.contains("42") || result.text.to_lowercase().contains("exit"),
+            "should mention exit code: got {}",
+            result.text
         );
     });
 }
@@ -1620,18 +1478,20 @@ fn tool_bash_exit_code_capture() {
 #[test]
 fn tool_bash_stdout_stderr_capture() {
     asupersync::test_utils::run_test(|| async {
-        let h = TestHarness::new("bash_stderr");
-        let tool = pi::tools::BashTool::new(h.temp_dir(), None, None);
+        let _h = TestHarness::new("bash_stderr");
+        let tool = pi::tools::BashTool::new(std::path::Path::new("/tmp"));
         let input = json!({ "command": "echo 'out_msg' && echo 'err_msg' >&2" });
-        let result = tool.execute("bash-stderr-1", input, None).await.unwrap();
+        let result = exec_tool(&tool, "bash-stderr-1", input).await;
 
-        h.log().info_ctx("verify", "bash stderr", |ctx| {
-            ctx.push(("is_error".into(), result.is_error.to_string()));
-            ctx.push(("text".into(), get_text(&result.content)));
-        });
-
-        let text = get_text(&result.content);
-        assert!(text.contains("out_msg"), "should capture stdout: got {text}");
-        assert!(text.contains("err_msg"), "should capture stderr: got {text}");
+        assert!(
+            result.text.contains("out_msg"),
+            "should capture stdout: got {}",
+            result.text
+        );
+        assert!(
+            result.text.contains("err_msg"),
+            "should capture stderr: got {}",
+            result.text
+        );
     });
 }

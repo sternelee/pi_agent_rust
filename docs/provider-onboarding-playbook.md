@@ -573,17 +573,114 @@ CI_E2E_TESTS=1 cargo test e2e_live_harness -- --nocapture
 
 ## Contributor checklist (new provider or major provider update)
 
-1. Add or update canonical metadata entry in `../src/provider_metadata.rs`.
-2. Ensure alias resolution + env key mapping are covered by tests.
-3. Wire route and provider factory behavior in `../src/providers/mod.rs`.
-4. Add/update provider-specific tests:
-   - factory selection,
-   - metadata invariants,
-   - streaming contract behavior.
-5. Update docs:
-   - `providers.md` (matrix/status)
-   - this playbook (config/troubleshooting)
-6. Attach evidence links (tests + artifact outputs) before closing provider-doc beads.
+### Phase 1: Metadata registration
+
+1. Add or update canonical metadata entry in `../src/provider_metadata.rs`:
+   - `canonical_id`: lowercase, hyphenated (e.g., `my-provider`).
+   - `aliases`: any common alternative names.
+   - `auth_env_keys`: primary env var first, fallbacks after (e.g., `&["MY_PROVIDER_API_KEY"]`).
+   - `onboarding`: one of `BuiltInNative`, `OpenAICompatiblePreset`, `NativeAdapterRequired`.
+   - `routing_defaults`: required for OAI-compatible; set `api`, `base_url`, `auth_header`, etc.
+   - `test_obligations`: set all to `true` for production providers.
+
+2. **Update drift-prevention snapshots** — these tests will fail until updated:
+   - `canonical_id_snapshot_detects_additions_and_removals` in `tests/provider_metadata_comprehensive.rs` — add the new ID to the sorted `EXPECTED` array.
+   - `alias_mapping_snapshot_is_current` — add any new aliases to `EXPECTED_ALIASES`.
+   - `base_url_snapshot_for_key_providers` — add the base URL if this is a key/gap provider.
+
+3. Ensure alias resolution + env key mapping are covered by existing invariant tests:
+   - `all_canonical_ids_are_unique`, `no_alias_collides_with_canonical_id` — automatic.
+   - `auth_env_keys_are_screaming_snake_case` — automatic.
+
+### Phase 2: Factory wiring and tests
+
+4. Wire route and provider factory behavior in `../src/providers/mod.rs`.
+
+5. Add/update provider-specific tests:
+   - **Factory selection**: `tests/provider_factory.rs` (wave preset tests).
+   - **Metadata invariants**: `tests/provider_metadata_comprehensive.rs` (automatic for structural tests).
+   - **Streaming contract**: `tests/provider_streaming.rs` or `tests/provider_native_contract.rs`.
+
+6. Add VCR fixtures in `tests/fixtures/vcr/`:
+   - Minimum: `verify_<provider>_simple_text.json`
+   - Recommended: `verify_<provider>_error_auth_401.json`, `verify_<provider>_tool_call_single.json`
+   - If core provider, add to `vcr_fixture_coverage_for_core_providers` in `tests/provider_metadata_comprehensive.rs`.
+
+### Phase 3: Documentation
+
+7. Update provider documentation:
+   - `providers.md` — matrix/status row.
+   - This playbook — config example and troubleshooting entry.
+   - For gap providers (groq, cerebras, openrouter, moonshotai, alibaba class): create a dedicated setup doc `docs/provider-<name>-setup.json` following schema `pi.provider_setup_guide.v1`.
+   - Update `docs/provider-config-examples.json` with env vars, CLI examples, and caveats.
+   - Update `docs/provider-migration-guide.md` if the provider has non-standard behavior.
+   - Update `docs/provider-auth-troubleshooting.md` with auth failure modes.
+
+8. **Verify docs/runtime consistency** — these tests catch doc drift:
+   - `docs_runtime_consistency::setup_doc_auth_env_matches_runtime` in `tests/provider_native_contract.rs`.
+   - `docs_runtime_consistency::setup_doc_base_url_matches_runtime_default`.
+   - `docs_runtime_consistency::config_examples_env_vars_match_runtime`.
+
+### Phase 4: Quality gates
+
+9. Run quality gates before closing:
+
+```bash
+# Drift-prevention (must pass — will catch snapshot mismatches)
+CARGO_TARGET_DIR=target/<agent> cargo test --test provider_metadata_comprehensive -- --nocapture
+
+# Factory + routing
+CARGO_TARGET_DIR=target/<agent> cargo test --test provider_factory -- --nocapture
+
+# Docs/runtime consistency
+CARGO_TARGET_DIR=target/<agent> cargo test --test provider_native_contract docs_runtime -- --nocapture
+
+# Full lint/format
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+```
+
+10. Attach evidence links (test output + artifact paths) before closing provider beads.
+
+## Quality gate reference
+
+### Drift-prevention tests (bd-3uqg.11.10.4)
+
+These tests in `tests/provider_metadata_comprehensive.rs` use hard-coded snapshots to force intentional acknowledgment of metadata changes:
+
+| Test | What it catches | Update when |
+|---|---|---|
+| `canonical_id_snapshot_detects_additions_and_removals` | Provider added/removed | Adding or removing any canonical_id |
+| `alias_mapping_snapshot_is_current` | Alias added/removed/reassigned | Any change to alias arrays |
+| `base_url_snapshot_for_key_providers` | Silent endpoint URL change | Changing base_url for key providers |
+| `vcr_fixture_coverage_for_core_providers` | Core provider missing VCR fixtures | Adding a new core provider |
+| `gap_providers_have_setup_documentation` | Gap provider missing setup doc | Adding a new gap-class provider |
+| `no_accidental_duplicate_routing_defaults` | Copy-paste routing error | Adding provider with same (api, base_url) pair |
+
+### Docs/runtime consistency tests (bd-3uqg.11.12.5)
+
+These tests in `tests/provider_native_contract.rs` validate documentation cannot silently diverge from runtime:
+
+| Test | What it catches |
+|---|---|
+| `setup_docs_exist_and_parse_as_valid_json` | Broken/missing JSON setup docs |
+| `setup_doc_provider_ids_match_metadata` | Doc provider_id vs metadata mismatch |
+| `setup_doc_auth_env_matches_runtime` | Doc auth_env vs runtime env keys |
+| `setup_doc_base_url_matches_runtime_default` | Doc base_url vs runtime default |
+| `config_examples_env_vars_match_runtime` | Config examples env vars vs runtime |
+| `migration_guide_references_correct_env_vars` | Migration guide env var references |
+
+## Provider-specific documentation references
+
+| Provider family | Setup doc | Config examples | Migration notes |
+|---|---|---|---|
+| Groq | `docs/provider-groq-setup.json` | `docs/provider-config-examples.json` | `docs/provider-migration-guide.md` |
+| Cerebras | `docs/provider-cerebras-setup.json` | `docs/provider-config-examples.json` | `docs/provider-migration-guide.md` |
+| OpenRouter | `docs/provider-openrouter-setup.json` | `docs/provider-config-examples.json` | `docs/provider-migration-guide.md` |
+| Kimi (moonshotai) | `docs/provider-kimi-setup.json` | `docs/provider-config-examples.json` | `docs/provider-migration-guide.md` |
+| Qwen (alibaba) | `docs/provider-qwen-setup.json` | `docs/provider-config-examples.json` | `docs/provider-migration-guide.md` |
+| Auth troubleshooting (all) | `docs/provider-auth-troubleshooting.md` | — | — |
+| Longtail evidence | `docs/provider-longtail-evidence.md` | — | — |
 
 ## Current evidence-backed limits
 
