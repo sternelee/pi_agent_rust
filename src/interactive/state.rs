@@ -1,8 +1,12 @@
 use std::collections::VecDeque;
+use std::path::PathBuf;
 
 use bubbles::list::{DefaultDelegate, Item as ListItem, List};
 
 use crate::agent::QueueMode;
+use crate::autocomplete::{
+    AutocompleteCatalog, AutocompleteItem, AutocompleteProvider, AutocompleteResponse,
+};
 use crate::model::{ContentBlock, Message as ModelMessage};
 use crate::models::OAuthConfig;
 use serde_json::Value;
@@ -93,6 +97,79 @@ pub enum InputMode {
 pub enum PendingInput {
     Text(String),
     Content(Vec<ContentBlock>),
+}
+
+/// Autocomplete dropdown state.
+#[derive(Debug)]
+pub(super) struct AutocompleteState {
+    /// The autocomplete provider that generates suggestions.
+    pub(super) provider: AutocompleteProvider,
+    /// Whether the dropdown is currently visible.
+    pub(super) open: bool,
+    /// Current list of suggestions.
+    pub(super) items: Vec<AutocompleteItem>,
+    /// Index of the currently selected item.
+    pub(super) selected: usize,
+    /// The range of text to replace when accepting a suggestion.
+    pub(super) replace_range: std::ops::Range<usize>,
+    /// Maximum number of items to display in the dropdown.
+    pub(super) max_visible: usize,
+}
+
+impl AutocompleteState {
+    pub(super) const fn new(cwd: PathBuf, catalog: AutocompleteCatalog) -> Self {
+        Self {
+            provider: AutocompleteProvider::new(cwd, catalog),
+            open: false,
+            items: Vec::new(),
+            selected: 0,
+            replace_range: 0..0,
+            max_visible: 10,
+        }
+    }
+
+    pub(super) fn close(&mut self) {
+        self.open = false;
+        self.items.clear();
+        self.selected = 0;
+        self.replace_range = 0..0;
+    }
+
+    pub(super) fn open_with(&mut self, response: AutocompleteResponse) {
+        if response.items.is_empty() {
+            self.close();
+            return;
+        }
+        self.open = true;
+        self.items = response.items;
+        self.selected = 0;
+        self.replace_range = response.replace;
+    }
+
+    pub(super) fn select_next(&mut self) {
+        if !self.items.is_empty() {
+            self.selected = (self.selected + 1) % self.items.len();
+        }
+    }
+
+    pub(super) fn select_prev(&mut self) {
+        if !self.items.is_empty() {
+            self.selected = self.selected.checked_sub(1).unwrap_or(self.items.len() - 1);
+        }
+    }
+
+    pub(super) fn selected_item(&self) -> Option<&AutocompleteItem> {
+        self.items.get(self.selected)
+    }
+
+    /// Returns the scroll offset for the dropdown view.
+    pub(super) const fn scroll_offset(&self) -> usize {
+        if self.selected < self.max_visible {
+            0
+        } else {
+            self.selected - self.max_visible + 1
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
