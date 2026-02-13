@@ -411,9 +411,8 @@ fn scenario_matrix_requires_artifact_index() {
         .as_array()
         .expect("required_suite_artifacts array");
     let has_index = suite_artifacts.iter().any(|a| {
-        a.as_str().is_some_and(|s| {
-            s.contains("artifact-index") || s.contains("index")
-        })
+        a.as_str()
+            .is_some_and(|s| s.contains("artifact-index") || s.contains("index"))
     });
     assert!(
         has_index,

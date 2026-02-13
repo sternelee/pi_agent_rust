@@ -210,22 +210,34 @@ impl TestHarness {
         self.logger.elapsed()
     }
 
-    /// Manually dump logs (useful for debugging passing tests).
-    pub fn dump_logs(&self) {
-        let header = format!("\n=== TEST LOGS: {} ===\n", self.name);
-        if self.use_colors {
-            eprint!("\x1b[1;36m{header}\x1b[0m");
-            eprint!("{}", self.logger.dump_colored());
-        } else {
-            eprint!("{header}");
-            eprint!("{}", self.logger.dump());
-        }
-        if self.logger.has_artifacts() {
-            eprintln!("=== ARTIFACTS ===");
-            eprint!("{}", self.logger.dump_artifacts());
-            eprintln!("=== END ARTIFACTS ===");
-        }
-        eprintln!("=== END LOGS ===\n");
+    /// Return logs as JSONL for machine assertions and triage workflows.
+    pub fn dump_logs(&self) -> String {
+        self.logger.dump_jsonl()
+    }
+
+    /// Compatibility helper for older tests.
+    pub fn has_artifacts(&self) -> bool {
+        self.logger.has_artifacts()
+    }
+
+    /// Compatibility helper for older tests.
+    pub fn dump_artifact_index(&self) -> String {
+        self.logger.dump_artifact_index_jsonl()
+    }
+
+    /// Compatibility helper for older tests.
+    pub fn info(&self, message: impl Into<String>) {
+        self.logger.info("test", message);
+    }
+
+    /// Compatibility helper for older tests.
+    pub fn info_ctx(&self, message: impl Into<String>, fields: &[(&str, &str)]) {
+        let message = message.into();
+        self.logger.info_ctx("test", message, |ctx| {
+            for (key, value) in fields {
+                ctx.push(((*key).to_string(), (*value).to_string()));
+            }
+        });
     }
 
     /// Record an artifact for this test.
