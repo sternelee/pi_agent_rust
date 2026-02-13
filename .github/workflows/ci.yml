@@ -964,6 +964,20 @@ jobs:
             pi_agent_rust/tests/quarantine_audit.jsonl
             pi_agent_rust/release_gate_report.json
           if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Upload provider test artifacts
+        if: runner.os == 'Linux' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-test-artifacts-${{ github.sha }}
+          path: |
+            pi_agent_rust/tests/full_suite_gate/**/*.json
+            pi_agent_rust/tests/full_suite_gate/**/*.jsonl
+            pi_agent_rust/tests/full_suite_gate/**/*.md
+            pi_agent_rust/tests/cross_platform_reports/**/*.json
+          if-no-files-found: ignore
+          retention-days: 30
 
   qa_shards_linux:
     name: qa-shard (${{ matrix.shard.name }})
