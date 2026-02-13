@@ -890,23 +890,25 @@ impl Session {
 
         match store_kind {
             SessionStoreKind::Jsonl => {
-                let mut content = String::new();
-
-                // Write header
-                content.push_str(&serde_json::to_string(&session_clone.header)?);
-                content.push('\n');
-
-                // Write entries
-                for entry in &session_clone.entries {
-                    content.push_str(&serde_json::to_string(entry)?);
-                    content.push('\n');
-                }
-
                 thread::spawn(move || {
                     let res = || -> Result<()> {
                         let parent = path_clone.parent().unwrap_or_else(|| Path::new("."));
                         let temp_file = tempfile::NamedTempFile::new_in(parent)?;
-                        std::fs::write(temp_file.path(), content)?;
+                        {
+                            let mut writer = std::io::BufWriter::new(temp_file.as_file());
+
+                            // Write header
+                            serde_json::to_writer(&mut writer, &session_clone.header)?;
+                            writer.write_all(b"\n")?;
+
+                            // Write entries
+                            for entry in &session_clone.entries {
+                                serde_json::to_writer(&mut writer, entry)?;
+                                writer.write_all(b"\n")?;
+                            }
+
+                            writer.flush()?;
+                        }
                         temp_file
                             .persist(&path_clone)
                             .map_err(|e| crate::Error::Io(Box::new(e.error)))?;

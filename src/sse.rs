@@ -3,6 +3,7 @@
 //! Implements the SSE protocol (text/event-stream) on top of asupersync's
 //! HTTP client for streaming LLM responses.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -11,7 +12,7 @@ use std::task::{Context, Poll};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SseEvent {
     /// Event type (from "event:" field, defaults to "message").
-    pub event: String,
+    pub event: Cow<'static, str>,
     /// Event data (from "data:" field(s), joined with newlines).
     pub data: String,
     /// Last event ID (from "id:" field).
@@ -23,7 +24,7 @@ pub struct SseEvent {
 impl Default for SseEvent {
     fn default() -> Self {
         Self {
-            event: "message".to_string(),
+            event: Cow::Borrowed("message"),
             data: String::new(),
             id: None,
             retry: None,
@@ -56,7 +57,7 @@ impl SseParser {
             // Field: value
             let value = value.strip_prefix(' ').unwrap_or(value);
             match field {
-                "event" => current.event = value.to_string(),
+                "event" => current.event = Cow::Owned(value.to_string()),
                 "data" => {
                     current.data.push_str(value);
                     current.data.push('\n');
@@ -73,7 +74,7 @@ impl SseParser {
         } else {
             // Field with no value
             match line {
-                "event" => current.event = String::new(),
+                "event" => current.event = Cow::Borrowed(""),
                 "data" => {
                     current.data.push('\n');
                     *has_data = true;
@@ -89,15 +90,15 @@ impl SseParser {
     /// Returns a vector of parsed events. Events are delimited by blank lines.
     pub fn feed(&mut self, data: &str) -> Vec<SseEvent> {
         self.buffer.push_str(data);
-        let mut events = Vec::new();
+        let mut events = Vec::with_capacity(4);
 
         let mut buffer = std::mem::take(&mut self.buffer);
 
         // Strip UTF-8 BOM from the beginning of the stream (SSE spec compliance).
         if !self.bom_checked && !buffer.is_empty() {
             self.bom_checked = true;
-            if let Some(stripped) = buffer.strip_prefix('\u{FEFF}') {
-                buffer = stripped.to_string();
+            if buffer.starts_with('\u{FEFF}') {
+                buffer.drain(..3);
             }
         }
         let mut start = 0usize;
@@ -143,7 +144,7 @@ impl SseParser {
                     }
                     // Per SSE spec, an empty event name dispatches as "message".
                     if self.current.event.is_empty() {
-                        self.current.event = "message".to_string();
+                        self.current.event = Cow::Borrowed("message");
                     }
                     events.push(std::mem::take(&mut self.current));
                     self.current = SseEvent::default();
@@ -180,7 +181,7 @@ impl SseParser {
                 self.current.data.pop();
             }
             if self.current.event.is_empty() {
-                self.current.event = "message".to_string();
+                self.current.event = Cow::Borrowed("message");
             }
             let event = std::mem::take(&mut self.current);
             self.current = SseEvent::default();

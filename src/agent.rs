@@ -579,7 +579,7 @@ impl Agent {
             .unwrap_or_default();
         let mut iterations = 0usize;
         let mut turn_index: usize = 0;
-        let mut new_messages: Vec<Message> = Vec::new();
+        let mut new_messages: Vec<Message> = Vec::with_capacity(prompts.len() + 8);
         let mut last_assistant: Option<AssistantMessage> = None;
 
         let agent_start_event = AgentEvent::AgentStart {

@@ -1846,6 +1846,7 @@ fn parse_oauth_code_input(input: &str) -> (Option<String>, Option<String>) {
 
 fn lock_file(file: File, timeout: Duration) -> Result<LockedFile> {
     let start = Instant::now();
+    let mut attempt: u32 = 0;
     loop {
         match FileExt::try_lock_exclusive(&file) {
             Ok(true) => return Ok(LockedFile { file }),
@@ -1859,12 +1860,19 @@ fn lock_file(file: File, timeout: Duration) -> Result<LockedFile> {
             return Err(Error::auth("Timed out waiting for auth lock".to_string()));
         }
 
-        std::thread::sleep(Duration::from_millis(50));
+        let base_ms: u64 = 10;
+        let cap_ms: u64 = 500;
+        let sleep_ms = base_ms.checked_shl(attempt.min(5)).unwrap_or(cap_ms).min(cap_ms);
+        let jitter = start.elapsed().subsec_nanos() as u64 % (sleep_ms / 2 + 1);
+        let delay = sleep_ms / 2 + jitter;
+        std::thread::sleep(Duration::from_millis(delay));
+        attempt = attempt.saturating_add(1);
     }
 }
 
 async fn lock_file_async(file: File, timeout: Duration) -> Result<LockedFile> {
     let start = Instant::now();
+    let mut attempt: u32 = 0;
     loop {
         match FileExt::try_lock_exclusive(&file) {
             Ok(true) => return Ok(LockedFile { file }),
@@ -1878,7 +1886,13 @@ async fn lock_file_async(file: File, timeout: Duration) -> Result<LockedFile> {
             return Err(Error::auth("Timed out waiting for auth lock".to_string()));
         }
 
-        asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(50)).await;
+        let base_ms: u64 = 10;
+        let cap_ms: u64 = 500;
+        let sleep_ms = base_ms.checked_shl(attempt.min(5)).unwrap_or(cap_ms).min(cap_ms);
+        let jitter = start.elapsed().subsec_nanos() as u64 % (sleep_ms / 2 + 1);
+        let delay = sleep_ms / 2 + jitter;
+        asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(delay)).await;
+        attempt = attempt.saturating_add(1);
     }
 }
 
