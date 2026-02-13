@@ -992,10 +992,22 @@ jobs:
             lane: e2e
             shard_index: 1
             shard_total: 2
-          - name: extension
+          - name: extension-0
             lane: extension
             shard_index: 0
-            shard_total: 1
+            shard_total: 4
+          - name: extension-1
+            lane: extension
+            shard_index: 1
+            shard_total: 4
+          - name: extension-2
+            lane: extension
+            shard_index: 2
+            shard_total: 4
+          - name: extension-3
+            lane: extension
+            shard_index: 3
+            shard_total: 4
           - name: security
             lane: security
             shard_index: 0
@@ -1083,9 +1095,17 @@ jobs:
             extension)
               TEST_LOG_JSONL_PATH="$SHARD_ARTIFACT_DIR/test-log.jsonl" \
               TEST_ARTIFACT_INDEX_PATH="$SHARD_ARTIFACT_DIR/artifact-index.jsonl" \
+              PI_SHARD_INDEX="${{ matrix.shard.shard_index }}" \
+              PI_SHARD_TOTAL="${{ matrix.shard.shard_total }}" \
+              PI_SHARD_PARALLELISM="${{ vars.PI_EXT_SHARD_PARALLELISM || '4' }}" \
               RUST_LOG=info \
-              cargo test --test ext_conformance --features ext-conformance -- --test-threads=1 \
+              cargo test --test ext_conformance_generated --features ext-conformance \
+                -- conformance_sharded_matrix --nocapture --exact \
                 2>&1 | tee "$SHARD_ARTIFACT_DIR/output.log"
+              mkdir -p "$SHARD_ARTIFACT_DIR/sharded"
+              cp -f tests/ext_conformance/reports/sharded/shard_*_report.json "$SHARD_ARTIFACT_DIR/sharded/" || true
+              cp -f tests/ext_conformance/reports/sharded/shard_*_events.jsonl "$SHARD_ARTIFACT_DIR/sharded/" || true
+              cp -f tests/ext_conformance/reports/sharded/shard_*_report.md "$SHARD_ARTIFACT_DIR/sharded/" || true
               ;;
             security)
               TEST_LOG_JSONL_PATH="$SHARD_ARTIFACT_DIR/test-log.jsonl" \
@@ -1349,11 +1369,10 @@ jobs:
                                   "thread_id": "bd-1f42.6.2",
                               }
                           )
-              payload["duration_seconds"] = duration_seconds
-
               manifest_file = shard_dir / "ci_shard_manifest.json"
               unit_targets = []
               e2e_suites = []
+              extension_count = 0
               if manifest_file.is_file():
                   manifest_payload = load_json(manifest_file)
                   if "error" in manifest_payload:
@@ -1375,10 +1394,71 @@ jobs:
                               "e2e_suites": len(e2e_suites),
                           },
                       }
+              extension_reports = sorted((shard_dir / "sharded").glob("shard_*_report.json"))
+              if extension_reports:
+                  extension_excerpts = []
+                  extension_durations_ms = []
+                  for report_file in extension_reports:
+                      report_payload = load_json(report_file)
+                      if "error" in report_payload:
+                          payload.setdefault("extension_report_errors", []).append(
+                              {
+                                  "path": str(report_file.relative_to(shard_dir)),
+                                  "error": report_payload["error"],
+                              }
+                          )
+                          continue
+                      shard_size = report_payload.get("shard_count")
+                      if isinstance(shard_size, int):
+                          extension_count += shard_size
+                      duration_ms = report_payload.get("total_duration_ms")
+                      if isinstance(duration_ms, (int, float)):
+                          extension_durations_ms.append(float(duration_ms))
+                      extension_excerpts.append(
+                          {
+                              "path": str(report_file.relative_to(shard_dir)),
+                              "shard_index": report_payload.get("shard_index"),
+                              "shard_total": report_payload.get("shard_total"),
+                              "shard_count": report_payload.get("shard_count"),
+                              "tested": report_payload.get("tested"),
+                              "passed": report_payload.get("passed"),
+                              "failed": report_payload.get("failed"),
+                              "skipped": report_payload.get("skipped"),
+                              "pass_rate_pct": report_payload.get("pass_rate_pct"),
+                              "by_failure_category": report_payload.get("by_failure_category"),
+                          }
+                      )
+                      for failure in report_payload.get("failures", []):
+                          if not isinstance(failure, dict):
+                              continue
+                          extension_id = str(failure.get("id", "unknown"))
+                          reason = str(failure.get("reason", "unknown"))
+                          category = str(failure.get("category", "unknown"))
+                          shard_failure_records.append(
+                              {
+                                  "shard_name": payload.get("shard_name", shard_dir.name),
+                                  "lane": payload.get("lane", "unknown"),
+                                  "scope": "extension",
+                                  "name": extension_id,
+                                  "signature": clean_signature(f"[{category}] {reason}"),
+                                  "failure_category": category,
+                                  "reason": reason,
+                                  "log_path": str(report_file.relative_to(shard_dir)),
+                                  "artifact_source": str(shard_dir),
+                                  "issue_id": "bd-1f42.6.2",
+                                  "thread_id": "bd-1f42.6.2",
+                              }
+                          )
+                  payload["extension_shard_reports"] = extension_excerpts
+                  if duration_seconds is None and extension_durations_ms:
+                      duration_seconds = max(extension_durations_ms) / 1000.0
+
               payload["selection_counts"] = {
                   "unit_targets": len(unit_targets),
                   "e2e_suites": len(e2e_suites),
+                  "extensions": extension_count,
               }
+              payload["duration_seconds"] = duration_seconds
 
               if not shard_failure_records and payload.get("job_status") not in {
                   "success",
@@ -1408,6 +1488,7 @@ jobs:
           lane_duration_seconds = {}
           lane_unit_samples = {}
           lane_suite_samples = {}
+          lane_extension_samples = {}
           correlation_ids = set()
           duration_rows = []
           failure_records = []
@@ -1419,6 +1500,7 @@ jobs:
               lane_runtime_samples.setdefault(lane, [])
               lane_unit_samples.setdefault(lane, [])
               lane_suite_samples.setdefault(lane, [])
+              lane_extension_samples.setdefault(lane, [])
               if shard.get("job_status") not in {"success", "unknown"}:
                   failed += 1
               duration = shard.get("duration_seconds")
@@ -1435,10 +1517,13 @@ jobs:
               selection_counts = shard.get("selection_counts", {})
               unit_count = selection_counts.get("unit_targets")
               suite_count = selection_counts.get("e2e_suites")
+              extension_count = selection_counts.get("extensions")
               if isinstance(unit_count, int):
                   lane_unit_samples[lane].append(unit_count)
               if isinstance(suite_count, int):
                   lane_suite_samples[lane].append(suite_count)
+              if isinstance(extension_count, int):
+                  lane_extension_samples[lane].append(extension_count)
               correlation = shard.get("correlation_id")
               if isinstance(correlation, str) and correlation:
                   correlation_ids.add(correlation)
@@ -1504,6 +1589,9 @@ jobs:
                   ),
                   "selection_e2e_suites": summarize_balance(
                       lane_suite_samples.get(lane, [])
+                  ),
+                  "selection_extensions": summarize_balance(
+                      lane_extension_samples.get(lane, [])
                   ),
               }
 
