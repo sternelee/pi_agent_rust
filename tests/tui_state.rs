@@ -31,6 +31,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -51,6 +52,19 @@ fn test_runtime_handle() -> asupersync::runtime::RuntimeHandle {
             .expect("build asupersync runtime")
     })
     .handle()
+}
+
+/// JSONL logging helper for test events.
+fn log_test_event(test_name: &str, event: &str, data: &serde_json::Value) {
+    let entry = serde_json::json!({
+        "schema": "pi.test.tui_state.v1",
+        "test": test_name,
+        "event": event,
+        "timestamp_ms": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis(),
+        "data": data,
+    });
+    eprintln!("JSONL: {}", serde_json::to_string(&entry).unwrap());
 }
 
 struct DummyProvider;
@@ -691,6 +705,68 @@ struct StepOutcome {
 
 const SINGLE_LINE_HINT: &str = "Enter: send  Shift+Enter: newline  Alt+Enter: multi-line";
 const MULTI_LINE_HINT: &str = "Alt+Enter: send  Enter: newline  Esc: single-line";
+
+#[allow(dead_code, clippy::needless_pass_by_value)]
+fn log_auth_test_event(test_name: &str, event: &str, data: serde_json::Value) {
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_millis();
+    let entry = json!({
+        "schema": "pi.test.auth_event.v1",
+        "test": test_name,
+        "event": event,
+        "timestamp_ms": timestamp_ms,
+        "data": data,
+    });
+    eprintln!(
+        "JSONL: {}",
+        serde_json::to_string(&entry).expect("serialize auth test event")
+    );
+}
+
+#[allow(dead_code)]
+#[derive(Clone)]
+struct MockRssReader {
+    value: Arc<AtomicUsize>,
+}
+
+#[allow(dead_code)]
+impl MockRssReader {
+    fn new(initial_rss_bytes: usize) -> Self {
+        Self {
+            value: Arc::new(AtomicUsize::new(initial_rss_bytes)),
+        }
+    }
+
+    fn set_rss_bytes(&self, rss_bytes: usize) {
+        self.value.store(rss_bytes, Ordering::Relaxed);
+    }
+
+    fn as_reader_fn(&self) -> Box<dyn Fn() -> Option<usize> + Send> {
+        let value = Arc::clone(&self.value);
+        Box::new(move || Some(value.load(Ordering::Relaxed)))
+    }
+}
+
+#[allow(dead_code, clippy::needless_pass_by_value)]
+fn log_perf_test_event(test_name: &str, event: &str, data: serde_json::Value) {
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_millis();
+    let entry = json!({
+        "schema": "pi.test.perf_event.v1",
+        "test": test_name,
+        "event": event,
+        "timestamp_ms": timestamp_ms,
+        "data": data,
+    });
+    eprintln!(
+        "JSONL: {}",
+        serde_json::to_string(&entry).expect("serialize perf test event")
+    );
+}
 
 fn log_initial_state(harness: &TestHarness, app: &PiApp) {
     let view = normalize_view(&BubbleteaModel::view(app));
@@ -2497,6 +2573,148 @@ fn tui_state_slash_help_adds_help_text() {
 }
 
 #[test]
+fn tui_login_no_args_shows_provider_table() {
+    let test_name = "tui_login_no_args_shows_provider_table";
+    let harness = TestHarness::new(test_name);
+    let mut app = build_app(&harness, Vec::new());
+    log_initial_state(&harness, &app);
+    log_auth_test_event(
+        test_name,
+        "test_start",
+        json!({ "scenario": "/login with no provider" }),
+    );
+
+    type_text(&harness, &mut app, "/login");
+    let step = press_enter(&harness, &mut app);
+
+    assert_after_contains(&harness, &step, "Available login providers:");
+    assert_after_contains(&harness, &step, "Built-in:");
+    assert_after_contains(&harness, &step, "anthropic");
+    assert_after_contains(&harness, &step, "openai");
+    assert_after_contains(&harness, &step, "google");
+    assert_after_contains(&harness, &step, "Usage: /login <provider>");
+
+    log_auth_test_event(
+        test_name,
+        "provider_table_rendered",
+        json!({
+            "providers": ["anthropic", "openai", "google"],
+            "authenticated": [],
+        }),
+    );
+    log_auth_test_event(test_name, "test_end", json!({ "status": "pass" }));
+}
+
+#[test]
+fn tui_login_openai_starts_auth_flow() {
+    let test_name = "tui_login_openai_starts_auth_flow";
+    let harness = TestHarness::new(test_name);
+    let mut app = build_app(&harness, Vec::new());
+    log_initial_state(&harness, &app);
+    log_auth_test_event(
+        test_name,
+        "test_start",
+        json!({ "scenario": "/login openai starts provider auth flow" }),
+    );
+
+    type_text(&harness, &mut app, "/login openai");
+    let step = press_enter(&harness, &mut app);
+    assert_after_contains(&harness, &step, "API key login: openai");
+    assert_after_contains(&harness, &step, "platform.openai.com/api-keys");
+
+    log_auth_test_event(
+        test_name,
+        "auth_flow_started",
+        json!({ "provider": "openai", "flow_type": "api_key" }),
+    );
+    log_auth_test_event(test_name, "test_end", json!({ "status": "pass" }));
+}
+
+#[test]
+fn tui_refresh_failure_shows_recovery_message() {
+    let test_name = "tui_refresh_failure_shows_recovery_message";
+    let harness = TestHarness::new(test_name);
+    let mut app = build_app(&harness, Vec::new());
+    log_initial_state(&harness, &app);
+    let recovery =
+        "OAuth token for anthropic has expired. Run /login anthropic to re-authenticate.";
+    log_auth_test_event(
+        test_name,
+        "test_start",
+        json!({ "scenario": "refresh failure guidance message appears in UI" }),
+    );
+
+    let step = apply_pi(
+        &harness,
+        &mut app,
+        "PiMsg::System",
+        PiMsg::System(recovery.to_string()),
+    );
+    assert_after_contains(&harness, &step, "/login anthropic");
+    assert_after_not_contains(&harness, &step, "Processing...");
+
+    log_auth_test_event(
+        test_name,
+        "system_message_shown",
+        json!({ "message_contains": "/login anthropic" }),
+    );
+    log_auth_test_event(test_name, "test_end", json!({ "status": "pass" }));
+}
+
+#[test]
+fn tui_login_unknown_provider_shows_error() {
+    let test_name = "tui_login_unknown_provider_shows_error";
+    let harness = TestHarness::new(test_name);
+    let mut app = build_app(&harness, Vec::new());
+    log_initial_state(&harness, &app);
+    log_auth_test_event(
+        test_name,
+        "test_start",
+        json!({ "scenario": "/login unknown-provider produces guidance" }),
+    );
+
+    type_text(&harness, &mut app, "/login unknown-provider");
+    let step = press_enter(&harness, &mut app);
+    assert_after_contains(
+        &harness,
+        &step,
+        "Login not supported for unknown-provider (no built-in flow or OAuth config)",
+    );
+
+    log_auth_test_event(
+        test_name,
+        "assertion",
+        json!({ "message_contains": "Login not supported for unknown-provider" }),
+    );
+    log_auth_test_event(test_name, "test_end", json!({ "status": "pass" }));
+}
+
+#[test]
+fn tui_login_gemini_aliases_to_google() {
+    let test_name = "tui_login_gemini_aliases_to_google";
+    let harness = TestHarness::new(test_name);
+    let mut app = build_app(&harness, Vec::new());
+    log_initial_state(&harness, &app);
+    log_auth_test_event(
+        test_name,
+        "test_start",
+        json!({ "scenario": "/login gemini aliases to google API-key flow" }),
+    );
+
+    type_text(&harness, &mut app, "/login gemini");
+    let step = press_enter(&harness, &mut app);
+    assert_after_contains(&harness, &step, "API key login: google/gemini");
+    assert_after_contains(&harness, &step, "ai.google.dev/gemini-api/docs/api-key");
+
+    log_auth_test_event(
+        test_name,
+        "auth_flow_started",
+        json!({ "provider": "google", "flow_type": "api_key", "requested_alias": "gemini" }),
+    );
+    log_auth_test_event(test_name, "test_end", json!({ "status": "pass" }));
+}
+
+#[test]
 fn tui_state_slash_login_google_shows_api_key_guidance() {
     let harness = TestHarness::new("tui_state_slash_login_google_shows_api_key_guidance");
     let mut app = build_app(&harness, Vec::new());
@@ -3022,6 +3240,7 @@ fn tui_state_slash_share_reports_error_when_gh_missing() {
         .expect("expected AgentError for missing gh");
     let step = apply_pi(&harness, &mut app, "PiMsg::AgentError", error);
     assert_after_contains(&harness, &step, "GitHub CLI `gh` not found");
+    assert_after_contains(&harness, &step, "https://cli.github.com");
 }
 
 #[test]
@@ -3059,7 +3278,7 @@ fn tui_state_slash_share_reports_error_when_gh_not_authenticated() {
         .expect("expected AgentError for unauthenticated gh");
     let step = apply_pi(&harness, &mut app, "PiMsg::AgentError", error);
     assert_after_contains(&harness, &step, "`gh` is not authenticated.");
-    assert_after_contains(&harness, &step, "Run `gh auth login` and retry.");
+    assert_after_contains(&harness, &step, "Run `gh auth login` to authenticate");
 }
 
 #[test]
@@ -3162,6 +3381,7 @@ fn tui_state_slash_share_creates_gist_and_reports_urls_and_cleans_temp_file() {
         .find(|msg| matches!(msg, PiMsg::System(_)) || matches!(msg, PiMsg::AgentError(_)))
         .expect("expected share result");
     let step = apply_pi(&harness, &mut app, "PiMsg share result", msg);
+    assert_after_contains(&harness, &step, "Created private gist");
     assert_after_contains(&harness, &step, "Share URL:");
     assert_after_contains(
         &harness,
@@ -3248,6 +3468,149 @@ fn tui_state_slash_share_is_cancellable_and_cleans_temp_file() {
         !shared_path.exists(),
         "expected temp HTML file to be cleaned up (still exists at {})",
         shared_path.display()
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn tui_state_slash_share_public_flag_creates_public_gist() {
+    let harness = TestHarness::new("tui_state_slash_share_public_flag_creates_public_gist");
+
+    let args_record = harness.temp_path("gh_args.txt");
+    let gh_path = harness.temp_path("gh");
+    let script = format!(
+        "#!/bin/sh\nset -e\n\nif [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then\n  exit 0\nfi\n\nif [ \"$1\" = \"gist\" ] && [ \"$2\" = \"create\" ]; then\n  printf '%s\\n' \"$@\" > \"{args_record}\"\n  echo \"https://gist.github.com/testuser/pub123public456\"\n  exit 0\nfi\n\necho \"unexpected gh args: $@\" >&2\nexit 2\n",
+        args_record = args_record.display(),
+    );
+    fs::write(&gh_path, script).expect("write fake gh");
+    make_executable(&gh_path);
+
+    let config = Config {
+        gh_path: Some(gh_path.display().to_string()),
+        ..Default::default()
+    };
+    let (mut app, event_rx) = build_app_with_session_and_events_and_config(
+        &harness,
+        Vec::new(),
+        Session::in_memory(),
+        config,
+    );
+    log_initial_state(&harness, &app);
+
+    log_test_event(
+        "tui_state_slash_share_public_flag_creates_public_gist",
+        "share_initiated",
+        &json!({"privacy": "public"}),
+    );
+
+    type_text(&harness, &mut app, "/share public");
+    let step = press_enter(&harness, &mut app);
+    assert_after_contains(&harness, &step, "Sharing session...");
+
+    let events = wait_for_pi_msgs(&event_rx, Duration::from_secs(3), |msgs| {
+        msgs.iter()
+            .any(|msg| matches!(msg, PiMsg::System(_)) || matches!(msg, PiMsg::AgentError(_)))
+    });
+    let msg = events
+        .into_iter()
+        .find(|msg| matches!(msg, PiMsg::System(_)) || matches!(msg, PiMsg::AgentError(_)))
+        .expect("expected share result");
+    let step = apply_pi(&harness, &mut app, "PiMsg share result", msg);
+    assert_after_contains(&harness, &step, "Created public gist");
+
+    // Verify the mock gh received --public=true
+    let recorded_args = fs::read_to_string(&args_record).expect("read recorded args");
+    assert!(
+        recorded_args.contains("--public=true"),
+        "expected --public=true in gh args, got: {recorded_args}"
+    );
+
+    log_test_event(
+        "tui_state_slash_share_public_flag_creates_public_gist",
+        "share_completed",
+        &json!({"privacy": "public", "public_flag_passed": true}),
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn tui_state_slash_share_includes_gist_description() {
+    let harness = TestHarness::new("tui_state_slash_share_includes_gist_description");
+
+    let args_record = harness.temp_path("gh_args.txt");
+    let gh_path = harness.temp_path("gh");
+    let script = format!(
+        "#!/bin/sh\nset -e\n\nif [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then\n  exit 0\nfi\n\nif [ \"$1\" = \"gist\" ] && [ \"$2\" = \"create\" ]; then\n  printf '%s\\n' \"$@\" > \"{args_record}\"\n  echo \"https://gist.github.com/testuser/desc123gist456\"\n  exit 0\nfi\n\necho \"unexpected gh args: $@\" >&2\nexit 2\n",
+        args_record = args_record.display(),
+    );
+    fs::write(&gh_path, script).expect("write fake gh");
+    make_executable(&gh_path);
+
+    let config = Config {
+        gh_path: Some(gh_path.display().to_string()),
+        ..Default::default()
+    };
+
+    // Use a session with a name so the description includes it.
+    let mut session = Session::in_memory();
+    session.set_name("my-debug-session");
+
+    let (mut app, event_rx) =
+        build_app_with_session_and_events_and_config(&harness, Vec::new(), session, config);
+    log_initial_state(&harness, &app);
+
+    type_text(&harness, &mut app, "/share");
+    let step = press_enter(&harness, &mut app);
+    assert_after_contains(&harness, &step, "Sharing session...");
+
+    let events = wait_for_pi_msgs(&event_rx, Duration::from_secs(3), |msgs| {
+        msgs.iter()
+            .any(|msg| matches!(msg, PiMsg::System(_)) || matches!(msg, PiMsg::AgentError(_)))
+    });
+    let msg = events
+        .into_iter()
+        .find(|msg| matches!(msg, PiMsg::System(_)) || matches!(msg, PiMsg::AgentError(_)))
+        .expect("expected share result");
+    apply_pi(&harness, &mut app, "PiMsg share result", msg);
+
+    // Verify the mock gh received --desc with session name
+    let recorded_args = fs::read_to_string(&args_record).expect("read recorded args");
+    assert!(
+        recorded_args.contains("--desc"),
+        "expected --desc flag in gh args, got: {recorded_args}"
+    );
+    assert!(
+        recorded_args.contains("Pi session: my-debug-session"),
+        "expected session name in gist description, got: {recorded_args}"
+    );
+
+    log_test_event(
+        "tui_state_slash_share_includes_gist_description",
+        "share_completed",
+        &json!({"session_name": "my-debug-session", "desc_passed": true}),
+    );
+}
+
+#[test]
+fn tui_state_slash_share_queued_while_processing() {
+    let harness = TestHarness::new("tui_state_slash_share_queued_while_processing");
+    let mut app = build_app(&harness, Vec::new());
+    log_initial_state(&harness, &app);
+
+    // Simulate processing state by sending AgentStart.
+    apply_pi(&harness, &mut app, "AgentStart", PiMsg::AgentStart);
+
+    // During processing, typing /share and pressing Enter queues the input.
+    type_text(&harness, &mut app, "/share");
+    let step = press_enter(&harness, &mut app);
+    // During processing, Enter queues the input as a steering/follow-up message
+    // rather than immediately dispatching the slash command.
+    assert_after_not_contains(&harness, &step, "Sharing session...");
+
+    log_test_event(
+        "tui_state_slash_share_queued_while_processing",
+        "share_queued",
+        &json!({"agent_state": "processing", "queued": true}),
     );
 }
 
@@ -5187,6 +5550,16 @@ fn tui_grad_collapse_multiple_tools_mixed_sizes() {
             is_error: false,
         },
     );
+    apply_pi(
+        &harness,
+        &mut app,
+        "PiMsg::AgentDone(stop)",
+        PiMsg::AgentDone {
+            usage: Some(sample_usage(5, 7)),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+        },
+    );
 
     // Second tool: large output (should auto-collapse).
     apply_pi(
@@ -6652,6 +7025,182 @@ fn tui_state_model_selector_no_match_enter_shows_no_model() {
     let step = press_enter(&harness, &mut app);
     assert_after_contains(&harness, &step, "No model selected");
     assert_after_not_contains(&harness, &step, "Select a model");
+}
+
+// ============================================================================
+// PERF integration tests (bd-42ahe)
+// ============================================================================
+
+#[test]
+fn tui_perf_memory_pressure_forces_degraded() {
+    let harness = TestHarness::new("tui_perf_memory_pressure_forces_degraded");
+    let mut app = build_app(&harness, Vec::new());
+    log_initial_state(&harness, &app);
+
+    let rss_reader = MockRssReader::new(30_000_000);
+    app.install_memory_rss_reader_for_test(rss_reader.as_reader_fn());
+
+    apply_pi(
+        &harness,
+        &mut app,
+        "PiMsg::ToolStart(read)",
+        PiMsg::ToolStart {
+            name: "read".to_string(),
+            tool_id: "perf-tool-1".to_string(),
+        },
+    );
+    apply_pi(
+        &harness,
+        &mut app,
+        "PiMsg::ToolUpdate(read)",
+        PiMsg::ToolUpdate {
+            name: "read".to_string(),
+            tool_id: "perf-tool-1".to_string(),
+            content: vec![ContentBlock::Text(TextContent::new(
+                "line-1: keep this deterministic\nline-2: will be collapsed under pressure",
+            ))],
+            details: None,
+        },
+    );
+    apply_pi(
+        &harness,
+        &mut app,
+        "PiMsg::ToolEnd(read)",
+        PiMsg::ToolEnd {
+            name: "read".to_string(),
+            tool_id: "perf-tool-1".to_string(),
+            is_error: false,
+        },
+    );
+
+    rss_reader.set_rss_bytes(142_000_000);
+    app.force_memory_collapse_tick_for_test();
+    app.force_memory_cycle_for_test();
+
+    let after_pressure = normalize_view(&BubbleteaModel::view(&app));
+    assert!(
+        after_pressure.contains("[tool output collapsed due to memory pressure]"),
+        "tool output should collapse when RSS reaches pressure level"
+    );
+    assert!(
+        !after_pressure.contains("line-2: will be collapsed under pressure"),
+        "collapsed tool output should no longer show original payload"
+    );
+    assert!(
+        app.conversation_messages_for_test().iter().any(|msg| {
+            msg.role == MessageRole::Tool
+                && msg.collapsed
+                && msg
+                    .content
+                    .contains("[tool output collapsed due to memory pressure]")
+        }),
+        "collapsed tool marker should be present in conversation state"
+    );
+    assert!(
+        app.memory_summary_for_test()
+            .contains("Pressure (collapsing old outputs...)"),
+        "memory summary should report pressure state"
+    );
+
+    log_perf_test_event(
+        "tui_perf_memory_pressure_forces_degraded",
+        "memory_floor",
+        json!({
+            "rss_mb": 142,
+            "memory_level": "pressure",
+            "fidelity_floor": "degraded",
+        }),
+    );
+}
+
+#[test]
+fn tui_perf_memory_critical_forces_emergency() {
+    let harness = TestHarness::new("tui_perf_memory_critical_forces_emergency");
+
+    let session_path = harness.temp_path("sessions/perf-critical.jsonl");
+    fs::create_dir_all(
+        session_path
+            .parent()
+            .expect("session path should have parent directory"),
+    )
+    .expect("create session directory");
+    let mut session = Session::in_memory();
+    session.path = Some(session_path.clone());
+    common::run_async({
+        let mut save_copy = session.clone();
+        async move { save_copy.save().await }
+    })
+    .expect("save initial session");
+    let session_before = fs::read_to_string(&session_path).expect("read baseline session file");
+
+    let mut app = build_app_with_session(&harness, Vec::new(), session);
+    log_initial_state(&harness, &app);
+
+    let rss_reader = MockRssReader::new(30_000_000);
+    app.install_memory_rss_reader_for_test(rss_reader.as_reader_fn());
+
+    for idx in 0..45 {
+        apply_pi(
+            &harness,
+            &mut app,
+            &format!("PiMsg::SystemNote({idx})"),
+            PiMsg::SystemNote(format!("critical message {idx}")),
+        );
+    }
+
+    rss_reader.set_rss_bytes(250_000_000);
+    app.force_memory_collapse_tick_for_test();
+    app.force_memory_cycle_for_test();
+
+    let after_critical = app.conversation_messages_for_test();
+    assert!(
+        !after_critical.is_empty(),
+        "conversation should retain recent messages after truncation"
+    );
+    assert!(
+        after_critical[0].role == MessageRole::System,
+        "critical pressure should prepend a system truncation sentinel"
+    );
+    assert!(
+        after_critical[0]
+            .content
+            .contains("truncated due to memory pressure"),
+        "critical pressure should inject truncation sentinel content"
+    );
+    assert!(
+        !after_critical
+            .iter()
+            .any(|msg| msg.content.contains("critical message 0")),
+        "oldest conversation entries should be truncated at critical level"
+    );
+    assert!(
+        after_critical
+            .iter()
+            .any(|msg| msg.content.contains("critical message 44")),
+        "newest entries should be retained after critical truncation"
+    );
+    assert!(
+        app.memory_summary_for_test().contains("CRITICAL"),
+        "memory summary should report critical level"
+    );
+
+    let session_after = fs::read_to_string(&session_path).expect("read final session file");
+    assert_eq!(
+        session_after, session_before,
+        "memory truncation must not mutate persisted session history"
+    );
+
+    log_perf_test_event(
+        "tui_perf_memory_critical_forces_emergency",
+        "memory_critical",
+        json!({
+            "rss_mb": 250,
+            "memory_level": "critical",
+            "fidelity": "emergency",
+            "messages_truncated": true,
+            "session_file_intact": true,
+        }),
+    );
 }
 
 // ============================================================================
