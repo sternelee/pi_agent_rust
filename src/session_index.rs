@@ -450,13 +450,28 @@ fn is_session_file_path(path: &Path) -> bool {
 
 fn walk_sessions(root: &Path) -> Vec<std::io::Result<PathBuf>> {
     let mut out = Vec::new();
-    if let Ok(entries) = fs::read_dir(root) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                out.extend(walk_sessions(&path));
-            } else if is_session_file_path(&path) {
-                out.push(Ok(path));
+    let mut stack = vec![root.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+
+                if file_type.is_dir() {
+                    stack.push(path);
+                } else if file_type.is_symlink() {
+                    // Allow symlinks to files, but skip symlinked directories to avoid cycles
+                    if let Ok(meta) = fs::metadata(&path) {
+                        if meta.is_file() && is_session_file_path(&path) {
+                            out.push(Ok(path));
+                        }
+                    }
+                } else if is_session_file_path(&path) {
+                    out.push(Ok(path));
+                }
             }
         }
     }
