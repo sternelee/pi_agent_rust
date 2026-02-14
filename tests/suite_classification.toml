@@ -141,6 +141,7 @@ files = [
     "exec_mediation_integration",
     "extension_lockfile_provenance",
     "graduated_enforcement_rollout",
+    "graduated_rollout_sec72",
     "extension_trust_promotion",
     "extensions_url_shim",
     "http_client",

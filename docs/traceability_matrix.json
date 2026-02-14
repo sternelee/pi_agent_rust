@@ -1198,6 +1198,19 @@
       ],
       "e2e_scripts": [],
       "evidence_logs": []
+    },
+    {
+      "id": "bd-8lppo",
+      "title": "SEC-7.2: Graduated enforcement rollout with rollback guards",
+      "acceptance_criteria": "Phased rollout state machine, rollback triggers, and operator-inspectable state covered by tests.",
+      "unit_tests": [
+        {
+          "path": "tests/graduated_enforcement_rollout.rs",
+          "justification": "45 tests: phase transitions, rollback triggers (FP/error rate/latency), window statistics, serde roundtrips, lifecycle scenarios, operator overrides."
+        }
+      ],
+      "e2e_scripts": [],
+      "evidence_logs": []
     }
   ]
 }

@@ -181,6 +181,16 @@ const SEC_MATRIX: &[SecBeadEntry] = &[
         min_primary_test_count: 35,
         requires_deterministic_fixtures: true,
     },
+    // ── WS7: Rollout and Operations ──
+    SecBeadEntry {
+        bead_id: "bd-8lppo",
+        sec_id: "SEC-7.2",
+        title: "Graduated enforcement rollout with rollback guards",
+        primary_test_files: &["graduated_enforcement_rollout"],
+        supplementary_test_files: &["enforcement_state_machine_sec34"],
+        min_primary_test_count: 40,
+        requires_deterministic_fixtures: false,
+    },
 ];
 
 fn repo_root() -> std::path::PathBuf {
@@ -378,6 +388,7 @@ fn all_security_workstreams_represented() {
                 "3" => "WS3-AnomalyDetection",
                 "4" => "WS4-PolicyEnforcement",
                 "5" => "WS5-OperatorUX",
+                "7" => "WS7-RolloutOps",
                 _ => "Unknown",
             }
         })
@@ -388,6 +399,7 @@ fn all_security_workstreams_represented() {
         "WS3-AnomalyDetection",
         "WS4-PolicyEnforcement",
         "WS5-OperatorUX",
+        "WS7-RolloutOps",
     ]);
 
     let missing: Vec<_> = expected.difference(&workstreams).collect();
@@ -469,6 +481,7 @@ fn sec_traceability_coverage_report() {
             Some('3') => "WS3",
             Some('4') => "WS4",
             Some('5') => "WS5",
+            Some('7') => "WS7",
             _ => "WS?",
         };
         let ws_entry = per_ws.entry(ws).or_insert((0, 0));
