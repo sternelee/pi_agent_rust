@@ -182,7 +182,7 @@ fn edit_distance(a: &[u8], b: &[u8]) -> usize {
 
 /// Maximum edit distance allowed for a fuzzy suggestion, scaled by the
 /// length of the input so very short inputs don't produce false positives.
-fn max_edit_distance(input_len: usize) -> usize {
+const fn max_edit_distance(input_len: usize) -> usize {
     match input_len {
         0..=2 => 0,
         3..=5 => 1,
@@ -233,7 +233,10 @@ fn suggest_similar_providers(input: &str) -> Vec<String> {
             }
             if best_dist <= threshold {
                 // Encode distance in the sort key so closer matches rank higher
-                matches.push((2_usize.wrapping_add(best_dist), meta.canonical_id.to_string()));
+                matches.push((
+                    2_usize.wrapping_add(best_dist),
+                    meta.canonical_id.to_string(),
+                ));
             }
         }
     }

@@ -31,7 +31,7 @@ use pi::model::{AssistantMessage, ContentBlock, StopReason};
 use pi::models::{ModelEntry, ModelRegistry, default_models_path};
 use pi::package_manager::{PackageEntry, PackageManager, PackageScope};
 use pi::provider::InputType;
-use pi::provider_metadata::PROVIDER_METADATA;
+use pi::provider_metadata::{self, PROVIDER_METADATA};
 use pi::providers;
 use pi::resources::{ResourceCliOptions, ResourceLoader};
 use pi::session::Session;
@@ -1524,43 +1524,43 @@ fn list_models(registry: &ModelRegistry, pattern: Option<&str>) {
 }
 
 fn list_providers() {
-    let mut rows: Vec<(&str, String, String, &str)> = PROVIDER_METADATA
+    let mut rows: Vec<(&str, &str, String, String, &str)> = PROVIDER_METADATA
         .iter()
         .map(|meta| {
+            let display = meta.display_name.unwrap_or(meta.canonical_id);
             let aliases = if meta.aliases.is_empty() {
                 String::new()
             } else {
                 meta.aliases.join(", ")
             };
             let env_keys = meta.auth_env_keys.join(", ");
-            let api = meta
-                .routing_defaults
-                .map_or("-", |defaults| defaults.api);
-            (meta.canonical_id, aliases, env_keys, api)
+            let api = meta.routing_defaults.map_or("-", |defaults| defaults.api);
+            (meta.canonical_id, display, aliases, env_keys, api)
         })
         .collect();
-    rows.sort_by_key(|(id, _, _, _)| *id);
+    rows.sort_by_key(|(id, _, _, _, _)| *id);
 
     let id_w = rows.iter().map(|r| r.0.len()).max().unwrap_or(0).max(8);
-    let alias_w = rows.iter().map(|r| r.1.len()).max().unwrap_or(0).max(7);
-    let env_w = rows.iter().map(|r| r.2.len()).max().unwrap_or(0).max(8);
-    let api_w = rows.iter().map(|r| r.3.len()).max().unwrap_or(0).max(3);
+    let name_w = rows.iter().map(|r| r.1.len()).max().unwrap_or(0).max(4);
+    let alias_w = rows.iter().map(|r| r.2.len()).max().unwrap_or(0).max(7);
+    let env_w = rows.iter().map(|r| r.3.len()).max().unwrap_or(0).max(8);
+    let api_w = rows.iter().map(|r| r.4.len()).max().unwrap_or(0).max(3);
 
     println!(
-        "{:<id_w$}  {:<alias_w$}  {:<env_w$}  {:<api_w$}",
-        "provider", "aliases", "auth env", "api",
+        "{:<id_w$}  {:<name_w$}  {:<alias_w$}  {:<env_w$}  {:<api_w$}",
+        "provider", "name", "aliases", "auth env", "api",
     );
     println!(
-        "{:<id_w$}  {:<alias_w$}  {:<env_w$}  {:<api_w$}",
+        "{:<id_w$}  {:<name_w$}  {:<alias_w$}  {:<env_w$}  {:<api_w$}",
         "-".repeat(id_w),
+        "-".repeat(name_w),
         "-".repeat(alias_w),
         "-".repeat(env_w),
         "-".repeat(api_w),
     );
-    for (id, aliases, env_keys, api) in &rows {
+    for (id, name, aliases, env_keys, api) in &rows {
         println!(
-            "{:<id_w$}  {:<alias_w$}  {:<env_w$}  {:<api_w$}",
-            id, aliases, env_keys, api,
+            "{id:<id_w$}  {name:<name_w$}  {aliases:<alias_w$}  {env_keys:<env_w$}  {api:<api_w$}"
         );
     }
     println!("\n{} providers available.", rows.len());
@@ -1573,7 +1573,7 @@ struct ProviderChoice {
     env: &'static str,
 }
 
-const PROVIDER_CHOICES: [ProviderChoice; 3] = [
+const PROVIDER_CHOICES: [ProviderChoice; 10] = [
     ProviderChoice {
         id: "anthropic",
         label: "Anthropic (Claude)",
@@ -1589,16 +1589,80 @@ const PROVIDER_CHOICES: [ProviderChoice; 3] = [
         label: "Google Gemini",
         env: "GOOGLE_API_KEY",
     },
+    ProviderChoice {
+        id: "azure-openai",
+        label: "Azure OpenAI",
+        env: "AZURE_OPENAI_API_KEY",
+    },
+    ProviderChoice {
+        id: "amazon-bedrock",
+        label: "Amazon Bedrock",
+        env: "AWS_ACCESS_KEY_ID",
+    },
+    ProviderChoice {
+        id: "groq",
+        label: "Groq",
+        env: "GROQ_API_KEY",
+    },
+    ProviderChoice {
+        id: "openrouter",
+        label: "OpenRouter",
+        env: "OPENROUTER_API_KEY",
+    },
+    ProviderChoice {
+        id: "mistral",
+        label: "Mistral AI",
+        env: "MISTRAL_API_KEY",
+    },
+    ProviderChoice {
+        id: "togetherai",
+        label: "Together AI",
+        env: "TOGETHER_API_KEY",
+    },
+    ProviderChoice {
+        id: "google-vertex",
+        label: "Google Vertex AI",
+        env: "GOOGLE_APPLICATION_CREDENTIALS",
+    },
 ];
 
 fn provider_from_token(token: &str) -> Option<ProviderChoice> {
     let normalized = token.trim().to_lowercase();
-    match normalized.as_str() {
-        "1" | "anthropic" | "claude" => Some(PROVIDER_CHOICES[0]),
-        "2" | "openai" | "gpt" => Some(PROVIDER_CHOICES[1]),
-        "3" | "google" | "gemini" => Some(PROVIDER_CHOICES[2]),
-        _ => None,
+
+    // Try numbered choice first (1-10)
+    if let Ok(num) = normalized.parse::<usize>() {
+        if num >= 1 && num <= PROVIDER_CHOICES.len() {
+            return Some(PROVIDER_CHOICES[num - 1]);
+        }
+        return None;
     }
+
+    // Try exact match against listed providers (including common nicknames)
+    for choice in &PROVIDER_CHOICES {
+        if normalized == choice.id || normalized == choice.label.to_lowercase() {
+            return Some(*choice);
+        }
+    }
+
+    // Common nicknames that map to listed providers
+    match normalized.as_str() {
+        "claude" => return Some(PROVIDER_CHOICES[0]),
+        "gpt" | "chatgpt" => return Some(PROVIDER_CHOICES[1]),
+        "gemini" => return Some(PROVIDER_CHOICES[2]),
+        "azure" => return Some(PROVIDER_CHOICES[3]),
+        "bedrock" | "aws" => return Some(PROVIDER_CHOICES[4]),
+        "together" => return Some(PROVIDER_CHOICES[8]),
+        "vertex" | "vertexai" => return Some(PROVIDER_CHOICES[9]),
+        _ => {}
+    }
+
+    // Fall back to provider_metadata registry for any canonical ID or alias
+    let meta = provider_metadata::provider_metadata(&normalized)?;
+    Some(ProviderChoice {
+        id: meta.canonical_id,
+        label: meta.canonical_id,
+        env: meta.auth_env_keys.first().copied().unwrap_or(""),
+    })
 }
 
 async fn run_first_time_setup(
@@ -1639,13 +1703,29 @@ async fn run_first_time_setup(
             default_marker
         ));
     }
-    console.print_markup("  [cyan]4)[/] Custom provider via models.json\n");
-    console.print_markup("  [cyan]5)[/] Exit setup\n\n");
+    let num_choices = PROVIDER_CHOICES.len();
+    console.print_markup(&format!(
+        "  [cyan]{})[/] Custom provider via models.json\n",
+        num_choices + 1
+    ));
+    console.print_markup(&format!(
+        "  [cyan]{})[/] Exit setup\n\n",
+        num_choices + 2
+    ));
+    console.print_markup("[dim]Or type any provider name (e.g., deepseek, cerebras, ollama).[/]\n\n");
 
+    let custom_num = (num_choices + 1).to_string();
+    let exit_num = (num_choices + 2).to_string();
     let provider = loop {
         let prompt = provider_hint.map_or_else(
-            || "Select 1-5: ".to_string(),
-            |default_provider| format!("Select 1-5 (Enter for {}): ", default_provider.label),
+            || format!("Select 1-{} or provider name: ", num_choices + 2),
+            |default_provider| {
+                format!(
+                    "Select 1-{} or name (Enter for {}): ",
+                    num_choices + 2,
+                    default_provider.label
+                )
+            },
         );
         let Some(input) = prompt_line(&prompt)? else {
             console.render_warning("Setup cancelled (no input).");
@@ -1658,14 +1738,18 @@ async fn run_first_time_setup(
             }
             continue;
         }
-        if normalized == "4" || normalized == "custom" || normalized == "models" {
+        if normalized == custom_num || normalized == "custom" || normalized == "models" {
             console.render_info(&format!(
                 "Create models.json at {} and restart Pi.",
                 models_path.display()
             ));
             return Ok(false);
         }
-        if normalized == "5" || normalized == "q" || normalized == "quit" || normalized == "exit" {
+        if normalized == exit_num
+            || normalized == "q"
+            || normalized == "quit"
+            || normalized == "exit"
+        {
             console.render_warning("Setup cancelled.");
             return Ok(false);
         }

@@ -2520,4 +2520,44 @@ mod tests {
         assert_eq!(meta.auth_env_keys, &["V0_API_KEY"]);
         assert!(provider_routing_defaults("v0").is_none());
     }
+
+    #[test]
+    fn display_name_populated_for_major_providers() {
+        let cases: &[(&str, &str)] = &[
+            ("anthropic", "Anthropic"),
+            ("openai", "OpenAI"),
+            ("google", "Google Gemini"),
+            ("xai", "xAI (Grok)"),
+            ("togetherai", "Together AI"),
+            ("huggingface", "Hugging Face"),
+            ("nvidia", "NVIDIA NIM"),
+            ("amazon-bedrock", "Amazon Bedrock"),
+            ("azure-openai", "Azure OpenAI"),
+            ("github-copilot", "GitHub Copilot"),
+            ("google-vertex", "Google Vertex AI"),
+            ("deepseek", "DeepSeek"),
+            ("mistral", "Mistral AI"),
+            ("lmstudio", "LM Studio"),
+        ];
+        for &(id, expected_name) in cases {
+            let meta =
+                provider_metadata(id).unwrap_or_else(|| panic!("provider '{id}' not found"));
+            assert_eq!(
+                meta.display_name,
+                Some(expected_name),
+                "display_name for '{id}' should be '{expected_name}'"
+            );
+        }
+    }
+
+    #[test]
+    fn all_providers_have_display_name() {
+        for meta in PROVIDER_METADATA {
+            assert!(
+                meta.display_name.is_some(),
+                "provider '{}' should have a display_name",
+                meta.canonical_id
+            );
+        }
+    }
 }
