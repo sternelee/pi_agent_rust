@@ -1,6 +1,9 @@
-use super::*;
-use super::conversation::{add_usage, last_assistant_message};
+use super::conversation::{
+    add_usage, build_content_blocks_for_input, content_blocks_to_text, last_assistant_message,
+    split_content_blocks_for_input,
+};
 use super::ext_session::{format_extension_ui_prompt, parse_extension_ui_response};
+use super::*;
 
 pub(super) fn extension_commands_for_catalog(
     manager: &ExtensionManager,
@@ -46,7 +49,6 @@ async fn dispatch_input_event(
         .await?;
     Ok(apply_input_event_response(response, text, images))
 }
-
 
 impl PiApp {
     /// Handle custom Pi messages from the agent.

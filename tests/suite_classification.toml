@@ -41,6 +41,7 @@ files = [
     "perf_regression",
     "performance_comparison",
     "provider_backward_lock",
+    "provider_closure_truth_table",
     "provider_discrepancy_classification",
     "provider_registry_guardrails",
     "provider_session_coverage",

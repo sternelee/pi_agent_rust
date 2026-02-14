@@ -429,15 +429,17 @@ pub fn resolve_scoped_model_entries(
     Ok(resolved)
 }
 
-
-const fn kind_rank(kind: &DiagnosticKind) -> u8 {
+pub(super) const fn kind_rank(kind: &DiagnosticKind) -> u8 {
     match kind {
         DiagnosticKind::Warning => 0,
         DiagnosticKind::Collision => 1,
     }
 }
 
-fn format_resource_diagnostics(label: &str, diagnostics: &[ResourceDiagnostic]) -> (String, usize) {
+pub(super) fn format_resource_diagnostics(
+    label: &str,
+    diagnostics: &[ResourceDiagnostic],
+) -> (String, usize) {
     let mut ordered: Vec<&ResourceDiagnostic> = diagnostics.iter().collect();
     ordered.sort_by(|a, b| {
         a.path
@@ -1712,7 +1714,10 @@ impl PiApp {
                 .and_then(|auth| auth.resolve_api_key(&next.model.provider, None))
         };
         if resolved_key_opt.is_none() {
-            self.status_message = Some(format!("Missing API key for provider {}", next.model.provider));
+            self.status_message = Some(format!(
+                "Missing API key for provider {}",
+                next.model.provider
+            ));
             return None;
         }
 

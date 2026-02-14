@@ -1527,7 +1527,7 @@ fn list_providers() {
     let mut rows: Vec<(&str, &str, String, String, &str)> = PROVIDER_METADATA
         .iter()
         .map(|meta| {
-            let display = meta.display_name.unwrap_or(meta.canonical_id);
+            let display = meta.canonical_id;
             let aliases = if meta.aliases.is_empty() {
                 String::new()
             } else {

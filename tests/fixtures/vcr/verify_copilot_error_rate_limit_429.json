@@ -27,7 +27,7 @@
           ]
         ],
         "body_chunks": [
-          "{\"endpoints\":{\"api\":\"https://api.githubcopilot.com\"},\"expires_at\":1770747847,\"token\":\"ghu_vcr_session_token\"}"
+          "{\"endpoints\":{\"api\":\"https://api.githubcopilot.com\"},\"expires_at\":1770747847,\"token\":\"[REDACTED]\"}"
         ]
       }
     },

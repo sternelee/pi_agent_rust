@@ -1,10 +1,12 @@
-use crate::model::{ContentBlock, ImageContent, ModelMessage, TextContent, Usage, UserContent};
+use crate::model::{
+    ContentBlock, ImageContent, Message as ModelMessage, TextContent, Usage, UserContent,
+};
 use crate::models::ModelEntry;
 use crate::session::{Session, SessionEntry, SessionMessage, bash_execution_to_text};
 use serde_json::{Value, json};
 
-use super::{ConversationMessage, MessageRole};
 use super::text_utils::push_line;
+use super::{ConversationMessage, MessageRole};
 
 pub(super) fn user_content_to_text(content: &UserContent) -> String {
     match content {
@@ -152,7 +154,7 @@ pub fn conversation_from_session(session: &Session) -> (Vec<ConversationMessage>
                 let (mut text, _) = assistant_content_to_text(content);
                 if let Some(diff) = details
                     .as_ref()
-                    .and_then(|details| details.get("diff"))
+                    .and_then(|d: &Value| d.get("diff"))
                     .and_then(Value::as_str)
                 {
                     let diff = diff.trim();
@@ -221,7 +223,9 @@ pub(super) fn extension_model_from_entry(entry: &ModelEntry) -> Value {
     })
 }
 
-pub(super) fn last_assistant_message(messages: &[ModelMessage]) -> Option<&crate::model::AssistantMessage> {
+pub(super) fn last_assistant_message(
+    messages: &[ModelMessage],
+) -> Option<&crate::model::AssistantMessage> {
     messages.iter().rev().find_map(|msg| match msg {
         ModelMessage::Assistant(assistant) => Some(assistant),
         _ => None,

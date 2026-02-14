@@ -79,28 +79,27 @@ mod tree;
 mod tree_ui;
 mod view;
 
+use self::agent::{build_user_message, extension_commands_for_catalog};
 pub use self::commands::{
     SlashCommand, model_entry_matches, parse_scoped_model_patterns, resolve_scoped_model_entries,
     strip_thinking_level_suffix,
 };
 #[cfg(test)]
 use self::commands::{
-    api_key_login_prompt, format_login_provider_listing, normalize_api_key_input,
-    normalize_auth_provider_input, remove_provider_credentials, save_provider_credential,
+    api_key_login_prompt, format_login_provider_listing, format_resource_diagnostics, kind_rank,
+    normalize_api_key_input, normalize_auth_provider_input, remove_provider_credentials,
+    save_provider_credential,
 };
 use self::commands::{parse_bash_command, parse_extension_command};
+use self::conversation::conversation_from_session;
 #[cfg(test)]
-use self::conversation::tool_content_blocks_to_text;
 use self::conversation::{
-    add_usage, assistant_content_to_text, build_content_blocks_for_input, content_blocks_to_text,
-    conversation_from_session, extension_model_from_entry, last_assistant_message,
-    split_content_blocks_for_input, user_content_to_text,
+    assistant_content_to_text, build_content_blocks_for_input, content_blocks_to_text,
+    split_content_blocks_for_input, tool_content_blocks_to_text, user_content_to_text,
 };
-use self::agent::{build_user_message, extension_commands_for_catalog};
-use self::ext_session::{
-    InteractiveExtensionHostActions, InteractiveExtensionSession, format_extension_ui_prompt,
-    parse_extension_ui_response,
-};
+use self::ext_session::{InteractiveExtensionHostActions, InteractiveExtensionSession};
+#[cfg(test)]
+use self::ext_session::{format_extension_ui_prompt, parse_extension_ui_response};
 use self::file_refs::{
     file_url_to_path, format_file_ref, is_file_ref_boundary, next_non_whitespace_token,
     parse_quoted_file_ref, path_for_display, split_trailing_punct, strip_wrapping_quotes,
@@ -981,8 +980,6 @@ const fn bool_label(value: bool) -> &'static str {
     if value { "on" } else { "off" }
 }
 
-
-
 /// Run the interactive mode.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_interactive(
@@ -1078,8 +1075,6 @@ pub async fn run_interactive(
     println!("Goodbye!");
     Ok(())
 }
-
-
 
 /// Custom message types for async agent events.
 #[derive(Debug, Clone)]

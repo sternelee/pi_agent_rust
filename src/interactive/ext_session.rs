@@ -1,3 +1,4 @@
+use super::conversation::extension_model_from_entry;
 use super::*;
 
 #[derive(Clone)]

@@ -36,6 +36,7 @@ pub struct ProviderRoutingDefaults {
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderMetadata {
     pub canonical_id: &'static str,
+    pub display_name: Option<&'static str>,
     pub aliases: &'static [&'static str],
     pub auth_env_keys: &'static [&'static str],
     pub onboarding: ProviderOnboardingMode,
@@ -56,6 +57,7 @@ const TEST_REQUIRED: ProviderTestObligations = ProviderTestObligations {
 pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     ProviderMetadata {
         canonical_id: "anthropic",
+        display_name: Some("Anthropic"),
         aliases: &[],
         auth_env_keys: &["ANTHROPIC_API_KEY"],
         onboarding: ProviderOnboardingMode::BuiltInNative,
@@ -72,6 +74,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "openai",
+        display_name: Some("OpenAI"),
         aliases: &[],
         auth_env_keys: &["OPENAI_API_KEY"],
         onboarding: ProviderOnboardingMode::BuiltInNative,
@@ -88,6 +91,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "google",
+        display_name: Some("Google Gemini"),
         aliases: &["gemini"],
         auth_env_keys: &["GOOGLE_API_KEY", "GEMINI_API_KEY"],
         onboarding: ProviderOnboardingMode::BuiltInNative,
@@ -104,6 +108,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "cohere",
+        display_name: Some("Cohere"),
         aliases: &[],
         auth_env_keys: &["COHERE_API_KEY"],
         onboarding: ProviderOnboardingMode::BuiltInNative,
@@ -120,6 +125,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "groq",
+        display_name: Some("Groq"),
         aliases: &[],
         auth_env_keys: &["GROQ_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -136,6 +142,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "deepinfra",
+        display_name: Some("Deep Infra"),
         aliases: &["deep-infra"],
         auth_env_keys: &["DEEPINFRA_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -152,6 +159,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "cerebras",
+        display_name: Some("Cerebras"),
         aliases: &[],
         auth_env_keys: &["CEREBRAS_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -168,6 +176,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "openrouter",
+        display_name: Some("OpenRouter"),
         aliases: &["open-router"],
         auth_env_keys: &["OPENROUTER_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -184,6 +193,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "mistral",
+        display_name: Some("Mistral AI"),
         aliases: &["mistralai"],
         auth_env_keys: &["MISTRAL_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -200,6 +210,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "moonshotai",
+        display_name: Some("Moonshot AI"),
         aliases: &["moonshot", "kimi"],
         auth_env_keys: &["MOONSHOT_API_KEY", "KIMI_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -216,6 +227,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "alibaba",
+        display_name: Some("Alibaba (Qwen)"),
         aliases: &["dashscope", "qwen"],
         auth_env_keys: &["DASHSCOPE_API_KEY", "QWEN_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -232,6 +244,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "deepseek",
+        display_name: Some("DeepSeek"),
         aliases: &["deep-seek"],
         auth_env_keys: &["DEEPSEEK_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -248,6 +261,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "fireworks",
+        display_name: Some("Fireworks AI"),
         aliases: &["fireworks-ai"],
         auth_env_keys: &["FIREWORKS_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -264,6 +278,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "togetherai",
+        display_name: Some("Together AI"),
         aliases: &["together", "together-ai"],
         auth_env_keys: &["TOGETHER_API_KEY", "TOGETHER_AI_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -280,6 +295,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "perplexity",
+        display_name: Some("Perplexity"),
         aliases: &["pplx"],
         auth_env_keys: &["PERPLEXITY_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -296,6 +312,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "xai",
+        display_name: Some("xAI (Grok)"),
         aliases: &["grok", "x-ai"],
         auth_env_keys: &["XAI_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -313,6 +330,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     // ── Batch A1: OAI-compatible preset providers ──────────────────────
     ProviderMetadata {
         canonical_id: "302ai",
+        display_name: Some("302.AI"),
         aliases: &[],
         auth_env_keys: &["302AI_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -329,6 +347,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "abacus",
+        display_name: Some("Abacus AI"),
         aliases: &[],
         auth_env_keys: &["ABACUS_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -345,6 +364,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "aihubmix",
+        display_name: Some("AIHubMix"),
         aliases: &[],
         auth_env_keys: &["AIHUBMIX_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -361,6 +381,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "bailing",
+        display_name: Some("Bailing"),
         aliases: &[],
         auth_env_keys: &["BAILING_API_TOKEN"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -377,6 +398,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "berget",
+        display_name: Some("Berget"),
         aliases: &[],
         auth_env_keys: &["BERGET_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -393,6 +415,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "chutes",
+        display_name: Some("Chutes"),
         aliases: &[],
         auth_env_keys: &["CHUTES_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -409,6 +432,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "cortecs",
+        display_name: Some("Cortecs"),
         aliases: &[],
         auth_env_keys: &["CORTECS_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -425,6 +449,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "fastrouter",
+        display_name: Some("FastRouter"),
         aliases: &[],
         auth_env_keys: &["FASTROUTER_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -442,6 +467,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     // ── Batch A2: OAI-compatible preset providers ──────────────────────
     ProviderMetadata {
         canonical_id: "firmware",
+        display_name: Some("Firmware"),
         aliases: &[],
         auth_env_keys: &["FIRMWARE_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -458,6 +484,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "friendli",
+        display_name: Some("Friendli"),
         aliases: &[],
         auth_env_keys: &["FRIENDLI_TOKEN"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -474,6 +501,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "github-models",
+        display_name: Some("GitHub Models"),
         aliases: &[],
         auth_env_keys: &["GITHUB_TOKEN"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -490,6 +518,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "helicone",
+        display_name: Some("Helicone"),
         aliases: &[],
         auth_env_keys: &["HELICONE_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -506,6 +535,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "huggingface",
+        display_name: Some("Hugging Face"),
         aliases: &["hf", "hugging-face"],
         auth_env_keys: &["HF_TOKEN"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -522,6 +552,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "iflowcn",
+        display_name: Some("iFlow"),
         aliases: &[],
         auth_env_keys: &["IFLOW_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -538,6 +569,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "inception",
+        display_name: Some("Inception"),
         aliases: &[],
         auth_env_keys: &["INCEPTION_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -554,6 +586,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "inference",
+        display_name: Some("Inference"),
         aliases: &[],
         auth_env_keys: &["INFERENCE_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -571,6 +604,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     // ── Batch A3: OAI-compatible preset providers ──────────────────────
     ProviderMetadata {
         canonical_id: "io-net",
+        display_name: Some("io.net"),
         aliases: &[],
         auth_env_keys: &["IOINTELLIGENCE_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -587,6 +621,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "jiekou",
+        display_name: Some("Jiekou"),
         aliases: &[],
         auth_env_keys: &["JIEKOU_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -603,6 +638,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "lucidquery",
+        display_name: Some("LucidQuery"),
         aliases: &[],
         auth_env_keys: &["LUCIDQUERY_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -619,6 +655,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "moark",
+        display_name: Some("Moark"),
         aliases: &[],
         auth_env_keys: &["MOARK_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -635,6 +672,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "morph",
+        display_name: Some("Morph"),
         aliases: &[],
         auth_env_keys: &["MORPH_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -651,6 +689,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "nano-gpt",
+        display_name: Some("NanoGPT"),
         aliases: &["nanogpt"],
         auth_env_keys: &["NANO_GPT_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -667,6 +706,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "nova",
+        display_name: Some("Nova"),
         aliases: &[],
         auth_env_keys: &["NOVA_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -683,6 +723,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "novita-ai",
+        display_name: Some("Novita AI"),
         aliases: &["novita"],
         auth_env_keys: &["NOVITA_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -699,6 +740,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "nvidia",
+        display_name: Some("NVIDIA NIM"),
         aliases: &["nim", "nvidia-nim"],
         auth_env_keys: &["NVIDIA_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -716,6 +758,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     // ── Batch A4: OAI-compatible preset providers ──────────────────────
     ProviderMetadata {
         canonical_id: "poe",
+        display_name: Some("Poe"),
         aliases: &[],
         auth_env_keys: &["POE_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -732,6 +775,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "privatemode-ai",
+        display_name: Some("PrivateMode AI"),
         aliases: &[],
         auth_env_keys: &["PRIVATEMODE_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -749,6 +793,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "requesty",
+        display_name: Some("Requesty"),
         aliases: &[],
         auth_env_keys: &["REQUESTY_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -765,6 +810,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "submodel",
+        display_name: Some("Submodel"),
         aliases: &[],
         auth_env_keys: &["SUBMODEL_INSTAGEN_ACCESS_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -781,6 +827,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "synthetic",
+        display_name: Some("Synthetic"),
         aliases: &[],
         auth_env_keys: &["SYNTHETIC_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -797,6 +844,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "vivgrid",
+        display_name: Some("Vivgrid"),
         aliases: &[],
         auth_env_keys: &["VIVGRID_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -813,6 +861,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "vultr",
+        display_name: Some("Vultr"),
         aliases: &[],
         auth_env_keys: &["VULTR_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -829,6 +878,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "wandb",
+        display_name: Some("Weights & Biases"),
         aliases: &[],
         auth_env_keys: &["WANDB_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -845,6 +895,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "xiaomi",
+        display_name: Some("Xiaomi"),
         aliases: &[],
         auth_env_keys: &["XIAOMI_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -862,6 +913,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     // ── Batch B1: Regional + coding-plan providers ─────────────────────
     ProviderMetadata {
         canonical_id: "alibaba-cn",
+        display_name: Some("Alibaba China"),
         aliases: &[],
         auth_env_keys: &["DASHSCOPE_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -878,6 +930,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "kimi-for-coding",
+        display_name: Some("Kimi for Coding"),
         aliases: &[],
         auth_env_keys: &["KIMI_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -894,6 +947,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "minimax",
+        display_name: Some("MiniMax"),
         aliases: &[],
         auth_env_keys: &["MINIMAX_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -910,6 +964,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "minimax-cn",
+        display_name: Some("MiniMax China"),
         aliases: &[],
         auth_env_keys: &["MINIMAX_CN_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -926,6 +981,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "minimax-coding-plan",
+        display_name: Some("MiniMax Coding Plan"),
         aliases: &[],
         auth_env_keys: &["MINIMAX_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -942,6 +998,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "minimax-cn-coding-plan",
+        display_name: Some("MiniMax China Coding Plan"),
         aliases: &[],
         auth_env_keys: &["MINIMAX_CN_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -959,6 +1016,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     // ── Batch B2: Regional + cloud providers ────────────────────────────
     ProviderMetadata {
         canonical_id: "modelscope",
+        display_name: Some("ModelScope"),
         aliases: &[],
         auth_env_keys: &["MODELSCOPE_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -975,6 +1033,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "moonshotai-cn",
+        display_name: Some("Moonshot AI China"),
         aliases: &[],
         auth_env_keys: &["MOONSHOT_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -991,6 +1050,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "nebius",
+        display_name: Some("Nebius"),
         aliases: &[],
         auth_env_keys: &["NEBIUS_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -1007,6 +1067,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "ovhcloud",
+        display_name: Some("OVHcloud"),
         aliases: &[],
         auth_env_keys: &["OVHCLOUD_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -1023,6 +1084,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "scaleway",
+        display_name: Some("Scaleway"),
         aliases: &[],
         auth_env_keys: &["SCALEWAY_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -1039,6 +1101,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "stackit",
+        display_name: Some("STACKIT"),
         aliases: &[],
         auth_env_keys: &["STACKIT_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -1056,6 +1119,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     // ── Batch B3: Regional + coding-plan providers ──────────────────────
     ProviderMetadata {
         canonical_id: "siliconflow",
+        display_name: Some("SiliconFlow"),
         aliases: &["silicon-flow"],
         auth_env_keys: &["SILICONFLOW_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -1072,6 +1136,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "siliconflow-cn",
+        display_name: Some("SiliconFlow China"),
         aliases: &[],
         auth_env_keys: &["SILICONFLOW_CN_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -1088,6 +1153,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "upstage",
+        display_name: Some("Upstage"),
         aliases: &[],
         auth_env_keys: &["UPSTAGE_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -1104,6 +1170,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "venice",
+        display_name: Some("Venice AI"),
         aliases: &[],
         auth_env_keys: &["VENICE_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -1120,6 +1187,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "zai",
+        display_name: Some("Zai"),
         aliases: &[],
         auth_env_keys: &["ZHIPU_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -1136,6 +1204,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "zai-coding-plan",
+        display_name: Some("Zai Coding Plan"),
         aliases: &[],
         auth_env_keys: &["ZHIPU_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -1152,6 +1221,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "zhipuai",
+        display_name: Some("Zhipu AI"),
         aliases: &["zhipu", "glm"],
         auth_env_keys: &["ZHIPU_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -1168,6 +1238,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "zhipuai-coding-plan",
+        display_name: Some("Zhipu AI Coding Plan"),
         aliases: &[],
         auth_env_keys: &["ZHIPU_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -1185,6 +1256,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     // ── Batch C1: Local/self-hosted preset providers ──────────────────────
     ProviderMetadata {
         canonical_id: "baseten",
+        display_name: Some("Baseten"),
         aliases: &[],
         auth_env_keys: &["BASETEN_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -1201,6 +1273,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "llama",
+        display_name: Some("Meta Llama"),
         aliases: &[],
         auth_env_keys: &["LLAMA_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -1217,6 +1290,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "lmstudio",
+        display_name: Some("LM Studio"),
         aliases: &["lm-studio"],
         auth_env_keys: &["LMSTUDIO_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -1233,6 +1307,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "ollama",
+        display_name: Some("Ollama"),
         aliases: &[],
         auth_env_keys: &[],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -1249,6 +1324,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "ollama-cloud",
+        display_name: Some("Ollama Cloud"),
         aliases: &[],
         auth_env_keys: &["OLLAMA_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -1266,6 +1342,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     // ── Special routing providers (bd-3uqg.3.9) ────────────────────────────
     ProviderMetadata {
         canonical_id: "opencode",
+        display_name: Some("OpenCode"),
         aliases: &[],
         auth_env_keys: &["OPENCODE_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -1282,6 +1359,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "vercel",
+        display_name: Some("Vercel AI"),
         aliases: &[],
         auth_env_keys: &["AI_GATEWAY_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -1298,6 +1376,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "zenmux",
+        display_name: Some("ZenMux"),
         aliases: &[],
         auth_env_keys: &["ZENMUX_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -1315,6 +1394,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     // ── Cloudflare provider IDs (gateway + workers-ai) ────────────────────
     ProviderMetadata {
         canonical_id: "cloudflare-ai-gateway",
+        display_name: Some("Cloudflare AI Gateway"),
         aliases: &[],
         auth_env_keys: &["CLOUDFLARE_API_TOKEN"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -1331,6 +1411,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "cloudflare-workers-ai",
+        display_name: Some("Cloudflare Workers AI"),
         aliases: &[],
         auth_env_keys: &["CLOUDFLARE_API_TOKEN"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
@@ -1348,6 +1429,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     // ── Native adapter required providers ────────────────────────────────
     ProviderMetadata {
         canonical_id: "google-vertex",
+        display_name: Some("Google Vertex AI"),
         aliases: &["vertexai", "google-vertex-anthropic"],
         auth_env_keys: &["GOOGLE_CLOUD_API_KEY", "VERTEX_API_KEY"],
         onboarding: ProviderOnboardingMode::BuiltInNative,
@@ -1364,6 +1446,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "amazon-bedrock",
+        display_name: Some("Amazon Bedrock"),
         aliases: &["bedrock"],
         auth_env_keys: &[
             "AWS_ACCESS_KEY_ID",
@@ -1387,6 +1470,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "sap-ai-core",
+        display_name: Some("SAP AI Core"),
         aliases: &["sap"],
         auth_env_keys: &[
             "AICORE_SERVICE_KEY",
@@ -1401,6 +1485,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "v0",
+        display_name: Some("v0 by Vercel"),
         aliases: &[],
         auth_env_keys: &["V0_API_KEY"],
         onboarding: ProviderOnboardingMode::NativeAdapterRequired,
@@ -1409,6 +1494,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "azure-openai",
+        display_name: Some("Azure OpenAI"),
         aliases: &["azure", "azure-cognitive-services"],
         auth_env_keys: &["AZURE_OPENAI_API_KEY"],
         onboarding: ProviderOnboardingMode::NativeAdapterRequired,
@@ -1417,6 +1503,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "github-copilot",
+        display_name: Some("GitHub Copilot"),
         aliases: &["copilot", "github-copilot-enterprise"],
         auth_env_keys: &["GITHUB_COPILOT_API_KEY", "GITHUB_TOKEN"],
         onboarding: ProviderOnboardingMode::NativeAdapterRequired,
@@ -1425,6 +1512,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "gitlab",
+        display_name: Some("GitLab Duo"),
         aliases: &["gitlab-duo"],
         auth_env_keys: &["GITLAB_TOKEN", "GITLAB_API_KEY"],
         onboarding: ProviderOnboardingMode::NativeAdapterRequired,
