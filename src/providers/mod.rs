@@ -58,6 +58,10 @@ struct ExtensionStreamSimpleState {
     api: String,
     accumulated_text: String,
     last_message: Option<AssistantMessage>,
+    /// Whether `StreamEvent::Start` + `TextStart` have been emitted for string-chunk mode.
+    string_chunk_started: bool,
+    /// Buffered events to drain before polling the next JS chunk.
+    pending_events: std::collections::VecDeque<StreamEvent>,
 }
 
 impl Drop for ExtensionStreamSimpleState {
@@ -478,80 +482,62 @@ impl ExtensionStreamSimpleProvider {
     fn assistant_event_to_stream_event(event: AssistantMessageEvent) -> StreamEvent {
         match event {
             AssistantMessageEvent::Start { partial } => StreamEvent::Start { partial },
-            AssistantMessageEvent::TextStart {
-                content_index,
-                partial,
-            } => StreamEvent::TextStart {
-                content_index,
-                partial,
-            },
+            AssistantMessageEvent::TextStart { content_index, .. } => {
+                StreamEvent::TextStart { content_index }
+            }
             AssistantMessageEvent::TextDelta {
                 content_index,
                 delta,
-                partial,
+                ..
             } => StreamEvent::TextDelta {
                 content_index,
                 delta,
-                partial,
             },
             AssistantMessageEvent::TextEnd {
                 content_index,
                 content,
-                partial,
+                ..
             } => StreamEvent::TextEnd {
                 content_index,
                 content,
-                partial,
             },
-            AssistantMessageEvent::ThinkingStart {
-                content_index,
-                partial,
-            } => StreamEvent::ThinkingStart {
-                content_index,
-                partial,
-            },
+            AssistantMessageEvent::ThinkingStart { content_index, .. } => {
+                StreamEvent::ThinkingStart { content_index }
+            }
             AssistantMessageEvent::ThinkingDelta {
                 content_index,
                 delta,
-                partial,
+                ..
             } => StreamEvent::ThinkingDelta {
                 content_index,
                 delta,
-                partial,
             },
             AssistantMessageEvent::ThinkingEnd {
                 content_index,
                 content,
-                partial,
+                ..
             } => StreamEvent::ThinkingEnd {
                 content_index,
                 content,
-                partial,
             },
-            AssistantMessageEvent::ToolCallStart {
-                content_index,
-                partial,
-            } => StreamEvent::ToolCallStart {
-                content_index,
-                partial,
-            },
+            AssistantMessageEvent::ToolCallStart { content_index, .. } => {
+                StreamEvent::ToolCallStart { content_index }
+            }
             AssistantMessageEvent::ToolCallDelta {
                 content_index,
                 delta,
-                partial,
+                ..
             } => StreamEvent::ToolCallDelta {
                 content_index,
                 delta,
-                partial,
             },
             AssistantMessageEvent::ToolCallEnd {
                 content_index,
                 tool_call,
-                partial,
+                ..
             } => StreamEvent::ToolCallEnd {
                 content_index,
                 tool_call,
-                partial,
             },
             AssistantMessageEvent::Done { reason, message } => {
                 StreamEvent::Done { reason, message }
@@ -621,9 +607,16 @@ impl Provider for ExtensionStreamSimpleProvider {
             api: self.model.api.clone(),
             accumulated_text: String::new(),
             last_message: None,
+            string_chunk_started: false,
+            pending_events: std::collections::VecDeque::new(),
         };
 
         let stream = stream::unfold(state, |mut state| async move {
+            // Drain any buffered events before polling JS.
+            if let Some(event) = state.pending_events.pop_front() {
+                return Some((Ok(event), state));
+            }
+
             let stream_id = state.stream_id.clone()?;
             let stream_id_for_cancel = stream_id.clone();
 
@@ -634,21 +627,43 @@ impl Provider for ExtensionStreamSimpleProvider {
             {
                 Ok(Some(value)) => {
                     if let Some(chunk) = value.as_str() {
-                        // Minimal compatibility: if streamSimple yields string chunks, map them to TextDelta events.
                         let chunk = chunk.to_string();
                         state.accumulated_text.push_str(&chunk);
-                        let partial = Self::make_partial(
+                        state.last_message = Some(Self::make_partial(
                             &state.model_id,
                             &state.provider,
                             &state.api,
                             &state.accumulated_text,
-                        );
-                        state.last_message = Some(partial.clone());
+                        ));
+
+                        // Emit Start + TextStart before first string-chunk TextDelta.
+                        if !state.string_chunk_started {
+                            state.string_chunk_started = true;
+                            state
+                                .pending_events
+                                .push_back(StreamEvent::TextStart { content_index: 0 });
+                            state.pending_events.push_back(StreamEvent::TextDelta {
+                                content_index: 0,
+                                delta: chunk,
+                            });
+                            return Some((
+                                Ok(StreamEvent::Start {
+                                    partial: state.last_message.clone().unwrap_or_else(|| {
+                                        Self::make_partial(
+                                            &state.model_id,
+                                            &state.provider,
+                                            &state.api,
+                                            &state.accumulated_text,
+                                        )
+                                    }),
+                                }),
+                                state,
+                            ));
+                        }
                         return Some((
                             Ok(StreamEvent::TextDelta {
                                 content_index: 0,
                                 delta: chunk,
-                                partial,
                             }),
                             state,
                         ));
@@ -704,7 +719,7 @@ impl Provider for ExtensionStreamSimpleProvider {
                     Some((Ok(stream_event), state))
                 }
                 Ok(None) => {
-                    // Stream ended — emit Done.
+                    // Stream ended — emit TextEnd (if string chunks were used) then Done.
                     state.stream_id = None;
                     let message = state.last_message.clone().unwrap_or_else(|| {
                         Self::make_partial(
@@ -714,13 +729,29 @@ impl Provider for ExtensionStreamSimpleProvider {
                             &state.accumulated_text,
                         )
                     });
-                    Some((
-                        Ok(StreamEvent::Done {
+
+                    if state.string_chunk_started {
+                        // Emit TextEnd before Done.
+                        state.pending_events.push_back(StreamEvent::Done {
                             reason: StopReason::Stop,
                             message,
-                        }),
-                        state,
-                    ))
+                        });
+                        Some((
+                            Ok(StreamEvent::TextEnd {
+                                content_index: 0,
+                                content: state.accumulated_text.clone(),
+                            }),
+                            state,
+                        ))
+                    } else {
+                        Some((
+                            Ok(StreamEvent::Done {
+                                reason: StopReason::Stop,
+                                message,
+                            }),
+                            state,
+                        ))
+                    }
                 }
                 Err(err) => {
                     state
@@ -1077,13 +1108,8 @@ export default function init(pi) {
                     StreamEvent::Start { .. } => {
                         saw_start = true;
                     }
-                    StreamEvent::TextDelta { delta, partial, .. } => {
+                    StreamEvent::TextDelta { delta, .. } => {
                         assert_eq!(delta, "hi");
-                        let text = match &partial.content[0] {
-                            ContentBlock::Text(text) => text,
-                            other => unreachable!("expected text content block, got {other:?}"),
-                        };
-                        assert_eq!(text.text, "hi");
                         saw_text_delta = true;
                     }
                     StreamEvent::Done { reason, message } => {

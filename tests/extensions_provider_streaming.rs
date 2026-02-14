@@ -551,11 +551,8 @@ fn stream_simple_string_chunks_accumulate_in_partials() {
         while let Some(item) = stream.next().await {
             let event = item.expect("event ok");
             match event {
-                StreamEvent::TextDelta { partial, .. } => {
-                    let ContentBlock::Text(text) = &partial.content[0] else {
-                        panic!("expected text content");
-                    };
-                    accumulated_texts.push(text.text.clone());
+                StreamEvent::TextDelta { delta, .. } => {
+                    accumulated_texts.push(delta);
                 }
                 StreamEvent::Done { .. } => break,
                 _ => {}

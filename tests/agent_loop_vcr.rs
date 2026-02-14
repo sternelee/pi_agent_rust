@@ -74,6 +74,42 @@ fn format_event(event: &AgentEvent) -> serde_json::Value {
             "tool_name": tool_name,
             "is_error": is_error,
         }),
+        AgentEvent::AutoCompactionStart { reason } => {
+            json!({ "event": "auto_compaction_start", "reason": reason })
+        }
+        AgentEvent::AutoCompactionEnd {
+            aborted,
+            will_retry,
+            error_message,
+            ..
+        } => json!({
+            "event": "auto_compaction_end",
+            "aborted": aborted,
+            "willRetry": will_retry,
+            "errorMessage": error_message,
+        }),
+        AgentEvent::AutoRetryStart {
+            attempt,
+            max_attempts,
+            delay_ms,
+            error_message,
+        } => json!({
+            "event": "auto_retry_start",
+            "attempt": attempt,
+            "maxAttempts": max_attempts,
+            "delayMs": delay_ms,
+            "errorMessage": error_message,
+        }),
+        AgentEvent::AutoRetryEnd {
+            success,
+            attempt,
+            final_error,
+        } => json!({
+            "event": "auto_retry_end",
+            "success": success,
+            "attempt": attempt,
+            "finalError": final_error,
+        }),
     }
 }
 

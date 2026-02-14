@@ -325,12 +325,19 @@ impl Provider for GitLabProvider {
             timestamp: chrono::Utc::now().timestamp_millis(),
         };
 
-        // GitLab Chat API is non-streaming, so we return a single Done event.
+        // GitLab Chat API is non-streaming, so we emit the full event sequence.
         let events: Vec<Result<StreamEvent>> = vec![
+            Ok(StreamEvent::Start {
+                partial: message.clone(),
+            }),
+            Ok(StreamEvent::TextStart { content_index: 0 }),
             Ok(StreamEvent::TextDelta {
                 content_index: 0,
-                delta: response_text,
-                partial: message.clone(),
+                delta: response_text.clone(),
+            }),
+            Ok(StreamEvent::TextEnd {
+                content_index: 0,
+                content: response_text,
             }),
             Ok(StreamEvent::Done {
                 reason: StopReason::Stop,

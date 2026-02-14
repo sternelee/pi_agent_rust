@@ -427,7 +427,7 @@ where
     #[allow(clippy::unnecessary_wraps)]
     fn process_candidate(&mut self, candidate: GeminiCandidate) -> Result<()> {
         // Handle finish reason.
-        if let Some(reason) = candidate.finish_reason {
+        if let Some(ref reason) = candidate.finish_reason {
             self.partial.stop_reason = match reason.as_str() {
                 "MAX_TOKENS" => StopReason::Length,
                 "SAFETY" | "RECITATION" | "OTHER" => StopReason::Error,
@@ -443,9 +443,15 @@ where
                         let last_is_text =
                             matches!(self.partial.content.last(), Some(ContentBlock::Text(_)));
                         if !last_is_text {
+                            let content_index = self.partial.content.len();
                             self.partial
                                 .content
                                 .push(ContentBlock::Text(TextContent::new("")));
+
+                            self.ensure_started();
+
+                            self.pending_events
+                                .push_back(StreamEvent::TextStart { content_index });
                         }
                         let content_index = self.partial.content.len() - 1;
 
@@ -460,7 +466,6 @@ where
                         self.pending_events.push_back(StreamEvent::TextDelta {
                             content_index,
                             delta: text,
-                            partial: self.partial.clone(),
                         });
                     }
                     GeminiPart::FunctionCall { function_call } => {
@@ -486,24 +491,32 @@ where
 
                         self.ensure_started();
 
-                        self.pending_events.push_back(StreamEvent::ToolCallStart {
-                            content_index,
-                            partial: self.partial.clone(),
-                        });
+                        self.pending_events
+                            .push_back(StreamEvent::ToolCallStart { content_index });
                         self.pending_events.push_back(StreamEvent::ToolCallDelta {
                             content_index,
                             delta: args_str,
-                            partial: self.partial.clone(),
                         });
                         self.pending_events.push_back(StreamEvent::ToolCallEnd {
                             content_index,
                             tool_call,
-                            partial: self.partial.clone(),
                         });
                     }
                     GeminiPart::InlineData { .. } | GeminiPart::FunctionResponse { .. } => {
                         // Input-only parts — skip.
                     }
+                }
+            }
+        }
+
+        // Emit TextEnd for all open text blocks when a finish reason is present.
+        if candidate.finish_reason.is_some() {
+            for (content_index, block) in self.partial.content.iter().enumerate() {
+                if let ContentBlock::Text(t) = block {
+                    self.pending_events.push_back(StreamEvent::TextEnd {
+                        content_index,
+                        content: t.text.clone(),
+                    });
                 }
             }
         }

@@ -202,9 +202,7 @@ pub struct Cost {
 
 /// Streaming event from a provider.
 ///
-/// Provider implementations emit this enum while decoding SSE/HTTP streams. Most variants carry a
-/// `partial` [`AssistantMessage`] snapshot so the caller can update UI state without having to
-/// re-implement incremental assembly.
+/// Provider implementations emit this enum while decoding SSE/HTTP streams.
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     Start {
@@ -213,47 +211,38 @@ pub enum StreamEvent {
 
     TextStart {
         content_index: usize,
-        partial: AssistantMessage,
     },
     TextDelta {
         content_index: usize,
         delta: String,
-        partial: AssistantMessage,
     },
     TextEnd {
         content_index: usize,
         content: String,
-        partial: AssistantMessage,
     },
 
     ThinkingStart {
         content_index: usize,
-        partial: AssistantMessage,
     },
     ThinkingDelta {
         content_index: usize,
         delta: String,
-        partial: AssistantMessage,
     },
     ThinkingEnd {
         content_index: usize,
         content: String,
-        partial: AssistantMessage,
     },
 
     ToolCallStart {
         content_index: usize,
-        partial: AssistantMessage,
     },
     ToolCallDelta {
         content_index: usize,
         delta: String,
-        partial: AssistantMessage,
     },
     ToolCallEnd {
         content_index: usize,
         tool_call: ToolCall,
-        partial: AssistantMessage,
     },
 
     Done {

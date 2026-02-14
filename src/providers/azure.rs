@@ -363,9 +363,12 @@ where
     fn push_text_delta(&mut self, text: String) -> StreamEvent {
         let last_is_text = matches!(self.partial.content.last(), Some(ContentBlock::Text(_)));
         if !last_is_text {
+            let content_index = self.partial.content.len();
             self.partial
                 .content
                 .push(ContentBlock::Text(crate::model::TextContent::new("")));
+            self.pending_events
+                .push_back(StreamEvent::TextStart { content_index });
         }
         let content_index = self.partial.content.len() - 1;
 
@@ -376,7 +379,6 @@ where
         StreamEvent::TextDelta {
             content_index,
             delta: text,
-            partial: self.partial.clone(),
         }
     }
 
@@ -430,6 +432,16 @@ where
                 // Finalize tool call arguments
                 self.finalize_tool_call_arguments();
 
+                // Emit TextEnd for all open text blocks.
+                for (content_index, block) in self.partial.content.iter().enumerate() {
+                    if let ContentBlock::Text(t) = block {
+                        self.pending_events.push_back(StreamEvent::TextEnd {
+                            content_index,
+                            content: t.text.clone(),
+                        });
+                    }
+                }
+
                 // Emit ToolCallEnd for each accumulated tool call
                 for tc in &self.tool_calls {
                     if let Some(ContentBlock::ToolCall(tool_call)) =
@@ -438,7 +450,6 @@ where
                         self.pending_events.push_back(StreamEvent::ToolCallEnd {
                             content_index: tc.content_index,
                             tool_call: tool_call.clone(),
-                            partial: self.partial.clone(),
                         });
                     }
                 }
@@ -485,10 +496,8 @@ where
                             }));
 
                         // Emit ToolCallStart
-                        self.pending_events.push_back(StreamEvent::ToolCallStart {
-                            content_index,
-                            partial: self.partial.clone(),
-                        });
+                        self.pending_events
+                            .push_back(StreamEvent::ToolCallStart { content_index });
                         self.tool_calls.len() - 1
                     };
 
@@ -521,7 +530,6 @@ where
                             self.pending_events.push_back(StreamEvent::ToolCallDelta {
                                 content_index,
                                 delta: args,
-                                partial: self.partial.clone(),
                             });
                         }
                     }

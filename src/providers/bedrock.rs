@@ -314,40 +314,33 @@ impl BedrockProvider {
 
     fn message_events(message: &AssistantMessage) -> Vec<Result<StreamEvent>> {
         let mut events = Vec::new();
+        events.push(Ok(StreamEvent::Start {
+            partial: message.clone(),
+        }));
         for (content_index, block) in message.content.iter().enumerate() {
             match block {
                 ContentBlock::Text(text) => {
-                    events.push(Ok(StreamEvent::TextStart {
-                        content_index,
-                        partial: message.clone(),
-                    }));
+                    events.push(Ok(StreamEvent::TextStart { content_index }));
                     events.push(Ok(StreamEvent::TextDelta {
                         content_index,
                         delta: text.text.clone(),
-                        partial: message.clone(),
                     }));
                     events.push(Ok(StreamEvent::TextEnd {
                         content_index,
                         content: text.text.clone(),
-                        partial: message.clone(),
                     }));
                 }
                 ContentBlock::ToolCall(tool_call) => {
                     let delta = serde_json::to_string(&tool_call.arguments)
                         .unwrap_or_else(|_| "{}".to_string());
-                    events.push(Ok(StreamEvent::ToolCallStart {
-                        content_index,
-                        partial: message.clone(),
-                    }));
+                    events.push(Ok(StreamEvent::ToolCallStart { content_index }));
                     events.push(Ok(StreamEvent::ToolCallDelta {
                         content_index,
                         delta,
-                        partial: message.clone(),
                     }));
                     events.push(Ok(StreamEvent::ToolCallEnd {
                         content_index,
                         tool_call: tool_call.clone(),
-                        partial: message.clone(),
                     }));
                 }
                 _ => {}

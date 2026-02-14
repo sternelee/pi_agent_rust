@@ -106,6 +106,10 @@ const fn event_label(event: &AgentEvent) -> &'static str {
         AgentEvent::ToolExecutionStart { .. } => "tool_start",
         AgentEvent::ToolExecutionUpdate { .. } => "tool_update",
         AgentEvent::ToolExecutionEnd { .. } => "tool_end",
+        AgentEvent::AutoCompactionStart { .. } => "auto_compaction_start",
+        AgentEvent::AutoCompactionEnd { .. } => "auto_compaction_end",
+        AgentEvent::AutoRetryStart { .. } => "auto_retry_start",
+        AgentEvent::AutoRetryEnd { .. } => "auto_retry_end",
     }
 }
 
@@ -350,7 +354,6 @@ impl Provider for SlowStreamProvider {
         self.stream_calls.fetch_add(1, Ordering::SeqCst);
 
         let mut events = Vec::new();
-        let mut accumulated = String::new();
 
         // Start event
         events.push(StreamEvent::Start {
@@ -359,11 +362,9 @@ impl Provider for SlowStreamProvider {
 
         // TextDelta chunks
         for _i in 0..self.chunks_before_hang {
-            accumulated.push_str(&self.chunk_text);
             events.push(StreamEvent::TextDelta {
                 content_index: 0,
                 delta: self.chunk_text.clone(),
-                partial: make_partial(&accumulated),
             });
         }
 
@@ -408,18 +409,15 @@ impl Provider for TruncatingProvider {
         _options: &StreamOptions,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
         let mut events: Vec<Option<StreamEvent>> = Vec::new();
-        let mut accumulated = String::new();
 
         events.push(Some(StreamEvent::Start {
             partial: make_partial(""),
         }));
 
         for chunk in &self.chunks {
-            accumulated.push_str(chunk);
             events.push(Some(StreamEvent::TextDelta {
                 content_index: 0,
                 delta: chunk.clone(),
-                partial: make_partial(&accumulated),
             }));
         }
 
@@ -464,7 +462,6 @@ impl Provider for ErrorMidStreamProvider {
         _options: &StreamOptions,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
         let mut events: Vec<Result<StreamEvent>> = Vec::new();
-        let mut accumulated = String::new();
 
         events.push(Ok(StreamEvent::Start {
             partial: make_partial(""),
@@ -472,11 +469,9 @@ impl Provider for ErrorMidStreamProvider {
 
         for i in 0..self.good_chunks {
             let chunk = format!("chunk{i} ");
-            accumulated.push_str(&chunk);
             events.push(Ok(StreamEvent::TextDelta {
                 content_index: 0,
                 delta: chunk,
-                partial: make_partial(&accumulated),
             }));
         }
 

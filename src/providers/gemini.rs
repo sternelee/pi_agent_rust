@@ -350,10 +350,8 @@ where
                             self.partial
                                 .content
                                 .push(ContentBlock::Text(TextContent::new("")));
-                            self.pending_events.push_back(StreamEvent::TextStart {
-                                content_index: idx,
-                                partial: self.partial.clone(),
-                            });
+                            self.pending_events
+                                .push_back(StreamEvent::TextStart { content_index: idx });
                             idx
                         };
 
@@ -366,7 +364,6 @@ where
                         self.pending_events.push_back(StreamEvent::TextDelta {
                             content_index,
                             delta: text,
-                            partial: self.partial.clone(),
                         });
                     }
                     GeminiPart::FunctionCall { function_call } => {
@@ -396,19 +393,15 @@ where
                         self.ensure_started();
 
                         // Emit full ToolCallStart → ToolCallDelta → ToolCallEnd sequence
-                        self.pending_events.push_back(StreamEvent::ToolCallStart {
-                            content_index,
-                            partial: self.partial.clone(),
-                        });
+                        self.pending_events
+                            .push_back(StreamEvent::ToolCallStart { content_index });
                         self.pending_events.push_back(StreamEvent::ToolCallDelta {
                             content_index,
                             delta: args_str,
-                            partial: self.partial.clone(),
                         });
                         self.pending_events.push_back(StreamEvent::ToolCallEnd {
                             content_index,
                             tool_call,
-                            partial: self.partial.clone(),
                         });
                     }
                     GeminiPart::InlineData { .. } | GeminiPart::FunctionResponse { .. } => {
@@ -418,15 +411,16 @@ where
             }
         }
 
-        // Emit TextEnd if we have a finish reason and the last block was text
+        // Emit TextEnd for all open text blocks (not just the last one,
+        // since text may precede tool calls).
         if has_finish_reason {
-            if let Some(ContentBlock::Text(t)) = self.partial.content.last() {
-                let content_index = self.partial.content.len() - 1;
-                self.pending_events.push_back(StreamEvent::TextEnd {
-                    content_index,
-                    content: t.text.clone(),
-                    partial: self.partial.clone(),
-                });
+            for (content_index, block) in self.partial.content.iter().enumerate() {
+                if let ContentBlock::Text(t) = block {
+                    self.pending_events.push_back(StreamEvent::TextEnd {
+                        content_index,
+                        content: t.text.clone(),
+                    });
+                }
             }
         }
 
@@ -1356,5 +1350,203 @@ mod tests {
             contents[2]["parts"][0]["functionResponse"]["response"]["result"],
             "file contents"
         );
+    }
+
+    // ========================================================================
+    // Proptest — process_event() fuzz coverage (FUZZ-P1.3)
+    // ========================================================================
+
+    mod proptest_process_event {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn make_state(
+        ) -> StreamState<impl Stream<Item = std::result::Result<Vec<u8>, std::io::Error>> + Unpin>
+        {
+            let empty = stream::empty::<std::result::Result<Vec<u8>, std::io::Error>>();
+            let sse = crate::sse::SseStream::new(Box::pin(empty));
+            StreamState::new(
+                sse,
+                "gemini-test".into(),
+                "google-generative".into(),
+                "google".into(),
+            )
+        }
+
+        fn small_string() -> impl Strategy<Value = String> {
+            prop_oneof![
+                Just(String::new()),
+                "[a-zA-Z0-9_]{1,16}",
+                "[ -~]{0,32}",
+            ]
+        }
+
+        fn token_count() -> impl Strategy<Value = u64> {
+            prop_oneof![
+                5 => 0u64..10_000u64,
+                2 => Just(0u64),
+                1 => Just(u64::MAX),
+                1 => (u64::MAX - 100)..=u64::MAX,
+            ]
+        }
+
+        fn finish_reason() -> impl Strategy<Value = Option<String>> {
+            prop_oneof![
+                3 => Just(None),
+                1 => Just(Some("STOP".to_string())),
+                1 => Just(Some("MAX_TOKENS".to_string())),
+                1 => Just(Some("SAFETY".to_string())),
+                1 => Just(Some("RECITATION".to_string())),
+                1 => Just(Some("OTHER".to_string())),
+                1 => small_string().prop_map(Some),
+            ]
+        }
+
+        /// Generate a JSON `Value` representing a Gemini function call args object.
+        fn json_args() -> impl Strategy<Value = serde_json::Value> {
+            prop_oneof![
+                Just(serde_json::json!({})),
+                Just(serde_json::json!({"key": "value"})),
+                Just(serde_json::json!({"a": 1, "b": true, "c": null})),
+                small_string().prop_map(|s| serde_json::json!({"input": s})),
+            ]
+        }
+
+        /// Strategy for Gemini text parts.
+        fn text_part() -> impl Strategy<Value = serde_json::Value> {
+            small_string().prop_map(|t| serde_json::json!({"text": t}))
+        }
+
+        /// Strategy for Gemini function call parts.
+        fn function_call_part() -> impl Strategy<Value = serde_json::Value> {
+            (small_string(), json_args()).prop_map(|(name, args)| {
+                serde_json::json!({"functionCall": {"name": name, "args": args}})
+            })
+        }
+
+        /// Strategy for content parts (mix of text and function calls).
+        fn parts_strategy() -> impl Strategy<Value = Vec<serde_json::Value>> {
+            prop::collection::vec(
+                prop_oneof![3 => text_part(), 1 => function_call_part(),],
+                0..5,
+            )
+        }
+
+        /// Generate valid `GeminiStreamResponse` JSON strings.
+        fn gemini_response_json() -> impl Strategy<Value = String> {
+            prop_oneof![
+                // Text response with candidate
+                3 => (parts_strategy(), finish_reason()).prop_map(|(parts, fr)| {
+                    let mut candidate = serde_json::json!({
+                        "content": {"parts": parts}
+                    });
+                    if let Some(r) = fr {
+                        candidate["finishReason"] = serde_json::Value::String(r);
+                    }
+                    serde_json::json!({"candidates": [candidate]}).to_string()
+                }),
+                // Usage-only response
+                2 => (token_count(), token_count(), token_count()).prop_map(|(p, c, t)| {
+                    serde_json::json!({
+                        "usageMetadata": {
+                            "promptTokenCount": p,
+                            "candidatesTokenCount": c,
+                            "totalTokenCount": t
+                        }
+                    })
+                    .to_string()
+                }),
+                // Empty candidates
+                1 => Just(r#"{"candidates":[]}"#.to_string()),
+                // No candidates, no usage
+                1 => Just(r#"{}"#.to_string()),
+                // Candidate with finish reason only (no content)
+                1 => finish_reason()
+                    .prop_filter("some reason", Option::is_some)
+                    .prop_map(|fr| {
+                        serde_json::json!({
+                            "candidates": [{"finishReason": fr.unwrap()}]
+                        })
+                        .to_string()
+                    }),
+                // Both candidate and usage
+                2 => (parts_strategy(), finish_reason(), token_count(), token_count(), token_count())
+                    .prop_map(|(parts, fr, p, c, t)| {
+                        let mut candidate = serde_json::json!({
+                            "content": {"parts": parts}
+                        });
+                        if let Some(r) = fr {
+                            candidate["finishReason"] = serde_json::Value::String(r);
+                        }
+                        serde_json::json!({
+                            "candidates": [candidate],
+                            "usageMetadata": {
+                                "promptTokenCount": p,
+                                "candidatesTokenCount": c,
+                                "totalTokenCount": t
+                            }
+                        })
+                        .to_string()
+                    }),
+            ]
+        }
+
+        /// Chaos — arbitrary JSON strings.
+        fn chaos_json() -> impl Strategy<Value = String> {
+            prop_oneof![
+                Just(String::new()),
+                Just("{}".to_string()),
+                Just("[]".to_string()),
+                Just("null".to_string()),
+                Just("{".to_string()),
+                Just(r#"{"candidates":"not_array"}"#.to_string()),
+                Just(r#"{"candidates":[{"content":null}]}"#.to_string()),
+                Just(r#"{"candidates":[{"content":{"parts":"not_array"}}]}"#.to_string()),
+                "[ -~]{0,64}",
+            ]
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig {
+                cases: 256,
+                max_shrink_iters: 100,
+                .. ProptestConfig::default()
+            })]
+
+            #[test]
+            fn process_event_valid_never_panics(data in gemini_response_json()) {
+                let mut state = make_state();
+                let _ = state.process_event(&data);
+            }
+
+            #[test]
+            fn process_event_chaos_never_panics(data in chaos_json()) {
+                let mut state = make_state();
+                let _ = state.process_event(&data);
+            }
+
+            #[test]
+            fn process_event_sequence_never_panics(
+                events in prop::collection::vec(gemini_response_json(), 1..8)
+            ) {
+                let mut state = make_state();
+                for event in &events {
+                    let _ = state.process_event(event);
+                }
+            }
+
+            #[test]
+            fn process_event_mixed_sequence_never_panics(
+                events in prop::collection::vec(
+                    prop_oneof![gemini_response_json(), chaos_json()],
+                    1..12
+                )
+            ) {
+                let mut state = make_state();
+                for event in &events {
+                    let _ = state.process_event(event);
+                }
+            }
+        }
     }
 }

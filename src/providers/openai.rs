@@ -555,21 +555,31 @@ where
             self.ensure_started();
         }
 
+        // Handle finish reason - may arrive in empty delta without content/tool_calls
+        // Ensure we emit Start before processing finish_reason
+        if choice.finish_reason.is_some() {
+            self.ensure_started();
+        }
+
         // Handle text content
+
         if let Some(content) = delta.content {
             // Update partial content
+
             let last_is_text = matches!(self.partial.content.last(), Some(ContentBlock::Text(_)));
+
             let content_index = if last_is_text {
                 self.partial.content.len() - 1
             } else {
                 let idx = self.partial.content.len();
+
                 self.partial
                     .content
                     .push(ContentBlock::Text(TextContent::new("")));
-                self.pending_events.push_back(StreamEvent::TextStart {
-                    content_index: idx,
-                    partial: self.partial.clone(),
-                });
+
+                self.pending_events
+                    .push_back(StreamEvent::TextStart { content_index: idx });
+
                 idx
             };
 
@@ -579,53 +589,67 @@ where
 
             self.pending_events.push_back(StreamEvent::TextDelta {
                 content_index,
+
                 delta: content,
-                partial: self.partial.clone(),
             });
         }
 
         // Handle tool calls
+
         if let Some(tool_calls) = delta.tool_calls {
             for tc_delta in tool_calls {
                 let index = tc_delta.index as usize;
 
                 // OpenAI may emit sparse tool-call indices. Match by logical index
+
                 // instead of assuming contiguous 0..N ordering in arrival order.
+
                 let tool_state_idx = if let Some(existing_idx) =
                     self.tool_calls.iter().position(|tc| tc.index == index)
                 {
                     existing_idx
                 } else {
                     let content_index = self.partial.content.len();
+
                     self.tool_calls.push(ToolCallState {
                         index,
+
                         content_index,
+
                         id: String::new(),
+
                         name: String::new(),
+
                         arguments: String::new(),
                     });
 
                     // Initialize the tool call block in partial content
+
                     self.partial.content.push(ContentBlock::ToolCall(ToolCall {
                         id: String::new(),
+
                         name: String::new(),
+
                         arguments: serde_json::Value::Null,
+
                         thought_signature: None,
                     }));
 
-                    self.pending_events.push_back(StreamEvent::ToolCallStart {
-                        content_index,
-                        partial: self.partial.clone(),
-                    });
+                    self.pending_events
+                        .push_back(StreamEvent::ToolCallStart { content_index });
+
                     self.tool_calls.len() - 1
                 };
 
                 let tc = &mut self.tool_calls[tool_state_idx];
+
                 let content_index = tc.content_index;
 
                 // Update ID if present
+
                 if let Some(id) = tc_delta.id {
                     tc.id = id;
+
                     if let Some(ContentBlock::ToolCall(block)) =
                         self.partial.content.get_mut(content_index)
                     {
@@ -634,25 +658,33 @@ where
                 }
 
                 // Update function name if present
+
                 if let Some(function) = tc_delta.function {
                     if let Some(name) = function.name {
                         tc.name = name;
+
                         if let Some(ContentBlock::ToolCall(block)) =
                             self.partial.content.get_mut(content_index)
                         {
                             block.name.clone_from(&tc.name);
                         }
                     }
+
                     if let Some(args) = function.arguments {
                         tc.arguments.push_str(&args);
+
                         // Update arguments in partial (best effort parse, or just raw string if we supported it)
+
                         // Note: We don't update partial.arguments here because it requires valid JSON.
+
                         // We only update it at the end or if we switched to storing raw string args.
+
                         // But we MUST emit the delta.
+
                         self.pending_events.push_back(StreamEvent::ToolCallDelta {
                             content_index,
+
                             delta: args,
-                            partial: self.partial.clone(),
                         });
                     }
                 }
@@ -660,36 +692,46 @@ where
         }
 
         // Handle finish reason (MUST happen after delta processing to capture final chunks)
+
         if let Some(reason) = choice.finish_reason {
             self.partial.stop_reason = match reason.as_str() {
                 "length" => StopReason::Length,
+
                 "tool_calls" => StopReason::ToolUse,
+
                 "content_filter" | "error" => StopReason::Error,
+
                 _ => StopReason::Stop,
             };
 
-            // If we ended with a text block, emit TextEnd.
-            if let Some(ContentBlock::Text(t)) = self.partial.content.last() {
-                let content_index = self.partial.content.len() - 1;
-                self.pending_events.push_back(StreamEvent::TextEnd {
-                    content_index,
-                    content: t.text.clone(),
-                    partial: self.partial.clone(),
-                });
+            // Emit TextEnd for all open text blocks (not just the last one,
+
+            // since text may precede tool calls).
+
+            for (content_index, block) in self.partial.content.iter().enumerate() {
+                if let ContentBlock::Text(t) = block {
+                    self.pending_events.push_back(StreamEvent::TextEnd {
+                        content_index,
+
+                        content: t.text.clone(),
+                    });
+                }
             }
 
             // Finalize tool call arguments
+
             self.finalize_tool_call_arguments();
 
             // Emit ToolCallEnd for each accumulated tool call
+
             for tc in &self.tool_calls {
                 if let Some(ContentBlock::ToolCall(tool_call)) =
                     self.partial.content.get(tc.content_index)
                 {
                     self.pending_events.push_back(StreamEvent::ToolCallEnd {
                         content_index: tc.content_index,
+
                         tool_call: tool_call.clone(),
-                        partial: self.partial.clone(),
                     });
                 }
             }
@@ -1234,6 +1276,88 @@ mod tests {
         assert_eq!(
             done.1.error_message.as_deref(),
             Some("upstream provider timeout")
+        );
+    }
+
+    #[test]
+    fn test_finish_reason_without_prior_content_emits_start() {
+        let events = vec![
+            json!({ "choices": [{ "delta": {}, "finish_reason": "stop" }] }),
+            Value::String("[DONE]".to_string()),
+        ];
+
+        let out = collect_events(&events);
+
+        // Should have: Start, Done
+        // First event must be Start (bug would skip this)
+        assert!(!out.is_empty(), "expected at least one event");
+        assert!(
+            matches!(out[0], StreamEvent::Start { .. }),
+            "First event should be Start, got {:?}",
+            out[0]
+        );
+    }
+
+    #[test]
+    fn test_stream_emits_all_events_in_correct_order() {
+        let events = vec![
+            json!({ "choices": [{ "delta": { "content": "Hello" } }] }),
+            json!({ "choices": [{ "delta": { "content": " world" } }] }),
+            json!({ "choices": [{ "delta": {}, "finish_reason": "stop" }] }),
+            Value::String("[DONE]".to_string()),
+        ];
+
+        let out = collect_events(&events);
+
+        // Verify sequence: Start, TextStart, TextDelta, TextDelta, TextEnd, Done
+        assert_eq!(out.len(), 6, "Expected 6 events, got {}", out.len());
+
+        assert!(
+            matches!(out[0], StreamEvent::Start { .. }),
+            "Event 0 should be Start, got {:?}",
+            out[0]
+        );
+
+        assert!(
+            matches!(
+                out[1],
+                StreamEvent::TextStart {
+                    content_index: 0,
+                    ..
+                }
+            ),
+            "Event 1 should be TextStart at index 0, got {:?}",
+            out[1]
+        );
+
+        assert!(
+            matches!(&out[2], StreamEvent::TextDelta { content_index: 0, delta, .. } if delta == "Hello"),
+            "Event 2 should be TextDelta 'Hello' at index 0, got {:?}",
+            out[2]
+        );
+
+        assert!(
+            matches!(&out[3], StreamEvent::TextDelta { content_index: 0, delta, .. } if delta == " world"),
+            "Event 3 should be TextDelta ' world' at index 0, got {:?}",
+            out[3]
+        );
+
+        assert!(
+            matches!(&out[4], StreamEvent::TextEnd { content_index: 0, content, .. } if content == "Hello world"),
+            "Event 4 should be TextEnd 'Hello world' at index 0, got {:?}",
+            out[4]
+        );
+
+        assert!(
+            matches!(
+                out[5],
+                StreamEvent::Done {
+                    reason: StopReason::Stop,
+                    ..
+                }
+            ),
+            "Event 5 should be Done with Stop reason, got {:?}",
+            out[5]
         );
     }
 
@@ -1854,5 +1978,186 @@ mod tests {
             Some("us-east-1"),
             "custom header should be present in request"
         );
+    }
+
+    // ========================================================================
+    // Proptest — process_event() fuzz coverage (FUZZ-P1.3)
+    // ========================================================================
+
+    mod proptest_process_event {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn make_state(
+        ) -> StreamState<impl Stream<Item = std::result::Result<Vec<u8>, std::io::Error>> + Unpin>
+        {
+            let empty = stream::empty::<std::result::Result<Vec<u8>, std::io::Error>>();
+            let sse = crate::sse::SseStream::new(Box::pin(empty));
+            StreamState::new(
+                sse,
+                "gpt-test".into(),
+                "openai".into(),
+                "openai".into(),
+            )
+        }
+
+        fn small_string() -> impl Strategy<Value = String> {
+            prop_oneof![
+                Just(String::new()),
+                "[a-zA-Z0-9_]{1,16}",
+                "[ -~]{0,32}",
+            ]
+        }
+
+        fn optional_string() -> impl Strategy<Value = Option<String>> {
+            prop_oneof![Just(None), small_string().prop_map(Some),]
+        }
+
+        fn token_count() -> impl Strategy<Value = u64> {
+            prop_oneof![
+                5 => 0u64..10_000u64,
+                2 => Just(0u64),
+                1 => Just(u64::MAX),
+                1 => (u64::MAX - 100)..=u64::MAX,
+            ]
+        }
+
+        fn finish_reason() -> impl Strategy<Value = Option<String>> {
+            prop_oneof![
+                3 => Just(None),
+                1 => Just(Some("stop".to_string())),
+                1 => Just(Some("length".to_string())),
+                1 => Just(Some("tool_calls".to_string())),
+                1 => Just(Some("content_filter".to_string())),
+                1 => small_string().prop_map(Some),
+            ]
+        }
+
+        fn tool_call_index() -> impl Strategy<Value = u32> {
+            prop_oneof![
+                5 => 0u32..3u32,
+                1 => Just(u32::MAX),
+                1 => 100u32..200u32,
+            ]
+        }
+
+        /// Generate valid `OpenAIStreamChunk` JSON.
+        fn openai_chunk_json() -> impl Strategy<Value = String> {
+            prop_oneof![
+                // Text content delta
+                3 => (small_string(), finish_reason()).prop_map(|(text, fr)| {
+                    let mut choice = serde_json::json!({
+                        "delta": {"content": text}
+                    });
+                    if let Some(reason) = fr {
+                        choice["finish_reason"] = serde_json::Value::String(reason);
+                    }
+                    serde_json::json!({"choices": [choice]}).to_string()
+                }),
+                // Empty delta (initial or heartbeat)
+                2 => Just(r#"{"choices":[{"delta":{}}]}"#.to_string()),
+                // Finish-only delta
+                2 => finish_reason().prop_filter("some reason", Option::is_some).prop_map(|fr| {
+                    serde_json::json!({
+                        "choices": [{"delta": {}, "finish_reason": fr.unwrap()}]
+                    })
+                    .to_string()
+                }),
+                // Tool call delta
+                3 => (tool_call_index(), optional_string(), optional_string(), optional_string())
+                    .prop_map(|(idx, id, name, args)| {
+                        let mut tc = serde_json::json!({"index": idx});
+                        if let Some(id) = id { tc["id"] = serde_json::Value::String(id); }
+                        let mut func = serde_json::Map::new();
+                        if let Some(n) = name { func.insert("name".into(), serde_json::Value::String(n)); }
+                        if let Some(a) = args { func.insert("arguments".into(), serde_json::Value::String(a)); }
+                        if !func.is_empty() { tc["function"] = serde_json::Value::Object(func); }
+                        serde_json::json!({
+                            "choices": [{"delta": {"tool_calls": [tc]}}]
+                        })
+                        .to_string()
+                    }),
+                // Usage-only chunk (no choices)
+                2 => (token_count(), token_count(), token_count()).prop_map(|(prompt, compl, total)| {
+                    serde_json::json!({
+                        "choices": [],
+                        "usage": {
+                            "prompt_tokens": prompt,
+                            "completion_tokens": compl,
+                            "total_tokens": total
+                        }
+                    })
+                    .to_string()
+                }),
+                // Error chunk
+                1 => small_string().prop_map(|msg| {
+                    serde_json::json!({
+                        "choices": [],
+                        "error": {"message": msg}
+                    })
+                    .to_string()
+                }),
+                // Empty choices
+                1 => Just(r#"{"choices":[]}"#.to_string()),
+            ]
+        }
+
+        /// Chaos — arbitrary JSON strings.
+        fn chaos_json() -> impl Strategy<Value = String> {
+            prop_oneof![
+                Just(String::new()),
+                Just("{}".to_string()),
+                Just("[]".to_string()),
+                Just("null".to_string()),
+                Just("{".to_string()),
+                Just(r#"{"choices":"not_array"}"#.to_string()),
+                Just(r#"{"choices":[{"delta":null}]}"#.to_string()),
+                "[a-z_]{1,20}".prop_map(|t| format!(r#"{{"type":"{t}"}}"#)),
+                "[ -~]{0,64}",
+            ]
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig {
+                cases: 256,
+                max_shrink_iters: 100,
+                .. ProptestConfig::default()
+            })]
+
+            #[test]
+            fn process_event_valid_never_panics(data in openai_chunk_json()) {
+                let mut state = make_state();
+                let _ = state.process_event(&data);
+            }
+
+            #[test]
+            fn process_event_chaos_never_panics(data in chaos_json()) {
+                let mut state = make_state();
+                let _ = state.process_event(&data);
+            }
+
+            #[test]
+            fn process_event_sequence_never_panics(
+                events in prop::collection::vec(openai_chunk_json(), 1..8)
+            ) {
+                let mut state = make_state();
+                for event in &events {
+                    let _ = state.process_event(event);
+                }
+            }
+
+            #[test]
+            fn process_event_mixed_sequence_never_panics(
+                events in prop::collection::vec(
+                    prop_oneof![openai_chunk_json(), chaos_json()],
+                    1..12
+                )
+            ) {
+                let mut state = make_state();
+                for event in &events {
+                    let _ = state.process_event(event);
+                }
+            }
+        }
     }
 }

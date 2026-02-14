@@ -352,10 +352,8 @@ where
             .content
             .push(ContentBlock::Text(TextContent::new("")));
         self.text_blocks.insert(key, idx);
-        self.pending_events.push_back(StreamEvent::TextStart {
-            content_index: idx,
-            partial: self.partial.clone(),
-        });
+        self.pending_events
+            .push_back(StreamEvent::TextStart { content_index: idx });
         idx
     }
 
@@ -376,10 +374,8 @@ where
                 thinking_signature: None,
             }));
         self.reasoning_blocks.insert(key, idx);
-        self.pending_events.push_back(StreamEvent::ThinkingStart {
-            content_index: idx,
-            partial: self.partial.clone(),
-        });
+        self.pending_events
+            .push_back(StreamEvent::ThinkingStart { content_index: idx });
         idx
     }
 
@@ -402,7 +398,6 @@ where
                 self.pending_events.push_back(StreamEvent::TextDelta {
                     content_index: idx,
                     delta,
-                    partial: self.partial.clone(),
                 });
             }
             OpenAIResponsesChunk::ReasoningSummaryTextDelta {
@@ -418,7 +413,6 @@ where
                 self.pending_events.push_back(StreamEvent::ThinkingDelta {
                     content_index: idx,
                     delta,
-                    partial: self.partial.clone(),
                 });
             }
             OpenAIResponsesChunk::OutputItemAdded { item } => {
@@ -449,16 +443,13 @@ where
                         },
                     );
 
-                    self.pending_events.push_back(StreamEvent::ToolCallStart {
-                        content_index,
-                        partial: self.partial.clone(),
-                    });
+                    self.pending_events
+                        .push_back(StreamEvent::ToolCallStart { content_index });
 
                     if !arguments.is_empty() {
                         self.pending_events.push_back(StreamEvent::ToolCallDelta {
                             content_index,
                             delta: arguments,
-                            partial: self.partial.clone(),
                         });
                     }
                 }
@@ -470,7 +461,6 @@ where
                     self.pending_events.push_back(StreamEvent::ToolCallDelta {
                         content_index: tc.content_index,
                         delta,
-                        partial: self.partial.clone(),
                     });
                 }
             }
@@ -568,7 +558,6 @@ where
                 arguments: parsed_args,
                 thought_signature: None,
             },
-            partial: self.partial.clone(),
         });
     }
 
@@ -583,7 +572,6 @@ where
                 self.pending_events.push_back(StreamEvent::TextEnd {
                     content_index: *idx,
                     content: t.text.clone(),
-                    partial: self.partial.clone(),
                 });
             }
         }
@@ -594,7 +582,6 @@ where
                 self.pending_events.push_back(StreamEvent::ThinkingEnd {
                     content_index: *idx,
                     content: t.thinking.clone(),
-                    partial: self.partial.clone(),
                 });
             }
         }

@@ -30,8 +30,8 @@
         }
       ],
       "expected": [
-        { "kind": "text_start", "content_index": 0 },
         { "kind": "start" },
+        { "kind": "text_start", "content_index": 0 },
         { "kind": "text_delta", "content_index": 0, "delta": "Hello " },
         { "kind": "text_delta", "content_index": 0, "delta": "world" },
         { "kind": "text_end", "content_index": 0, "content": "Hello world" },
@@ -66,8 +66,8 @@
         }
       ],
       "expected": [
-        { "kind": "text_start", "content_index": 0 },
         { "kind": "start" },
+        { "kind": "text_start", "content_index": 0 },
         { "kind": "text_delta", "content_index": 0, "delta": "First " },
         { "kind": "text_delta", "content_index": 0, "delta": "second " },
         { "kind": "text_delta", "content_index": 0, "delta": "third" },
@@ -132,8 +132,8 @@
         }
       ],
       "expected": [
-        { "kind": "text_start", "content_index": 0 },
         { "kind": "start" },
+        { "kind": "text_start", "content_index": 0 },
         { "kind": "text_delta", "content_index": 0, "delta": "truncated output" },
         { "kind": "text_delta", "content_index": 0, "delta": "..." },
         { "kind": "text_end", "content_index": 0, "content": "truncated output..." },
@@ -159,8 +159,8 @@
         }
       ],
       "expected": [
-        { "kind": "text_start", "content_index": 0 },
         { "kind": "start" },
+        { "kind": "text_start", "content_index": 0 },
         { "kind": "text_delta", "content_index": 0, "delta": "I " },
         { "kind": "text_end", "content_index": 0, "content": "I " },
         { "kind": "done", "reason": "error" }
@@ -193,12 +193,13 @@
         }
       ],
       "expected": [
-        { "kind": "text_start", "content_index": 0 },
         { "kind": "start" },
+        { "kind": "text_start", "content_index": 0 },
         { "kind": "text_delta", "content_index": 0, "delta": "Let me check that file." },
         { "kind": "other" },
         { "kind": "other" },
         { "kind": "other" },
+        { "kind": "text_end", "content_index": 0, "content": "Let me check that file." },
         { "kind": "done", "reason": "tool_use" }
       ]
     },
@@ -227,8 +228,8 @@
         }
       ],
       "expected": [
-        { "kind": "text_start", "content_index": 0 },
         { "kind": "start" },
+        { "kind": "text_start", "content_index": 0 },
         { "kind": "text_delta", "content_index": 0, "delta": "hi" },
         { "kind": "text_delta", "content_index": 0, "delta": " there" },
         { "kind": "text_end", "content_index": 0, "content": "hi there" },

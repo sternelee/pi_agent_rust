@@ -107,6 +107,7 @@
         { "kind": "other" },
         { "kind": "other" },
         { "kind": "other" },
+        { "kind": "text_end", "content_index": 0, "content": "Let me check." },
         { "kind": "other" },
         { "kind": "done", "reason": "tool_use" }
       ]

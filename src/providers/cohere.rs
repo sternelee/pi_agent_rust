@@ -315,10 +315,8 @@ where
                 self.partial
                     .content
                     .push(ContentBlock::Text(TextContent::new("")));
-                self.pending_events.push_back(StreamEvent::TextStart {
-                    content_index,
-                    partial: self.partial.clone(),
-                });
+                self.pending_events
+                    .push_back(StreamEvent::TextStart { content_index });
             }
             CohereContentKind::Thinking => {
                 self.partial
@@ -327,10 +325,8 @@ where
                         thinking: String::new(),
                         thinking_signature: None,
                     }));
-                self.pending_events.push_back(StreamEvent::ThinkingStart {
-                    content_index,
-                    partial: self.partial.clone(),
-                });
+                self.pending_events
+                    .push_back(StreamEvent::ThinkingStart { content_index });
             }
         }
 
@@ -363,7 +359,6 @@ where
                             self.pending_events.push_back(StreamEvent::TextDelta {
                                 content_index,
                                 delta: initial,
-                                partial: self.partial.clone(),
                             });
                         }
                         CohereContentKind::Thinking => {
@@ -375,7 +370,6 @@ where
                             self.pending_events.push_back(StreamEvent::ThinkingDelta {
                                 content_index,
                                 delta: initial,
-                                partial: self.partial.clone(),
                             });
                         }
                     }
@@ -396,7 +390,6 @@ where
                         self.pending_events.push_back(StreamEvent::TextDelta {
                             content_index,
                             delta: delta_text,
-                            partial: self.partial.clone(),
                         });
                     }
                     CohereContentKind::Thinking => {
@@ -408,7 +401,6 @@ where
                         self.pending_events.push_back(StreamEvent::ThinkingDelta {
                             content_index,
                             delta: delta_text,
-                            partial: self.partial.clone(),
                         });
                     }
                 }
@@ -420,14 +412,12 @@ where
                             self.pending_events.push_back(StreamEvent::TextEnd {
                                 content_index,
                                 content: t.text.clone(),
-                                partial: self.partial.clone(),
                             });
                         }
                         Some(ContentBlock::Thinking(t)) => {
                             self.pending_events.push_back(StreamEvent::ThinkingEnd {
                                 content_index,
                                 content: t.thinking.clone(),
-                                partial: self.partial.clone(),
                             });
                         }
                         _ => {}
@@ -452,15 +442,12 @@ where
                     arguments: tc.function.arguments.clone(),
                 });
 
-                self.pending_events.push_back(StreamEvent::ToolCallStart {
-                    content_index,
-                    partial: self.partial.clone(),
-                });
+                self.pending_events
+                    .push_back(StreamEvent::ToolCallStart { content_index });
                 if !tc.function.arguments.is_empty() {
                     self.pending_events.push_back(StreamEvent::ToolCallDelta {
                         content_index,
                         delta: tc.function.arguments,
-                        partial: self.partial.clone(),
                     });
                 }
             }
@@ -473,7 +460,6 @@ where
                     self.pending_events.push_back(StreamEvent::ToolCallDelta {
                         content_index: active.content_index,
                         delta: delta.message.tool_calls.function.arguments,
-                        partial: self.partial.clone(),
                     });
                 }
             }
@@ -505,7 +491,6 @@ where
                             arguments: parsed_args,
                             thought_signature: None,
                         },
-                        partial: self.partial.clone(),
                     });
                 }
             }

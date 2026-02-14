@@ -28,8 +28,8 @@ use crate::extensions::{WasmExtensionHost, WasmExtensionLoadSpec};
 use crate::extensions_js::{PiJsRuntimeConfig, RepairMode};
 use crate::model::{
     AssistantMessage, AssistantMessageEvent, ContentBlock, CustomMessage, ImageContent, Message,
-    StopReason, StreamEvent, TextContent, ToolCall, ToolResultMessage, Usage, UserContent,
-    UserMessage,
+    StopReason, StreamEvent, TextContent, ThinkingContent, ToolCall, ToolResultMessage, Usage,
+    UserContent, UserMessage,
 };
 use crate::models::{ModelEntry, ModelRegistry};
 use crate::provider::{Context, Provider, StreamOptions, ToolDef};
@@ -259,6 +259,35 @@ pub enum AgentEvent {
         result: ToolOutput,
         #[serde(rename = "isError")]
         is_error: bool,
+    },
+    /// Auto-compaction lifecycle start.
+    AutoCompactionStart { reason: String },
+    /// Auto-compaction lifecycle end.
+    AutoCompactionEnd {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result: Option<serde_json::Value>,
+        aborted: bool,
+        #[serde(rename = "willRetry")]
+        will_retry: bool,
+        #[serde(rename = "errorMessage", skip_serializing_if = "Option::is_none")]
+        error_message: Option<String>,
+    },
+    /// Auto-retry lifecycle start.
+    AutoRetryStart {
+        attempt: u32,
+        #[serde(rename = "maxAttempts")]
+        max_attempts: u32,
+        #[serde(rename = "delayMs")]
+        delay_ms: u64,
+        #[serde(rename = "errorMessage")]
+        error_message: String,
+    },
+    /// Auto-retry lifecycle end.
+    AutoRetryEnd {
+        success: bool,
+        attempt: u32,
+        #[serde(rename = "finalError", skip_serializing_if = "Option::is_none")]
+        final_error: Option<String>,
     },
 }
 
@@ -859,6 +888,9 @@ impl Agent {
             .await?;
 
         let mut added_partial = false;
+        // Track whether we've already emitted `MessageStart` for this streaming response.
+        // Avoids cloning the full message on every event just to re-emit a redundant start.
+        let mut sent_start = false;
 
         loop {
             let event_result = if let Some(signal) = abort.as_ref() {
@@ -908,6 +940,7 @@ impl Agent {
                     on_event(AgentEvent::MessageStart {
                         message: Message::Assistant(ev.clone()),
                     });
+                    sent_start = true;
                     on_event(AgentEvent::MessageUpdate {
                         message: Message::Assistant(ev.clone()),
                         assistant_message_event: Box::new(AssistantMessageEvent::Start {
@@ -915,188 +948,273 @@ impl Agent {
                         }),
                     });
                 }
-                StreamEvent::TextStart {
-                    content_index,
-                    partial,
-                } => {
-                    let ev = partial.clone();
-                    let started_now = self.update_partial_message(partial, &mut added_partial);
-                    if started_now {
-                        on_event(AgentEvent::MessageStart {
+                StreamEvent::TextStart { content_index, .. } => {
+                    if let Some(Message::Assistant(msg)) = self.messages.last_mut() {
+                        if content_index == msg.content.len() {
+                            msg.content.push(ContentBlock::Text(TextContent::new("")));
+                        }
+                        let ev = msg.clone();
+                        if !sent_start {
+                            on_event(AgentEvent::MessageStart {
+                                message: Message::Assistant(ev.clone()),
+                            });
+                            sent_start = true;
+                        }
+                        on_event(AgentEvent::MessageUpdate {
                             message: Message::Assistant(ev.clone()),
+                            assistant_message_event: Box::new(AssistantMessageEvent::TextStart {
+                                content_index,
+                                partial: ev,
+                            }),
                         });
                     }
-                    on_event(AgentEvent::MessageUpdate {
-                        message: Message::Assistant(ev.clone()),
-                        assistant_message_event: Box::new(AssistantMessageEvent::TextStart {
-                            content_index,
-                            partial: ev,
-                        }),
-                    });
                 }
                 StreamEvent::TextDelta {
                     content_index,
                     delta,
-                    partial,
+                    ..
                 } => {
-                    let ev = partial.clone();
-                    let started_now = self.update_partial_message(partial, &mut added_partial);
-                    if started_now {
-                        on_event(AgentEvent::MessageStart {
+                    if let Some(Message::Assistant(msg)) = self.messages.last_mut() {
+                        if let Some(ContentBlock::Text(text)) = msg.content.get_mut(content_index) {
+                            text.text.push_str(&delta);
+                        }
+                        let ev = msg.clone();
+                        if !sent_start {
+                            on_event(AgentEvent::MessageStart {
+                                message: Message::Assistant(ev.clone()),
+                            });
+                            sent_start = true;
+                        }
+                        on_event(AgentEvent::MessageUpdate {
                             message: Message::Assistant(ev.clone()),
+                            assistant_message_event: Box::new(AssistantMessageEvent::TextDelta {
+                                content_index,
+                                delta,
+                                partial: ev,
+                            }),
                         });
                     }
-                    on_event(AgentEvent::MessageUpdate {
-                        message: Message::Assistant(ev.clone()),
-                        assistant_message_event: Box::new(AssistantMessageEvent::TextDelta {
-                            content_index,
-                            delta,
-                            partial: ev,
-                        }),
-                    });
                 }
                 StreamEvent::TextEnd {
                     content_index,
                     content,
-                    partial,
+                    ..
                 } => {
-                    let ev = partial.clone();
-                    let started_now = self.update_partial_message(partial, &mut added_partial);
-                    if started_now {
-                        on_event(AgentEvent::MessageStart {
+                    if let Some(Message::Assistant(msg)) = self.messages.last_mut() {
+                        if let Some(ContentBlock::Text(text)) = msg.content.get_mut(content_index) {
+                            text.text.clone_from(&content);
+                        }
+                        let ev = msg.clone();
+                        if !sent_start {
+                            on_event(AgentEvent::MessageStart {
+                                message: Message::Assistant(ev.clone()),
+                            });
+                            sent_start = true;
+                        }
+                        on_event(AgentEvent::MessageUpdate {
                             message: Message::Assistant(ev.clone()),
+                            assistant_message_event: Box::new(AssistantMessageEvent::TextEnd {
+                                content_index,
+                                content,
+                                partial: ev,
+                            }),
                         });
                     }
-                    on_event(AgentEvent::MessageUpdate {
-                        message: Message::Assistant(ev.clone()),
-                        assistant_message_event: Box::new(AssistantMessageEvent::TextEnd {
-                            content_index,
-                            content,
-                            partial: ev,
-                        }),
-                    });
                 }
-                StreamEvent::ThinkingStart {
-                    content_index,
-                    partial,
-                } => {
-                    let ev = partial.clone();
-                    let started_now = self.update_partial_message(partial, &mut added_partial);
-                    if started_now {
-                        on_event(AgentEvent::MessageStart {
+                StreamEvent::ThinkingStart { content_index, .. } => {
+                    if let Some(Message::Assistant(msg)) = self.messages.last_mut() {
+                        if content_index == msg.content.len() {
+                            msg.content.push(ContentBlock::Thinking(ThinkingContent {
+                                thinking: String::new(),
+                                thinking_signature: None,
+                            }));
+                        }
+                        let ev = msg.clone();
+                        if !sent_start {
+                            on_event(AgentEvent::MessageStart {
+                                message: Message::Assistant(ev.clone()),
+                            });
+                            sent_start = true;
+                        }
+                        on_event(AgentEvent::MessageUpdate {
                             message: Message::Assistant(ev.clone()),
+                            assistant_message_event: Box::new(
+                                AssistantMessageEvent::ThinkingStart {
+                                    content_index,
+                                    partial: ev,
+                                },
+                            ),
                         });
                     }
-                    on_event(AgentEvent::MessageUpdate {
-                        message: Message::Assistant(ev.clone()),
-                        assistant_message_event: Box::new(AssistantMessageEvent::ThinkingStart {
-                            content_index,
-                            partial: ev,
-                        }),
-                    });
                 }
                 StreamEvent::ThinkingDelta {
                     content_index,
                     delta,
-                    partial,
+                    ..
                 } => {
-                    let ev = partial.clone();
-                    let started_now = self.update_partial_message(partial, &mut added_partial);
-                    if started_now {
-                        on_event(AgentEvent::MessageStart {
+                    if let Some(Message::Assistant(msg)) = self.messages.last_mut() {
+                        if let Some(ContentBlock::Thinking(thinking)) =
+                            msg.content.get_mut(content_index)
+                        {
+                            thinking.thinking.push_str(&delta);
+                        }
+                        let ev = msg.clone();
+                        if !sent_start {
+                            on_event(AgentEvent::MessageStart {
+                                message: Message::Assistant(ev.clone()),
+                            });
+                            sent_start = true;
+                        }
+                        on_event(AgentEvent::MessageUpdate {
                             message: Message::Assistant(ev.clone()),
+                            assistant_message_event: Box::new(
+                                AssistantMessageEvent::ThinkingDelta {
+                                    content_index,
+                                    delta,
+                                    partial: ev,
+                                },
+                            ),
                         });
                     }
-                    on_event(AgentEvent::MessageUpdate {
-                        message: Message::Assistant(ev.clone()),
-                        assistant_message_event: Box::new(AssistantMessageEvent::ThinkingDelta {
-                            content_index,
-                            delta,
-                            partial: ev,
-                        }),
-                    });
                 }
                 StreamEvent::ThinkingEnd {
                     content_index,
                     content,
-                    partial,
+                    ..
                 } => {
-                    let ev = partial.clone();
-                    let started_now = self.update_partial_message(partial, &mut added_partial);
-                    if started_now {
-                        on_event(AgentEvent::MessageStart {
+                    if let Some(Message::Assistant(msg)) = self.messages.last_mut() {
+                        if let Some(ContentBlock::Thinking(thinking)) =
+                            msg.content.get_mut(content_index)
+                        {
+                            thinking.thinking.clone_from(&content);
+                        }
+                        let ev = msg.clone();
+                        if !sent_start {
+                            on_event(AgentEvent::MessageStart {
+                                message: Message::Assistant(ev.clone()),
+                            });
+                            sent_start = true;
+                        }
+                        on_event(AgentEvent::MessageUpdate {
                             message: Message::Assistant(ev.clone()),
+                            assistant_message_event: Box::new(AssistantMessageEvent::ThinkingEnd {
+                                content_index,
+                                content,
+                                partial: ev,
+                            }),
                         });
                     }
-                    on_event(AgentEvent::MessageUpdate {
-                        message: Message::Assistant(ev.clone()),
-                        assistant_message_event: Box::new(AssistantMessageEvent::ThinkingEnd {
-                            content_index,
-                            content,
-                            partial: ev,
-                        }),
-                    });
                 }
-                StreamEvent::ToolCallStart {
-                    content_index,
-                    partial,
-                } => {
-                    let ev = partial.clone();
-                    let started_now = self.update_partial_message(partial, &mut added_partial);
-                    if started_now {
-                        on_event(AgentEvent::MessageStart {
+                StreamEvent::ToolCallStart { content_index, .. } => {
+                    if let Some(Message::Assistant(msg)) = self.messages.last_mut() {
+                        if content_index == msg.content.len() {
+                            msg.content.push(ContentBlock::ToolCall(ToolCall {
+                                id: String::new(),
+                                name: String::new(),
+                                arguments: serde_json::Value::Null,
+                                thought_signature: None,
+                            }));
+                        }
+                        let ev = msg.clone();
+                        if !sent_start {
+                            on_event(AgentEvent::MessageStart {
+                                message: Message::Assistant(ev.clone()),
+                            });
+                            sent_start = true;
+                        }
+                        on_event(AgentEvent::MessageUpdate {
                             message: Message::Assistant(ev.clone()),
+                            assistant_message_event: Box::new(
+                                AssistantMessageEvent::ToolCallStart {
+                                    content_index,
+                                    partial: ev,
+                                },
+                            ),
                         });
                     }
-                    on_event(AgentEvent::MessageUpdate {
-                        message: Message::Assistant(ev.clone()),
-                        assistant_message_event: Box::new(AssistantMessageEvent::ToolCallStart {
-                            content_index,
-                            partial: ev,
-                        }),
-                    });
                 }
                 StreamEvent::ToolCallDelta {
                     content_index,
                     delta,
-                    partial,
+                    ..
                 } => {
-                    let ev = partial.clone();
-                    let started_now = self.update_partial_message(partial, &mut added_partial);
-                    if started_now {
-                        on_event(AgentEvent::MessageStart {
+                    if let Some(Message::Assistant(msg)) = self.messages.last_mut() {
+                        // Note: we can't easily parse partial JSON arguments here to update the Value.
+                        // We must accumulate the string.
+                        // However, ToolCall struct stores `arguments: serde_json::Value`.
+                        // The providers were storing it in a separate `arguments_str` in `StreamState`
+                        // and only parsing it at `ToolCallEnd`.
+                        //
+                        // PROBLEM: `ContentBlock::ToolCall` stores `Value`, not `String`.
+                        // We cannot incrementally update `Value` with a partial JSON string.
+                        //
+                        // BUT `AssistantMessageEvent::ToolCallDelta` expects `partial: AssistantMessage`.
+                        // If `AssistantMessage` only has `Value`, we can't represent the partial state in `Message`.
+                        //
+                        // How did it work before?
+                        // `StreamState` had `partial: AssistantMessage`.
+                        // `StreamState` updates `self.current_tool_json` (string).
+                        // It does NOT update `self.partial.content[idx].arguments` until END!
+                        //
+                        // So `partial` in `TextDelta` (before) actually contained `arguments: Null` (or empty)
+                        // until `ToolCallEnd`?
+                        //
+                        // Let's verify `openai.rs`:
+                        // `process_choice` -> `ToolCallDelta`:
+                        // `self.pending_events.push_back(StreamEvent::ToolCallDelta { ... partial: self.partial.clone() })`
+                        // It does NOT update `self.partial.content`.
+                        //
+                        // So `ev` (partial message) sent to `on_event` has `Null` arguments during streaming.
+                        // The `delta` string is carried in `AssistantMessageEvent::ToolCallDelta { delta }`.
+                        //
+                        // So here in `agent.rs`, we don't need to update `msg.content` for `ToolCallDelta`.
+                        // We just clone the current `msg` (which has `Null` args) and pass it along.
+
+                        let ev = msg.clone();
+                        if !sent_start {
+                            on_event(AgentEvent::MessageStart {
+                                message: Message::Assistant(ev.clone()),
+                            });
+                            sent_start = true;
+                        }
+                        on_event(AgentEvent::MessageUpdate {
                             message: Message::Assistant(ev.clone()),
+                            assistant_message_event: Box::new(
+                                AssistantMessageEvent::ToolCallDelta {
+                                    content_index,
+                                    delta,
+                                    partial: ev,
+                                },
+                            ),
                         });
                     }
-                    on_event(AgentEvent::MessageUpdate {
-                        message: Message::Assistant(ev.clone()),
-                        assistant_message_event: Box::new(AssistantMessageEvent::ToolCallDelta {
-                            content_index,
-                            delta,
-                            partial: ev,
-                        }),
-                    });
                 }
                 StreamEvent::ToolCallEnd {
                     content_index,
                     tool_call,
-                    partial,
+                    ..
                 } => {
-                    let ev = partial.clone();
-                    let started_now = self.update_partial_message(partial, &mut added_partial);
-                    if started_now {
-                        on_event(AgentEvent::MessageStart {
+                    if let Some(Message::Assistant(msg)) = self.messages.last_mut() {
+                        if let Some(ContentBlock::ToolCall(tc)) = msg.content.get_mut(content_index)
+                        {
+                            *tc = tool_call.clone();
+                        }
+                        let ev = msg.clone();
+                        if !sent_start {
+                            on_event(AgentEvent::MessageStart {
+                                message: Message::Assistant(ev.clone()),
+                            });
+                            sent_start = true;
+                        }
+                        on_event(AgentEvent::MessageUpdate {
                             message: Message::Assistant(ev.clone()),
+                            assistant_message_event: Box::new(AssistantMessageEvent::ToolCallEnd {
+                                content_index,
+                                tool_call,
+                                partial: ev,
+                            }),
                         });
                     }
-                    on_event(AgentEvent::MessageUpdate {
-                        message: Message::Assistant(ev.clone()),
-                        assistant_message_event: Box::new(AssistantMessageEvent::ToolCallEnd {
-                            content_index,
-                            tool_call,
-                            partial: ev,
-                        }),
-                    });
                 }
                 StreamEvent::Done { message, .. } => {
                     return Ok(self.finalize_assistant_message(message, on_event, added_partial));
@@ -1236,18 +1354,25 @@ impl Agent {
                 partial_result: output.clone(),
             });
 
+            // Decompose output: clone content/details for End event, move originals
+            // into ToolResultMessage to avoid an extra full-struct clone.
+            let end_result = ToolOutput {
+                content: output.content.clone(),
+                details: output.details.clone(),
+                is_error: output.is_error,
+            };
             on_event(AgentEvent::ToolExecutionEnd {
                 tool_call_id: tool_call.id.clone(),
                 tool_name: tool_call.name.clone(),
-                result: output.clone(),
+                result: end_result,
                 is_error,
             });
 
             let tool_result = ToolResultMessage {
                 tool_call_id: tool_call.id.clone(),
                 tool_name: tool_call.name.clone(),
-                content: output.content.clone(),
-                details: output.details.clone(),
+                content: output.content,
+                details: output.details,
                 is_error,
                 timestamp: Utc::now().timestamp_millis(),
             };
@@ -3110,6 +3235,10 @@ mod abort_tests {
             AgentEvent::ToolExecutionStart { .. } => "tool_start",
             AgentEvent::ToolExecutionUpdate { .. } => "tool_update",
             AgentEvent::ToolExecutionEnd { .. } => "tool_end",
+            AgentEvent::AutoCompactionStart { .. } => "auto_compaction_start",
+            AgentEvent::AutoCompactionEnd { .. } => "auto_compaction_end",
+            AgentEvent::AutoRetryStart { .. } => "auto_retry_start",
+            AgentEvent::AutoRetryEnd { .. } => "auto_retry_end",
         }
     }
 
@@ -3923,7 +4052,7 @@ impl AgentSession {
         self.save_enabled
     }
 
-    async fn maybe_compact(&self) -> Result<()> {
+    async fn maybe_compact(&self, on_event: &(impl Fn(AgentEvent) + Send + Sync)) -> Result<()> {
         if !self.compaction_settings.enabled {
             return Ok(());
         }
@@ -3944,6 +4073,10 @@ impl AgentSession {
         };
 
         if let Some(prep) = preparation {
+            on_event(AgentEvent::AutoCompactionStart {
+                reason: "threshold".to_string(),
+            });
+
             let provider = self.agent.provider();
             let api_key = self
                 .agent
@@ -3953,27 +4086,47 @@ impl AgentSession {
                 .unwrap_or_default();
 
             // Note: We might want custom instructions from config, but for now None is fine.
-            let result = compaction::compact(prep, provider, &api_key, None).await?;
+            match compaction::compact(prep, provider, &api_key, None).await {
+                Ok(result) => {
+                    let cx = crate::agent_cx::AgentCx::for_request();
+                    let mut session = self
+                        .session
+                        .lock(cx.cx())
+                        .await
+                        .map_err(|e| Error::session(e.to_string()))?;
 
-            let cx = crate::agent_cx::AgentCx::for_request();
-            let mut session = self
-                .session
-                .lock(cx.cx())
-                .await
-                .map_err(|e| Error::session(e.to_string()))?;
+                    let details = compaction::compaction_details_to_value(&result.details).ok();
 
-            let details = compaction::compaction_details_to_value(&result.details).ok();
+                    let result_value = details.clone();
 
-            session.append_compaction(
-                result.summary,
-                result.first_kept_entry_id,
-                result.tokens_before,
-                details,
-                None, // from_hook
-            );
+                    session.append_compaction(
+                        result.summary,
+                        result.first_kept_entry_id,
+                        result.tokens_before,
+                        details,
+                        None, // from_hook
+                    );
 
-            if self.save_enabled {
-                session.save().await?;
+                    if self.save_enabled {
+                        session.save().await?;
+                    }
+
+                    on_event(AgentEvent::AutoCompactionEnd {
+                        result: result_value,
+                        aborted: false,
+                        will_retry: false,
+                        error_message: None,
+                    });
+                }
+                Err(e) => {
+                    on_event(AgentEvent::AutoCompactionEnd {
+                        result: None,
+                        aborted: false,
+                        will_retry: false,
+                        error_message: Some(e.to_string()),
+                    });
+                    return Err(e);
+                }
             }
         }
         Ok(())
@@ -4339,7 +4492,7 @@ impl AgentSession {
             self.apply_session_model_selection(provider_id.as_str(), model_id.as_str());
         }
 
-        self.maybe_compact().await?;
+        self.maybe_compact(&on_event).await?;
         let history = {
             let cx = crate::agent_cx::AgentCx::for_request();
             let session = self
@@ -4407,7 +4560,7 @@ impl AgentSession {
             self.apply_session_model_selection(provider_id.as_str(), model_id.as_str());
         }
 
-        self.maybe_compact().await?;
+        self.maybe_compact(&on_event).await?;
         let history = {
             let cx = crate::agent_cx::AgentCx::for_request();
             let session = self
@@ -4619,6 +4772,90 @@ mod tests {
     }
 
     #[test]
+    fn auto_compaction_start_serializes_with_pi_mono_compatible_type_tag() {
+        let event = AgentEvent::AutoCompactionStart {
+            reason: "threshold".to_string(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "auto_compaction_start");
+        assert_eq!(json["reason"], "threshold");
+    }
+
+    #[test]
+    fn auto_compaction_end_serializes_with_pi_mono_compatible_fields() {
+        let event = AgentEvent::AutoCompactionEnd {
+            result: Some(serde_json::json!({"tokens_before": 5000, "tokens_after": 2000})),
+            aborted: false,
+            will_retry: false,
+            error_message: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "auto_compaction_end");
+        assert_eq!(json["aborted"], false);
+        assert_eq!(json["willRetry"], false);
+        assert!(json.get("errorMessage").is_none()); // skipped when None
+        assert!(json["result"].is_object());
+    }
+
+    #[test]
+    fn auto_compaction_end_includes_error_message_when_present() {
+        let event = AgentEvent::AutoCompactionEnd {
+            result: None,
+            aborted: true,
+            will_retry: false,
+            error_message: Some("Compaction failed".to_string()),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "auto_compaction_end");
+        assert_eq!(json["aborted"], true);
+        assert_eq!(json["errorMessage"], "Compaction failed");
+    }
+
+    #[test]
+    fn auto_retry_start_serializes_with_camel_case_fields() {
+        let event = AgentEvent::AutoRetryStart {
+            attempt: 1,
+            max_attempts: 3,
+            delay_ms: 2000,
+            error_message: "Rate limited".to_string(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "auto_retry_start");
+        assert_eq!(json["attempt"], 1);
+        assert_eq!(json["maxAttempts"], 3);
+        assert_eq!(json["delayMs"], 2000);
+        assert_eq!(json["errorMessage"], "Rate limited");
+    }
+
+    #[test]
+    fn auto_retry_end_serializes_success_and_omits_null_final_error() {
+        let event = AgentEvent::AutoRetryEnd {
+            success: true,
+            attempt: 2,
+            final_error: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "auto_retry_end");
+        assert_eq!(json["success"], true);
+        assert_eq!(json["attempt"], 2);
+        assert!(json.get("finalError").is_none());
+    }
+
+    #[test]
+    fn auto_retry_end_includes_final_error_on_failure() {
+        let event = AgentEvent::AutoRetryEnd {
+            success: false,
+            attempt: 3,
+            final_error: Some("Max retries exceeded".to_string()),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "auto_retry_end");
+        assert_eq!(json["success"], false);
+        assert_eq!(json["attempt"], 3);
+        assert_eq!(json["finalError"], "Max retries exceeded");
+    }
+
+    #[test]
     fn message_queue_push_increments_seq_and_counts_both_queues() {
         let mut queue = MessageQueue::new(QueueMode::OneAtATime, QueueMode::OneAtATime);
         assert_eq!(queue.pending_count(), 0);
@@ -4785,5 +5022,94 @@ mod tests {
             None,
             "stale key must be cleared when target model has no configured key"
         );
+    }
+
+    #[test]
+    fn auto_compaction_start_serializes_to_pi_mono_format() {
+        let event = AgentEvent::AutoCompactionStart {
+            reason: "threshold".to_string(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "auto_compaction_start");
+        assert_eq!(json["reason"], "threshold");
+    }
+
+    #[test]
+    fn auto_compaction_end_serializes_to_pi_mono_format() {
+        let event = AgentEvent::AutoCompactionEnd {
+            result: Some(serde_json::json!({
+                "summary": "Compacted",
+                "firstKeptEntryId": "abc123",
+                "tokensBefore": 50000,
+                "details": { "readFiles": [], "modifiedFiles": [] }
+            })),
+            aborted: false,
+            will_retry: true,
+            error_message: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "auto_compaction_end");
+        assert!(json["result"].is_object());
+        assert_eq!(json["aborted"], false);
+        assert_eq!(json["willRetry"], true);
+        assert!(json.get("errorMessage").is_none());
+    }
+
+    #[test]
+    fn auto_compaction_end_with_error_serializes_error_message() {
+        let event = AgentEvent::AutoCompactionEnd {
+            result: None,
+            aborted: false,
+            will_retry: false,
+            error_message: Some("compaction failed".to_string()),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "auto_compaction_end");
+        assert!(json["result"].is_null());
+        assert_eq!(json["errorMessage"], "compaction failed");
+    }
+
+    #[test]
+    fn auto_retry_start_serializes_to_pi_mono_format() {
+        let event = AgentEvent::AutoRetryStart {
+            attempt: 2,
+            max_attempts: 3,
+            delay_ms: 4000,
+            error_message: "rate limited".to_string(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "auto_retry_start");
+        assert_eq!(json["attempt"], 2);
+        assert_eq!(json["maxAttempts"], 3);
+        assert_eq!(json["delayMs"], 4000);
+        assert_eq!(json["errorMessage"], "rate limited");
+    }
+
+    #[test]
+    fn auto_retry_end_success_serializes_to_pi_mono_format() {
+        let event = AgentEvent::AutoRetryEnd {
+            success: true,
+            attempt: 2,
+            final_error: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "auto_retry_end");
+        assert_eq!(json["success"], true);
+        assert_eq!(json["attempt"], 2);
+        assert!(json.get("finalError").is_none());
+    }
+
+    #[test]
+    fn auto_retry_end_failure_serializes_final_error() {
+        let event = AgentEvent::AutoRetryEnd {
+            success: false,
+            attempt: 3,
+            final_error: Some("max retries exceeded".to_string()),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "auto_retry_end");
+        assert_eq!(json["success"], false);
+        assert_eq!(json["attempt"], 3);
+        assert_eq!(json["finalError"], "max retries exceeded");
     }
 }

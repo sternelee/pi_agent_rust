@@ -397,10 +397,7 @@ where
                 self.partial
                     .content
                     .push(ContentBlock::Text(TextContent::new("")));
-                Some(StreamEvent::TextStart {
-                    content_index,
-                    partial: self.partial.clone(),
-                })
+                Some(StreamEvent::TextStart { content_index })
             }
             "thinking" => {
                 self.current_thinking.clear();
@@ -410,10 +407,7 @@ where
                         thinking: String::new(),
                         thinking_signature: None,
                     }));
-                Some(StreamEvent::ThinkingStart {
-                    content_index,
-                    partial: self.partial.clone(),
-                })
+                Some(StreamEvent::ThinkingStart { content_index })
             }
             "tool_use" => {
                 self.current_tool_json.clear();
@@ -425,10 +419,7 @@ where
                     arguments: serde_json::Value::Null,
                     thought_signature: None,
                 }));
-                Some(StreamEvent::ToolCallStart {
-                    content_index,
-                    partial: self.partial.clone(),
-                })
+                Some(StreamEvent::ToolCallStart { content_index })
             }
             _ => None,
         }
@@ -451,7 +442,6 @@ where
                     Some(StreamEvent::TextDelta {
                         content_index: idx,
                         delta: text,
-                        partial: self.partial.clone(),
                     })
                 } else {
                     None
@@ -466,7 +456,6 @@ where
                     Some(StreamEvent::ThinkingDelta {
                         content_index: idx,
                         delta: thinking,
-                        partial: self.partial.clone(),
                     })
                 } else {
                     None
@@ -478,7 +467,6 @@ where
                     Some(StreamEvent::ToolCallDelta {
                         content_index: idx,
                         delta: partial_json,
-                        partial: self.partial.clone(),
                     })
                 } else {
                     None
@@ -509,7 +497,6 @@ where
                 Some(StreamEvent::TextEnd {
                     content_index: idx,
                     content,
-                    partial: self.partial.clone(),
                 })
             }
             Some(ContentBlock::Thinking(t)) => {
@@ -518,7 +505,6 @@ where
                 Some(StreamEvent::ThinkingEnd {
                     content_index: idx,
                     content,
-                    partial: self.partial.clone(),
                 })
             }
             Some(ContentBlock::ToolCall(tc)) => {
@@ -547,7 +533,6 @@ where
                 Some(StreamEvent::ToolCallEnd {
                     content_index: idx,
                     tool_call,
-                    partial: self.partial.clone(),
                 })
             }
             _ => None,
@@ -1767,5 +1752,232 @@ mod tests {
             !captured.headers.contains_key("x-custom-tag"),
             "No custom headers should be present with compat=None"
         );
+    }
+
+    // ========================================================================
+    // Proptest — process_event() fuzz coverage (FUZZ-P1.3)
+    // ========================================================================
+
+    mod proptest_process_event {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn make_state(
+        ) -> StreamState<impl Stream<Item = std::result::Result<Vec<u8>, std::io::Error>> + Unpin>
+        {
+            let empty = stream::empty::<std::result::Result<Vec<u8>, std::io::Error>>();
+            let sse = crate::sse::SseStream::new(Box::pin(empty));
+            StreamState::new(
+                sse,
+                "claude-test".into(),
+                "anthropic-messages".into(),
+                "anthropic".into(),
+            )
+        }
+
+        fn small_string() -> impl Strategy<Value = String> {
+            prop_oneof![
+                Just(String::new()),
+                "[a-zA-Z0-9_]{1,16}",
+                "[ -~]{0,32}",
+            ]
+        }
+
+        fn optional_string() -> impl Strategy<Value = Option<String>> {
+            prop_oneof![Just(None), small_string().prop_map(Some),]
+        }
+
+        fn token_count() -> impl Strategy<Value = u64> {
+            prop_oneof![
+                5 => 0u64..10_000u64,
+                2 => Just(0u64),
+                1 => Just(u64::MAX),
+                1 => (u64::MAX - 100)..=u64::MAX,
+            ]
+        }
+
+        fn block_type() -> impl Strategy<Value = String> {
+            prop_oneof![
+                Just("text".to_string()),
+                Just("thinking".to_string()),
+                Just("tool_use".to_string()),
+                Just("unknown_block_type".to_string()),
+                "[a-z_]{1,12}",
+            ]
+        }
+
+        fn delta_type() -> impl Strategy<Value = String> {
+            prop_oneof![
+                Just("text_delta".to_string()),
+                Just("thinking_delta".to_string()),
+                Just("input_json_delta".to_string()),
+                Just("signature_delta".to_string()),
+                Just("unknown_delta".to_string()),
+                "[a-z_]{1,16}",
+            ]
+        }
+
+        fn content_index() -> impl Strategy<Value = u32> {
+            prop_oneof![
+                5 => 0u32..5u32,
+                2 => Just(0u32),
+                1 => Just(u32::MAX),
+                1 => 1000u32..2000u32,
+            ]
+        }
+
+        fn stop_reason_str() -> impl Strategy<Value = String> {
+            prop_oneof![
+                Just("end_turn".to_string()),
+                Just("max_tokens".to_string()),
+                Just("tool_use".to_string()),
+                Just("stop_sequence".to_string()),
+                Just("unknown_reason".to_string()),
+                "[a-z_]{1,12}",
+            ]
+        }
+
+        /// Strategy that generates valid `AnthropicStreamEvent` JSON strings
+        /// covering all event type variants and edge cases.
+        fn anthropic_event_json() -> impl Strategy<Value = String> {
+            prop_oneof![
+                // message_start
+                3 => token_count().prop_flat_map(|input| {
+                    (Just(input), token_count(), token_count()).prop_map(
+                        move |(cache_read, cache_write, _)| {
+                            serde_json::json!({
+                                "type": "message_start",
+                                "message": {
+                                    "usage": {
+                                        "input_tokens": input,
+                                        "cache_read_input_tokens": cache_read,
+                                        "cache_creation_input_tokens": cache_write
+                                    }
+                                }
+                            })
+                            .to_string()
+                        },
+                    )
+                }),
+                // message_start without usage
+                1 => Just(r#"{"type":"message_start","message":{}}"#.to_string()),
+                // content_block_start
+                3 => (content_index(), block_type(), optional_string(), optional_string())
+                    .prop_map(|(idx, bt, id, name)| {
+                        let mut block = serde_json::json!({"type": bt});
+                        if let Some(id) = id {
+                            block["id"] = serde_json::Value::String(id);
+                        }
+                        if let Some(name) = name {
+                            block["name"] = serde_json::Value::String(name);
+                        }
+                        serde_json::json!({
+                            "type": "content_block_start",
+                            "index": idx,
+                            "content_block": block
+                        })
+                        .to_string()
+                    }),
+                // content_block_delta
+                3 => (content_index(), delta_type(), optional_string(), optional_string(), optional_string(), optional_string())
+                    .prop_map(|(idx, dt, text, thinking, partial_json, sig)| {
+                        let mut delta = serde_json::json!({"type": dt});
+                        if let Some(t) = text { delta["text"] = serde_json::Value::String(t); }
+                        if let Some(t) = thinking { delta["thinking"] = serde_json::Value::String(t); }
+                        if let Some(p) = partial_json { delta["partial_json"] = serde_json::Value::String(p); }
+                        if let Some(s) = sig { delta["signature"] = serde_json::Value::String(s); }
+                        serde_json::json!({
+                            "type": "content_block_delta",
+                            "index": idx,
+                            "delta": delta
+                        })
+                        .to_string()
+                    }),
+                // content_block_stop
+                2 => content_index().prop_map(|idx| {
+                    serde_json::json!({"type": "content_block_stop", "index": idx}).to_string()
+                }),
+                // message_delta
+                2 => (stop_reason_str(), token_count()).prop_map(|(sr, out)| {
+                    serde_json::json!({
+                        "type": "message_delta",
+                        "delta": {"stop_reason": sr},
+                        "usage": {"output_tokens": out}
+                    })
+                    .to_string()
+                }),
+                // message_delta without usage
+                1 => stop_reason_str().prop_map(|sr| {
+                    serde_json::json!({
+                        "type": "message_delta",
+                        "delta": {"stop_reason": sr}
+                    })
+                    .to_string()
+                }),
+                // message_stop
+                2 => Just(r#"{"type":"message_stop"}"#.to_string()),
+                // error
+                2 => small_string().prop_map(|msg| {
+                    serde_json::json!({"type": "error", "error": {"message": msg}}).to_string()
+                }),
+                // ping
+                2 => Just(r#"{"type":"ping"}"#.to_string()),
+            ]
+        }
+
+        /// Strategy that generates arbitrary JSON — chaos testing.
+        fn chaos_json() -> impl Strategy<Value = String> {
+            prop_oneof![
+                // Empty / whitespace
+                Just(String::new()),
+                Just("{}".to_string()),
+                Just("[]".to_string()),
+                Just("null".to_string()),
+                Just("true".to_string()),
+                Just("42".to_string()),
+                // Broken JSON
+                Just("{".to_string()),
+                Just(r#"{"type":}"#.to_string()),
+                Just(r#"{"type":null}"#.to_string()),
+                // Unknown type tag
+                "[a-z_]{1,20}".prop_map(|t| format!(r#"{{"type":"{t}"}}"#)),
+                // Completely random printable ASCII
+                "[ -~]{0,64}",
+                // Valid JSON with wrong schema
+                Just(r#"{"type":"message_start"}"#.to_string()),
+                Just(r#"{"type":"content_block_delta"}"#.to_string()),
+                Just(r#"{"type":"error"}"#.to_string()),
+            ]
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig {
+                cases: 256,
+                max_shrink_iters: 100,
+                .. ProptestConfig::default()
+            })]
+
+            #[test]
+            fn process_event_valid_never_panics(data in anthropic_event_json()) {
+                let mut state = make_state();
+                let _ = state.process_event(&data);
+            }
+
+            #[test]
+            fn process_event_chaos_never_panics(data in chaos_json()) {
+                let mut state = make_state();
+                let _ = state.process_event(&data);
+            }
+
+            #[test]
+            fn process_event_sequence_never_panics(
+                events in prop::collection::vec(anthropic_event_json(), 1..8)
+            ) {
+                let mut state = make_state();
+                for event in &events {
+                    let _ = state.process_event(event);
+                }
+            }
+        }
     }
 }
