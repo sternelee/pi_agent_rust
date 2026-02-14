@@ -400,6 +400,7 @@ pub(crate) fn inject_wasm_globals(
                             wasmtime::Extern::Table(_) => "table",
                             wasmtime::Extern::Global(_) => "global",
                             wasmtime::Extern::SharedMemory(_) => "shared-memory",
+                            wasmtime::Extern::Tag(_) => "tag",
                         };
                         entries.push(WasmExportEntry { name, kind });
                     }

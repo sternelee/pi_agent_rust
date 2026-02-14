@@ -8250,7 +8250,8 @@ mod wasm_host {
     wasmtime::component::bindgen!({
         path: "docs/wit/extension.wit",
         world: "pi-extension",
-        async: true,
+        imports: { default: async },
+        exports: { default: async },
     });
 
     use self::pi::extension::host;
@@ -9276,7 +9277,11 @@ mod wasm_host {
             })?;
 
             let mut linker = Linker::<HostState>::new(engine);
-            host::add_to_linker(&mut linker, |data| data).map_err(|err| {
+            host::add_to_linker::<HostState, wasmtime::component::HasSelf<HostState>>(
+                &mut linker,
+                |data| data,
+            )
+            .map_err(|err| {
                 Error::extension(format!("Failed to link WASM host imports: {err}"))
             })?;
 
