@@ -1,7 +1,7 @@
 # Feature Parity: pi_agent_rust vs Pi Agent (TypeScript)
 
 > **Purpose:** Authoritative single-source-of-truth for implementation status.
-> **Last Updated:** 2026-02-14 (Performance track complete, test counts refreshed, perf measurements added)
+> **Last Updated:** 2026-02-14 (Final parity certification: all 🔶 resolved to ✅, zero gaps remaining)
 
 ## Status Legend
 
@@ -28,7 +28,7 @@
 | **Extensions Runtime** | 12 | 0 | 0 | 0 | 12 |
 | **TUI** | 18 | 0 | 0 | 2 | 20 |
 | **Configuration** | 9 | 0 | 0 | 0 | 9 |
-| **Authentication** | 6 | 2 | 0 | 0 | 8 |
+| **Authentication** | 8 | 0 | 0 | 0 | 8 |
 
 ---
 
@@ -268,7 +268,7 @@
 | `/history` | ✅ | `src/interactive.rs` | Show input history |
 | `/export` | ✅ | `src/interactive.rs` | Export session to HTML |
 | `/exit` / `/quit` | ✅ | `src/interactive.rs` | Exit Pi |
-| `/login` | 🔶 | `src/interactive.rs`, `src/auth.rs` | Anthropic OAuth supported; other providers deferred (refresh tests `bd-3pn`) |
+| `/login` | ✅ | `src/interactive/commands.rs`, `src/auth.rs` | Anthropic OAuth + OpenAI/Google API key + extension OAuth |
 | `/logout` | ✅ | `src/interactive.rs`, `src/auth.rs` | Remove stored credentials |
 | `/session` | ✅ | `src/interactive.rs` | Show session info (path/tokens/cost) |
 | `/resume` | ✅ | `src/interactive.rs` | Session picker overlay (deletion disabled) |
@@ -276,12 +276,12 @@
 | `/name <name>` | ✅ | `src/interactive.rs` | Set session display name |
 | `/copy` | ✅ | `src/interactive.rs` | Clipboard support is feature-gated (`--features clipboard`) |
 | `/hotkeys` | ✅ | `src/interactive.rs` | Show keybindings |
-| `/scoped-models` | 🔶 | `src/interactive.rs` | UI + persistence tracked in `bd-27a8` (cycling `bd-21gp`) |
+| `/scoped-models` | ✅ | `src/interactive/commands.rs` | Pattern matching + persistence to project settings |
 | `/settings` | ✅ | `src/interactive.rs` | Shows effective settings + resource counts |
 | `/tree` | ✅ | `src/interactive.rs` | List leaves and switch branch by id/index |
 | `/fork` | ✅ | `src/interactive.rs` | Forks new session file from user message |
 | `/compact [prompt]` | ✅ | `src/interactive.rs`, `src/compaction.rs` | Manual compaction |
-| `/share` | 🔶 | `src/interactive.rs` | Exports temp HTML; Gist upload deferred |
+| `/share` | ✅ | `src/interactive/share.rs` | HTML export + GitHub Gist upload via `gh` CLI |
 | `/reload` | ✅ | `src/interactive.rs`, `src/resources.rs` | Reloads skills/prompts/themes + refreshes autocomplete |
 | `/changelog` | ✅ | `src/interactive.rs` | Display changelog entries |
 
@@ -297,8 +297,8 @@
 | File locking | ✅ | `src/auth.rs` | - | Exclusive lock with timeout |
 | Key resolution | ✅ | `src/auth.rs` | - | override > auth.json > env |
 | Multi-provider keys | ✅ | `src/auth.rs` | - | 12 providers supported |
-| OAuth flow | 🔶 | `src/auth.rs`, `src/interactive.rs` | - | Anthropic OAuth supported; other providers deferred (tests `bd-3pn`) |
-| Token refresh | 🔶 | `src/auth.rs`, `src/main.rs` | - | Refresh tests tracked in `bd-3pn` |
+| OAuth flow | ✅ | `src/auth.rs`, `src/interactive/commands.rs` | Unit | Anthropic PKCE + extension-registered providers |
+| Token refresh | ✅ | `src/auth.rs`, `src/main.rs` | Unit | Auto-refresh on startup for all OAuth providers |
 
 ---
 
