@@ -1176,8 +1176,9 @@ fn patch_settings_file(path: &Path, patch: Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::{
+        Config, ExtensionRiskConfig, SettingsScope, TerminalSettings,
         extension_index_path_from_env, global_dir_from_env, package_dir_from_env,
-        sessions_dir_from_env, Config, ExtensionRiskConfig, SettingsScope,
+        sessions_dir_from_env,
     };
     use crate::agent::QueueMode;
     use proptest::prelude::*;
