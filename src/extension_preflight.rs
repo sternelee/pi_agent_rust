@@ -3406,4 +3406,400 @@ debugger;
         assert!(scan(r#"const api_key = "sk-ant-test";"#).needs_review());
         assert!(!scan("process.env.X;").needs_review());
     }
+
+    // ================================================================
+    // Rulebook v2.0.0 — new rule tests
+    // ================================================================
+
+    // ---- SEC-SPAWN-001: child_process command execution ----
+
+    #[test]
+    fn detect_child_process_exec() {
+        let report = scan("const { exec } = require('child_process'); exec('ls');");
+        assert!(has_rule(&report, SecurityRuleId::ChildProcessSpawn));
+        assert_eq!(report.overall_tier, RiskTier::Critical);
+        assert!(report.should_block());
+    }
+
+    #[test]
+    fn detect_child_process_spawn() {
+        let report = scan("const cp = require('child_process'); cp.spawn('node', ['app.js']);");
+        assert!(has_rule(&report, SecurityRuleId::ChildProcessSpawn));
+    }
+
+    #[test]
+    fn detect_child_process_fork() {
+        let report = scan("childProcess.fork('./worker.js');");
+        assert!(has_rule(&report, SecurityRuleId::ChildProcessSpawn));
+    }
+
+    #[test]
+    fn regular_exec_not_flagged_as_spawn() {
+        // exec() without child_process context should NOT trigger.
+        let report = scan("const result = exec('query');");
+        assert!(!has_rule(&report, SecurityRuleId::ChildProcessSpawn));
+    }
+
+    // ---- SEC-CONSTRUCTOR-001: constructor escape ----
+
+    #[test]
+    fn detect_constructor_escape() {
+        let report = scan("const fn = constructor.constructor('return this')();");
+        assert!(has_rule(&report, SecurityRuleId::ConstructorEscape));
+        assert_eq!(report.overall_tier, RiskTier::Critical);
+    }
+
+    #[test]
+    fn detect_constructor_escape_bracket() {
+        let report = scan(r#"const fn = constructor["constructor"]('return this')();"#);
+        assert!(has_rule(&report, SecurityRuleId::ConstructorEscape));
+    }
+
+    // ---- SEC-NATIVEMOD-001: native module require ----
+
+    #[test]
+    fn detect_native_node_require() {
+        let report = scan(r#"const addon = require('./native.node');"#);
+        assert!(has_rule(&report, SecurityRuleId::NativeModuleRequire));
+        assert_eq!(report.overall_tier, RiskTier::Critical);
+    }
+
+    #[test]
+    fn detect_native_so_require() {
+        let report = scan(r#"const lib = require('/usr/lib/evil.so');"#);
+        assert!(has_rule(&report, SecurityRuleId::NativeModuleRequire));
+    }
+
+    #[test]
+    fn detect_native_dylib_require() {
+        let report = scan(r#"const lib = require('./lib.dylib');"#);
+        assert!(has_rule(&report, SecurityRuleId::NativeModuleRequire));
+    }
+
+    #[test]
+    fn normal_require_not_flagged_as_native() {
+        let report = scan(r#"const fs = require('fs');"#);
+        assert!(!has_rule(&report, SecurityRuleId::NativeModuleRequire));
+    }
+
+    // ---- SEC-GLOBAL-001: global mutation ----
+
+    #[test]
+    fn detect_global_this_mutation() {
+        let report = scan("globalThis.fetch = evilFetch;");
+        assert!(has_rule(&report, SecurityRuleId::GlobalMutation));
+        assert!(report.needs_review());
+    }
+
+    #[test]
+    fn detect_global_property_mutation() {
+        let report = scan("global.process = fakeProcess;");
+        assert!(has_rule(&report, SecurityRuleId::GlobalMutation));
+    }
+
+    #[test]
+    fn detect_global_bracket_mutation() {
+        let report = scan("globalThis['fetch'] = evilFetch;");
+        assert!(has_rule(&report, SecurityRuleId::GlobalMutation));
+    }
+
+    #[test]
+    fn global_read_not_flagged() {
+        // Reading globalThis should not trigger (no assignment).
+        let report = scan("const f = globalThis.fetch;");
+        assert!(!has_rule(&report, SecurityRuleId::GlobalMutation));
+    }
+
+    // ---- SEC-SYMLINK-001: symlink creation ----
+
+    #[test]
+    fn detect_fs_symlink() {
+        let report = scan("fs.symlinkSync('/etc/passwd', '/tmp/link');");
+        assert!(has_rule(&report, SecurityRuleId::SymlinkCreation));
+        assert!(report.needs_review());
+    }
+
+    #[test]
+    fn detect_fs_link() {
+        let report = scan("fs.linkSync('/etc/shadow', '/tmp/hard');");
+        assert!(has_rule(&report, SecurityRuleId::SymlinkCreation));
+    }
+
+    // ---- SEC-CHMOD-001: permission changes ----
+
+    #[test]
+    fn detect_chmod() {
+        let report = scan("fs.chmodSync('/tmp/script.sh', 0o777);");
+        assert!(has_rule(&report, SecurityRuleId::PermissionChange));
+        assert!(report.needs_review());
+    }
+
+    #[test]
+    fn detect_chown() {
+        let report = scan("fs.chown('/etc/passwd', 0, 0, cb);");
+        assert!(has_rule(&report, SecurityRuleId::PermissionChange));
+    }
+
+    // ---- SEC-SOCKET-001: socket listeners ----
+
+    #[test]
+    fn detect_create_server() {
+        let report = scan("const server = http.createServer(handler);");
+        assert!(has_rule(&report, SecurityRuleId::SocketListener));
+        assert!(report.needs_review());
+    }
+
+    #[test]
+    fn detect_create_socket() {
+        let report = scan("const sock = dgram.createSocket('udp4');");
+        assert!(has_rule(&report, SecurityRuleId::SocketListener));
+    }
+
+    // ---- SEC-WASM-001: WebAssembly usage ----
+
+    #[test]
+    fn detect_webassembly_instantiate() {
+        let report = scan("const instance = await WebAssembly.instantiate(buffer);");
+        assert!(has_rule(&report, SecurityRuleId::WebAssemblyUsage));
+        assert!(report.needs_review());
+    }
+
+    #[test]
+    fn detect_webassembly_compile() {
+        let report = scan("const module = WebAssembly.compile(bytes);");
+        assert!(has_rule(&report, SecurityRuleId::WebAssemblyUsage));
+    }
+
+    // ---- SEC-ARGUMENTS-001: arguments.callee/caller ----
+
+    #[test]
+    fn detect_arguments_callee() {
+        let report = scan("const self = arguments.callee;");
+        assert!(has_rule(&report, SecurityRuleId::ArgumentsCallerAccess));
+        assert_eq!(report.overall_tier, RiskTier::Medium);
+    }
+
+    #[test]
+    fn detect_arguments_caller() {
+        let report = scan("const parent = arguments.caller;");
+        assert!(has_rule(&report, SecurityRuleId::ArgumentsCallerAccess));
+    }
+
+    // ---- New rule IDs serde roundtrip ----
+
+    #[test]
+    fn new_rule_id_serde_roundtrip() {
+        let rules = [
+            SecurityRuleId::ChildProcessSpawn,
+            SecurityRuleId::ConstructorEscape,
+            SecurityRuleId::NativeModuleRequire,
+            SecurityRuleId::GlobalMutation,
+            SecurityRuleId::SymlinkCreation,
+            SecurityRuleId::PermissionChange,
+            SecurityRuleId::SocketListener,
+            SecurityRuleId::WebAssemblyUsage,
+            SecurityRuleId::ArgumentsCallerAccess,
+        ];
+        for rule in &rules {
+            let json = serde_json::to_string(rule).unwrap();
+            let back: SecurityRuleId = serde_json::from_str(&json).unwrap();
+            assert_eq!(*rule, back, "roundtrip failed for {rule}");
+        }
+    }
+
+    #[test]
+    fn new_rule_id_names_are_stable() {
+        assert_eq!(
+            serde_json::to_string(&SecurityRuleId::ChildProcessSpawn).unwrap(),
+            "\"SEC-SPAWN-001\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SecurityRuleId::ConstructorEscape).unwrap(),
+            "\"SEC-CONSTRUCTOR-001\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SecurityRuleId::NativeModuleRequire).unwrap(),
+            "\"SEC-NATIVEMOD-001\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SecurityRuleId::GlobalMutation).unwrap(),
+            "\"SEC-GLOBAL-001\""
+        );
+    }
+
+    // ---- Determinism with new rules ----
+
+    #[test]
+    fn scan_with_new_rules_is_deterministic() {
+        let source = r#"
+eval('x');
+const cp = require('child_process'); cp.exec('ls');
+globalThis.foo = 'bar';
+fs.symlinkSync('/a', '/b');
+fs.chmodSync('/tmp/x', 0o777);
+const s = http.createServer(h);
+const m = WebAssembly.compile(b);
+const c = arguments.callee;
+constructor.constructor('return this')();
+const addon = require('./evil.node');
+"#;
+        let r1 = scan(source);
+        let r2 = scan(source);
+        let j1 = r1.to_json().unwrap();
+        let j2 = r2.to_json().unwrap();
+        assert_eq!(j1, j2, "Scan with new rules must be deterministic");
+    }
+
+    // ---- Deterministic sort: file + line within tier ----
+
+    #[test]
+    fn findings_sorted_deterministically_within_tier() {
+        let findings = vec![
+            SecurityFinding {
+                rule_id: SecurityRuleId::ProcessEnvAccess,
+                risk_tier: RiskTier::Medium,
+                rationale: "env".into(),
+                file: Some("b.ts".into()),
+                line: Some(10),
+                column: Some(1),
+                snippet: None,
+            },
+            SecurityFinding {
+                rule_id: SecurityRuleId::ProcessEnvAccess,
+                risk_tier: RiskTier::Medium,
+                rationale: "env".into(),
+                file: Some("a.ts".into()),
+                line: Some(5),
+                column: Some(1),
+                snippet: None,
+            },
+        ];
+        let report = SecurityScanReport::from_findings("test".into(), findings);
+        // a.ts should come before b.ts within same tier.
+        assert_eq!(
+            report.findings[0].file.as_deref(),
+            Some("a.ts"),
+            "Findings should be sorted by file within tier"
+        );
+        assert_eq!(report.findings[1].file.as_deref(), Some("b.ts"));
+    }
+
+    // ---- Evidence ledger with new rules ----
+
+    #[test]
+    fn evidence_ledger_includes_new_rules() {
+        let source = r#"
+constructor.constructor('return this')();
+const m = WebAssembly.compile(b);
+const c = arguments.callee;
+"#;
+        let report = scan(source);
+        let jsonl = security_evidence_ledger_jsonl(&report).unwrap();
+        let entries: Vec<SecurityEvidenceLedgerEntry> = jsonl
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert!(!entries.is_empty());
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.rule_id == SecurityRuleId::ConstructorEscape)
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.rule_id == SecurityRuleId::WebAssemblyUsage)
+        );
+        // Rulebook version should be 2.0.0
+        for entry in &entries {
+            assert_eq!(entry.rulebook_version, "2.0.0");
+        }
+    }
+
+    // ---- Rulebook version ----
+
+    #[test]
+    fn rulebook_version_is_v2() {
+        assert_eq!(SECURITY_RULEBOOK_VERSION, "2.0.0");
+    }
+
+    // ---- New rule tier consistency ----
+
+    #[test]
+    fn new_rule_default_tier_consistency() {
+        assert_eq!(
+            SecurityRuleId::ChildProcessSpawn.default_tier(),
+            RiskTier::Critical
+        );
+        assert_eq!(
+            SecurityRuleId::ConstructorEscape.default_tier(),
+            RiskTier::Critical
+        );
+        assert_eq!(
+            SecurityRuleId::NativeModuleRequire.default_tier(),
+            RiskTier::Critical
+        );
+        assert_eq!(
+            SecurityRuleId::GlobalMutation.default_tier(),
+            RiskTier::High
+        );
+        assert_eq!(
+            SecurityRuleId::SymlinkCreation.default_tier(),
+            RiskTier::High
+        );
+        assert_eq!(
+            SecurityRuleId::PermissionChange.default_tier(),
+            RiskTier::High
+        );
+        assert_eq!(
+            SecurityRuleId::SocketListener.default_tier(),
+            RiskTier::High
+        );
+        assert_eq!(
+            SecurityRuleId::WebAssemblyUsage.default_tier(),
+            RiskTier::High
+        );
+        assert_eq!(
+            SecurityRuleId::ArgumentsCallerAccess.default_tier(),
+            RiskTier::Medium
+        );
+    }
+
+    // ---- Install-time risk classifier with new rules ----
+
+    #[test]
+    fn install_time_risk_blocks_critical_new_rules() {
+        let source = "constructor.constructor('return this')();";
+        let policy = ExtensionPolicy::default();
+        let report = classify_extension_source("test-ext", source, &policy);
+        assert!(report.should_block());
+        assert_eq!(report.composite_risk_tier, RiskTier::Critical);
+        assert_eq!(report.recommendation, InstallRecommendation::Block);
+    }
+
+    #[test]
+    fn install_time_risk_reviews_high_new_rules() {
+        let source = "const m = WebAssembly.compile(bytes);";
+        let policy = ExtensionPolicy::default();
+        let report = classify_extension_source("test-ext", source, &policy);
+        assert!(report.needs_review());
+        assert!(matches!(
+            report.composite_risk_tier,
+            RiskTier::Critical | RiskTier::High
+        ));
+    }
+
+    // ---- Comments skip new rules too ----
+
+    #[test]
+    fn commented_new_rules_not_flagged() {
+        let report = scan("// constructor.constructor('return this')();");
+        assert!(!has_rule(&report, SecurityRuleId::ConstructorEscape));
+    }
+
+    #[test]
+    fn block_commented_new_rules_not_flagged() {
+        let report = scan("/* WebAssembly.compile(bytes); */");
+        assert!(!has_rule(&report, SecurityRuleId::WebAssemblyUsage));
+    }
 }
