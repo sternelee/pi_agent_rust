@@ -10283,6 +10283,17 @@ export default p;
     // tools/commands even though the actual library behaviour is absent.
 
     modules.insert(
+        "@mariozechner/clipboard".to_string(),
+        r"
+export async function getText() { return ''; }
+export async function setText(_text) {}
+export default { getText, setText };
+"
+        .trim()
+        .to_string(),
+    );
+
+    modules.insert(
         "node-pty".to_string(),
         r"
 let _pid = 1000;
@@ -11056,6 +11067,13 @@ pub fn available_virtual_module_names() -> std::collections::BTreeSet<String> {
     default_virtual_modules_shared().keys().cloned().collect()
 }
 
+/// Sampling cadence for memory usage snapshots when no hard memory limit is configured.
+///
+/// `AsyncRuntime::memory_usage()` triggers QuickJS heap traversal and is expensive on hot
+/// tick paths. When runtime memory is unbounded, periodic sampling preserves observability
+/// while avoiding per-tick full-heap scans.
+const UNBOUNDED_MEMORY_USAGE_SAMPLE_EVERY_TICKS: u64 = 32;
+
 /// Integrated PiJS runtime combining QuickJS, scheduler, and Promise bridge.
 ///
 /// This is the main entry point for running JavaScript extensions with
@@ -11099,7 +11117,9 @@ pub struct PiJsRuntime<C: SchedulerClock = WallClock> {
     hostcall_tracker: Rc<RefCell<HostcallTracker>>,
     hostcalls_total: Arc<AtomicU64>,
     hostcalls_timed_out: Arc<AtomicU64>,
+    last_memory_used_bytes: Arc<AtomicU64>,
     peak_memory_used_bytes: Arc<AtomicU64>,
+    tick_counter: Arc<AtomicU64>,
     interrupt_budget: Rc<InterruptBudget>,
     config: PiJsRuntimeConfig,
     /// Additional filesystem roots that `readFileSync` may access (e.g.
@@ -11208,7 +11228,9 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
         let hostcall_tracker = Rc::new(RefCell::new(HostcallTracker::default()));
         let hostcalls_total = Arc::new(AtomicU64::new(0));
         let hostcalls_timed_out = Arc::new(AtomicU64::new(0));
+        let last_memory_used_bytes = Arc::new(AtomicU64::new(0));
         let peak_memory_used_bytes = Arc::new(AtomicU64::new(0));
+        let tick_counter = Arc::new(AtomicU64::new(0));
         let trace_seq = Arc::new(AtomicU64::new(1));
 
         let instance = Self {
@@ -11220,7 +11242,9 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
             hostcall_tracker,
             hostcalls_total,
             hostcalls_timed_out,
+            last_memory_used_bytes,
             peak_memory_used_bytes,
+            tick_counter,
             interrupt_budget,
             config,
             allowed_read_roots: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -11246,6 +11270,15 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
             return Error::extension("PiJS execution budget exceeded".to_string());
         }
         Error::extension(format!("QuickJS job: {err}"))
+    }
+
+    fn should_sample_memory_usage(&self) -> bool {
+        if self.config.limits.memory_limit_bytes.is_some() {
+            return true;
+        }
+
+        let tick = self.tick_counter.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+        tick == 1 || tick.is_multiple_of(UNBOUNDED_MEMORY_USAGE_SAMPLE_EVERY_TICKS)
     }
 
     /// Evaluate JavaScript source code.
@@ -11501,17 +11534,29 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
             .hostcalls_timed_out
             .load(std::sync::atomic::Ordering::SeqCst);
 
-        let usage = self.runtime.memory_usage().await;
-        stats.memory_used_bytes = u64::try_from(usage.memory_used_size).unwrap_or(0);
-        let mut peak = self
-            .peak_memory_used_bytes
-            .load(std::sync::atomic::Ordering::SeqCst);
-        if stats.memory_used_bytes > peak {
-            peak = stats.memory_used_bytes;
-            self.peak_memory_used_bytes
-                .store(peak, std::sync::atomic::Ordering::SeqCst);
+        if self.should_sample_memory_usage() {
+            let usage = self.runtime.memory_usage().await;
+            stats.memory_used_bytes = u64::try_from(usage.memory_used_size).unwrap_or(0);
+            self.last_memory_used_bytes
+                .store(stats.memory_used_bytes, std::sync::atomic::Ordering::SeqCst);
+
+            let mut peak = self
+                .peak_memory_used_bytes
+                .load(std::sync::atomic::Ordering::SeqCst);
+            if stats.memory_used_bytes > peak {
+                peak = stats.memory_used_bytes;
+                self.peak_memory_used_bytes
+                    .store(peak, std::sync::atomic::Ordering::SeqCst);
+            }
+            stats.peak_memory_used_bytes = peak;
+        } else {
+            stats.memory_used_bytes = self
+                .last_memory_used_bytes
+                .load(std::sync::atomic::Ordering::SeqCst);
+            stats.peak_memory_used_bytes = self
+                .peak_memory_used_bytes
+                .load(std::sync::atomic::Ordering::SeqCst);
         }
-        stats.peak_memory_used_bytes = peak;
         stats.repairs_total = self.repair_count();
 
         if let Some(limit) = self.config.limits.memory_limit_bytes {
