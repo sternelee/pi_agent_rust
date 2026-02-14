@@ -55,3 +55,13 @@ doc = false
 name = "fuzz_session_entry"
 path = "fuzz_targets/fuzz_session_entry.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_message_deser"
+path = "fuzz_targets/fuzz_message_deser.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_message_roundtrip"
+path = "fuzz_targets/fuzz_message_roundtrip.rs"
+doc = false
