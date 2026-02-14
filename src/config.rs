@@ -100,6 +100,10 @@ pub struct Config {
     // Repair Policy
     #[serde(alias = "repairPolicy")]
     pub repair_policy: Option<RepairPolicyConfig>,
+
+    // Runtime Risk Controller
+    #[serde(alias = "extensionRisk")]
+    pub extension_risk: Option<ExtensionRiskConfig>,
 }
 
 /// Extension capability policy configuration.
@@ -138,6 +142,30 @@ pub struct RepairPolicyConfig {
     pub mode: Option<String>,
 }
 
+/// Runtime risk controller configuration for extension hostcalls.
+///
+/// Deterministic, non-LLM controls for dynamic hardening/denial decisions.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExtensionRiskConfig {
+    /// Enable runtime risk controller.
+    pub enabled: Option<bool>,
+    /// Type-I error target for sequential detector (0 < alpha < 1).
+    pub alpha: Option<f64>,
+    /// Sliding window size for residual/drift checks.
+    #[serde(alias = "windowSize")]
+    pub window_size: Option<u32>,
+    /// Max in-memory risk ledger entries.
+    #[serde(alias = "ledgerLimit")]
+    pub ledger_limit: Option<u32>,
+    /// Max budget per risk decision in milliseconds.
+    #[serde(alias = "decisionTimeoutMs")]
+    pub decision_timeout_ms: Option<u64>,
+    /// Fail closed when controller evaluation errors or exceeds budget.
+    #[serde(alias = "failClosed")]
+    pub fail_closed: Option<bool>,
+}
+
 /// Resolved extension policy plus explainability metadata.
 #[derive(Debug, Clone)]
 pub struct ResolvedExtensionPolicy {
@@ -162,6 +190,15 @@ pub struct ResolvedRepairPolicy {
     pub effective_mode: crate::extensions::RepairPolicyMode,
     /// Source of the selected mode token: cli, env, config, or default.
     pub source: &'static str,
+}
+
+/// Resolved runtime risk settings plus source metadata.
+#[derive(Debug, Clone)]
+pub struct ResolvedExtensionRisk {
+    /// Source of the resolved settings: env, config, or default.
+    pub source: &'static str,
+    /// Effective settings used by the extension runtime.
+    pub settings: crate::extensions::RuntimeRiskConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -414,6 +451,9 @@ impl Config {
 
             // Repair Policy
             repair_policy: merge_repair_policy(base.repair_policy, other.repair_policy),
+
+            // Runtime Risk Controller
+            extension_risk: merge_extension_risk(base.extension_risk, other.extension_risk),
         }
     }
 
@@ -654,6 +694,108 @@ impl Config {
             .effective_mode
     }
 
+    /// Resolve runtime risk controller settings from config and environment.
+    ///
+    /// Resolution order (highest precedence first):
+    /// 1. `PI_EXTENSION_RISK_*` env vars
+    /// 2. `extensionRisk` config
+    /// 3. deterministic defaults
+    pub fn resolve_extension_risk_with_metadata(&self) -> ResolvedExtensionRisk {
+        fn parse_env_bool(name: &str) -> Option<bool> {
+            std::env::var(name).ok().and_then(|v| {
+                let t = v.trim();
+                if t.eq_ignore_ascii_case("1")
+                    || t.eq_ignore_ascii_case("true")
+                    || t.eq_ignore_ascii_case("yes")
+                    || t.eq_ignore_ascii_case("on")
+                {
+                    Some(true)
+                } else if t.eq_ignore_ascii_case("0")
+                    || t.eq_ignore_ascii_case("false")
+                    || t.eq_ignore_ascii_case("no")
+                    || t.eq_ignore_ascii_case("off")
+                {
+                    Some(false)
+                } else {
+                    None
+                }
+            })
+        }
+
+        fn parse_env_f64(name: &str) -> Option<f64> {
+            std::env::var(name).ok().and_then(|v| v.trim().parse().ok())
+        }
+
+        fn parse_env_u32(name: &str) -> Option<u32> {
+            std::env::var(name).ok().and_then(|v| v.trim().parse().ok())
+        }
+
+        fn parse_env_u64(name: &str) -> Option<u64> {
+            std::env::var(name).ok().and_then(|v| v.trim().parse().ok())
+        }
+
+        let mut settings = crate::extensions::RuntimeRiskConfig::default();
+        let mut source = "default";
+
+        if let Some(cfg) = self.extension_risk.as_ref() {
+            if let Some(enabled) = cfg.enabled {
+                settings.enabled = enabled;
+                source = "config";
+            }
+            if let Some(alpha) = cfg.alpha {
+                settings.alpha = alpha.clamp(1.0e-6, 0.5);
+                source = "config";
+            }
+            if let Some(window_size) = cfg.window_size {
+                settings.window_size = window_size.clamp(8, 4096) as usize;
+                source = "config";
+            }
+            if let Some(ledger_limit) = cfg.ledger_limit {
+                settings.ledger_limit = ledger_limit.clamp(32, 20_000) as usize;
+                source = "config";
+            }
+            if let Some(timeout_ms) = cfg.decision_timeout_ms {
+                settings.decision_timeout_ms = timeout_ms.clamp(1, 2_000);
+                source = "config";
+            }
+            if let Some(fail_closed) = cfg.fail_closed {
+                settings.fail_closed = fail_closed;
+                source = "config";
+            }
+        }
+
+        if let Some(enabled) = parse_env_bool("PI_EXTENSION_RISK_ENABLED") {
+            settings.enabled = enabled;
+            source = "env";
+        }
+        if let Some(alpha) = parse_env_f64("PI_EXTENSION_RISK_ALPHA") {
+            settings.alpha = alpha.clamp(1.0e-6, 0.5);
+            source = "env";
+        }
+        if let Some(window_size) = parse_env_u32("PI_EXTENSION_RISK_WINDOW") {
+            settings.window_size = window_size.clamp(8, 4096) as usize;
+            source = "env";
+        }
+        if let Some(ledger_limit) = parse_env_u32("PI_EXTENSION_RISK_LEDGER_LIMIT") {
+            settings.ledger_limit = ledger_limit.clamp(32, 20_000) as usize;
+            source = "env";
+        }
+        if let Some(timeout_ms) = parse_env_u64("PI_EXTENSION_RISK_DECISION_TIMEOUT_MS") {
+            settings.decision_timeout_ms = timeout_ms.clamp(1, 2_000);
+            source = "env";
+        }
+        if let Some(fail_closed) = parse_env_bool("PI_EXTENSION_RISK_FAIL_CLOSED") {
+            settings.fail_closed = fail_closed;
+            source = "env";
+        }
+
+        ResolvedExtensionRisk { source, settings }
+    }
+
+    pub fn resolve_extension_risk(&self) -> crate::extensions::RuntimeRiskConfig {
+        self.resolve_extension_risk_with_metadata().settings
+    }
+
     fn emit_queue_mode_diagnostics(&self) {
         emit_queue_mode_diagnostic("steering_mode", self.steering_mode.as_deref());
         emit_queue_mode_diagnostic("follow_up_mode", self.follow_up_mode.as_deref());
@@ -702,7 +844,7 @@ where
 }
 
 pub(crate) fn parse_queue_mode(mode: Option<&str>) -> Option<QueueMode> {
-    match mode.map(str::trim) {
+    match mode.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
         Some("all") => Some(QueueMode::All),
         Some("one-at-a-time") => Some(QueueMode::OneAtATime),
         _ => None,
@@ -844,6 +986,25 @@ fn merge_repair_policy(
     match (base, other) {
         (Some(base), Some(other)) => Some(RepairPolicyConfig {
             mode: other.mode.or(base.mode),
+        }),
+        (None, Some(other)) => Some(other),
+        (Some(base), None) => Some(base),
+        (None, None) => None,
+    }
+}
+
+fn merge_extension_risk(
+    base: Option<ExtensionRiskConfig>,
+    other: Option<ExtensionRiskConfig>,
+) -> Option<ExtensionRiskConfig> {
+    match (base, other) {
+        (Some(base), Some(other)) => Some(ExtensionRiskConfig {
+            enabled: other.enabled.or(base.enabled),
+            alpha: other.alpha.or(base.alpha),
+            window_size: other.window_size.or(base.window_size),
+            ledger_limit: other.ledger_limit.or(base.ledger_limit),
+            decision_timeout_ms: other.decision_timeout_ms.or(base.decision_timeout_ms),
+            fail_closed: other.fail_closed.or(base.fail_closed),
         }),
         (None, Some(other)) => Some(other),
         (Some(base), None) => Some(base),

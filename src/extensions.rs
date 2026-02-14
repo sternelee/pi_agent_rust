@@ -12,7 +12,7 @@ use crate::extensions_js::{
     ExtensionRepairEvent, ExtensionToolDef, HostcallKind, HostcallRequest, PiJsRuntime,
     PiJsRuntimeConfig, js_to_json, json_to_js,
 };
-use crate::permissions::PermissionStore;
+use crate::permissions::{PermissionStore, PersistedDecision};
 use crate::scheduler::HostcallOutcome;
 use crate::session::SessionMessage;
 use crate::tools::ToolRegistry;
@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::Digest as _;
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -1481,6 +1481,284 @@ impl Default for ExtensionPolicy {
             per_extension: HashMap::new(),
         }
     }
+}
+
+/// Deterministic runtime risk-controller settings for extension hostcalls.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuntimeRiskConfig {
+    /// Master switch for runtime risk decisions.
+    pub enabled: bool,
+    /// Type-I error budget for sequential detection (0 < alpha < 1).
+    pub alpha: f64,
+    /// Sliding-window size for residual/drift checks.
+    pub window_size: usize,
+    /// Max in-memory entries retained in the risk evidence ledger.
+    pub ledger_limit: usize,
+    /// Max decision budget per hostcall (ms) before fallback action.
+    pub decision_timeout_ms: u64,
+    /// If true, controller failures/timeouts fail closed.
+    pub fail_closed: bool,
+}
+
+impl Default for RuntimeRiskConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            alpha: 0.01,
+            window_size: 128,
+            ledger_limit: 2048,
+            decision_timeout_ms: 50,
+            fail_closed: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum RuntimeRiskStateLabel {
+    SafeFast,
+    Suspicious,
+    Unsafe,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum RuntimeRiskAction {
+    Allow,
+    Harden,
+    Deny,
+    Terminate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RuntimeRiskPosterior {
+    safe_fast: f64,
+    suspicious: f64,
+    unsafe_: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RuntimeRiskExpectedLoss {
+    allow: f64,
+    harden: f64,
+    deny: f64,
+    terminate: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RuntimeRiskLedgerEntry {
+    ts_ms: i64,
+    extension_id: String,
+    call_id: String,
+    capability: String,
+    method: String,
+    params_hash: String,
+    policy_reason: String,
+    risk_score: f64,
+    posterior: RuntimeRiskPosterior,
+    expected_loss: RuntimeRiskExpectedLoss,
+    selected_action: RuntimeRiskAction,
+    derived_state: RuntimeRiskStateLabel,
+    triggers: Vec<String>,
+    fallback_reason: Option<String>,
+    e_process: f64,
+    e_threshold: f64,
+    conformal_residual: f64,
+    conformal_quantile: f64,
+    drift_detected: bool,
+    outcome_error_code: Option<String>,
+    ledger_hash: String,
+    prev_ledger_hash: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeRiskDecision {
+    action: RuntimeRiskAction,
+    reason: String,
+    capability: String,
+    method: String,
+    params_hash: String,
+    risk_score: f64,
+    posterior: RuntimeRiskPosterior,
+    expected_loss: RuntimeRiskExpectedLoss,
+    e_process: f64,
+    e_threshold: f64,
+    conformal_residual: f64,
+    conformal_quantile: f64,
+    drift_detected: bool,
+    triggers: Vec<String>,
+    fallback_reason: Option<String>,
+    elapsed_ms: u64,
+    state_label: RuntimeRiskStateLabel,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeRiskState {
+    alpha_safe: f64,
+    alpha_suspicious: f64,
+    alpha_unsafe: f64,
+    log_e_process: f64,
+    recent_scores: VecDeque<f64>,
+    residual_window: VecDeque<f64>,
+    previous_residual_quantile: f64,
+    consecutive_unsafe: u32,
+    quarantined: bool,
+    last_decision: Option<RuntimeRiskAction>,
+}
+
+impl Default for RuntimeRiskState {
+    fn default() -> Self {
+        Self {
+            alpha_safe: 8.0,
+            alpha_suspicious: 1.5,
+            alpha_unsafe: 0.5,
+            log_e_process: 0.0,
+            recent_scores: VecDeque::new(),
+            residual_window: VecDeque::new(),
+            previous_residual_quantile: 0.0,
+            consecutive_unsafe: 0,
+            quarantined: false,
+            last_decision: None,
+        }
+    }
+}
+
+fn runtime_risk_now_ms() -> i64 {
+    i64::try_from(wall_now().as_millis()).unwrap_or(i64::MAX)
+}
+
+#[allow(clippy::missing_const_for_fn)]
+fn runtime_risk_clamp01(value: f64) -> f64 {
+    if value.is_nan() {
+        0.0
+    } else {
+        value.clamp(0.0, 1.0)
+    }
+}
+
+fn runtime_risk_is_dangerous(capability: &str) -> bool {
+    matches!(capability, "exec" | "env" | "http")
+}
+
+fn runtime_risk_base_score(capability: &str, method: &str, policy_reason: &str) -> f64 {
+    let capability_score = match capability {
+        "exec" => 0.95,
+        "env" => 0.85,
+        "http" => 0.70,
+        "write" => 0.45,
+        "tool" => 0.50,
+        "session" => 0.35,
+        "events" => 0.30,
+        "ui" => 0.20,
+        "read" => 0.15,
+        _ => 0.25,
+    };
+
+    let method_bonus = match method {
+        "exec" => 0.20,
+        "http" => 0.12,
+        "tool" => 0.08,
+        _ => 0.0,
+    };
+
+    let policy_bonus = if policy_reason.starts_with("prompt_user_") {
+        0.15
+    } else if policy_reason.starts_with("prompt_cache_") {
+        0.08
+    } else {
+        0.0
+    };
+
+    runtime_risk_clamp01(capability_score + method_bonus + policy_bonus)
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn runtime_risk_quantile(mut values: Vec<f64>, q: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let q = runtime_risk_clamp01(q);
+    let idx = ((values.len() - 1) as f64 * q).round() as usize;
+    values[idx.min(values.len() - 1)]
+}
+
+fn runtime_risk_choose_action(
+    posterior: &RuntimeRiskPosterior,
+    e_process_breach: bool,
+    drift_detected: bool,
+) -> (
+    RuntimeRiskAction,
+    RuntimeRiskExpectedLoss,
+    Vec<String>,
+    RuntimeRiskStateLabel,
+) {
+    // Asymmetric loss matrix:
+    // - false allow on unsafe is very costly
+    // - denying known-safe calls has meaningful UX/compat cost
+    let allow_loss = 120.0f64.mul_add(posterior.unsafe_, 8.0 * posterior.suspicious);
+    let harden_loss = 35.0f64.mul_add(
+        posterior.unsafe_,
+        3.0f64.mul_add(posterior.safe_fast, 2.0 * posterior.suspicious),
+    );
+    let deny_loss = 2.0f64.mul_add(
+        posterior.unsafe_,
+        20.0f64.mul_add(posterior.safe_fast, 4.0 * posterior.suspicious),
+    );
+    let terminate_loss = 1.0f64.mul_add(
+        posterior.unsafe_,
+        35.0f64.mul_add(posterior.safe_fast, 8.0 * posterior.suspicious),
+    );
+
+    let expected = RuntimeRiskExpectedLoss {
+        allow: allow_loss,
+        harden: harden_loss,
+        deny: deny_loss,
+        terminate: terminate_loss,
+    };
+
+    let mut best = RuntimeRiskAction::Allow;
+    let mut best_loss = allow_loss;
+    if harden_loss < best_loss {
+        best = RuntimeRiskAction::Harden;
+        best_loss = harden_loss;
+    }
+    if deny_loss < best_loss {
+        best = RuntimeRiskAction::Deny;
+        best_loss = deny_loss;
+    }
+    if terminate_loss < best_loss {
+        best = RuntimeRiskAction::Terminate;
+    }
+
+    let mut triggers = Vec::new();
+    if e_process_breach {
+        triggers.push("e_process_breach".to_string());
+        if matches!(best, RuntimeRiskAction::Allow) {
+            best = RuntimeRiskAction::Harden;
+        }
+    }
+    if drift_detected {
+        triggers.push("drift_detected".to_string());
+        if matches!(best, RuntimeRiskAction::Allow) {
+            best = RuntimeRiskAction::Harden;
+        }
+    }
+
+    let state_label = if posterior.unsafe_ >= 0.55 {
+        RuntimeRiskStateLabel::Unsafe
+    } else if posterior.suspicious >= 0.40 {
+        RuntimeRiskStateLabel::Suspicious
+    } else {
+        RuntimeRiskStateLabel::SafeFast
+    };
+
+    (best, expected, triggers, state_label)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -6915,6 +7193,7 @@ fn log_hostcall_end(
 /// 3. Routes to the appropriate type-specific handler.
 /// 4. Returns a taxonomy-compliant [`HostResultPayload`].
 #[allow(clippy::future_not_send)]
+#[allow(clippy::too_many_lines)]
 pub async fn dispatch_host_call_shared(
     ctx: &HostCallContext<'_>,
     call: HostCallPayload,
@@ -6966,8 +7245,45 @@ pub async fn dispatch_host_call_shared(
         &params_hash,
     );
 
+    let mut runtime_risk_decision = None;
     let outcome = if decision == PolicyDecision::Allow {
-        dispatch_shared_allowed(ctx, &call).await
+        if let Some(manager) = ctx.manager.as_ref() {
+            runtime_risk_decision = manager.evaluate_runtime_risk(
+                ctx.extension_id,
+                &call_id,
+                capability,
+                &method,
+                &params_hash,
+                &reason,
+            );
+        }
+
+        match runtime_risk_decision
+            .as_ref()
+            .map_or(RuntimeRiskAction::Allow, |d| d.action)
+        {
+            RuntimeRiskAction::Allow => dispatch_shared_allowed(ctx, &call).await,
+            RuntimeRiskAction::Harden => {
+                if runtime_risk_is_dangerous(capability) {
+                    HostcallOutcome::Error {
+                        code: "denied".to_string(),
+                        message: format!(
+                            "Capability '{capability}' denied by runtime risk hardening"
+                        ),
+                    }
+                } else {
+                    dispatch_shared_allowed(ctx, &call).await
+                }
+            }
+            RuntimeRiskAction::Deny => HostcallOutcome::Error {
+                code: "denied".to_string(),
+                message: format!("Capability '{capability}' denied by runtime risk controller"),
+            },
+            RuntimeRiskAction::Terminate => HostcallOutcome::Error {
+                code: "denied".to_string(),
+                message: "Extension quarantined by runtime risk controller".to_string(),
+            },
+        }
     } else {
         HostcallOutcome::Error {
             code: "denied".to_string(),
@@ -6986,6 +7302,22 @@ pub async fn dispatch_host_call_shared(
         duration_ms,
         &outcome,
     );
+
+    if let (Some(manager), Some(risk_decision)) =
+        (ctx.manager.as_ref(), runtime_risk_decision.as_ref())
+    {
+        let outcome_error_code = match &outcome {
+            HostcallOutcome::Error { code, .. } => Some(code.as_str()),
+            _ => None,
+        };
+        manager.record_runtime_risk_outcome(
+            ctx.extension_id,
+            &call_id,
+            &reason,
+            risk_decision,
+            outcome_error_code,
+        );
+    }
 
     outcome_to_host_result(&call_id, &outcome)
 }
@@ -8585,9 +8917,14 @@ struct ExtensionManagerInner {
     current_model_id: Option<String>,
     current_thinking_level: Option<String>,
     host_actions: Option<Arc<dyn ExtensionHostActions>>,
-    policy_prompt_cache: HashMap<String, HashMap<String, bool>>,
+    policy_prompt_cache: HashMap<String, HashMap<String, PersistedDecision>>,
     /// Persistent store for "Allow Always" / "Deny Always" decisions.
     permission_store: Option<PermissionStore>,
+    /// Runtime risk controller configuration and mutable per-extension state.
+    runtime_risk_config: RuntimeRiskConfig,
+    runtime_risk_states: HashMap<String, RuntimeRiskState>,
+    runtime_risk_ledger: VecDeque<RuntimeRiskLedgerEntry>,
+    runtime_risk_last_hash: Option<String>,
     /// Budget for extension operations (structured concurrency).
     extension_budget: Budget,
 }
@@ -8696,6 +9033,64 @@ impl std::fmt::Debug for ExtensionRegion {
     }
 }
 
+fn check_version_constraint(version: &str, range: &str) -> bool {
+    let range = range.trim();
+    if range == "*" || range.is_empty() {
+        return true;
+    }
+
+    let parse = |s: &str| -> Option<(u32, u32, u32)> {
+        let parts: Vec<&str> = s.split('.').collect();
+        if parts.len() < 3 {
+            return None;
+        }
+        let major = parts[0].parse().ok()?;
+        let minor = parts[1].parse().ok()?;
+        let patch_str = parts[2].split(['-', '+']).next()?;
+        let patch = patch_str.parse().ok()?;
+        Some((major, minor, patch))
+    };
+
+    let Some((v_major, v_minor, v_patch)) = parse(version) else {
+        return false;
+    };
+
+    if let Some(rest) = range.strip_prefix('^') {
+        let Some((r_major, _, _)) = parse(rest) else {
+            return false;
+        };
+        return v_major == r_major;
+    }
+
+    if let Some(rest) = range.strip_prefix('~') {
+        let Some((r_major, r_minor, _)) = parse(rest) else {
+            return false;
+        };
+        return v_major == r_major && v_minor == r_minor;
+    }
+
+    if let Some(rest) = range.strip_prefix(">=") {
+        let Some((r_major, r_minor, r_patch)) = parse(rest) else {
+            return false;
+        };
+        if v_major > r_major {
+            return true;
+        }
+        if v_major < r_major {
+            return false;
+        }
+        if v_minor > r_minor {
+            return true;
+        }
+        if v_minor < r_minor {
+            return false;
+        }
+        return v_patch >= r_patch;
+    }
+
+    version == range
+}
+
 impl ExtensionManager {
     /// Default cleanup budget for extension shutdown.
     pub const DEFAULT_CLEANUP_BUDGET: Duration = Duration::from_secs(5);
@@ -8730,7 +9125,7 @@ impl ExtensionManager {
         match PermissionStore::open_default() {
             Ok(store) => {
                 // Seed the in-memory cache from persisted decisions.
-                inner.policy_prompt_cache = store.to_cache_map();
+                inner.policy_prompt_cache = store.to_decision_cache();
                 inner.permission_store = Some(store);
             }
             Err(e) => {
@@ -8777,6 +9172,376 @@ impl ExtensionManager {
             let remaining_ms = deadline.as_millis().saturating_sub(now.as_millis());
             operation_timeout_ms.min(remaining_ms)
         })
+    }
+
+    fn runtime_risk_extension_key(extension_id: Option<&str>) -> String {
+        extension_id.unwrap_or("<unknown>").to_string()
+    }
+
+    fn runtime_risk_push_ledger(
+        guard: &mut ExtensionManagerInner,
+        mut entry: RuntimeRiskLedgerEntry,
+    ) -> RuntimeRiskLedgerEntry {
+        let prev_hash = guard.runtime_risk_last_hash.clone();
+        entry.prev_ledger_hash.clone_from(&prev_hash);
+
+        // Compute hash chain over previous hash + current entry body.
+        let mut hasher = sha2::Sha256::new();
+        if let Some(prev) = prev_hash.as_deref() {
+            hasher.update(prev.as_bytes());
+        }
+        let entry_json = serde_json::to_string(&entry).unwrap_or_default();
+        hasher.update(entry_json.as_bytes());
+        let digest = hasher.finalize();
+        entry.ledger_hash = format!("{digest:x}");
+
+        guard.runtime_risk_last_hash = Some(entry.ledger_hash.clone());
+        guard.runtime_risk_ledger.push_back(entry.clone());
+        while guard.runtime_risk_ledger.len() > guard.runtime_risk_config.ledger_limit {
+            let _ = guard.runtime_risk_ledger.pop_front();
+        }
+        entry
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn set_runtime_risk_config(&self, config: RuntimeRiskConfig) {
+        let mut guard = self.inner.lock().unwrap();
+        let clamped = RuntimeRiskConfig {
+            enabled: config.enabled,
+            alpha: config.alpha.clamp(1.0e-6, 0.5),
+            window_size: config.window_size.clamp(8, 4096),
+            ledger_limit: config.ledger_limit.clamp(32, 20_000),
+            decision_timeout_ms: config.decision_timeout_ms.clamp(1, 2_000),
+            fail_closed: config.fail_closed,
+        };
+        guard.runtime_risk_config = clamped;
+    }
+
+    pub fn runtime_risk_config(&self) -> RuntimeRiskConfig {
+        self.inner.lock().unwrap().runtime_risk_config.clone()
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        clippy::significant_drop_tightening,
+        clippy::cast_precision_loss,
+        clippy::suboptimal_flops
+    )]
+    fn evaluate_runtime_risk(
+        &self,
+        extension_id: Option<&str>,
+        _call_id: &str,
+        capability: &str,
+        method: &str,
+        params_hash: &str,
+        policy_reason: &str,
+    ) -> Option<RuntimeRiskDecision> {
+        let started = Instant::now();
+        let mut guard = self.inner.lock().unwrap();
+        let config = guard.runtime_risk_config.clone();
+        if !config.enabled {
+            return None;
+        }
+
+        let ext_key = Self::runtime_risk_extension_key(extension_id);
+        let state = guard.runtime_risk_states.entry(ext_key).or_default();
+
+        if state.quarantined {
+            let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            return Some(RuntimeRiskDecision {
+                action: RuntimeRiskAction::Terminate,
+                reason: "quarantined".to_string(),
+                capability: capability.to_string(),
+                method: method.to_string(),
+                params_hash: params_hash.to_string(),
+                risk_score: 1.0,
+                posterior: RuntimeRiskPosterior {
+                    safe_fast: 0.0,
+                    suspicious: 0.0,
+                    unsafe_: 1.0,
+                },
+                expected_loss: RuntimeRiskExpectedLoss {
+                    allow: 120.0,
+                    harden: 35.0,
+                    deny: 2.0,
+                    terminate: 1.0,
+                },
+                e_process: f64::INFINITY,
+                e_threshold: 1.0 / config.alpha,
+                conformal_residual: 1.0,
+                conformal_quantile: state.previous_residual_quantile,
+                drift_detected: true,
+                triggers: vec!["quarantined".to_string()],
+                fallback_reason: None,
+                elapsed_ms,
+                state_label: RuntimeRiskStateLabel::Unsafe,
+            });
+        }
+
+        let base = runtime_risk_base_score(capability, method, policy_reason);
+        let recent_mean = if state.recent_scores.is_empty() {
+            0.0
+        } else {
+            state.recent_scores.iter().sum::<f64>() / state.recent_scores.len() as f64
+        };
+        let mut risk_score = runtime_risk_clamp01((0.65 * base) + (0.35 * recent_mean));
+        if runtime_risk_is_dangerous(capability)
+            && matches!(state.last_decision, Some(RuntimeRiskAction::Harden))
+        {
+            risk_score = runtime_risk_clamp01(risk_score + 0.10);
+        }
+
+        state.recent_scores.push_back(risk_score);
+        while state.recent_scores.len() > config.window_size {
+            let _ = state.recent_scores.pop_front();
+        }
+
+        // Soft Bayesian evidence update.
+        let safe_evidence = (1.0 - risk_score).max(0.05);
+        let suspicious_evidence = (risk_score * 0.9).max(0.01);
+        let unsafe_evidence = if runtime_risk_is_dangerous(capability) {
+            (risk_score * 0.8).max(0.01)
+        } else {
+            (risk_score * 0.35).max(0.01)
+        };
+
+        state.alpha_safe += safe_evidence;
+        state.alpha_suspicious += suspicious_evidence;
+        state.alpha_unsafe += unsafe_evidence;
+
+        let denom = state.alpha_safe + state.alpha_suspicious + state.alpha_unsafe;
+        let posterior = RuntimeRiskPosterior {
+            safe_fast: runtime_risk_clamp01(state.alpha_safe / denom),
+            suspicious: runtime_risk_clamp01(state.alpha_suspicious / denom),
+            unsafe_: runtime_risk_clamp01(state.alpha_unsafe / denom),
+        };
+
+        // Anytime-valid sequential evidence (likelihood-ratio style e-process).
+        let x = if risk_score >= 0.65 { 1.0 } else { 0.0 };
+        let p0: f64 = 0.10;
+        let p1: f64 = 0.45;
+        let log_lr = if x > 0.5 {
+            f64::ln(p1 / p0)
+        } else {
+            f64::ln((1.0 - p1) / (1.0 - p0))
+        };
+        state.log_e_process = (state.log_e_process + log_lr).clamp(-120.0, 120.0);
+        let e_process = state.log_e_process.exp();
+        let e_threshold = 1.0 / config.alpha;
+        let e_process_breach = e_process >= e_threshold;
+
+        // BOCPD-lite drift: compare first/second half moving means.
+        let mut drift_detected = false;
+        if state.recent_scores.len() >= config.window_size / 2 {
+            let len = state.recent_scores.len();
+            let split = len / 2;
+            if split > 0 {
+                let first_mean = state.recent_scores.iter().take(split).sum::<f64>() / split as f64;
+                let second_mean =
+                    state.recent_scores.iter().skip(split).sum::<f64>() / (len - split) as f64;
+                drift_detected = (second_mean - first_mean).abs() >= 0.22;
+            }
+        }
+
+        let conformal_residual = (risk_score - recent_mean).abs();
+        let conformal_quantile = if state.residual_window.is_empty() {
+            state.previous_residual_quantile
+        } else {
+            runtime_risk_quantile(
+                state.residual_window.iter().copied().collect(),
+                1.0 - config.alpha,
+            )
+        };
+        if conformal_quantile > 0.0 && conformal_residual > conformal_quantile * 1.5 {
+            drift_detected = true;
+        }
+
+        let (mut action, expected_loss, mut triggers, state_label) =
+            runtime_risk_choose_action(&posterior, e_process_breach, drift_detected);
+
+        if state.consecutive_unsafe >= 3 && posterior.unsafe_ >= 0.45 {
+            action = RuntimeRiskAction::Terminate;
+            triggers.push("unsafe_streak".to_string());
+        }
+
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let mut fallback_reason = None;
+        if elapsed_ms > config.decision_timeout_ms {
+            fallback_reason = Some("decision_timeout".to_string());
+            action = if config.fail_closed {
+                RuntimeRiskAction::Harden
+            } else {
+                RuntimeRiskAction::Allow
+            };
+            triggers.push("decision_timeout".to_string());
+        }
+
+        state.last_decision = Some(action);
+
+        Some(RuntimeRiskDecision {
+            action,
+            reason: "runtime_risk".to_string(),
+            capability: capability.to_string(),
+            method: method.to_string(),
+            params_hash: params_hash.to_string(),
+            risk_score,
+            posterior,
+            expected_loss,
+            e_process,
+            e_threshold,
+            conformal_residual,
+            conformal_quantile,
+            drift_detected,
+            triggers,
+            fallback_reason,
+            elapsed_ms,
+            state_label,
+        })
+    }
+
+    #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
+    fn record_runtime_risk_outcome(
+        &self,
+        extension_id: Option<&str>,
+        call_id: &str,
+        policy_reason: &str,
+        decision: &RuntimeRiskDecision,
+        outcome_error_code: Option<&str>,
+    ) {
+        let mut guard = self.inner.lock().unwrap();
+        if !guard.runtime_risk_config.enabled {
+            return;
+        }
+        let window_size = guard.runtime_risk_config.window_size;
+        let alpha = guard.runtime_risk_config.alpha;
+
+        let ext_key = Self::runtime_risk_extension_key(extension_id);
+        let Some(state) = guard.runtime_risk_states.get_mut(&ext_key) else {
+            return;
+        };
+
+        let realized_risk = if outcome_error_code.is_some() {
+            1.0
+        } else {
+            0.0
+        };
+        let predicted =
+            runtime_risk_clamp01(decision.posterior.suspicious + decision.posterior.unsafe_);
+        let residual = (predicted - realized_risk).abs();
+
+        state.residual_window.push_back(residual);
+        while state.residual_window.len() > window_size {
+            let _ = state.residual_window.pop_front();
+        }
+        state.previous_residual_quantile =
+            runtime_risk_quantile(state.residual_window.iter().copied().collect(), 1.0 - alpha);
+
+        let denied_dangerous = outcome_error_code.is_some_and(|code| code == "denied")
+            && runtime_risk_is_dangerous(&decision.capability);
+        if decision.posterior.unsafe_ >= 0.55
+            || matches!(decision.action, RuntimeRiskAction::Terminate)
+            || denied_dangerous
+        {
+            state.consecutive_unsafe = state.consecutive_unsafe.saturating_add(1);
+        } else {
+            state.consecutive_unsafe = 0;
+        }
+        if state.consecutive_unsafe >= 3 {
+            state.quarantined = true;
+        }
+
+        // Outcome-conditioned Bayesian reinforcement.
+        if let Some(code) = outcome_error_code {
+            if code == "denied" || code == "timeout" || code == "io" {
+                state.alpha_unsafe += 0.9;
+                state.alpha_suspicious += 0.4;
+            } else {
+                state.alpha_suspicious += 0.35;
+            }
+        } else {
+            state.alpha_safe += 0.6;
+        }
+
+        let entry = RuntimeRiskLedgerEntry {
+            ts_ms: runtime_risk_now_ms(),
+            extension_id: ext_key,
+            call_id: call_id.to_string(),
+            capability: decision.capability.clone(),
+            method: decision.method.clone(),
+            params_hash: decision.params_hash.clone(),
+            policy_reason: policy_reason.to_string(),
+            risk_score: decision.risk_score,
+            posterior: decision.posterior.clone(),
+            expected_loss: decision.expected_loss.clone(),
+            selected_action: decision.action,
+            derived_state: decision.state_label,
+            triggers: decision.triggers.clone(),
+            fallback_reason: decision.fallback_reason.clone(),
+            e_process: decision.e_process,
+            e_threshold: decision.e_threshold,
+            conformal_residual: residual,
+            conformal_quantile: state.previous_residual_quantile,
+            drift_detected: decision.drift_detected,
+            outcome_error_code: outcome_error_code.map(ToString::to_string),
+            ledger_hash: String::new(),
+            prev_ledger_hash: None,
+        };
+
+        let entry = Self::runtime_risk_push_ledger(&mut guard, entry);
+
+        if matches!(
+            decision.action,
+            RuntimeRiskAction::Deny | RuntimeRiskAction::Terminate | RuntimeRiskAction::Harden
+        ) {
+            tracing::warn!(
+                event = "runtime_risk.decision",
+                extension_id = %entry.extension_id,
+                call_id = %entry.call_id,
+                capability = %entry.capability,
+                method = %entry.method,
+                selected_action = ?entry.selected_action,
+                state = ?entry.derived_state,
+                risk_score = entry.risk_score,
+                e_process = entry.e_process,
+                e_threshold = entry.e_threshold,
+                conformal_residual = entry.conformal_residual,
+                conformal_quantile = entry.conformal_quantile,
+                triggers = ?entry.triggers,
+                fallback_reason = ?entry.fallback_reason,
+                outcome_error_code = ?entry.outcome_error_code,
+                ledger_hash = %entry.ledger_hash,
+                "Runtime risk controller applied defensive action"
+            );
+        } else {
+            tracing::info!(
+                event = "runtime_risk.decision",
+                extension_id = %entry.extension_id,
+                call_id = %entry.call_id,
+                capability = %entry.capability,
+                method = %entry.method,
+                selected_action = ?entry.selected_action,
+                state = ?entry.derived_state,
+                risk_score = entry.risk_score,
+                e_process = entry.e_process,
+                e_threshold = entry.e_threshold,
+                conformal_residual = entry.conformal_residual,
+                conformal_quantile = entry.conformal_quantile,
+                triggers = ?entry.triggers,
+                ledger_hash = %entry.ledger_hash,
+                "Runtime risk controller allowed hostcall"
+            );
+        }
+    }
+
+    #[cfg(test)]
+    fn runtime_risk_ledger_snapshot(&self) -> Vec<RuntimeRiskLedgerEntry> {
+        self.inner
+            .lock()
+            .unwrap()
+            .runtime_risk_ledger
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// Shut down the extension runtime with a cleanup budget.
@@ -8851,25 +9616,66 @@ impl ExtensionManager {
         extension_id: &str,
         capability: &str,
     ) -> Option<bool> {
-        let guard = self.inner.lock().unwrap();
-        guard
-            .policy_prompt_cache
-            .get(extension_id)
-            .and_then(|by_cap| by_cap.get(capability))
-            .copied()
+        let (dec, extension_version) = {
+            let guard = self.inner.lock().unwrap();
+            let dec = guard
+                .policy_prompt_cache
+                .get(extension_id)
+                .and_then(|by_cap| by_cap.get(capability))?
+                .clone();
+            let extension_version = guard
+                .extensions
+                .iter()
+                .find(|e| e.name == extension_id)
+                .map(|e| e.version.clone());
+            drop(guard);
+            (dec, extension_version)
+        };
+
+        if let Some(range) = &dec.version_range {
+            if let Some(version) = extension_version {
+                if !check_version_constraint(&version, range) {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        }
+
+        Some(dec.allow)
     }
 
     pub fn cache_policy_prompt_decision(&self, extension_id: &str, capability: &str, allow: bool) {
         let mut guard = self.inner.lock().unwrap();
+
+        let version_range = guard
+            .extensions
+            .iter()
+            .find(|e| e.name == extension_id)
+            .map(|e| format!("^{}", e.version));
+
+        let decision = PersistedDecision {
+            capability: capability.to_string(),
+            allow,
+            decided_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            expires_at: None,
+            version_range: version_range.clone(),
+        };
+
         guard
             .policy_prompt_cache
             .entry(extension_id.to_string())
             .or_default()
-            .insert(capability.to_string(), allow);
+            .insert(capability.to_string(), decision);
 
         // Persist to disk so the decision survives across sessions.
         if let Some(ref mut store) = guard.permission_store {
-            if let Err(e) = store.record(extension_id, capability, allow) {
+            let res = if let Some(range) = version_range {
+                store.record_with_version(extension_id, capability, allow, &range)
+            } else {
+                store.record(extension_id, capability, allow)
+            };
+            if let Err(e) = res {
                 tracing::warn!("Failed to persist permission decision: {e}");
             }
         }
@@ -8900,7 +9706,17 @@ impl ExtensionManager {
     /// List all persisted permission decisions.
     pub fn list_permissions(&self) -> HashMap<String, HashMap<String, bool>> {
         let guard = self.inner.lock().unwrap();
-        guard.policy_prompt_cache.clone()
+        guard
+            .policy_prompt_cache
+            .iter()
+            .map(|(extension_id, caps)| {
+                let mapped = caps
+                    .iter()
+                    .map(|(cap, decision)| (cap.clone(), decision.allow))
+                    .collect::<HashMap<_, _>>();
+                (extension_id.clone(), mapped)
+            })
+            .collect()
     }
 
     pub fn active_tools(&self) -> Option<Vec<String>> {
@@ -8962,6 +9778,14 @@ impl ExtensionManager {
             guard.active_tools = active_tools;
             guard.providers = all_providers;
             guard.flags = all_flags;
+            let active_extension_ids = guard
+                .extensions
+                .iter()
+                .map(|ext| ext.name.clone())
+                .collect::<std::collections::HashSet<_>>();
+            guard
+                .runtime_risk_states
+                .retain(|ext_id, _| active_extension_ids.contains(ext_id));
         }
         Ok(())
     }
@@ -15714,6 +16538,174 @@ mod tests {
                 err.message.contains("denied"),
                 "message should mention denial, got: {}",
                 err.message
+            );
+        });
+    }
+
+    #[test]
+    fn shared_dispatch_runtime_risk_disabled_is_isomorphic() {
+        let dir = tempdir().expect("tempdir");
+        let tools = ToolRegistry::new(&[], dir.path(), None);
+        let http = HttpConnector::with_defaults();
+        let policy = permissive_policy();
+        let baseline_ctx = test_host_call_context(&tools, &http, &policy);
+
+        let manager = ExtensionManager::new();
+        manager.set_runtime_risk_config(RuntimeRiskConfig {
+            enabled: false,
+            ..Default::default()
+        });
+        let risk_ctx = HostCallContext {
+            runtime_name: "test",
+            extension_id: Some("ext.test"),
+            tools: &tools,
+            http: &http,
+            manager: Some(manager),
+            policy: &policy,
+            js_runtime: None,
+            interceptor: None,
+        };
+
+        let call = HostCallPayload {
+            call_id: "call-risk-off".to_string(),
+            capability: "log".to_string(),
+            method: "log".to_string(),
+            params: json!({ "level": "info", "message": "isomorphism" }),
+            timeout_ms: None,
+            cancel_token: None,
+            context: None,
+        };
+
+        run_async(async {
+            let baseline = dispatch_host_call_shared(&baseline_ctx, call.clone()).await;
+            let with_risk = dispatch_host_call_shared(&risk_ctx, call).await;
+            assert_eq!(baseline.is_error, with_risk.is_error);
+            assert_eq!(baseline.error.is_some(), with_risk.error.is_some());
+            if let (Some(a), Some(b)) = (baseline.error, with_risk.error) {
+                assert_eq!(a.code, b.code);
+                assert_eq!(a.message, b.message);
+            }
+        });
+    }
+
+    #[test]
+    fn shared_dispatch_runtime_risk_hardens_exec_calls() {
+        let dir = tempdir().expect("tempdir");
+        let tools = ToolRegistry::new(&[], dir.path(), None);
+        let http = HttpConnector::with_defaults();
+        let policy = permissive_policy();
+
+        let manager = ExtensionManager::new();
+        manager.set_runtime_risk_config(RuntimeRiskConfig {
+            enabled: true,
+            alpha: 0.01,
+            window_size: 64,
+            ledger_limit: 512,
+            decision_timeout_ms: 50,
+            fail_closed: true,
+        });
+
+        let ctx = HostCallContext {
+            runtime_name: "test",
+            extension_id: Some("ext.test"),
+            tools: &tools,
+            http: &http,
+            manager: Some(manager.clone()),
+            policy: &policy,
+            js_runtime: None,
+            interceptor: None,
+        };
+
+        let call = HostCallPayload {
+            call_id: "call-risk-harden".to_string(),
+            capability: "exec".to_string(),
+            method: "exec".to_string(),
+            params: json!({ "cmd": "echo", "args": ["hello"] }),
+            timeout_ms: None,
+            cancel_token: None,
+            context: None,
+        };
+
+        run_async(async {
+            let result = dispatch_host_call_shared(&ctx, call).await;
+            assert!(result.is_error, "exec should be denied by risk hardening");
+            let err = result.error.expect("expected error payload");
+            assert_eq!(err.code, HostCallErrorCode::Denied);
+            assert!(
+                err.message.contains("runtime risk"),
+                "expected runtime risk denial, got: {}",
+                err.message
+            );
+
+            let ledger = manager.runtime_risk_ledger_snapshot();
+            assert!(!ledger.is_empty(), "risk ledger should record decisions");
+            let last = ledger.last().expect("last ledger entry");
+            assert_ne!(last.selected_action, RuntimeRiskAction::Allow);
+            assert!(
+                !last.ledger_hash.is_empty(),
+                "ledger entry should include hash chain"
+            );
+        });
+    }
+
+    #[test]
+    fn shared_dispatch_runtime_risk_quarantines_repeated_unsafe_attempts() {
+        let dir = tempdir().expect("tempdir");
+        let tools = ToolRegistry::new(&[], dir.path(), None);
+        let http = HttpConnector::with_defaults();
+        let policy = permissive_policy();
+
+        let manager = ExtensionManager::new();
+        manager.set_runtime_risk_config(RuntimeRiskConfig {
+            enabled: true,
+            alpha: 0.01,
+            window_size: 32,
+            ledger_limit: 512,
+            decision_timeout_ms: 50,
+            fail_closed: true,
+        });
+
+        let ctx = HostCallContext {
+            runtime_name: "test",
+            extension_id: Some("ext.test"),
+            tools: &tools,
+            http: &http,
+            manager: Some(manager.clone()),
+            policy: &policy,
+            js_runtime: None,
+            interceptor: None,
+        };
+
+        run_async(async {
+            let mut saw_quarantine = false;
+            for idx in 0..6 {
+                let call = HostCallPayload {
+                    call_id: format!("call-risk-unsafe-{idx}"),
+                    capability: "exec".to_string(),
+                    method: "exec".to_string(),
+                    params: json!({ "cmd": "echo", "args": [idx.to_string()] }),
+                    timeout_ms: None,
+                    cancel_token: None,
+                    context: None,
+                };
+                let result = dispatch_host_call_shared(&ctx, call).await;
+                assert!(result.is_error, "unsafe exec attempt should be blocked");
+                let err = result.error.expect("error payload");
+                if err.message.contains("quarantined") {
+                    saw_quarantine = true;
+                }
+            }
+
+            assert!(
+                saw_quarantine,
+                "controller should eventually quarantine repeated unsafe attempts"
+            );
+            let ledger = manager.runtime_risk_ledger_snapshot();
+            assert!(
+                ledger
+                    .iter()
+                    .any(|entry| matches!(entry.selected_action, RuntimeRiskAction::Terminate)),
+                "ledger should include at least one terminate action"
             );
         });
     }

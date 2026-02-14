@@ -4030,6 +4030,22 @@ impl AgentSession {
 
         let resolved_policy = policy.unwrap_or_default();
         let tools = Arc::new(ToolRegistry::new(enabled_tools, cwd, config));
+
+        if let Some(cfg) = config {
+            let resolved_risk = cfg.resolve_extension_risk_with_metadata();
+            tracing::info!(
+                event = "pi.extension_runtime_risk.config",
+                source = resolved_risk.source,
+                enabled = resolved_risk.settings.enabled,
+                alpha = resolved_risk.settings.alpha,
+                window_size = resolved_risk.settings.window_size,
+                ledger_limit = resolved_risk.settings.ledger_limit,
+                fail_closed = resolved_risk.settings.fail_closed,
+                "Resolved extension runtime risk settings"
+            );
+            manager.set_runtime_risk_config(resolved_risk.settings);
+        }
+
         let js_runtime = JsExtensionRuntimeHandle::start_with_policy(
             PiJsRuntimeConfig {
                 cwd: cwd.display().to_string(),

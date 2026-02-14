@@ -212,6 +212,24 @@ impl PermissionStore {
             .collect()
     }
 
+    /// Retrieve the full decision cache (including version ranges) for
+    /// runtime enforcement.
+    pub fn to_decision_cache(&self) -> HashMap<String, HashMap<String, PersistedDecision>> {
+        let now = now_iso8601();
+        self.decisions
+            .iter()
+            .map(|(ext_id, by_cap)| {
+                let filtered: HashMap<String, PersistedDecision> = by_cap
+                    .iter()
+                    .filter(|(_, dec)| dec.expires_at.as_ref().is_none_or(|exp| now <= *exp))
+                    .map(|(cap, dec)| (cap.clone(), dec.clone()))
+                    .collect();
+                (ext_id.clone(), filtered)
+            })
+            .filter(|(_, m)| !m.is_empty())
+            .collect()
+    }
+
     // -----------------------------------------------------------------------
     // Internal
     // -----------------------------------------------------------------------
