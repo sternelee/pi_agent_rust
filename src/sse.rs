@@ -48,6 +48,25 @@ impl SseParser {
         Self::default()
     }
 
+    /// Intern common SSE event type names to avoid per-event String allocation.
+    /// LLM streaming APIs use a fixed set of event types; matching them to
+    /// `Cow::Borrowed` static strings eliminates one allocation per event.
+    #[inline]
+    fn intern_event_type(value: &str) -> Cow<'static, str> {
+        match value {
+            "message" => Cow::Borrowed("message"),
+            "message_start" => Cow::Borrowed("message_start"),
+            "message_stop" => Cow::Borrowed("message_stop"),
+            "message_delta" => Cow::Borrowed("message_delta"),
+            "content_block_start" => Cow::Borrowed("content_block_start"),
+            "content_block_delta" => Cow::Borrowed("content_block_delta"),
+            "content_block_stop" => Cow::Borrowed("content_block_stop"),
+            "ping" => Cow::Borrowed("ping"),
+            "error" => Cow::Borrowed("error"),
+            _ => Cow::Owned(value.to_string()),
+        }
+    }
+
     /// Process a single line of SSE data.
     fn process_line(line: &str, current: &mut SseEvent, has_data: &mut bool) {
         if let Some(rest) = line.strip_prefix(':') {
@@ -57,7 +76,7 @@ impl SseParser {
             // Field: value
             let value = value.strip_prefix(' ').unwrap_or(value);
             match field {
-                "event" => current.event = Cow::Owned(value.to_string()),
+                "event" => current.event = Self::intern_event_type(value),
                 "data" => {
                     current.data.push_str(value);
                     current.data.push('\n');
@@ -85,28 +104,34 @@ impl SseParser {
         }
     }
 
-    /// Feed data to the parser and emit any complete events to `emit`.
-    fn feed_into<F>(&mut self, data: &str, mut emit: F)
+    /// Process complete lines from `source`, dispatching events via `emit`.
+    /// Returns the byte offset of the first unconsumed byte.
+    #[inline]
+    fn process_source<F>(
+        source: &str,
+        bom_checked: &mut bool,
+        current: &mut SseEvent,
+        has_data: &mut bool,
+        emit: &mut F,
+    ) -> usize
     where
         F: FnMut(SseEvent),
     {
-        self.buffer.push_str(data);
-
-        let mut buffer = std::mem::take(&mut self.buffer);
-
-        // Strip UTF-8 BOM from the beginning of the stream (SSE spec compliance).
-        if !self.bom_checked && !buffer.is_empty() {
-            self.bom_checked = true;
-            if buffer.starts_with('\u{FEFF}') {
-                buffer.drain(..3);
-            }
-        }
+        let bytes = source.as_bytes();
         let mut start = 0usize;
 
+        // Strip UTF-8 BOM from the beginning of the stream (SSE spec compliance).
+        if !*bom_checked && !source.is_empty() {
+            *bom_checked = true;
+            if source.starts_with('\u{FEFF}') {
+                start = 3;
+            }
+        }
+
         // Use memchr2 to find either \r or \n
-        while let Some(rel_pos) = memchr::memchr2(b'\r', b'\n', &buffer.as_bytes()[start..]) {
+        while let Some(rel_pos) = memchr::memchr2(b'\r', b'\n', &bytes[start..]) {
             let pos = start + rel_pos;
-            let b = buffer.as_bytes()[pos];
+            let b = bytes[pos];
 
             let line_end;
             let next_start;
@@ -117,9 +142,9 @@ impl SseParser {
                 next_start = pos + 1;
             } else {
                 // Found \r
-                if pos + 1 < buffer.len() {
+                if pos + 1 < source.len() {
                     line_end = pos;
-                    next_start = if buffer.as_bytes()[pos + 1] == b'\n' {
+                    next_start = if bytes[pos + 1] == b'\n' {
                         // CRLF
                         pos + 2
                     } else {
@@ -132,33 +157,66 @@ impl SseParser {
                 }
             }
 
-            let line = &buffer[start..line_end];
+            let line = &source[start..line_end];
             start = next_start;
 
             if line.is_empty() {
                 // Blank line = event boundary
-                if self.has_data {
+                if *has_data {
                     // Trim trailing newline from data
-                    if self.current.data.ends_with('\n') {
-                        self.current.data.pop();
+                    if current.data.ends_with('\n') {
+                        current.data.pop();
                     }
                     // Per SSE spec, an empty event name dispatches as "message".
-                    if self.current.event.is_empty() {
-                        self.current.event = Cow::Borrowed("message");
+                    if current.event.is_empty() {
+                        current.event = Cow::Borrowed("message");
                     }
-                    emit(std::mem::take(&mut self.current));
-                    self.current = SseEvent::default();
-                    self.has_data = false;
+                    emit(std::mem::take(current));
+                    *current = SseEvent::default();
+                    *has_data = false;
                 }
             } else {
-                Self::process_line(line, &mut self.current, &mut self.has_data);
+                Self::process_line(line, current, has_data);
             }
         }
 
-        if start > 0 {
-            buffer.drain(..start);
+        start
+    }
+
+    /// Feed data to the parser and emit any complete events to `emit`.
+    fn feed_into<F>(&mut self, data: &str, mut emit: F)
+    where
+        F: FnMut(SseEvent),
+    {
+        if self.buffer.is_empty() {
+            // Fast path: process data directly without copying to buffer.
+            // Only buffer the unconsumed tail (incomplete line at end).
+            let consumed = Self::process_source(
+                data,
+                &mut self.bom_checked,
+                &mut self.current,
+                &mut self.has_data,
+                &mut emit,
+            );
+            if consumed < data.len() {
+                self.buffer.push_str(&data[consumed..]);
+            }
+        } else {
+            // Slow path: combine with existing buffered data, then process.
+            self.buffer.push_str(data);
+            let mut buffer = std::mem::take(&mut self.buffer);
+            let consumed = Self::process_source(
+                &buffer,
+                &mut self.bom_checked,
+                &mut self.current,
+                &mut self.has_data,
+                &mut emit,
+            );
+            if consumed > 0 {
+                buffer.drain(..consumed);
+            }
+            self.buffer = buffer;
         }
-        self.buffer = buffer;
     }
 
     /// Feed data to the parser and extract any complete events.
