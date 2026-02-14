@@ -2108,7 +2108,11 @@ mod tests {
 
     #[test]
     fn overflow_prompt_is_too_long() {
-        assert!(is_context_overflow("prompt is too long: 150000 tokens", None, None));
+        assert!(is_context_overflow(
+            "prompt is too long: 150000 tokens",
+            None,
+            None
+        ));
     }
 
     #[test]
@@ -2122,7 +2126,11 @@ mod tests {
 
     #[test]
     fn overflow_exceeds_context_window() {
-        assert!(is_context_overflow("exceeds the context window", None, None));
+        assert!(is_context_overflow(
+            "exceeds the context window",
+            None,
+            None
+        ));
     }
 
     #[test]
@@ -2238,11 +2246,7 @@ mod tests {
 
     #[test]
     fn overflow_mistral_status_code_pattern() {
-        assert!(is_context_overflow(
-            "413 status code (no body)",
-            None,
-            None,
-        ));
+        assert!(is_context_overflow("413 status code (no body)", None, None,));
     }
 
     #[test]
@@ -2301,7 +2305,11 @@ mod tests {
 
     #[test]
     fn retryable_server_500() {
-        assert!(is_retryable_error("HTTP 500 internal server error", None, None));
+        assert!(is_retryable_error(
+            "HTTP 500 internal server error",
+            None,
+            None
+        ));
     }
 
     #[test]

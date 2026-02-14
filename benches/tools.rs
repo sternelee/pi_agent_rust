@@ -163,9 +163,7 @@ fn bench_sse_stream(c: &mut Criterion) {
 /// Simulates the streaming hot path: accumulate text via push_str, then share
 /// with event consumers via Arc::clone (O(1)) instead of deep clone (O(n)).
 fn bench_streaming_arc(c: &mut Criterion) {
-    use pi::model::{
-        AssistantMessage, ContentBlock, StopReason, TextContent, Usage,
-    };
+    use pi::model::{AssistantMessage, ContentBlock, StopReason, TextContent, Usage};
     use std::sync::Arc;
 
     let mut group = c.benchmark_group("streaming_clone");

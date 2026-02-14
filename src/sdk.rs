@@ -154,10 +154,7 @@ impl AgentSessionHandle {
     }
 
     /// Update thinking level and persist it to session metadata.
-    pub async fn set_thinking_level(
-        &mut self,
-        level: crate::model::ThinkingLevel,
-    ) -> Result<()> {
+    pub async fn set_thinking_level(&mut self, level: crate::model::ThinkingLevel) -> Result<()> {
         let level_string = level.to_string();
         let cx = crate::agent_cx::AgentCx::for_request();
         {
