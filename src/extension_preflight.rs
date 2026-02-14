@@ -978,35 +978,44 @@ impl SecurityRuleId {
     /// Default risk tier for this rule.
     #[must_use]
     pub const fn default_tier(self) -> RiskTier {
-        match self {
+        if matches!(
+            self,
             Self::EvalUsage
-            | Self::NewFunctionUsage
-            | Self::ProcessBinding
-            | Self::ProcessDlopen
-            | Self::ProtoPollution
-            | Self::RequireCacheManip
-            | Self::ChildProcessSpawn
-            | Self::ConstructorEscape
-            | Self::NativeModuleRequire => RiskTier::Critical,
-
+                | Self::NewFunctionUsage
+                | Self::ProcessBinding
+                | Self::ProcessDlopen
+                | Self::ProtoPollution
+                | Self::RequireCacheManip
+                | Self::ChildProcessSpawn
+                | Self::ConstructorEscape
+                | Self::NativeModuleRequire
+        ) {
+            RiskTier::Critical
+        } else if matches!(
+            self,
             Self::HardcodedSecret
-            | Self::DynamicImport
-            | Self::DefinePropertyAbuse
-            | Self::NetworkExfiltration
-            | Self::SensitivePathWrite
-            | Self::GlobalMutation
-            | Self::SymlinkCreation
-            | Self::PermissionChange
-            | Self::SocketListener
-            | Self::WebAssemblyUsage => RiskTier::High,
-
+                | Self::DynamicImport
+                | Self::DefinePropertyAbuse
+                | Self::NetworkExfiltration
+                | Self::SensitivePathWrite
+                | Self::GlobalMutation
+                | Self::SymlinkCreation
+                | Self::PermissionChange
+                | Self::SocketListener
+                | Self::WebAssemblyUsage
+        ) {
+            RiskTier::High
+        } else if matches!(
+            self,
             Self::ProcessEnvAccess
-            | Self::TimerAbuse
-            | Self::ProxyReflect
-            | Self::WithStatement
-            | Self::ArgumentsCallerAccess => RiskTier::Medium,
-
-            Self::DebuggerStatement | Self::ConsoleInfoLeak => RiskTier::Low,
+                | Self::TimerAbuse
+                | Self::ProxyReflect
+                | Self::WithStatement
+                | Self::ArgumentsCallerAccess
+        ) {
+            RiskTier::Medium
+        } else {
+            RiskTier::Low
         }
     }
 }
@@ -1096,6 +1105,7 @@ pub struct SecurityTierCounts {
 }
 
 /// Current rulebook version. Bump when rules are added or changed.
+///
 /// v2.0.0: Added 9 rules (SEC-SPAWN-001, SEC-CONSTRUCTOR-001, SEC-NATIVEMOD-001,
 ///   SEC-GLOBAL-001, SEC-SYMLINK-001, SEC-CHMOD-001, SEC-SOCKET-001,
 ///   SEC-WASM-001, SEC-ARGUMENTS-001). Stabilized deterministic sort order.
@@ -1114,7 +1124,12 @@ impl SecurityScanReport {
         findings.sort_by(|a, b| {
             a.risk_tier
                 .cmp(&b.risk_tier)
-                .then_with(|| a.file.as_deref().unwrap_or("").cmp(b.file.as_deref().unwrap_or("")))
+                .then_with(|| {
+                    a.file
+                        .as_deref()
+                        .unwrap_or("")
+                        .cmp(b.file.as_deref().unwrap_or(""))
+                })
                 .then_with(|| a.line.cmp(&b.line))
                 .then_with(|| a.column.cmp(&b.column))
                 .then_with(|| a.rule_id.name().cmp(b.rule_id.name()))
@@ -1130,9 +1145,7 @@ impl SecurityScanReport {
             }
         }
 
-        let overall_tier = findings
-            .first()
-            .map_or(RiskTier::Low, |f| f.risk_tier);
+        let overall_tier = findings.first().map_or(RiskTier::Low, |f| f.risk_tier);
 
         let verdict = match overall_tier {
             RiskTier::Critical => format!(
@@ -1148,10 +1161,7 @@ impl SecurityScanReport {
                 counts.medium
             ),
             RiskTier::Low if findings.is_empty() => "CLEAN: no security findings".to_string(),
-            RiskTier::Low => format!(
-                "INFO: {} low-risk finding(s) — informational",
-                counts.low
-            ),
+            RiskTier::Low => format!("INFO: {} low-risk finding(s) — informational", counts.low),
         };
 
         Self {
@@ -1225,11 +1235,7 @@ pub struct SecurityEvidenceLedgerEntry {
 impl SecurityEvidenceLedgerEntry {
     /// Convert a `SecurityFinding` into a ledger entry.
     #[must_use]
-    pub fn from_finding(
-        entry_index: usize,
-        extension_id: &str,
-        finding: &SecurityFinding,
-    ) -> Self {
+    pub fn from_finding(entry_index: usize, extension_id: &str, finding: &SecurityFinding) -> Self {
         Self {
             schema: SECURITY_EVIDENCE_LEDGER_SCHEMA.to_string(),
             entry_index,
@@ -1255,8 +1261,7 @@ pub fn security_evidence_ledger_jsonl(
 ) -> Result<String, serde_json::Error> {
     let mut out = String::new();
     for (i, finding) in report.findings.iter().enumerate() {
-        let entry =
-            SecurityEvidenceLedgerEntry::from_finding(i, &report.extension_id, finding);
+        let entry = SecurityEvidenceLedgerEntry::from_finding(i, &report.extension_id, finding);
         if i > 0 {
             out.push('\n');
         }
@@ -1299,11 +1304,7 @@ impl SecurityScanner {
     }
 
     /// Scan extension files under a directory.
-    pub fn scan_path(
-        extension_id: &str,
-        path: &Path,
-        root: &Path,
-    ) -> SecurityScanReport {
+    pub fn scan_path(extension_id: &str, path: &Path, root: &Path) -> SecurityScanReport {
         let files = collect_scannable_files(path);
         let mut findings = Vec::new();
 
@@ -1321,10 +1322,7 @@ impl SecurityScanner {
                 let line = strip_block_comment_tracking(raw_line, &mut in_block_comment);
                 let trimmed = line.trim();
 
-                if trimmed.is_empty()
-                    || trimmed.starts_with("//")
-                    || trimmed.starts_with('*')
-                {
+                if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with('*') {
                     continue;
                 }
 
@@ -1386,8 +1384,7 @@ impl SecurityScanner {
             findings.push(SecurityFinding {
                 rule_id: SecurityRuleId::ProcessBinding,
                 risk_tier: RiskTier::Critical,
-                rationale: "process.binding() accesses internal Node.js C++ bindings"
-                    .to_string(),
+                rationale: "process.binding() accesses internal Node.js C++ bindings".to_string(),
                 file: file_opt.clone(),
                 line: Some(line_no),
                 column: text.find("process.binding").map(|c| c + 1),
@@ -1400,8 +1397,7 @@ impl SecurityScanner {
             findings.push(SecurityFinding {
                 rule_id: SecurityRuleId::ProcessDlopen,
                 risk_tier: RiskTier::Critical,
-                rationale: "process.dlopen() loads native addons, bypassing sandbox"
-                    .to_string(),
+                rationale: "process.dlopen() loads native addons, bypassing sandbox".to_string(),
                 file: file_opt.clone(),
                 line: Some(line_no),
                 column: text.find("process.dlopen").map(|c| c + 1),
@@ -1414,8 +1410,7 @@ impl SecurityScanner {
             findings.push(SecurityFinding {
                 rule_id: SecurityRuleId::ProtoPollution,
                 risk_tier: RiskTier::Critical,
-                rationale: "Prototype manipulation can pollute shared object chains"
-                    .to_string(),
+                rationale: "Prototype manipulation can pollute shared object chains".to_string(),
                 file: file_opt.clone(),
                 line: Some(line_no),
                 column: text
@@ -1431,8 +1426,7 @@ impl SecurityScanner {
             findings.push(SecurityFinding {
                 rule_id: SecurityRuleId::RequireCacheManip,
                 risk_tier: RiskTier::Critical,
-                rationale:
-                    "require.cache manipulation can hijack module resolution".to_string(),
+                rationale: "require.cache manipulation can hijack module resolution".to_string(),
                 file: file_opt.clone(),
                 line: Some(line_no),
                 column: text.find("require.cache").map(|c| c + 1),
@@ -1460,8 +1454,7 @@ impl SecurityScanner {
             findings.push(SecurityFinding {
                 rule_id: SecurityRuleId::DynamicImport,
                 risk_tier: RiskTier::High,
-                rationale: "Dynamic import() can load arbitrary modules at runtime"
-                    .to_string(),
+                rationale: "Dynamic import() can load arbitrary modules at runtime".to_string(),
                 file: file_opt.clone(),
                 line: Some(line_no),
                 column: text.find("import(").map(|c| c + 1),
@@ -1478,9 +1471,8 @@ impl SecurityScanner {
             findings.push(SecurityFinding {
                 rule_id: SecurityRuleId::DefinePropertyAbuse,
                 risk_tier: RiskTier::High,
-                rationale:
-                    "Object.defineProperty on global/prototype can intercept operations"
-                        .to_string(),
+                rationale: "Object.defineProperty on global/prototype can intercept operations"
+                    .to_string(),
                 file: file_opt.clone(),
                 line: Some(line_no),
                 column: text.find("Object.defineProperty").map(|c| c + 1),
@@ -1507,8 +1499,7 @@ impl SecurityScanner {
             findings.push(SecurityFinding {
                 rule_id: SecurityRuleId::SensitivePathWrite,
                 risk_tier: RiskTier::High,
-                rationale: "Write to security-sensitive filesystem path detected"
-                    .to_string(),
+                rationale: "Write to security-sensitive filesystem path detected".to_string(),
                 file: file_opt.clone(),
                 line: Some(line_no),
                 column: None,
@@ -1523,8 +1514,7 @@ impl SecurityScanner {
             findings.push(SecurityFinding {
                 rule_id: SecurityRuleId::ProcessEnvAccess,
                 risk_tier: RiskTier::Medium,
-                rationale: "process.env access may expose secrets or configuration"
-                    .to_string(),
+                rationale: "process.env access may expose secrets or configuration".to_string(),
                 file: file_opt.clone(),
                 line: Some(line_no),
                 column: text.find("process.env").map(|c| c + 1),
@@ -1537,8 +1527,7 @@ impl SecurityScanner {
             findings.push(SecurityFinding {
                 rule_id: SecurityRuleId::TimerAbuse,
                 risk_tier: RiskTier::Medium,
-                rationale: "Very short timer interval may indicate resource abuse"
-                    .to_string(),
+                rationale: "Very short timer interval may indicate resource abuse".to_string(),
                 file: file_opt.clone(),
                 line: Some(line_no),
                 column: None,
@@ -1551,9 +1540,8 @@ impl SecurityScanner {
             findings.push(SecurityFinding {
                 rule_id: SecurityRuleId::ProxyReflect,
                 risk_tier: RiskTier::Medium,
-                rationale:
-                    "Proxy/Reflect can intercept and modify object operations transparently"
-                        .to_string(),
+                rationale: "Proxy/Reflect can intercept and modify object operations transparently"
+                    .to_string(),
                 file: file_opt.clone(),
                 line: Some(line_no),
                 column: text
@@ -1600,9 +1588,162 @@ impl SecurityScanner {
                 rule_id: SecurityRuleId::ConsoleInfoLeak,
                 risk_tier: RiskTier::Low,
                 rationale: "Console output may leak sensitive information".to_string(),
-                file: file_opt,
+                file: file_opt.clone(),
                 line: Some(line_no),
                 column: text.find("console.").map(|c| c + 1),
+                snippet: Some(truncate_snippet(text)),
+            });
+        }
+
+        // ==== Rules added in rulebook v2.0.0 ====
+
+        // ---- Critical tier (v2) ----
+
+        // SEC-SPAWN-001: child_process command execution.
+        if contains_child_process_spawn(text) {
+            findings.push(SecurityFinding {
+                rule_id: SecurityRuleId::ChildProcessSpawn,
+                risk_tier: RiskTier::Critical,
+                rationale: "child_process command execution enables arbitrary system commands"
+                    .to_string(),
+                file: file_opt.clone(),
+                line: Some(line_no),
+                column: find_child_process_column(text),
+                snippet: Some(truncate_snippet(text)),
+            });
+        }
+
+        // SEC-CONSTRUCTOR-001: constructor.constructor sandbox escape.
+        if text.contains("constructor.constructor") || text.contains("constructor[\"constructor\"]")
+        {
+            findings.push(SecurityFinding {
+                rule_id: SecurityRuleId::ConstructorEscape,
+                risk_tier: RiskTier::Critical,
+                rationale:
+                    "constructor.constructor() can escape sandbox by accessing Function constructor"
+                        .to_string(),
+                file: file_opt.clone(),
+                line: Some(line_no),
+                column: text
+                    .find("constructor.constructor")
+                    .or_else(|| text.find("constructor[\"constructor\"]"))
+                    .map(|c| c + 1),
+                snippet: Some(truncate_snippet(text)),
+            });
+        }
+
+        // SEC-NATIVEMOD-001: native module require (.node/.so/.dylib).
+        if contains_native_module_require(text) {
+            findings.push(SecurityFinding {
+                rule_id: SecurityRuleId::NativeModuleRequire,
+                risk_tier: RiskTier::Critical,
+                rationale: "Requiring native addon (.node/.so/.dylib) bypasses JS sandbox"
+                    .to_string(),
+                file: file_opt.clone(),
+                line: Some(line_no),
+                column: text.find("require(").map(|c| c + 1),
+                snippet: Some(truncate_snippet(text)),
+            });
+        }
+
+        // ---- High tier (v2) ----
+
+        // SEC-GLOBAL-001: globalThis/global property mutation.
+        if contains_global_mutation(text) {
+            findings.push(SecurityFinding {
+                rule_id: SecurityRuleId::GlobalMutation,
+                risk_tier: RiskTier::High,
+                rationale: "Mutating globalThis/global properties can escape sandbox scope"
+                    .to_string(),
+                file: file_opt.clone(),
+                line: Some(line_no),
+                column: text
+                    .find("globalThis.")
+                    .or_else(|| text.find("global."))
+                    .or_else(|| text.find("globalThis["))
+                    .map(|c| c + 1),
+                snippet: Some(truncate_snippet(text)),
+            });
+        }
+
+        // SEC-SYMLINK-001: symlink/link creation.
+        if contains_symlink_creation(text) {
+            findings.push(SecurityFinding {
+                rule_id: SecurityRuleId::SymlinkCreation,
+                risk_tier: RiskTier::High,
+                rationale: "Symlink/link creation can enable path traversal attacks".to_string(),
+                file: file_opt.clone(),
+                line: Some(line_no),
+                column: text
+                    .find("symlink")
+                    .or_else(|| text.find("link"))
+                    .map(|c| c + 1),
+                snippet: Some(truncate_snippet(text)),
+            });
+        }
+
+        // SEC-CHMOD-001: permission changes.
+        if contains_permission_change(text) {
+            findings.push(SecurityFinding {
+                rule_id: SecurityRuleId::PermissionChange,
+                risk_tier: RiskTier::High,
+                rationale: "Changing file permissions can enable privilege escalation".to_string(),
+                file: file_opt.clone(),
+                line: Some(line_no),
+                column: text
+                    .find("chmod")
+                    .or_else(|| text.find("chown"))
+                    .map(|c| c + 1),
+                snippet: Some(truncate_snippet(text)),
+            });
+        }
+
+        // SEC-SOCKET-001: network listener creation.
+        if contains_socket_listener(text) {
+            findings.push(SecurityFinding {
+                rule_id: SecurityRuleId::SocketListener,
+                risk_tier: RiskTier::High,
+                rationale: "Creating network listeners opens unauthorized server ports".to_string(),
+                file: file_opt.clone(),
+                line: Some(line_no),
+                column: text
+                    .find("createServer")
+                    .or_else(|| text.find("createSocket"))
+                    .map(|c| c + 1),
+                snippet: Some(truncate_snippet(text)),
+            });
+        }
+
+        // SEC-WASM-001: WebAssembly usage.
+        if text.contains("WebAssembly.") {
+            findings.push(SecurityFinding {
+                rule_id: SecurityRuleId::WebAssemblyUsage,
+                risk_tier: RiskTier::High,
+                rationale: "WebAssembly can execute native code, bypassing JS sandbox controls"
+                    .to_string(),
+                file: file_opt.clone(),
+                line: Some(line_no),
+                column: text.find("WebAssembly.").map(|c| c + 1),
+                snippet: Some(truncate_snippet(text)),
+            });
+        }
+
+        // ---- Medium tier (v2) ----
+
+        // SEC-ARGUMENTS-001: arguments.callee.caller introspection.
+        if text.contains("arguments.callee") || text.contains("arguments.caller") {
+            findings.push(SecurityFinding {
+                rule_id: SecurityRuleId::ArgumentsCallerAccess,
+                risk_tier: RiskTier::Medium,
+                rationale:
+                    "arguments.callee/caller enables stack introspection and caller chain walking"
+                        .to_string(),
+                file: file_opt,
+                line: Some(line_no),
+                column: text
+                    .find("arguments.callee")
+                    .or_else(|| text.find("arguments.caller"))
+                    .map(|c| c + 1),
                 snippet: Some(truncate_snippet(text)),
             });
         }
@@ -1619,7 +1760,9 @@ fn contains_eval_call(text: &str) -> bool {
     while let Some(pos) = search.find("eval(") {
         // Not preceded by a dot (method call on object) or letter (part of
         // another identifier like `retrieval`).
-        if pos == 0 || !text.as_bytes()[pos - 1].is_ascii_alphanumeric() && text.as_bytes()[pos - 1] != b'.' {
+        if pos == 0
+            || !text.as_bytes()[pos - 1].is_ascii_alphanumeric() && text.as_bytes()[pos - 1] != b'.'
+        {
             return true;
         }
         search = &search[pos + 5..];
@@ -1642,12 +1785,20 @@ fn contains_hardcoded_secret(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     // Look for assignment patterns with secret-like names.
     let secret_keywords = [
-        "api_key", "apikey", "api-key",
-        "secret_key", "secretkey", "secret-key",
-        "password", "passwd",
-        "access_token", "accesstoken",
-        "private_key", "privatekey",
-        "auth_token", "authtoken",
+        "api_key",
+        "apikey",
+        "api-key",
+        "secret_key",
+        "secretkey",
+        "secret-key",
+        "password",
+        "passwd",
+        "access_token",
+        "accesstoken",
+        "private_key",
+        "privatekey",
+        "auth_token",
+        "authtoken",
     ];
 
     for kw in &secret_keywords {
@@ -1710,8 +1861,17 @@ fn contains_sensitive_path_write(text: &str) -> bool {
         return false;
     }
     let sensitive_paths = [
-        "/etc/", "/root/", "~/.ssh", "~/.bashrc", "~/.profile",
-        "~/.zshrc", "/usr/", "/var/", ".env", "id_rsa", "authorized_keys",
+        "/etc/",
+        "/root/",
+        "~/.ssh",
+        "~/.bashrc",
+        "~/.profile",
+        "~/.zshrc",
+        "/usr/",
+        "/var/",
+        ".env",
+        "id_rsa",
+        "authorized_keys",
     ];
     sensitive_paths.iter().any(|p| text.contains(p))
 }
@@ -1723,7 +1883,10 @@ fn contains_timer_abuse(text: &str) -> bool {
     }
     // Look for setInterval(..., N) where N < 10.
     if let Some(pos) = text.rfind(", ") {
-        let rest = text[pos + 2..].trim_end_matches(')').trim();
+        let rest = text[pos + 2..]
+            .trim_end_matches(';')
+            .trim_end_matches(')')
+            .trim();
         if let Ok(ms) = rest.parse::<u64>() {
             return ms < 10;
         }
@@ -1769,6 +1932,116 @@ fn contains_console_info_leak(text: &str) -> bool {
     text.contains("console.error(") || text.contains("console.warn(")
 }
 
+// ---- Pattern detection helpers added in rulebook v2.0.0 ----
+
+/// Detect `child_process` command execution: exec, execSync, spawn, spawnSync,
+/// execFile, execFileSync, fork.
+fn contains_child_process_spawn(text: &str) -> bool {
+    let spawn_patterns = [
+        "exec(",
+        "execSync(",
+        "spawn(",
+        "spawnSync(",
+        "execFile(",
+        "execFileSync(",
+        "fork(",
+    ];
+    // Only flag when preceded by child_process context indicators.
+    let has_cp_context =
+        text.contains("child_process") || text.contains("cp.") || text.contains("childProcess");
+
+    if has_cp_context {
+        return spawn_patterns.iter().any(|p| text.contains(p));
+    }
+
+    // Also flag direct destructured usage: `const { exec } = require('child_process')`
+    // is already covered by the context check. Check for standalone exec() that looks
+    // like it comes from child_process (not general method calls).
+    false
+}
+
+/// Find column position for child_process spawn patterns.
+fn find_child_process_column(text: &str) -> Option<usize> {
+    for pattern in &[
+        "execSync(",
+        "execFileSync(",
+        "spawnSync(",
+        "execFile(",
+        "spawn(",
+        "exec(",
+        "fork(",
+    ] {
+        if let Some(pos) = text.find(pattern) {
+            return Some(pos + 1);
+        }
+    }
+    None
+}
+
+/// Detect `globalThis`/`global` property mutation (assignment, not just read).
+fn contains_global_mutation(text: &str) -> bool {
+    // Mutation patterns: assignment to globalThis.X or global.X
+    let assignment_patterns = ["globalThis.", "global.", "globalThis["];
+
+    for pat in &assignment_patterns {
+        if let Some(pos) = text.find(pat) {
+            let after = &text[pos + pat.len()..];
+            // Check if this is an assignment (has = but not == or ===)
+            if let Some(eq_pos) = after.find('=') {
+                let before_eq = &after[..eq_pos];
+                let after_eq = &after[eq_pos..];
+                // Not a comparison (==, ===) and not part of a longer identifier
+                if !after_eq.starts_with("==")
+                    && !before_eq.contains('(')
+                    && !before_eq.contains(')')
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Detect `fs.symlink`/`fs.symlinkSync`/`fs.link`/`fs.linkSync`.
+fn contains_symlink_creation(text: &str) -> bool {
+    text.contains("fs.symlink(")
+        || text.contains("fs.symlinkSync(")
+        || text.contains("fs.link(")
+        || text.contains("fs.linkSync(")
+        || text.contains("symlinkSync(")
+        || text.contains("linkSync(")
+}
+
+/// Detect `fs.chmod`/`fs.chown` and their sync variants.
+fn contains_permission_change(text: &str) -> bool {
+    text.contains("fs.chmod(")
+        || text.contains("fs.chmodSync(")
+        || text.contains("fs.chown(")
+        || text.contains("fs.chownSync(")
+        || text.contains("fs.lchmod(")
+        || text.contains("fs.lchown(")
+        || text.contains("chmodSync(")
+        || text.contains("chownSync(")
+}
+
+/// Detect server/socket listener creation.
+fn contains_socket_listener(text: &str) -> bool {
+    text.contains("createServer(")
+        || text.contains("createSocket(")
+        || text.contains(".listen(")
+            && (text.contains("server") || text.contains("http") || text.contains("net"))
+}
+
+/// Detect `require()` of native addon files (.node, .so, .dylib).
+fn contains_native_module_require(text: &str) -> bool {
+    if !text.contains("require(") {
+        return false;
+    }
+    let native_exts = [".node\"", ".node'", ".so\"", ".so'", ".dylib\"", ".dylib'"];
+    native_exts.iter().any(|ext| text.contains(ext))
+}
+
 /// Truncate a source snippet to a reasonable display length.
 fn truncate_snippet(text: &str) -> String {
     const MAX_SNIPPET_LEN: usize = 200;
@@ -1797,7 +2070,10 @@ fn collect_scannable_files(path: &Path) -> Vec<std::path::PathBuf> {
                 files.extend(collect_scannable_files(&p));
             } else if p.is_file() {
                 if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
-                    if matches!(ext, "js" | "ts" | "mjs" | "mts" | "cjs" | "cts" | "jsx" | "tsx") {
+                    if matches!(
+                        ext,
+                        "js" | "ts" | "mjs" | "mts" | "cjs" | "cts" | "jsx" | "tsx"
+                    ) {
                         files.push(p);
                     }
                 }
@@ -1970,8 +2246,7 @@ impl InstallTimeRiskReport {
             + security.tier_counts.high.saturating_mul(20)
             + security.tier_counts.medium.saturating_mul(10)
             + security.tier_counts.low.saturating_mul(3);
-        let preflight_deduction =
-            preflight.summary.errors.saturating_mul(15)
+        let preflight_deduction = preflight.summary.errors.saturating_mul(15)
             + preflight.summary.warnings.saturating_mul(5);
         let total_deduction = security_deduction + preflight_deduction;
         let composite_risk_score =
@@ -2038,19 +2313,11 @@ impl InstallTimeRiskReport {
 
         let compat_part = match preflight.verdict {
             PreflightVerdict::Pass => "compatible".to_string(),
-            PreflightVerdict::Warn => format!(
-                "{} compat warning(s)",
-                preflight.warnings
-            ),
-            PreflightVerdict::Fail => format!(
-                "{} compat error(s)",
-                preflight.errors
-            ),
+            PreflightVerdict::Warn => format!("{} compat warning(s)", preflight.warnings),
+            PreflightVerdict::Fail => format!("{} compat error(s)", preflight.errors),
         };
 
-        format!(
-            "{recommendation}: score {score}/100 — {sec_part}; {compat_part}"
-        )
+        format!("{recommendation}: score {score}/100 — {sec_part}; {compat_part}")
     }
 
     /// Serialize to pretty JSON.
@@ -2764,10 +3031,7 @@ pi.exec("ls");
     #[test]
     fn rule_id_default_tier_consistency() {
         // All critical rules should have Critical tier.
-        assert_eq!(
-            SecurityRuleId::EvalUsage.default_tier(),
-            RiskTier::Critical
-        );
+        assert_eq!(SecurityRuleId::EvalUsage.default_tier(), RiskTier::Critical);
         assert_eq!(
             SecurityRuleId::ProcessBinding.default_tier(),
             RiskTier::Critical
@@ -2922,9 +3186,7 @@ export default function init(pi) {
 
     #[test]
     fn detect_define_property_on_global() {
-        let report = scan(
-            "Object.defineProperty(globalThis, 'fetch', { value: evilFetch });",
-        );
+        let report = scan("Object.defineProperty(globalThis, 'fetch', { value: evilFetch });");
         assert!(has_rule(&report, SecurityRuleId::DefinePropertyAbuse));
     }
 
@@ -3027,6 +3289,7 @@ export default function init(pi) {
     }
 
     #[test]
+    #[allow(clippy::needless_raw_string_hashes)]
     fn report_tier_counts_accurate() {
         let report = scan(
             r#"
@@ -3045,11 +3308,11 @@ debugger;
     #[test]
     fn findings_sorted_by_tier_worst_first() {
         let report = scan(
-            r#"
+            r"
 debugger;
 eval('x');
 process.env.KEY;
-"#,
+",
         );
         // First finding should be Critical (eval), last should be Low (debugger).
         assert!(!report.findings.is_empty());
@@ -3067,8 +3330,7 @@ process.env.KEY;
         let lines: Vec<&str> = jsonl.lines().collect();
         assert_eq!(lines.len(), report.findings.len());
         for line in &lines {
-            let entry: SecurityEvidenceLedgerEntry =
-                serde_json::from_str(line).unwrap();
+            let entry: SecurityEvidenceLedgerEntry = serde_json::from_str(line).unwrap();
             assert_eq!(entry.schema, SECURITY_EVIDENCE_LEDGER_SCHEMA);
             assert_eq!(entry.extension_id, "test-ext");
             assert_eq!(entry.rulebook_version, SECURITY_RULEBOOK_VERSION);
