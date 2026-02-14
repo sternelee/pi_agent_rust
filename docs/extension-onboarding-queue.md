@@ -1,315 +1,317 @@
 # Extension Onboarding Queue
 
-Generated: 2026-02-14T00:00:00Z  
-Source pool: `docs/extension-candidate-pool.json` (1000 total)  
+Generated: 2026-02-14T03:14:42Z
+Source pool: `docs/extension-candidate-pool.json` (1000 total)
 Eligible (unvendored): **777**
+Pi-relevant (heuristic): **322**
+Schema: `pi.ext.onboarding_queue.v2` (repo-level de-bias enabled)
 
 ## Top 100 (Start Here)
 
-| Rank | ID | Tier | Stars | npm/mo | Impact |
-|---:|---|---|---:|---:|---:|
-| 1 | `npm/karvin2c-feishu` | `npm-registry` | 192167 | 0 | 200.439 |
-| 2 | `npm/openclaw-pro` | `npm-registry` | 192167 | 0 | 200.439 |
-| 3 | `third-party/screenpipe-screenpipe` | `third-party-github` | 16837 | 0 | 154.028 |
-| 4 | `npm/shieldcortex` | `npm-registry` | 7 | 4934 | 139.529 |
-| 5 | `npm/clawdbot-popo-plugin` | `npm-registry` | 3117 | 0 | 137.228 |
-| 6 | `npm/colin3191-feishu` | `npm-registry` | 3117 | 0 | 137.228 |
-| 7 | `npm/duckduck-cocode-feishu` | `npm-registry` | 3117 | 0 | 137.228 |
-| 8 | `npm/johnny-joster-popo` | `npm-registry` | 3117 | 0 | 137.228 |
-| 9 | `npm/m1heng-clawd-feishu` | `npm-registry` | 3117 | 0 | 137.228 |
-| 10 | `npm/shenhh-clawdbot-popo-plugin` | `npm-registry` | 3117 | 0 | 137.228 |
-| 11 | `npm/shenhh-popo` | `npm-registry` | 3117 | 0 | 137.228 |
-| 12 | `npm/vectorize-io-hindsight-openclaw` | `npm-registry` | 1404 | 0 | 128.214 |
-| 13 | `npm/qingchencloud-openclaw-zh` | `npm-registry` | 1181 | 0 | 124.210 |
-| 14 | `npm/openclaw-cn` | `npm-registry` | 1285 | 0 | 124.114 |
-| 15 | `npm/pi-acp` | `npm-registry` | 23 | 228 | 112.689 |
-| 16 | `npm/askjo-camofox-browser` | `npm-registry` | 380 | 0 | 108.983 |
-| 17 | `third-party/mic92-dotfiles` | `third-party-github` | 726 | 0 | 106.883 |
-| 18 | `third-party/badlogic-pi-skills` | `third-party-github` | 465 | 0 | 103.669 |
-| 19 | `third-party/tiberriver256-mcp-server-azure-devops` | `third-party-github` | 329 | 0 | 102.914 |
-| 20 | `npm/openclawfs` | `npm-registry` | 277 | 0 | 101.917 |
-| 21 | `npm/getfoundry-unbrowse-openclaw` | `npm-registry` | 308 | 0 | 101.009 |
-| 22 | `npm/phantom-openclaw-plugin` | `npm-registry` | 113 | 0 | 99.879 |
-| 23 | `third-party/galz10-pickle-rick-extension` | `third-party-github` | 369 | 0 | 99.359 |
-| 24 | `npm/feishu-openclaw` | `npm-registry` | 167 | 0 | 95.535 |
-| 25 | `npm/getfoundry-foundry` | `npm-registry` | 153 | 0 | 94.738 |
-| 26 | `npm/getfoundry-foundry-openclaw` | `npm-registry` | 153 | 0 | 94.738 |
-| 27 | `third-party/mikeyobrien-rho` | `third-party-github` | 242 | 0 | 92.096 |
-| 28 | `npm/pi-subagents` | `npm-registry` | 173 | 0 | 91.109 |
-| 29 | `third-party/megalithic-dotfiles` | `third-party-github` | 212 | 0 | 88.781 |
-| 30 | `npm/expo-openclaw-chat` | `npm-registry` | 101 | 0 | 88.154 |
-| 31 | `npm/clawcontrol` | `npm-registry` | 58 | 0 | 84.515 |
-| 32 | `third-party/joelazar-dotfiles` | `third-party-github` | 156 | 0 | 84.443 |
-| 33 | `third-party/davekilleen-dex` | `third-party-github` | 86 | 0 | 83.761 |
-| 34 | `third-party/nexxeln-dots` | `third-party-github` | 122 | 0 | 82.407 |
-| 35 | `npm/pi-voice` | `npm-registry` | 43 | 0 | 79.973 |
-| 36 | `npm/openclaw-profanity` | `npm-registry` | 38 | 0 | 79.432 |
-| 37 | `npm/openclaw-termux` | `npm-registry` | 32 | 0 | 77.372 |
-| 38 | `npm/openclawd-termux` | `npm-registry` | 32 | 0 | 77.372 |
-| 39 | `npm/virtue-ai-openclaw-guard` | `npm-registry` | 0 | 59 | 75.119 |
-| 40 | `third-party/neotavern-neotavern-frontend` | `third-party-github` | 53 | 0 | 74.782 |
-| 41 | `npm/jaydenbeard-clawguard` | `npm-registry` | 25 | 0 | 73.925 |
-| 42 | `npm/rickybloomfield-ouraclaw` | `npm-registry` | 25 | 0 | 72.721 |
-| 43 | `npm/zalo-personal` | `npm-registry` | 14 | 0 | 72.247 |
-| 44 | `npm/pi-rewind-hook` | `npm-registry` | 45 | 0 | 71.397 |
-| 45 | `npm/openzca` | `npm-registry` | 14 | 0 | 70.712 |
-| 46 | `third-party/edmundmiller-dotfiles` | `third-party-github` | 42 | 0 | 69.957 |
-| 47 | `npm/clawctl` | `npm-registry` | 17 | 0 | 69.637 |
-| 48 | `npm/clawfleet` | `npm-registry` | 17 | 0 | 69.637 |
-| 49 | `npm/clawguardian` | `npm-registry` | 22 | 0 | 69.570 |
-| 50 | `third-party/ethanalgox-marketbot` | `third-party-github` | 32 | 0 | 69.372 |
-| 51 | `npm/true-and-useful-janee-openclaw` | `npm-registry` | 16 | 0 | 69.090 |
-| 52 | `npm/adongguo-dingtalk` | `npm-registry` | 18 | 0 | 68.949 |
-| 53 | `npm/adongguo-openclaw-dingtalk` | `npm-registry` | 18 | 0 | 68.949 |
-| 54 | `third-party/davidgasquez-dotfiles` | `third-party-github` | 40 | 0 | 67.798 |
-| 55 | `npm/peac-adapter-openclaw` | `npm-registry` | 10 | 0 | 67.615 |
-| 56 | `npm/openclaw-droid` | `npm-registry` | 13 | 0 | 67.440 |
-| 57 | `third-party/lllooollpp-clawdbot-cn` | `third-party-github` | 32 | 0 | 66.999 |
-| 58 | `third-party/prateekmedia-pi-hooks` | `third-party-github` | 26 | 0 | 65.715 |
-| 59 | `npm/prinova-pi-github-tools` | `npm-registry` | 20 | 0 | 64.701 |
-| 60 | `npm/openclaw-mcp-adapter` | `npm-registry` | 11 | 0 | 64.558 |
-| 61 | `third-party/richardgill-nix` | `third-party-github` | 29 | 0 | 64.109 |
-| 62 | `third-party/sibyllinesoft-scribe` | `third-party-github` | 27 | 0 | 63.654 |
-| 63 | `npm/tobotorui-wecom` | `npm-registry` | 13 | 0 | 63.623 |
-| 64 | `npm/agent-security-scanner-mcp` | `npm-registry` | 11 | 0 | 63.559 |
-| 65 | `npm/capsulesecurity-clawguard` | `npm-registry` | 14 | 0 | 63.078 |
-| 66 | `npm/hzl-cli` | `npm-registry` | 12 | 0 | 62.915 |
-| 67 | `npm/hzl-core` | `npm-registry` | 12 | 0 | 62.915 |
-| 68 | `npm/hapi-cors-headers` | `npm-registry` | 28 | 0 | 62.715 |
-| 69 | `npm/clawvault` | `npm-registry` | 14 | 0 | 61.874 |
-| 70 | `npm/botschat` | `npm-registry` | 9 | 0 | 61.817 |
-| 71 | `npm/botschat-botschat` | `npm-registry` | 9 | 0 | 61.817 |
-| 72 | `npm/botschat-openclaw-plugin` | `npm-registry` | 9 | 0 | 61.817 |
-| 73 | `npm/cloudbase-setup-openclaw` | `npm-registry` | 13 | 0 | 61.215 |
-| 74 | `npm/setup-cloudbase-openclaw` | `npm-registry` | 13 | 0 | 61.215 |
-| 75 | `third-party/pedal-intelligence-saypi-userscript` | `third-party-github` | 23 | 0 | 61.034 |
-| 76 | `third-party/dwsy-agent` | `third-party-github` | 20 | 0 | 60.906 |
-| 77 | `npm/moltbot-duckcoding-auth` | `npm-registry` | 12 | 0 | 60.507 |
-| 78 | `npm/opena2a-signcrypt-openclaw` | `npm-registry` | 12 | 0 | 60.507 |
-| 79 | `npm/opena2a-skillguard-openclaw` | `npm-registry` | 12 | 0 | 60.507 |
-| 80 | `npm/openclawwechat` | `npm-registry` | 9 | 0 | 60.408 |
-| 81 | `npm/zeneo-openclaw-feishu` | `npm-registry` | 9 | 0 | 60.408 |
-| 82 | `third-party/yesongyun-openclaw-cn` | `third-party-github` | 16 | 0 | 59.886 |
-| 83 | `third-party/deybhayden-dotfiles` | `third-party-github` | 9 | 0 | 59.409 |
-| 84 | `npm/openclaw-secure` | `npm-registry` | 8 | 0 | 59.402 |
-| 85 | `third-party/l-lin-dotfiles` | `third-party-github` | 16 | 0 | 59.387 |
-| 86 | `npm/aquaman-plugin` | `npm-registry` | 10 | 0 | 58.911 |
-| 87 | `npm/aquaman-proxy` | `npm-registry` | 10 | 0 | 58.911 |
-| 88 | `npm/ferologics-pi-skills` | `npm-registry` | 6 | 0 | 58.592 |
-| 89 | `npm/tmustier-pi-nes` | `npm-registry` | 15 | 0 | 58.491 |
-| 90 | `npm/clawpad` | `npm-registry` | 6 | 0 | 58.409 |
-| 91 | `npm/clawpad-openclaw-plugin` | `npm-registry` | 6 | 0 | 58.409 |
-| 92 | `npm/moltbot-channel-feishu` | `npm-registry` | 7 | 0 | 58.276 |
-| 93 | `third-party/goncalossilva-.agents` | `third-party-github` | 13 | 0 | 58.236 |
-| 94 | `npm/nox-openclaw-hunter` | `npm-registry` | 8 | 0 | 58.197 |
-| 95 | `third-party/default-anton-dotfiles` | `third-party-github` | 19 | 0 | 57.827 |
-| 96 | `npm/mcp-to-pi-tools` | `npm-registry` | 14 | 0 | 57.691 |
-| 97 | `third-party/continua-ai-pi-lab` | `third-party-github` | 21 | 0 | 57.533 |
-| 98 | `third-party/dejanr-dotfiles` | `third-party-github` | 13 | 0 | 57.532 |
-| 99 | `npm/clawskills-strands` | `npm-registry` | 6 | 0 | 57.000 |
-| 100 | `npm/openclaw-mcp` | `npm-registry` | 6 | 0 | 57.000 |
+| Rank | ID | Tier | Repo n | Rel | Stars | npm/mo | Impact |
+|---:|---|---|---:|---:|---:|---:|---:|
+| 1 | `third-party/screenpipe-screenpipe` | `third-party-github` | 1 | 80 | 16,837 | 0 | 250.028 |
+| 2 | `third-party/tiberriver256-mcp-server-azure-devops` | `third-party-github` | 1 | 86 | 329 | 0 | 204.914 |
+| 3 | `third-party/mikeyobrien-rho` | `third-party-github` | 1 | 80 | 242 | 0 | 188.096 |
+| 4 | `npm/pi-subagents` | `npm-registry` | 1 | 80 | 173 | 0 | 187.109 |
+| 5 | `third-party/megalithic-dotfiles` | `third-party-github` | 1 | 80 | 212 | 0 | 184.781 |
+| 6 | `third-party/joelazar-dotfiles` | `third-party-github` | 1 | 80 | 156 | 0 | 180.443 |
+| 7 | `third-party/davekilleen-dex` | `third-party-github` | 1 | 80 | 86 | 0 | 179.761 |
+| 8 | `third-party/nexxeln-dots` | `third-party-github` | 1 | 80 | 122 | 0 | 178.407 |
+| 9 | `third-party/mic92-dotfiles` | `third-party-github` | 1 | 60 | 726 | 0 | 174.883 |
+| 10 | `third-party/edmundmiller-dotfiles` | `third-party-github` | 1 | 80 | 42 | 0 | 165.957 |
+| 11 | `third-party/davidgasquez-dotfiles` | `third-party-github` | 1 | 80 | 40 | 0 | 163.798 |
+| 12 | `third-party/prateekmedia-pi-hooks` | `third-party-github` | 1 | 80 | 26 | 0 | 161.715 |
+| 13 | `third-party/richardgill-nix` | `third-party-github` | 1 | 80 | 29 | 0 | 160.109 |
+| 14 | `third-party/sibyllinesoft-scribe` | `third-party-github` | 1 | 80 | 27 | 0 | 159.654 |
+| 15 | `third-party/neotavern-neotavern-frontend` | `third-party-github` | 1 | 72 | 53 | 0 | 158.782 |
+| 16 | `third-party/goncalossilva-.agents` | `third-party-github` | 1 | 84 | 13 | 0 | 158.236 |
+| 17 | `third-party/deybhayden-dotfiles` | `third-party-github` | 1 | 80 | 9 | 0 | 155.409 |
+| 18 | `third-party/l-lin-dotfiles` | `third-party-github` | 1 | 80 | 16 | 0 | 155.387 |
+| 19 | `third-party/prateekmedia-claude-agent-sdk-pi` | `third-party-github` | 1 | 84 | 8 | 0 | 155.014 |
+| 20 | `third-party/default-anton-dotfiles` | `third-party-github` | 1 | 80 | 19 | 0 | 153.827 |
+| 21 | `third-party/dejanr-dotfiles` | `third-party-github` | 1 | 80 | 13 | 0 | 153.532 |
+| 22 | `third-party/adragomir-dotfiles` | `third-party-github` | 1 | 80 | 9 | 0 | 152.725 |
+| 23 | `third-party/badlogic-pi-doom` | `third-party-github` | 1 | 80 | 9 | 0 | 149.817 |
+| 24 | `third-party/joshp123-ai-stack` | `third-party-github` | 1 | 80 | 10 | 0 | 149.319 |
+| 25 | `third-party/pratos-clanker-setup` | `third-party-github` | 1 | 80 | 10 | 0 | 149.319 |
+| 26 | `third-party/whamp-pi-rlm` | `third-party-github` | 1 | 80 | 10 | 0 | 149.319 |
+| 27 | `third-party/nicobailon-pi-model-switch` | `third-party-github` | 1 | 80 | 13 | 0 | 149.215 |
+| 28 | `third-party/lllooollpp-clawdbot-cn` | `third-party-github` | 1 | 74 | 32 | 0 | 148.999 |
+| 29 | `third-party/surma-nixenv` | `third-party-github` | 1 | 80 | 10 | 0 | 148.115 |
+| 30 | `third-party/hjanuschka-pi-qmd` | `third-party-github` | 1 | 80 | 11 | 0 | 147.742 |
+| 31 | `third-party/thrashr888-agentkernel` | `third-party-github` | 1 | 80 | 8 | 0 | 147.402 |
+| 32 | `third-party/pspdfkit-labs-pi-skills` | `third-party-github` | 1 | 86 | 5 | 0 | 147.119 |
+| 33 | `third-party/rytswd-pi-agent-extensions` | `third-party-github` | 1 | 84 | 4 | 0 | 146.990 |
+| 34 | `third-party/0xsero-pi-readiness-report` | `third-party-github` | 1 | 80 | 7 | 0 | 146.276 |
+| 35 | `third-party/haider-patanwala-clawdbot` | `third-party-github` | 1 | 94 | 1 | 0 | 144.623 |
+| 36 | `third-party/mrexodia-devdocs-cli` | `third-party-github` | 1 | 80 | 8 | 0 | 143.402 |
+| 37 | `third-party/yesongyun-openclaw-cn` | `third-party-github` | 1 | 74 | 16 | 0 | 141.886 |
+| 38 | `third-party/badlogic-pi-dosbox` | `third-party-github` | 1 | 80 | 4 | 0 | 141.786 |
+| 39 | `third-party/mrexodia-agent-viewer` | `third-party-github` | 1 | 84 | 4 | 0 | 141.786 |
+| 40 | `third-party/leiserfg-nix-config` | `third-party-github` | 1 | 80 | 4 | 0 | 141.286 |
+| 41 | `third-party/badlogic-pi-gitlab-duo` | `third-party-github` | 1 | 80 | 5 | 0 | 141.119 |
+| 42 | `third-party/coctostan-pi-superteam` | `third-party-github` | 1 | 80 | 3 | 0 | 139.654 |
+| 43 | `third-party/elementsai-dev-cognia` | `third-party-github` | 1 | 80 | 3 | 0 | 139.654 |
+| 44 | `third-party/nicobailon-pi-coordination` | `third-party-github` | 1 | 72 | 17 | 0 | 139.433 |
+| 45 | `npm/pi-rewind-hook` | `npm-registry` | 1 | 60 | 45 | 0 | 139.397 |
+| 46 | `third-party/ayagmar-pi-extmgr` | `third-party-github` | 1 | 80 | 4 | 0 | 139.377 |
+| 47 | `third-party/dotemacs-pi-multi-prompt` | `third-party-github` | 1 | 80 | 4 | 0 | 139.377 |
+| 48 | `third-party/towry-agent-share` | `third-party-github` | 1 | 84 | 2 | 0 | 138.497 |
+| 49 | `third-party/messense-pi-parallel-agents` | `third-party-github` | 1 | 84 | 1 | 0 | 138.440 |
+| 50 | `third-party/hdresearch-pi-v` | `third-party-github` | 1 | 80 | 2 | 0 | 138.314 |
+| 51 | `third-party/whamp-glm-vision` | `third-party-github` | 1 | 80 | 2 | 0 | 138.314 |
+| 52 | `third-party/jbuckmccready-dotfiles` | `third-party-github` | 1 | 80 | 2 | 0 | 138.109 |
+| 53 | `third-party/jcolano-openclaw` | `third-party-github` | 1 | 94 | 0 | 0 | 138.000 |
+| 54 | `third-party/ethanalgox-marketbot` | `third-party-github` | 1 | 60 | 32 | 0 | 137.372 |
+| 55 | `third-party/ditfetzt-pi-antigravity-quota` | `third-party-github` | 1 | 80 | 3 | 0 | 137.245 |
+| 56 | `third-party/ditfetzt-pi-cline-free-models` | `third-party-github` | 1 | 80 | 3 | 0 | 137.245 |
+| 57 | `third-party/knoopx-pi` | `third-party-github` | 1 | 80 | 3 | 0 | 137.245 |
+| 58 | `third-party/mikeastock-dotagents` | `third-party-github` | 1 | 80 | 3 | 0 | 137.245 |
+| 59 | `third-party/ninlds-pi-ding` | `third-party-github` | 1 | 80 | 3 | 0 | 137.245 |
+| 60 | `third-party/yulqen-conductor-pi` | `third-party-github` | 1 | 80 | 2 | 0 | 136.905 |
+| 61 | `third-party/cameronmaske-agent-stuff` | `third-party-github` | 1 | 84 | 1 | 0 | 134.623 |
+| 62 | `third-party/isaacraja-agents-config` | `third-party-github` | 1 | 84 | 1 | 0 | 134.623 |
+| 63 | `third-party/asoules-pi-recall` | `third-party-github` | 1 | 80 | 2 | 0 | 134.497 |
+| 64 | `third-party/continua-ai-tinny-pi` | `third-party-github` | 1 | 80 | 2 | 0 | 134.497 |
+| 65 | `third-party/neohope-neopimonosrc` | `third-party-github` | 1 | 80 | 2 | 0 | 134.497 |
+| 66 | `third-party/pauldthomson-dotfiles` | `third-party-github` | 1 | 80 | 2 | 0 | 134.497 |
+| 67 | `third-party/skyfallsin-pi-vertex-anthropic` | `third-party-github` | 1 | 80 | 2 | 0 | 134.497 |
+| 68 | `third-party/whamp-pi-automem` | `third-party-github` | 1 | 80 | 2 | 0 | 134.497 |
+| 69 | `third-party/volantk-pi-agent-skills-extensions` | `third-party-github` | 1 | 90 | 0 | 0 | 134.000 |
+| 70 | `third-party/dinhtungdu-orange` | `third-party-github` | 1 | 80 | 1 | 0 | 133.031 |
+| 71 | `third-party/kaofelix-dotfiles` | `third-party-github` | 1 | 80 | 1 | 0 | 133.031 |
+| 72 | `third-party/stefan2904-dockerized-pi` | `third-party-github` | 1 | 80 | 1 | 0 | 133.031 |
+| 73 | `third-party/dwsy-agent` | `third-party-github` | 1 | 64 | 20 | 0 | 132.906 |
+| 74 | `third-party/deybhayden-bendows` | `third-party-github` | 1 | 80 | 1 | 0 | 131.827 |
+| 75 | `third-party/garymjr-dotfiles` | `third-party-github` | 1 | 80 | 1 | 0 | 131.827 |
+| 76 | `third-party/max-leopold-dotfiles` | `third-party-github` | 1 | 80 | 1 | 0 | 131.827 |
+| 77 | `third-party/mcasper-dotfiles` | `third-party-github` | 1 | 80 | 1 | 0 | 131.827 |
+| 78 | `third-party/seriousben-serious-nixos-config` | `third-party-github` | 1 | 80 | 1 | 0 | 131.827 |
+| 79 | `third-party/assagman-pi-extensions` | `third-party-github` | 1 | 80 | 1 | 0 | 130.623 |
+| 80 | `third-party/bytes032-agentkit` | `third-party-github` | 1 | 80 | 1 | 0 | 130.623 |
+| 81 | `third-party/ditfetzt-pi-antigravity-imagen` | `third-party-github` | 1 | 80 | 1 | 0 | 130.623 |
+| 82 | `third-party/forbidden-game-kimicodeprovider` | `third-party-github` | 1 | 80 | 1 | 0 | 130.623 |
+| 83 | `third-party/otahontas-nix` | `third-party-github` | 1 | 80 | 1 | 0 | 130.623 |
+| 84 | `third-party/safzanpirani-pi-config` | `third-party-github` | 1 | 80 | 1 | 0 | 130.623 |
+| 85 | `third-party/sigtom-wow-ocp` | `third-party-github` | 1 | 80 | 1 | 0 | 130.623 |
+| 86 | `third-party/toorusr-ai-extensions` | `third-party-github` | 1 | 80 | 1 | 0 | 130.623 |
+| 87 | `third-party/whamp-pi-brain` | `third-party-github` | 1 | 80 | 1 | 0 | 130.623 |
+| 88 | `third-party/badlogic-pi-skills` | `third-party-github` | 1 | 28 | 465 | 0 | 129.669 |
+| 89 | `third-party/jamwil-dotfiles` | `third-party-github` | 1 | 80 | 0 | 0 | 128.317 |
+| 90 | `third-party/aldoborrero-agent-kit` | `third-party-github` | 1 | 84 | 0 | 0 | 128.000 |
+| 91 | `third-party/anntnzrb-agents` | `third-party-github` | 1 | 84 | 0 | 0 | 128.000 |
+| 92 | `third-party/anthnykr-agent-setups` | `third-party-github` | 1 | 84 | 0 | 0 | 128.000 |
+| 93 | `third-party/dungle-scrubs-agent-config` | `third-party-github` | 1 | 84 | 0 | 0 | 128.000 |
+| 94 | `third-party/goofansu-agent-stuff` | `third-party-github` | 1 | 84 | 0 | 0 | 128.000 |
+| 95 | `third-party/mikeyobrien-pi-agent` | `third-party-github` | 1 | 84 | 0 | 0 | 128.000 |
+| 96 | `third-party/nof0xgiven-pi-coding-agent-eureka` | `third-party-github` | 1 | 84 | 0 | 0 | 128.000 |
+| 97 | `third-party/richard-devbot-computer-agent` | `third-party-github` | 1 | 84 | 0 | 0 | 128.000 |
+| 98 | `third-party/skyfallsin-pi-agent-config` | `third-party-github` | 1 | 84 | 0 | 0 | 128.000 |
+| 99 | `third-party/wayanjimmy-agent-stuff` | `third-party-github` | 1 | 84 | 0 | 0 | 128.000 |
+| 100 | `third-party/willyfrog-agents-warning` | `third-party-github` | 1 | 84 | 0 | 0 | 128.000 |
 
 ## Next 200 (Parallel Agents)
 
-| Rank | ID | Tier | Stars | npm/mo | Impact |
-|---:|---|---|---:|---:|---:|
-| 101 | `npm/openclaw-penfield` | `npm-registry` | 6 | 0 | 57.000 |
-| 102 | `npm/openguardrails-moltguard` | `npm-registry` | 6 | 0 | 57.000 |
-| 103 | `third-party/adragomir-dotfiles` | `third-party-github` | 9 | 0 | 56.725 |
-| 104 | `third-party/jwintz-pi-island` | `third-party-github` | 19 | 0 | 56.623 |
-| 105 | `npm/jungjaehoon-openclaw-mama` | `npm-registry` | 4 | 0 | 56.194 |
-| 106 | `npm/neon-soul` | `npm-registry` | 7 | 0 | 55.868 |
-| 107 | `npm/opencami` | `npm-registry` | 7 | 0 | 55.868 |
-| 108 | `npm/betrue-openclaw-claude-code-plugin` | `npm-registry` | 5 | 0 | 55.528 |
-| 109 | `npm/fireclaw` | `npm-registry` | 5 | 0 | 55.528 |
-| 110 | `third-party/nicobailon-pi-coordination` | `third-party-github` | 17 | 0 | 55.433 |
-| 111 | `npm/openclawd-flock` | `npm-registry` | 4 | 0 | 55.194 |
-| 112 | `third-party/prateekmedia-claude-agent-sdk-pi` | `third-party-github` | 8 | 0 | 55.014 |
-| 113 | `npm/cybrlab-urlcheck-openclaw` | `npm-registry` | 6 | 0 | 54.592 |
-| 114 | `npm/openclaw-social-scheduler` | `npm-registry` | 6 | 0 | 54.592 |
-| 115 | `npm/opengoat-core` | `npm-registry` | 6 | 0 | 54.592 |
-| 116 | `npm/dnopi` | `npm-registry` | 9 | 0 | 54.000 |
-| 117 | `third-party/badlogic-pi-doom` | `third-party-github` | 9 | 0 | 53.817 |
-| 118 | `npm/maudecode-cove` | `npm-registry` | 4 | 0 | 53.786 |
-| 119 | `npm/nanobazaar-cli` | `npm-registry` | 4 | 0 | 53.786 |
-| 120 | `third-party/dannote-dot-pi` | `third-party-github` | 10 | 0 | 53.727 |
-| 121 | `third-party/joshp123-ai-stack` | `third-party-github` | 10 | 0 | 53.319 |
-| 122 | `third-party/pratos-clanker-setup` | `third-party-github` | 10 | 0 | 53.319 |
-| 123 | `third-party/whamp-pi-rlm` | `third-party-github` | 10 | 0 | 53.319 |
-| 124 | `third-party/nicobailon-pi-model-switch` | `third-party-github` | 13 | 0 | 53.215 |
-| 125 | `npm/nodeskai-feishu` | `npm-registry` | 5 | 0 | 53.119 |
-| 126 | `npm/openfeelz` | `npm-registry` | 5 | 0 | 53.119 |
-| 127 | `npm/phuetz-code-buddy` | `npm-registry` | 5 | 0 | 53.119 |
-| 128 | `npm/xzq-xu-feishu` | `npm-registry` | 5 | 0 | 53.119 |
-| 129 | `npm/templeofsilicon-esoterica` | `npm-registry` | 3 | 0 | 53.062 |
-| 130 | `npm/pi-context` | `npm-registry` | 8 | 0 | 52.993 |
-| 131 | `npm/pi-rose-pine` | `npm-registry` | 2 | 0 | 52.905 |
-| 132 | `npm/zenobius-pi-rose-pine` | `npm-registry` | 2 | 0 | 52.905 |
-| 133 | `npm/agent-skills-hub` | `npm-registry` | 3 | 0 | 52.858 |
-| 134 | `npm/openclaw-inspector` | `npm-registry` | 3 | 0 | 52.858 |
-| 135 | `third-party/surma-nixenv` | `third-party-github` | 10 | 0 | 52.115 |
-| 136 | `npm/diplodoc-openapi-extension` | `npm-registry` | 0 | 0 | 51.965 |
-| 137 | `third-party/hjanuschka-pi-qmd` | `third-party-github` | 11 | 0 | 51.742 |
-| 138 | `third-party/thrashr888-agentkernel` | `third-party-github` | 8 | 0 | 51.402 |
-| 139 | `npm/memorystack-clawdbot-memorystack` | `npm-registry` | 4 | 0 | 51.377 |
-| 140 | `npm/memorystack-openclaw-memorystack` | `npm-registry` | 4 | 0 | 51.377 |
-| 141 | `npm/poprobertdaniel-openclaw-memory` | `npm-registry` | 4 | 0 | 51.377 |
-| 142 | `npm/thisisjeron-openclaw-better-gateway` | `npm-registry` | 4 | 0 | 51.377 |
-| 143 | `npm/xpr-agents-openclaw` | `npm-registry` | 4 | 0 | 51.377 |
-| 144 | `third-party/nickslevine-pirs` | `third-party-github` | 12 | 0 | 50.507 |
-| 145 | `npm/vaclav-synacek-pi-coding-agent-termux` | `npm-registry` | 2 | 0 | 50.497 |
-| 146 | `npm/bsv-openclaw-overlay-plugin` | `npm-registry` | 3 | 0 | 50.449 |
-| 147 | `npm/tloncorp-tlon-skill` | `npm-registry` | 2 | 0 | 50.314 |
-| 148 | `third-party/0xsero-pi-readiness-report` | `third-party-github` | 7 | 0 | 50.276 |
-| 149 | `npm/akashabot-openclaw-mem` | `npm-registry` | 2 | 0 | 50.109 |
-| 150 | `npm/akashabot-openclaw-memory-offline-core` | `npm-registry` | 2 | 0 | 50.109 |
-| 151 | `npm/houchenyang-nexus` | `npm-registry` | 2 | 0 | 50.109 |
-| 152 | `npm/dsw0000-xiaozhi` | `npm-registry` | 3 | 0 | 49.245 |
-| 153 | `npm/exa-search` | `npm-registry` | 3 | 0 | 49.245 |
-| 154 | `npm/laurentenhoor-devclaw` | `npm-registry` | 3 | 0 | 49.245 |
-| 155 | `npm/moltybob-dingtalk` | `npm-registry` | 3 | 0 | 49.245 |
-| 156 | `npm/polucas-clawshell` | `npm-registry` | 3 | 0 | 49.245 |
-| 157 | `npm/primersystems-x402` | `npm-registry` | 3 | 0 | 49.245 |
-| 158 | `npm/thailand-openclaw` | `npm-registry` | 3 | 0 | 49.245 |
-| 159 | `npm/xray2016-openclaw-mem0` | `npm-registry` | 3 | 0 | 49.245 |
-| 160 | `npm/leiyangyou-openclaw-wechaty` | `npm-registry` | 2 | 0 | 48.905 |
-| 161 | `third-party/tmustier-pi-agent-teams` | `third-party-github` | 7 | 0 | 48.276 |
-| 162 | `npm/scientify` | `npm-registry` | 2 | 0 | 47.701 |
-| 163 | `npm/justram-pi-undo-redo` | `npm-registry` | 3 | 0 | 47.654 |
-| 164 | `third-party/mrexodia-devdocs-cli` | `third-party-github` | 8 | 0 | 47.402 |
-| 165 | `npm/juanibiapina-pi-powerbar` | `npm-registry` | 4 | 0 | 47.377 |
-| 166 | `npm/pi-glm-image-summary` | `npm-registry` | 4 | 0 | 47.377 |
-| 167 | `third-party/markus1189-nixos-config` | `third-party-github` | 5 | 0 | 47.028 |
-| 168 | `third-party/rytswd-pi-agent-extensions` | `third-party-github` | 4 | 0 | 46.990 |
-| 169 | `npm/pborck-pi-de` | `npm-registry` | 1 | 0 | 46.623 |
-| 170 | `npm/agent-army` | `npm-registry` | 2 | 0 | 46.497 |
-| 171 | `npm/cdot65-prisma-airs` | `npm-registry` | 2 | 0 | 46.497 |
-| 172 | `npm/clawboy-openclaw-skill` | `npm-registry` | 2 | 0 | 46.497 |
-| 173 | `npm/clawdepl` | `npm-registry` | 2 | 0 | 46.497 |
-| 174 | `npm/crossmint-openclaw` | `npm-registry` | 2 | 0 | 46.497 |
-| 175 | `npm/crossmint-openclaw-wallet` | `npm-registry` | 2 | 0 | 46.497 |
-| 176 | `npm/fluxpointstudios-orynq-openclaw` | `npm-registry` | 2 | 0 | 46.497 |
-| 177 | `npm/ksmith221-openclaw-xmpp` | `npm-registry` | 2 | 0 | 46.497 |
-| 178 | `npm/lark-openclaw` | `npm-registry` | 2 | 0 | 46.497 |
-| 179 | `npm/openclaw-apple-calendar` | `npm-registry` | 2 | 0 | 46.497 |
-| 180 | `npm/openclaw-telegram-manager` | `npm-registry` | 2 | 0 | 46.497 |
-| 181 | `npm/openclaw-telegram-proxy` | `npm-registry` | 2 | 0 | 46.497 |
-| 182 | `npm/openclaw-watcher` | `npm-registry` | 2 | 0 | 46.497 |
-| 183 | `npm/skillport-cli` | `npm-registry` | 2 | 0 | 46.497 |
-| 184 | `npm/swedish-medications` | `npm-registry` | 2 | 0 | 46.497 |
-| 185 | `npm/turquoisebay-mqtt` | `npm-registry` | 2 | 0 | 46.497 |
-| 186 | `npm/turquoisebay-openclaw-mqtt` | `npm-registry` | 2 | 0 | 46.497 |
-| 187 | `npm/zenas940222-openclaw-feishu` | `npm-registry` | 2 | 0 | 46.497 |
-| 188 | `third-party/badlogic-pi-dosbox` | `third-party-github` | 4 | 0 | 45.786 |
-| 189 | `third-party/leiserfg-nix-config` | `third-party-github` | 4 | 0 | 45.286 |
-| 190 | `npm/juanibiapina-pi-plan` | `npm-registry` | 3 | 0 | 45.245 |
-| 191 | `third-party/badlogic-pi-gitlab-duo` | `third-party-github` | 5 | 0 | 45.119 |
-| 192 | `third-party/pspdfkit-labs-pi-skills` | `third-party-github` | 5 | 0 | 45.119 |
-| 193 | `npm/compaction-context` | `npm-registry` | 1 | 0 | 45.031 |
-| 194 | `npm/mcinteerj-openclaw-gmail` | `npm-registry` | 1 | 0 | 45.031 |
-| 195 | `npm/moltbot-lark` | `npm-registry` | 1 | 0 | 45.031 |
-| 196 | `npm/openclaw-redis-agent-memory` | `npm-registry` | 1 | 0 | 45.031 |
-| 197 | `npm/unicitylabs-openclaw-unicity` | `npm-registry` | 1 | 0 | 45.031 |
-| 198 | `npm/pi-codex-profile` | `npm-registry` | 2 | 0 | 44.905 |
-| 199 | `third-party/cv-pinance` | `third-party-github` | 6 | 0 | 44.592 |
-| 200 | `third-party/linx-systems-pi-sentinel` | `third-party-github` | 6 | 0 | 44.592 |
-| 201 | `third-party/skyfallsin-pi-mem` | `third-party-github` | 6 | 0 | 44.592 |
-| 202 | `npm/advantage-surgeclaw` | `npm-registry` | 1 | 0 | 43.827 |
-| 203 | `third-party/coctostan-pi-superteam` | `third-party-github` | 3 | 0 | 43.654 |
-| 204 | `third-party/elementsai-dev-cognia` | `third-party-github` | 3 | 0 | 43.654 |
-| 205 | `third-party/ayagmar-pi-extmgr` | `third-party-github` | 4 | 0 | 43.377 |
-| 206 | `third-party/bout3fiddy-agents` | `third-party-github` | 4 | 0 | 43.377 |
-| 207 | `third-party/dotemacs-pi-multi-prompt` | `third-party-github` | 4 | 0 | 43.377 |
-| 208 | `third-party/ghoseb-pi-irc-messenger` | `third-party-github` | 5 | 0 | 43.119 |
-| 209 | `npm/agent-squad-cli` | `npm-registry` | 1 | 0 | 42.623 |
-| 210 | `npm/agentdog-openclaw` | `npm-registry` | 1 | 0 | 42.623 |
-| 211 | `npm/ai-pdf-builder` | `npm-registry` | 1 | 0 | 42.623 |
-| 212 | `npm/chandlersun-openclaw-feishu` | `npm-registry` | 1 | 0 | 42.623 |
-| 213 | `npm/claude-search-proxy` | `npm-registry` | 1 | 0 | 42.623 |
-| 214 | `npm/clawalytics` | `npm-registry` | 1 | 0 | 42.623 |
-| 215 | `npm/clawdbot-ringcentral` | `npm-registry` | 1 | 0 | 42.623 |
-| 216 | `npm/clawguard-cli` | `npm-registry` | 1 | 0 | 42.623 |
-| 217 | `npm/contextableai-openclaw-memory-graphiti` | `npm-registry` | 1 | 0 | 42.623 |
-| 218 | `npm/csuwl-opencode-memory-plugin` | `npm-registry` | 1 | 0 | 42.623 |
-| 219 | `npm/dotkc` | `npm-registry` | 1 | 0 | 42.623 |
-| 220 | `npm/firela-billclaw-openclaw` | `npm-registry` | 1 | 0 | 42.623 |
-| 221 | `npm/jasper-configguard` | `npm-registry` | 1 | 0 | 42.623 |
-| 222 | `npm/joshualelon-clawdbot-skill-flow` | `npm-registry` | 1 | 0 | 42.623 |
-| 223 | `npm/moltbot-ringcentral` | `npm-registry` | 1 | 0 | 42.623 |
-| 224 | `npm/nebula-ai-openclaw-nebula` | `npm-registry` | 1 | 0 | 42.623 |
-| 225 | `npm/nutrient-sdk-nutrient-openclaw` | `npm-registry` | 1 | 0 | 42.623 |
-| 226 | `npm/openclaw-feishu` | `npm-registry` | 1 | 0 | 42.623 |
-| 227 | `npm/openclaw-linear-plugin` | `npm-registry` | 1 | 0 | 42.623 |
-| 228 | `npm/openclaw-promitheus` | `npm-registry` | 1 | 0 | 42.623 |
-| 229 | `npm/openclaw-ringcentral` | `npm-registry` | 1 | 0 | 42.623 |
-| 230 | `npm/openclaw-wap-channel` | `npm-registry` | 1 | 0 | 42.623 |
-| 231 | `npm/optimizclaw-acip-security` | `npm-registry` | 1 | 0 | 42.623 |
-| 232 | `npm/thewulf7-openclaw-avatarcam` | `npm-registry` | 1 | 0 | 42.623 |
-| 233 | `npm/too-many-claw` | `npm-registry` | 1 | 0 | 42.623 |
-| 234 | `npm/troykelly-openclaw-projects` | `npm-registry` | 1 | 0 | 42.623 |
-| 235 | `npm/xonder-supercall` | `npm-registry` | 1 | 0 | 42.623 |
-| 236 | `npm/z151620-openclaw-feishu` | `npm-registry` | 1 | 0 | 42.623 |
-| 237 | `npm/pi-manage-todo-list` | `npm-registry` | 2 | 0 | 42.497 |
-| 238 | `third-party/vrslev-dotfiles` | `third-party-github` | 3 | 0 | 42.449 |
-| 239 | `npm/zenobius-pi-worktrees` | `npm-registry` | 0 | 0 | 42.408 |
-| 240 | `third-party/hdresearch-pi-v` | `third-party-github` | 2 | 0 | 42.314 |
-| 241 | `third-party/whamp-glm-vision` | `third-party-github` | 2 | 0 | 42.314 |
-| 242 | `third-party/jbuckmccready-dotfiles` | `third-party-github` | 2 | 0 | 42.109 |
-| 243 | `third-party/mrexodia-agent-viewer` | `third-party-github` | 4 | 0 | 41.786 |
-| 244 | `third-party/juanibiapina-pi-extension-settings` | `third-party-github` | 3 | 0 | 41.654 |
-| 245 | `third-party/joshuadavidthomas-pi-opensync-plugin` | `third-party-github` | 4 | 0 | 41.377 |
-| 246 | `third-party/juanibiapina-pi-powerbar` | `third-party-github` | 4 | 0 | 41.377 |
-| 247 | `third-party/kaofelix-pi-fzf` | `third-party-github` | 4 | 0 | 41.377 |
-| 248 | `third-party/ditfetzt-pi-antigravity-quota` | `third-party-github` | 3 | 0 | 41.245 |
-| 249 | `third-party/ditfetzt-pi-cline-free-models` | `third-party-github` | 3 | 0 | 41.245 |
-| 250 | `third-party/knoopx-pi` | `third-party-github` | 3 | 0 | 41.245 |
-| 251 | `third-party/mikeastock-dotagents` | `third-party-github` | 3 | 0 | 41.245 |
-| 252 | `third-party/ninlds-pi-ding` | `third-party-github` | 3 | 0 | 41.245 |
-| 253 | `third-party/ogulcancelik-pi-ghostty-theme-sync` | `third-party-github` | 3 | 0 | 41.245 |
-| 254 | `third-party/yulqen-conductor-pi` | `third-party-github` | 2 | 0 | 40.905 |
-| 255 | `third-party/sgtest-megarepo` | `third-party-github` | 6 | 0 | 40.708 |
-| 256 | `third-party/gturkoglu-pi-codex-apply-patch` | `third-party-github` | 3 | 0 | 40.449 |
-| 257 | `npm/aliou-pi-evals` | `npm-registry` | 0 | 0 | 40.000 |
-| 258 | `npm/juanibiapina-pi-tokyonight` | `npm-registry` | 0 | 0 | 40.000 |
-| 259 | `npm/pi-planning-with-files` | `npm-registry` | 0 | 0 | 40.000 |
-| 260 | `npm/toenobu-agent` | `npm-registry` | 0 | 0 | 40.000 |
-| 261 | `npm/zenobius-pi-ds` | `npm-registry` | 0 | 0 | 40.000 |
-| 262 | `third-party/timofreiberg-dotfiles` | `third-party-github` | 2 | 0 | 39.701 |
-| 263 | `third-party/whodaniel-fuse` | `third-party-github` | 2 | 0 | 39.701 |
-| 264 | `third-party/juanibiapina-pi-plan` | `third-party-github` | 3 | 0 | 39.245 |
-| 265 | `third-party/lebonbruce-pi-hippocampus` | `third-party-github` | 3 | 0 | 39.245 |
-| 266 | `third-party/sudosubin-pi-cursor-agent` | `third-party-github` | 3 | 0 | 39.245 |
-| 267 | `npm/ameno-pi-minimax-mcp` | `npm-registry` | 1 | 0 | 38.623 |
-| 268 | `npm/pi-agent-extensions` | `npm-registry` | 1 | 0 | 38.623 |
-| 269 | `npm/pi-finder-subagent` | `npm-registry` | 1 | 0 | 38.623 |
-| 270 | `npm/pi-handoff` | `npm-registry` | 1 | 0 | 38.623 |
-| 271 | `npm/pi-librarian` | `npm-registry` | 1 | 0 | 38.623 |
-| 272 | `npm/pi-messenger-bridge` | `npm-registry` | 1 | 0 | 38.623 |
-| 273 | `npm/pi-read-map` | `npm-registry` | 1 | 0 | 38.623 |
-| 274 | `third-party/aadishv-dotfiles` | `third-party-github` | 2 | 0 | 38.497 |
-| 275 | `third-party/asoules-pi-recall` | `third-party-github` | 2 | 0 | 38.497 |
-| 276 | `third-party/continua-ai-tinny-pi` | `third-party-github` | 2 | 0 | 38.497 |
-| 277 | `third-party/iranb-clawdbot` | `third-party-github` | 2 | 0 | 38.497 |
-| 278 | `third-party/neohope-neopimonosrc` | `third-party-github` | 2 | 0 | 38.497 |
-| 279 | `third-party/pauldthomson-dotfiles` | `third-party-github` | 2 | 0 | 38.497 |
-| 280 | `third-party/skyfallsin-pi-vertex-anthropic` | `third-party-github` | 2 | 0 | 38.497 |
-| 281 | `third-party/towry-agent-share` | `third-party-github` | 2 | 0 | 38.497 |
-| 282 | `third-party/whamp-pi-automem` | `third-party-github` | 2 | 0 | 38.497 |
-| 283 | `third-party/messense-pi-parallel-agents` | `third-party-github` | 1 | 0 | 38.440 |
-| 284 | `npm/dexterai-clawdexter` | `npm-registry` | 0 | 0 | 38.408 |
-| 285 | `npm/openclaw-agentmail` | `npm-registry` | 0 | 0 | 38.408 |
-| 286 | `npm/openclaw-mem` | `npm-registry` | 0 | 0 | 38.408 |
-| 287 | `npm/prefactor-openclaw` | `npm-registry` | 0 | 0 | 37.204 |
-| 288 | `npm/rugbyclaw` | `npm-registry` | 0 | 0 | 37.204 |
-| 289 | `third-party/az9713-clawdbot` | `third-party-github` | 1 | 0 | 37.031 |
-| 290 | `third-party/dinhtungdu-orange` | `third-party-github` | 1 | 0 | 37.031 |
-| 291 | `third-party/kaofelix-dotfiles` | `third-party-github` | 1 | 0 | 37.031 |
-| 292 | `third-party/stefan2904-dockerized-pi` | `third-party-github` | 1 | 0 | 37.031 |
-| 293 | `third-party/ferologics-pi-extensions` | `third-party-github` | 2 | 0 | 36.497 |
-| 294 | `third-party/gturkoglu-pi-dynsys` | `third-party-github` | 2 | 0 | 36.497 |
-| 295 | `third-party/hintjen-pi-extensions` | `third-party-github` | 2 | 0 | 36.497 |
-| 296 | `third-party/qualisero-rhubarb-pi` | `third-party-github` | 2 | 0 | 36.497 |
-| 297 | `npm/2en-clawly-plugins` | `npm-registry` | 0 | 0 | 36.000 |
-| 298 | `npm/302oc` | `npm-registry` | 0 | 0 | 36.000 |
-| 299 | `npm/a2acalling` | `npm-registry` | 0 | 0 | 36.000 |
-| 300 | `npm/adp-openclaw` | `npm-registry` | 0 | 0 | 36.000 |
+| Rank | ID | Tier | Repo n | Rel | Stars | npm/mo | Impact |
+|---:|---|---|---:|---:|---:|---:|---:|
+| 101 | `third-party/willyfrog-pi-agent-extensions` | `third-party-github` | 1 | 84 | 0 | 0 | 128.000 |
+| 102 | `third-party/isaacraja-pi-vertex-claude` | `third-party-github` | 1 | 80 | 0 | 0 | 126.408 |
+| 103 | `third-party/jorgeavaldez-pi-config` | `third-party-github` | 1 | 80 | 0 | 0 | 126.408 |
+| 104 | `third-party/continua-ai-pi-lab` | `third-party-github` | 1 | 60 | 21 | 0 | 125.533 |
+| 105 | `third-party/graycarl-dotshell` | `third-party-github` | 1 | 80 | 0 | 0 | 125.204 |
+| 106 | `third-party/lepinkainen-dotfiles` | `third-party-github` | 1 | 80 | 0 | 0 | 125.204 |
+| 107 | `third-party/neonspectra-dotfiles` | `third-party-github` | 1 | 80 | 0 | 0 | 125.204 |
+| 108 | `third-party/samuelstevens-dotfiles` | `third-party-github` | 1 | 80 | 0 | 0 | 125.204 |
+| 109 | `third-party/sgtest-megarepo` | `third-party-github` | 1 | 72 | 6 | 0 | 124.708 |
+| 110 | `third-party/9cog-pi-cogno` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 111 | `third-party/annapurna-himal-pi-memory-search` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 112 | `third-party/annapurna-himal-pi-vim-editor` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 113 | `third-party/assagman-phi` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 114 | `third-party/atoncap-monorepo` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 115 | `third-party/blwsk-pi-test-scope` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 116 | `third-party/bout3fiddy-pi-langlearn` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 117 | `third-party/christroutner-pi-extensions` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 118 | `third-party/coctostan-pi-web-tools` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 119 | `third-party/dctrwatson-pi-squared` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 120 | `third-party/fink-andreas-pi-web-reader` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 121 | `third-party/forwardinfinity-pi-extensions` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 122 | `third-party/igor-makarov-pi-extension-sandbox` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 123 | `third-party/istar-eldritch-pi-wakatime` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 124 | `third-party/itsnotaka-dot-pi` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 125 | `third-party/jasonish-pi-sandbox` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 126 | `third-party/joshleblanc-pi-ext` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 127 | `third-party/joshleblanc-pi-minimax` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 128 | `third-party/joshuadavidthomas-agentkit` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 129 | `third-party/k1000-pi-reflect` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 130 | `third-party/leechael-pi-provider-kimi-code` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 131 | `third-party/lenstr-pi-fetch-url` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 132 | `third-party/maxsumrall-homeycli` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 133 | `third-party/mcollina-pi-bash-confirm` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 134 | `third-party/meteyou-pi-stuff` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 135 | `third-party/mrndstvndv-nixdots` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 136 | `third-party/nrupatunga-pi-extensions` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 137 | `third-party/opus-workshop-rush` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 138 | `third-party/rhnvrm-pi-mesh` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 139 | `third-party/rkunnamp-pi-apply-patch` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 140 | `third-party/sbattywolf-gaia` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 141 | `third-party/scooter-lacroix-leindex` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 142 | `third-party/sids-pi-extensions` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 143 | `third-party/ttttmr-pi-search-tool` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 144 | `third-party/zanieb-pi-plugins` | `third-party-github` | 1 | 80 | 0 | 0 | 124.000 |
+| 145 | `third-party/iranb-clawdbot` | `third-party-github` | 1 | 74 | 2 | 0 | 120.497 |
+| 146 | `third-party/az9713-clawdbot` | `third-party-github` | 1 | 74 | 1 | 0 | 119.031 |
+| 147 | `third-party/ex3ndr-daycare` | `third-party-github` | 1 | 72 | 1 | 0 | 118.623 |
+| 148 | `third-party/richardgill-pi-extensions` | `third-party-github` | 1 | 72 | 1 | 0 | 118.623 |
+| 149 | `third-party/robextremevoice-openclaw-1` | `third-party-github` | 1 | 74 | 1 | 0 | 116.623 |
+| 150 | `third-party/jwrunge-agent` | `third-party-github` | 1 | 76 | 0 | 0 | 116.000 |
+| 151 | `third-party/masonjames-dockhand-sre-agent` | `third-party-github` | 1 | 76 | 0 | 0 | 116.000 |
+| 152 | `third-party/bout3fiddy-agents` | `third-party-github` | 1 | 64 | 4 | 0 | 115.377 |
+| 153 | `third-party/markus1189-nixos-config` | `third-party-github` | 1 | 60 | 5 | 0 | 115.028 |
+| 154 | `third-party/lukeus-ai-shell` | `third-party-github` | 1 | 72 | 0 | 0 | 112.000 |
+| 155 | `third-party/weolopez-aardvark` | `third-party-github` | 1 | 72 | 0 | 0 | 112.000 |
+| 156 | `third-party/vrslev-dotfiles` | `third-party-github` | 1 | 60 | 3 | 0 | 110.449 |
+| 157 | `third-party/archiecrawford-openclaw` | `third-party-github` | 1 | 74 | 0 | 0 | 110.000 |
+| 158 | `third-party/az9713-openclaw` | `third-party-github` | 1 | 74 | 0 | 0 | 110.000 |
+| 159 | `third-party/brianwan19801015-labopenclaw` | `third-party-github` | 1 | 74 | 0 | 0 | 110.000 |
+| 160 | `third-party/charlie-818-clawd` | `third-party-github` | 1 | 74 | 0 | 0 | 110.000 |
+| 161 | `third-party/deskaunedsei1983-loc_clawdbot_01` | `third-party-github` | 1 | 74 | 0 | 0 | 110.000 |
+| 162 | `third-party/flufybot-openclaw` | `third-party-github` | 1 | 74 | 0 | 0 | 110.000 |
+| 163 | `third-party/timofreiberg-dotfiles` | `third-party-github` | 1 | 60 | 2 | 0 | 107.701 |
+| 164 | `third-party/whodaniel-fuse` | `third-party-github` | 1 | 60 | 2 | 0 | 107.701 |
+| 165 | `third-party/aadishv-dotfiles` | `third-party-github` | 1 | 60 | 2 | 0 | 106.497 |
+| 166 | `third-party/tudoroancea-dotfiles` | `third-party-github` | 1 | 60 | 1 | 0 | 103.827 |
+| 167 | `third-party/kavia-common-moltbot-311196` | `third-party-github` | 1 | 60 | 1 | 0 | 102.623 |
+| 168 | `third-party/m-dev-lab-ultimate-agent` | `third-party-github` | 1 | 64 | 0 | 0 | 100.000 |
+| 169 | `third-party/balaraj74-f.r.i.d.a.y` | `third-party-github` | 1 | 60 | 0 | 0 | 96.000 |
+| 170 | `third-party/coltonbatts-loubot` | `third-party-github` | 1 | 60 | 0 | 0 | 96.000 |
+| 171 | `third-party/ehtbanton-controlocal` | `third-party-github` | 1 | 60 | 0 | 0 | 96.000 |
+| 172 | `third-party/elwinliu-pi-config` | `third-party-github` | 1 | 60 | 0 | 0 | 96.000 |
+| 173 | `third-party/kanatti-pipi` | `third-party-github` | 1 | 60 | 0 | 0 | 96.000 |
+| 174 | `third-party/leopechnicki-ai-assistant` | `third-party-github` | 1 | 60 | 0 | 0 | 96.000 |
+| 175 | `third-party/thurstonsand-ansiblonomicon` | `third-party-github` | 1 | 60 | 0 | 0 | 96.000 |
+| 176 | `third-party/whamp-pi-agentic-compaction` | `third-party-github` | 1 | 60 | 0 | 0 | 96.000 |
+| 177 | `third-party/willem4130-android` | `third-party-github` | 1 | 60 | 0 | 0 | 96.000 |
+| 178 | `third-party/xxrenzhe-autobb` | `third-party-github` | 1 | 60 | 0 | 0 | 96.000 |
+| 179 | `npm/pi-voice` | `npm-registry` | 1 | 26 | 43 | 0 | 93.973 |
+| 180 | `third-party/carmandale-ralph-loop` | `third-party-github` | 1 | 60 | 0 | 0 | 92.000 |
+| 181 | `third-party/drshailesh88-krypto` | `third-party-github` | 1 | 60 | 0 | 0 | 92.000 |
+| 182 | `npm/hapi-cors-headers` | `npm-registry` | 1 | 36 | 28 | 0 | 86.715 |
+| 183 | `npm/zalo-personal` | `npm-registry` | 1 | 22 | 14 | 0 | 86.247 |
+| 184 | `third-party/pedal-intelligence-saypi-userscript` | `third-party-github` | 1 | 22 | 23 | 0 | 83.034 |
+| 185 | `npm/prinova-pi-github-tools` | `npm-registry` | 1 | 22 | 20 | 0 | 82.701 |
+| 186 | `npm/agent-security-scanner-mcp` | `npm-registry` | 1 | 24 | 11 | 0 | 79.559 |
+| 187 | `npm/ferologics-pi-skills` | `npm-registry` | 1 | 32 | 6 | 0 | 78.592 |
+| 188 | `npm/mcp-to-pi-tools` | `npm-registry` | 1 | 24 | 14 | 0 | 77.691 |
+| 189 | `third-party/jwintz-pi-island` | `third-party-github` | 1 | 22 | 19 | 0 | 76.623 |
+| 190 | `npm/openclaw-mcp-adapter` | `npm-registry` | 1 | 20 | 11 | 0 | 76.558 |
+| 191 | `npm/tmustier-pi-nes` | `npm-registry` | 1 | 22 | 15 | 0 | 76.491 |
+| 192 | `npm/diplodoc-openapi-extension` | `npm-registry` | 1 | 36 | 0 | 0 | 75.965 |
+| 193 | `third-party/dannote-dot-pi` | `third-party-github` | 1 | 22 | 10 | 0 | 75.727 |
+| 194 | `third-party/tmustier-pi-agent-teams` | `third-party-github` | 1 | 26 | 7 | 0 | 74.276 |
+| 195 | `npm/shieldcortex` | `npm-registry` | 1 | 14 | 7 | 4,934 | 73.188 |
+| 196 | `third-party/nickslevine-pirs` | `third-party-github` | 1 | 22 | 12 | 0 | 72.507 |
+| 197 | `npm/dnopi` | `npm-registry` | 1 | 22 | 9 | 0 | 72.000 |
+| 198 | `npm/openclaw-mcp` | `npm-registry` | 1 | 20 | 6 | 0 | 69.000 |
+| 199 | `npm/agent-skills-hub` | `npm-registry` | 1 | 24 | 3 | 0 | 68.858 |
+| 200 | `npm/vectorize-io-hindsight-openclaw` | `npm-registry` | 1 | 14 | 1,404 | 0 | 68.096 |
+| 201 | `npm/pi-context` | `npm-registry` | 1 | 18 | 8 | 0 | 66.993 |
+| 202 | `third-party/cv-pinance` | `third-party-github` | 1 | 22 | 6 | 0 | 66.592 |
+| 203 | `third-party/linx-systems-pi-sentinel` | `third-party-github` | 1 | 22 | 6 | 0 | 66.592 |
+| 204 | `third-party/skyfallsin-pi-mem` | `third-party-github` | 1 | 22 | 6 | 0 | 66.592 |
+| 205 | `npm/qingchencloud-openclaw-zh` | `npm-registry` | 1 | 14 | 1,181 | 0 | 66.295 |
+| 206 | `npm/openclaw-cn` | `npm-registry` | 1 | 14 | 1,285 | 0 | 66.252 |
+| 207 | `npm/pi-glm-image-summary` | `npm-registry` | 1 | 22 | 4 | 0 | 65.377 |
+| 208 | `third-party/lebonbruce-pi-hippocampus` | `third-party-github` | 1 | 26 | 3 | 0 | 65.245 |
+| 209 | `third-party/sudosubin-pi-cursor-agent` | `third-party-github` | 1 | 26 | 3 | 0 | 65.245 |
+| 210 | `npm/karvin2c-feishu` | `npm-registry` | 2 | 14 | 192,167 | 0 | 65.146 |
+| 211 | `third-party/ghoseb-pi-irc-messenger` | `third-party-github` | 1 | 22 | 5 | 0 | 65.119 |
+| 212 | `npm/pi-acp` | `npm-registry` | 1 | 14 | 23 | 228 | 64.710 |
+| 213 | `npm/vaclav-synacek-pi-coding-agent-termux` | `npm-registry` | 1 | 26 | 2 | 0 | 64.497 |
+| 214 | `third-party/juanibiapina-pi-extension-settings` | `third-party-github` | 1 | 22 | 3 | 0 | 63.654 |
+| 215 | `third-party/joshuadavidthomas-pi-opensync-plugin` | `third-party-github` | 1 | 22 | 4 | 0 | 63.377 |
+| 216 | `third-party/kaofelix-pi-fzf` | `third-party-github` | 1 | 22 | 4 | 0 | 63.377 |
+| 217 | `npm/joshualelon-clawdbot-skill-flow` | `npm-registry` | 1 | 28 | 1 | 0 | 62.623 |
+| 218 | `third-party/gturkoglu-pi-codex-apply-patch` | `third-party-github` | 1 | 22 | 3 | 0 | 62.449 |
+| 219 | `npm/tloncorp-tlon-skill` | `npm-registry` | 1 | 20 | 2 | 0 | 62.314 |
+| 220 | `npm/justram-pi-undo-redo` | `npm-registry` | 1 | 18 | 3 | 0 | 61.654 |
+| 221 | `npm/xpr-agents-openclaw` | `npm-registry` | 1 | 18 | 4 | 0 | 61.377 |
+| 222 | `third-party/ogulcancelik-pi-ghostty-theme-sync` | `third-party-github` | 1 | 22 | 3 | 0 | 61.245 |
+| 223 | `npm/pi-agent-extensions` | `npm-registry` | 1 | 26 | 1 | 0 | 60.623 |
+| 224 | `npm/pi-manage-todo-list` | `npm-registry` | 1 | 22 | 2 | 0 | 60.497 |
+| 225 | `npm/askjo-camofox-browser` | `npm-registry` | 1 | 14 | 380 | 0 | 59.442 |
+| 226 | `npm/pi-codex-profile` | `npm-registry` | 1 | 18 | 2 | 0 | 58.905 |
+| 227 | `npm/ameno-pi-minimax-mcp` | `npm-registry` | 1 | 24 | 1 | 0 | 58.623 |
+| 228 | `third-party/marcfargas-pi-mf-extensions` | `third-party-github` | 1 | 26 | 1 | 0 | 58.623 |
+| 229 | `third-party/zach-source-pi-agent-extensions` | `third-party-github` | 1 | 26 | 1 | 0 | 58.623 |
+| 230 | `npm/clawboy-openclaw-skill` | `npm-registry` | 1 | 20 | 2 | 0 | 58.497 |
+| 231 | `third-party/ferologics-pi-extensions` | `third-party-github` | 1 | 22 | 2 | 0 | 58.497 |
+| 232 | `third-party/gturkoglu-pi-dynsys` | `third-party-github` | 1 | 22 | 2 | 0 | 58.497 |
+| 233 | `third-party/hintjen-pi-extensions` | `third-party-github` | 1 | 22 | 2 | 0 | 58.497 |
+| 234 | `third-party/qualisero-rhubarb-pi` | `third-party-github` | 1 | 22 | 2 | 0 | 58.497 |
+| 235 | `npm/openclaw-pro` | `npm-registry` | 2 | 14 | 192,167 | 0 | 57.474 |
+| 236 | `npm/pborck-pi-de` | `npm-registry` | 1 | 22 | 1 | 0 | 56.623 |
+| 237 | `npm/pi-finder-subagent` | `npm-registry` | 1 | 22 | 1 | 0 | 56.623 |
+| 238 | `npm/pi-handoff` | `npm-registry` | 1 | 22 | 1 | 0 | 56.623 |
+| 239 | `npm/pi-librarian` | `npm-registry` | 1 | 22 | 1 | 0 | 56.623 |
+| 240 | `npm/pi-messenger-bridge` | `npm-registry` | 1 | 22 | 1 | 0 | 56.623 |
+| 241 | `npm/pi-read-map` | `npm-registry` | 1 | 22 | 1 | 0 | 56.623 |
+| 242 | `npm/too-many-claw` | `npm-registry` | 1 | 22 | 1 | 0 | 56.623 |
+| 243 | `npm/agent-army` | `npm-registry` | 1 | 18 | 2 | 0 | 56.497 |
+| 244 | `npm/zenobius-pi-worktrees` | `npm-registry` | 1 | 26 | 0 | 0 | 56.408 |
+| 245 | `npm/openclawfs` | `npm-registry` | 1 | 14 | 277 | 0 | 56.263 |
+| 246 | `npm/getfoundry-unbrowse-openclaw` | `npm-registry` | 1 | 14 | 308 | 0 | 55.854 |
+| 247 | `npm/phantom-openclaw-plugin` | `npm-registry` | 1 | 14 | 113 | 0 | 55.346 |
+| 248 | `npm/openclaw-redis-agent-memory` | `npm-registry` | 1 | 18 | 1 | 0 | 55.031 |
+| 249 | `third-party/ayagmar-pi-extension-template` | `third-party-github` | 1 | 22 | 1 | 0 | 54.623 |
+| 250 | `third-party/c-reiter-pi-conversation-retro` | `third-party-github` | 1 | 22 | 1 | 0 | 54.623 |
+| 251 | `third-party/damianpdr-pi-thread-switcher` | `third-party-github` | 1 | 22 | 1 | 0 | 54.623 |
+| 252 | `third-party/hazat-pi-context-filter` | `third-party-github` | 1 | 22 | 1 | 0 | 54.623 |
+| 253 | `third-party/tickideas-pi-cliproxy` | `third-party-github` | 1 | 22 | 1 | 0 | 54.623 |
+| 254 | `third-party/tintinweb-pi-schedule-prompt` | `third-party-github` | 1 | 22 | 1 | 0 | 54.623 |
+| 255 | `third-party/tintinweb-vscode-pi-model-chat-provider` | `third-party-github` | 1 | 22 | 1 | 0 | 54.623 |
+| 256 | `npm/aliou-pi-evals` | `npm-registry` | 1 | 26 | 0 | 0 | 54.000 |
+| 257 | `npm/cargo-cult-pi-coding-agent` | `npm-registry` | 1 | 26 | 0 | 0 | 54.000 |
+| 258 | `npm/jbutlerdev-pi-coding-agent` | `npm-registry` | 1 | 26 | 0 | 0 | 54.000 |
+| 259 | `npm/juanibiapina-pi-tokyonight` | `npm-registry` | 1 | 26 | 0 | 0 | 54.000 |
+| 260 | `npm/pi-extension-observational-memory` | `npm-registry` | 1 | 26 | 0 | 0 | 54.000 |
+| 261 | `npm/pi-planning-with-files` | `npm-registry` | 1 | 26 | 0 | 0 | 54.000 |
+| 262 | `npm/toenobu-agent` | `npm-registry` | 1 | 26 | 0 | 0 | 54.000 |
+| 263 | `npm/vandeepunk-pi-coding-agent` | `npm-registry` | 1 | 26 | 0 | 0 | 54.000 |
+| 264 | `third-party/dwsy-pi-extensions-skill` | `third-party-github` | 1 | 28 | 0 | 0 | 54.000 |
+| 265 | `npm/feishu-openclaw` | `npm-registry` | 1 | 14 | 167 | 0 | 53.391 |
+| 266 | `npm/agent-squad-cli` | `npm-registry` | 1 | 18 | 1 | 0 | 52.623 |
+| 267 | `third-party/byteowlz-pi-agent-extensions` | `third-party-github` | 1 | 26 | 0 | 0 | 52.000 |
+| 268 | `third-party/galz10-pickle-rick-extension` | `third-party-github` | 1 | 8 | 369 | 0 | 51.812 |
+| 269 | `npm/cloudbase-setup-openclaw` | `npm-registry` | 2 | 20 | 13 | 0 | 51.430 |
+| 270 | `third-party/lsj5031-ralph-pi-extension` | `third-party-github` | 1 | 22 | 0 | 0 | 50.408 |
+| 271 | `npm/pi-rose-pine` | `npm-registry` | 2 | 26 | 2 | 0 | 50.159 |
+| 272 | `npm/expo-openclaw-chat` | `npm-registry` | 1 | 14 | 101 | 0 | 50.069 |
+| 273 | `npm/clawdbot` | `npm-registry` | 1 | 22 | 0 | 0 | 50.000 |
+| 274 | `npm/hjanuschka-pi-nanny` | `npm-registry` | 1 | 22 | 0 | 0 | 50.000 |
+| 275 | `npm/jmz1-remembrall` | `npm-registry` | 1 | 22 | 0 | 0 | 50.000 |
+| 276 | `npm/pi-kagi` | `npm-registry` | 1 | 22 | 0 | 0 | 50.000 |
+| 277 | `npm/pi-kimi-coder` | `npm-registry` | 1 | 22 | 0 | 0 | 50.000 |
+| 278 | `npm/pi-nvidia-nim` | `npm-registry` | 1 | 22 | 0 | 0 | 50.000 |
+| 279 | `npm/pi-shit` | `npm-registry` | 1 | 22 | 0 | 0 | 50.000 |
+| 280 | `npm/pi-vscode-terminal-notification` | `npm-registry` | 1 | 22 | 0 | 0 | 50.000 |
+| 281 | `npm/pi-web-search` | `npm-registry` | 1 | 22 | 0 | 0 | 50.000 |
+| 282 | `npm/shitty-prompt` | `npm-registry` | 1 | 22 | 0 | 0 | 50.000 |
+| 283 | `npm/teploe-odealko-mpflow-mpflow-proxy` | `npm-registry` | 1 | 22 | 0 | 0 | 50.000 |
+| 284 | `npm/wezterm-pi-helper` | `npm-registry` | 1 | 22 | 0 | 0 | 50.000 |
+| 285 | `npm/zenobius-pi-ds` | `npm-registry` | 1 | 22 | 0 | 0 | 50.000 |
+| 286 | `npm/clawcontrol` | `npm-registry` | 1 | 14 | 58 | 0 | 48.432 |
+| 287 | `npm/agenshield-skills` | `npm-registry` | 1 | 20 | 0 | 0 | 48.000 |
+| 288 | `npm/agentwars-skill` | `npm-registry` | 1 | 20 | 0 | 0 | 48.000 |
+| 289 | `npm/buildlog-openclaw-skill` | `npm-registry` | 1 | 20 | 0 | 0 | 48.000 |
+| 290 | `npm/jtai-whatsapp-skill` | `npm-registry` | 1 | 20 | 0 | 0 | 48.000 |
+| 291 | `npm/merchantguard-guardbot-skills` | `npm-registry` | 1 | 20 | 0 | 0 | 48.000 |
+| 292 | `npm/openagora-skill` | `npm-registry` | 1 | 20 | 0 | 0 | 48.000 |
+| 293 | `npm/openclaw-docs-mcp` | `npm-registry` | 1 | 20 | 0 | 0 | 48.000 |
+| 294 | `npm/skill-scaffold` | `npm-registry` | 1 | 20 | 0 | 0 | 48.000 |
+| 295 | `npm/skill-validator` | `npm-registry` | 1 | 20 | 0 | 0 | 48.000 |
+| 296 | `npm/skillzmarket-openclaw-skill` | `npm-registry` | 1 | 20 | 0 | 0 | 48.000 |
+| 297 | `third-party/carlos-rodrigo-pi-extensions` | `third-party-github` | 1 | 22 | 0 | 0 | 48.000 |
+| 298 | `third-party/drew-myers-pi-extensions` | `third-party-github` | 1 | 22 | 0 | 0 | 48.000 |
+| 299 | `third-party/hopsken-pi-extensions` | `third-party-github` | 1 | 22 | 0 | 0 | 48.000 |
+| 300 | `third-party/igorwarzocha-howaboua-pi-extensions` | `third-party-github` | 1 | 22 | 0 | 0 | 48.000 |
