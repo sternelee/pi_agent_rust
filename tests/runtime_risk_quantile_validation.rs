@@ -34,6 +34,7 @@ fn permissive_policy() -> ExtensionPolicy {
 const fn default_risk_config() -> RuntimeRiskConfig {
     RuntimeRiskConfig {
         enabled: true,
+        enforce: true,
         alpha: 0.01,
         window_size: 64,
         ledger_limit: 1024,
@@ -507,6 +508,7 @@ fn e2e_ledger_integrity_after_truncation() {
     // ledger_limit is clamped to minimum 32, so use 32 and generate > 32 calls
     let config = RuntimeRiskConfig {
         enabled: true,
+        enforce: true,
         alpha: 0.01,
         window_size: 16,
         ledger_limit: 32,

@@ -33,6 +33,7 @@ fn permissive_policy() -> ExtensionPolicy {
 const fn make_risk_config(window_size: usize, ledger_limit: usize) -> RuntimeRiskConfig {
     RuntimeRiskConfig {
         enabled: true,
+        enforce: true,
         alpha: 0.01,
         window_size,
         ledger_limit,

@@ -48,6 +48,7 @@ fn e2e_runtime_hostcall_telemetry_logs_required_fields() {
     let manager = ExtensionManager::new();
     manager.set_runtime_risk_config(RuntimeRiskConfig {
         enabled: true,
+        enforce: true,
         alpha: 0.01,
         window_size: 64,
         ledger_limit: 1024,
