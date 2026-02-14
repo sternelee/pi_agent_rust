@@ -8,11 +8,12 @@
 //!   2. `ollama pull qwen2.5:0.5b`
 //!   3. `cargo test --test e2e_ollama_live`
 
+use asupersync::runtime::RuntimeBuilder;
 use futures::StreamExt;
-use pi_agent_rust::model::{Message, StreamEvent, UserContent, UserMessage};
-use pi_agent_rust::models::ModelEntry;
-use pi_agent_rust::provider::{Context, InputType, Model, ModelCost, StreamOptions};
-use pi_agent_rust::providers::create_provider;
+use pi::model::{Message, StreamEvent, UserContent, UserMessage};
+use pi::models::ModelEntry;
+use pi::provider::{Context, InputType, Model, ModelCost, StreamOptions};
+use pi::providers::create_provider;
 use std::collections::HashMap;
 
 const OLLAMA_BASE: &str = "http://127.0.0.1:11434/v1";
@@ -83,7 +84,7 @@ fn live_ollama_simple_text_streaming() {
         return;
     }
 
-    let rt = asupersync::RuntimeBuilder::current_thread()
+    let rt = RuntimeBuilder::current_thread()
         .build()
         .expect("runtime");
 
@@ -142,7 +143,7 @@ fn live_ollama_event_ordering() {
         return;
     }
 
-    let rt = asupersync::RuntimeBuilder::current_thread()
+    let rt = RuntimeBuilder::current_thread()
         .build()
         .expect("runtime");
 
