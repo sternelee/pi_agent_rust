@@ -347,7 +347,7 @@ impl PackageManager {
                 }
             }
             ParsedSource::Local { .. } => {}
-        };
+        }
 
         self.verify_and_record_lock(source, scope, PackageLockAction::Update)
     }
@@ -684,7 +684,11 @@ impl PackageManager {
     fn lockfile_path_for_scope(&self, scope: PackageScope) -> Option<PathBuf> {
         match scope {
             PackageScope::User => Some(Config::global_dir().join("packages.lock.json")),
-            PackageScope::Project => Some(self.cwd.join(Config::project_dir()).join("packages.lock.json")),
+            PackageScope::Project => Some(
+                self.cwd
+                    .join(Config::project_dir())
+                    .join("packages.lock.json"),
+            ),
             PackageScope::Temporary => None,
         }
     }
@@ -692,9 +696,11 @@ impl PackageManager {
     fn trust_audit_path_for_scope(&self, scope: PackageScope) -> Option<PathBuf> {
         match scope {
             PackageScope::User => Some(Config::global_dir().join("package-trust-audit.jsonl")),
-            PackageScope::Project => {
-                Some(self.cwd.join(Config::project_dir()).join("package-trust-audit.jsonl"))
-            }
+            PackageScope::Project => Some(
+                self.cwd
+                    .join(Config::project_dir())
+                    .join("package-trust-audit.jsonl"),
+            ),
             PackageScope::Temporary => None,
         }
     }
@@ -729,7 +735,8 @@ impl PackageManager {
 
                 let event = PackageTrustAuditEvent {
                     schema: PACKAGE_TRUST_AUDIT_SCHEMA,
-                    timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    timestamp: chrono::Utc::now()
+                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                     action: match action {
                         PackageLockAction::Install => "install",
                         PackageLockAction::Update => "update",
@@ -742,18 +749,21 @@ impl PackageManager {
                     to_state: transition.to_state,
                     reason_codes: transition.reason_codes,
                     remediation: None,
-                    details: serde_json::to_value(&candidate).unwrap_or_else(|_| serde_json::json!({})),
+                    details: serde_json::to_value(&candidate)
+                        .unwrap_or_else(|_| serde_json::json!({})),
                 };
                 self.append_trust_audit_event(scope, &event)?;
                 Ok(())
             }
             Err(mismatch) => {
-                let from_state = existing
-                    .as_ref()
-                    .map_or_else(|| "untracked".to_string(), |entry| trust_state_label(entry.trust_state).to_string());
+                let from_state = existing.as_ref().map_or_else(
+                    || "untracked".to_string(),
+                    |entry| trust_state_label(entry.trust_state).to_string(),
+                );
                 let event = PackageTrustAuditEvent {
                     schema: PACKAGE_TRUST_AUDIT_SCHEMA,
-                    timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    timestamp: chrono::Utc::now()
+                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                     action: match action {
                         PackageLockAction::Install => "install",
                         PackageLockAction::Update => "update",
@@ -766,7 +776,8 @@ impl PackageManager {
                     to_state: "rejected".to_string(),
                     reason_codes: vec![mismatch.code.to_string()],
                     remediation: Some(mismatch.remediation.clone()),
-                    details: serde_json::to_value(&candidate).unwrap_or_else(|_| serde_json::json!({})),
+                    details: serde_json::to_value(&candidate)
+                        .unwrap_or_else(|_| serde_json::json!({})),
                 };
                 self.append_trust_audit_event(scope, &event)?;
 
@@ -786,7 +797,11 @@ impl PackageManager {
 
         let identity = self.package_identity(source);
         let mut lockfile = read_package_lockfile(&lockfile_path)?;
-        let Some(idx) = lockfile.entries.iter().position(|entry| entry.identity == identity) else {
+        let Some(idx) = lockfile
+            .entries
+            .iter()
+            .position(|entry| entry.identity == identity)
+        else {
             return Ok(());
         };
 
@@ -811,7 +826,11 @@ impl PackageManager {
         Ok(())
     }
 
-    fn append_trust_audit_event(&self, scope: PackageScope, event: &PackageTrustAuditEvent) -> Result<()> {
+    fn append_trust_audit_event(
+        &self,
+        scope: PackageScope,
+        event: &PackageTrustAuditEvent,
+    ) -> Result<()> {
         let Some(path) = self.trust_audit_path_for_scope(scope) else {
             return Ok(());
         };
@@ -820,11 +839,15 @@ impl PackageManager {
         }
 
         let payload = serde_json::to_string(event)?;
-        let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
         writeln!(file, "{payload}")?;
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn build_lock_entry(&self, source: &str, scope: PackageScope) -> Result<PackageLockEntry> {
         let parsed = parse_source(source, &self.cwd);
         match parsed {
@@ -857,7 +880,10 @@ impl PackageManager {
                     )
                 })?;
 
-                if let Some(expected) = requested_version.as_deref().filter(|value| is_exact_npm_version(value)) {
+                if let Some(expected) = requested_version
+                    .as_deref()
+                    .filter(|value| is_exact_npm_version(value))
+                {
                     if expected != installed_version {
                         return Err(verification_error(
                             "npm_version_mismatch",
@@ -922,10 +948,13 @@ impl PackageManager {
                     }
                 }
 
-                let origin_url =
-                    run_command_capture("git", ["config", "--get", "remote.origin.url"], Some(&installed_path))
-                        .ok()
-                        .filter(|value| !value.trim().is_empty());
+                let origin_url = run_command_capture(
+                    "git",
+                    ["config", "--get", "remote.origin.url"],
+                    Some(&installed_path),
+                )
+                .ok()
+                .filter(|value| !value.trim().is_empty());
                 let digest_sha256 = digest_package_path(&installed_path)?;
 
                 Ok(PackageLockEntry {
@@ -2860,7 +2889,7 @@ where
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn scope_label(scope: PackageScope) -> &'static str {
+const fn scope_label(scope: PackageScope) -> &'static str {
     match scope {
         PackageScope::User => "user",
         PackageScope::Project => "project",
@@ -2868,7 +2897,7 @@ fn scope_label(scope: PackageScope) -> &'static str {
     }
 }
 
-fn trust_state_label(state: PackageEntryTrustState) -> &'static str {
+const fn trust_state_label(state: PackageEntryTrustState) -> &'static str {
     match state {
         PackageEntryTrustState::Trusted => "trusted",
         PackageEntryTrustState::Rejected => "rejected",
@@ -2899,24 +2928,24 @@ fn evaluate_lock_transition(
 
     let allow_mutation = allow_lock_entry_update(candidate, action);
 
-    if existing.source_kind != candidate.source_kind || existing.source != candidate.source {
-        if !allow_mutation {
-            return Err(PackageLockMismatch {
-                code: "provenance_mismatch",
-                reason: format!(
-                    "source identity changed for {}: previous='{}' ({:?}), current='{}' ({:?})",
-                    candidate.identity,
-                    existing.source,
-                    existing.source_kind,
-                    candidate.source,
-                    candidate.source_kind
-                ),
-                remediation: format!(
-                    "Review the source change, then run `pi remove {}` and `pi install {}` to re-establish trust.",
-                    candidate.source, candidate.source
-                ),
-            });
-        }
+    if (existing.source_kind != candidate.source_kind || existing.source != candidate.source)
+        && !allow_mutation
+    {
+        return Err(PackageLockMismatch {
+            code: "provenance_mismatch",
+            reason: format!(
+                "source identity changed for {}: previous='{}' ({:?}), current='{}' ({:?})",
+                candidate.identity,
+                existing.source,
+                existing.source_kind,
+                candidate.source,
+                candidate.source_kind
+            ),
+            remediation: format!(
+                "Review the source change, then run `pi remove {}` and `pi install {}` to re-establish trust.",
+                candidate.source, candidate.source
+            ),
+        });
     }
 
     if existing.resolved != candidate.resolved && !allow_mutation {
@@ -2965,7 +2994,7 @@ fn evaluate_lock_transition(
     })
 }
 
-fn allow_lock_entry_update(candidate: &PackageLockEntry, action: PackageLockAction) -> bool {
+const fn allow_lock_entry_update(candidate: &PackageLockEntry, action: PackageLockAction) -> bool {
     match action {
         PackageLockAction::Install => false,
         PackageLockAction::Update => match candidate.resolved {
@@ -3067,7 +3096,11 @@ fn digest_package_path(path: &Path) -> Result<String> {
     Ok(hex_encode(hasher.finalize().as_slice()))
 }
 
-fn collect_digest_files_recursive(root: &Path, dir: &Path, out: &mut Vec<(PathBuf, String)>) -> Result<()> {
+fn collect_digest_files_recursive(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<(PathBuf, String)>,
+) -> Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -5063,42 +5096,32 @@ mod tests {
             true,
         );
 
-        let mismatch = evaluate_lock_transition(
-            Some(&existing),
-            &candidate,
-            PackageLockAction::Install,
-        )
-        .expect_err("install should fail closed on digest mismatch");
+        let mismatch =
+            evaluate_lock_transition(Some(&existing), &candidate, PackageLockAction::Install)
+                .expect_err("install should fail closed on digest mismatch");
         assert_eq!(mismatch.code, "digest_mismatch");
     }
 
     #[test]
     fn evaluate_lock_transition_allows_unpinned_update_changes() {
-        let existing = sample_npm_lock_entry(
-            "npm:demo-pkg",
-            "demo-pkg",
-            None,
-            "1.0.0",
-            "aaaaaaaa",
-            false,
-        );
-        let candidate = sample_npm_lock_entry(
-            "npm:demo-pkg",
-            "demo-pkg",
-            None,
-            "1.1.0",
-            "bbbbbbbb",
-            false,
-        );
+        let existing =
+            sample_npm_lock_entry("npm:demo-pkg", "demo-pkg", None, "1.0.0", "aaaaaaaa", false);
+        let candidate =
+            sample_npm_lock_entry("npm:demo-pkg", "demo-pkg", None, "1.1.0", "bbbbbbbb", false);
 
-        let transition = evaluate_lock_transition(Some(&existing), &candidate, PackageLockAction::Update)
-            .expect("unpinned update should permit provenance/digest rotation");
+        let transition =
+            evaluate_lock_transition(Some(&existing), &candidate, PackageLockAction::Update)
+                .expect("unpinned update should permit provenance/digest rotation");
         assert!(
-            transition.reason_codes.contains(&"provenance_changed".to_string()),
+            transition
+                .reason_codes
+                .contains(&"provenance_changed".to_string()),
             "expected provenance_changed reason code"
         );
         assert!(
-            transition.reason_codes.contains(&"digest_changed".to_string()),
+            transition
+                .reason_codes
+                .contains(&"digest_changed".to_string()),
             "expected digest_changed reason code"
         );
     }
@@ -5108,14 +5131,20 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let package_root = dir.path().join("pkg");
         fs::create_dir_all(package_root.join(".git")).expect("create .git dir");
-        fs::write(package_root.join("index.js"), "export const ok = true;\n").expect("write index.js");
-        fs::write(package_root.join(".git/HEAD"), "ref: refs/heads/main\n").expect("write .git/HEAD");
+        fs::write(package_root.join("index.js"), "export const ok = true;\n")
+            .expect("write index.js");
+        fs::write(package_root.join(".git/HEAD"), "ref: refs/heads/main\n")
+            .expect("write .git/HEAD");
 
         let digest_before = digest_package_path(&package_root).expect("digest before");
 
-        fs::write(package_root.join(".git/HEAD"), "ref: refs/heads/feature\n").expect("rewrite .git/HEAD");
-        fs::write(package_root.join(".git/config"), "[core]\nrepositoryformatversion = 0\n")
-            .expect("write .git/config");
+        fs::write(package_root.join(".git/HEAD"), "ref: refs/heads/feature\n")
+            .expect("rewrite .git/HEAD");
+        fs::write(
+            package_root.join(".git/config"),
+            "[core]\nrepositoryformatversion = 0\n",
+        )
+        .expect("write .git/config");
 
         let digest_after = digest_package_path(&package_root).expect("digest after");
         assert_eq!(
@@ -5130,18 +5159,27 @@ mod tests {
         let cwd = dir.path().to_path_buf();
         let pkg = cwd.join("local-pkg");
         fs::create_dir_all(&pkg).expect("create local package dir");
-        fs::write(pkg.join("index.js"), "export const stable = true;\n").expect("write extension file");
+        fs::write(pkg.join("index.js"), "export const stable = true;\n")
+            .expect("write extension file");
 
         let manager = PackageManager::new(cwd.clone());
         manager
-            .verify_and_record_lock("./local-pkg", PackageScope::Project, PackageLockAction::Install)
+            .verify_and_record_lock(
+                "./local-pkg",
+                PackageScope::Project,
+                PackageLockAction::Install,
+            )
             .expect("first lock verification");
 
         let lockfile_path = cwd.join(".pi").join("packages.lock.json");
         let first = fs::read_to_string(&lockfile_path).expect("read first lockfile");
 
         manager
-            .verify_and_record_lock("./local-pkg", PackageScope::Project, PackageLockAction::Install)
+            .verify_and_record_lock(
+                "./local-pkg",
+                PackageScope::Project,
+                PackageLockAction::Install,
+            )
             .expect("second lock verification");
         let second = fs::read_to_string(&lockfile_path).expect("read second lockfile");
 
@@ -5162,13 +5200,21 @@ mod tests {
 
         let manager = PackageManager::new(cwd.clone());
         manager
-            .verify_and_record_lock("./local-pkg", PackageScope::Project, PackageLockAction::Install)
+            .verify_and_record_lock(
+                "./local-pkg",
+                PackageScope::Project,
+                PackageLockAction::Install,
+            )
             .expect("initial lock verification");
 
         fs::write(&file_path, "export const version = 2;\n").expect("tamper package file");
 
         let err = manager
-            .verify_and_record_lock("./local-pkg", PackageScope::Project, PackageLockAction::Install)
+            .verify_and_record_lock(
+                "./local-pkg",
+                PackageScope::Project,
+                PackageLockAction::Install,
+            )
             .expect_err("install verification should fail on digest mismatch");
         let message = err.to_string();
         assert!(

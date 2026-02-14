@@ -12,7 +12,7 @@ use common::TestHarness;
 use pi::connectors::http::HttpConnector;
 use pi::extensions::{
     ExtensionManager, ExtensionPolicy, ExtensionPolicyMode, HostCallContext, HostCallPayload,
-    HostResultPayload, RuntimeRiskActionValue, RuntimeRiskCalibrationConfig, RuntimeRiskConfig,
+    RuntimeRiskActionValue, RuntimeRiskCalibrationConfig, RuntimeRiskConfig,
     calibrate_runtime_risk_from_ledger, replay_runtime_risk_ledger_artifact,
     verify_runtime_risk_ledger_artifact,
 };

@@ -19433,7 +19433,7 @@ mod tests {
     }
 
     #[test]
-    fn quantile_single_element() {
+    fn quantile_single_element_bd_xqipg_full() {
         let result = runtime_risk_quantile(vec![0.42], 0.5);
         assert!(
             (result - 0.42).abs() < f64::EPSILON,
@@ -19460,7 +19460,7 @@ mod tests {
     }
 
     #[test]
-    fn quantile_odd_sample_count_median() {
+    fn quantile_odd_sample_count_median_bd_xqipg_full() {
         // 5 elements sorted: [0.1, 0.3, 0.5, 0.7, 0.9]
         // q=0.5 → idx = round((5-1)*0.5) = round(2.0) = 2 → values[2] = 0.5
         let result = runtime_risk_quantile(vec![0.9, 0.1, 0.7, 0.3, 0.5], 0.5);
@@ -19471,7 +19471,7 @@ mod tests {
     }
 
     #[test]
-    fn quantile_even_sample_count_median() {
+    fn quantile_even_sample_count_median_bd_xqipg_full() {
         // 4 elements sorted: [0.1, 0.3, 0.7, 0.9]
         // q=0.5 → idx = round((4-1)*0.5) = round(1.5) = 2 → values[2] = 0.7
         let result = runtime_risk_quantile(vec![0.9, 0.1, 0.7, 0.3], 0.5);
@@ -19482,7 +19482,7 @@ mod tests {
     }
 
     #[test]
-    fn quantile_duplicate_values() {
+    fn quantile_duplicate_values_bd_xqipg_full() {
         let result = runtime_risk_quantile(vec![0.5, 0.5, 0.5, 0.5], 0.75);
         assert!(
             (result - 0.5).abs() < f64::EPSILON,
@@ -19511,7 +19511,7 @@ mod tests {
     }
 
     #[test]
-    fn quantile_nan_q_treated_as_zero() {
+    fn quantile_nan_q_treated_as_zero_bd_xqipg_full() {
         // runtime_risk_clamp01(NaN) → 0.0, so returns minimum
         let result = runtime_risk_quantile(vec![0.2, 0.4, 0.6], f64::NAN);
         assert!(
@@ -21950,7 +21950,7 @@ mod tests {
     }
 
     #[test]
-    fn quantile_single_element() {
+    fn quantile_single_element_multi_q() {
         let v = vec![42.0];
         assert!((runtime_risk_quantile(v.clone(), 0.0) - 42.0).abs() < f64::EPSILON);
         assert!((runtime_risk_quantile(v.clone(), 0.5) - 42.0).abs() < f64::EPSILON);
@@ -21970,21 +21970,21 @@ mod tests {
     }
 
     #[test]
-    fn quantile_odd_sample_count_median() {
+    fn quantile_odd_sample_count_median_integer_values() {
         // 5 elements: sorted = [1,3,5,7,9], median index = (4*0.5).round() = 2
         let v = vec![5.0, 1.0, 9.0, 3.0, 7.0];
         assert!((runtime_risk_quantile(v, 0.5) - 5.0).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn quantile_even_sample_count_median() {
+    fn quantile_even_sample_count_median_integer_values() {
         // 4 elements: sorted = [2,4,6,8], median index = (3*0.5).round() = 2
         let v = vec![8.0, 2.0, 6.0, 4.0];
         assert!((runtime_risk_quantile(v, 0.5) - 6.0).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn quantile_duplicate_values() {
+    fn quantile_all_duplicate_values() {
         let v = vec![3.0, 3.0, 3.0, 3.0, 3.0];
         assert!((runtime_risk_quantile(v.clone(), 0.0) - 3.0).abs() < f64::EPSILON);
         assert!((runtime_risk_quantile(v.clone(), 0.5) - 3.0).abs() < f64::EPSILON);
@@ -22013,7 +22013,7 @@ mod tests {
     }
 
     #[test]
-    fn quantile_nan_q_treated_as_zero() {
+    fn quantile_nan_q_clamped_to_zero() {
         let v = vec![10.0, 20.0, 30.0];
         // clamp01 maps NaN to 0.0 → returns minimum
         assert!((runtime_risk_quantile(v, f64::NAN) - 10.0).abs() < f64::EPSILON);
@@ -22081,7 +22081,7 @@ mod tests {
         // residual_window filled with residuals, then quantile(window, 1.0 - alpha)
         let alpha = 0.01;
         let residuals: Vec<f64> = (0..64).map(|i| (f64::from(i) / 63.0) * 0.5).collect();
-        let quantile_val = runtime_risk_quantile(residuals.clone(), 1.0 - alpha);
+        let quantile_val = runtime_risk_quantile(residuals, 1.0 - alpha);
         // At q=0.99, should be close to the maximum residual (~0.5)
         assert!(
             quantile_val >= 0.45,
