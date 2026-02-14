@@ -17,7 +17,7 @@ const VCR_DIR: &str = "tests/fixtures/vcr";
 const REDACTED: &str = "[REDACTED]";
 
 /// Known sensitive HTTP headers (case-insensitive).
-/// Matches the set in `src/vcr.rs` SENSITIVE_HEADERS.
+/// Matches the set in `src/vcr.rs` `SENSITIVE_HEADERS`.
 const SENSITIVE_HEADERS: [&str; 6] = [
     "authorization",
     "x-api-key",

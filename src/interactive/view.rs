@@ -74,7 +74,9 @@ impl PiApp {
             None
         };
 
-        let mut output = String::new();
+        // PERF-7: Pre-allocate view output with capacity from the previous
+        // frame, avoiding incremental String grows during assembly.
+        let mut output = String::with_capacity(self.render_buffers.view_capacity_hint());
 
         // Header
         output.push_str(&self.render_header());
@@ -97,12 +99,16 @@ impl PiApp {
             } else {
                 None
             };
-            let raw = self.build_conversation_content();
+            let mut raw = self.build_conversation_content();
             if let Some(start) = content_start {
                 self.frame_timing
                     .record_content_build(micros_as_u64(start.elapsed().as_micros()));
             }
-            raw.trim_end().to_string()
+            // PERF-7: Truncate in place instead of trim_end().to_string()
+            // which would allocate a second copy of the entire content.
+            let trimmed_len = raw.trim_end().len();
+            raw.truncate(trimmed_len);
+            raw
         };
 
         // Update viewport content (we can't mutate self in view, so we render with current offset)

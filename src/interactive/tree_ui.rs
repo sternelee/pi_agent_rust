@@ -331,7 +331,6 @@ impl PiApp {
             self.agent_state = AgentState::Idle;
             self.current_tool = None;
             self.abort_handle = None;
-            self.message_render_cache.clear();
             self.status_message = Some(format!("Switched to {status_leaf}"));
             self.scroll_to_bottom();
 

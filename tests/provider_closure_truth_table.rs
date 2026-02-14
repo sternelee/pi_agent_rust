@@ -390,7 +390,7 @@ fn cross_provider_matrix_has_production_ready_row() {
     let rows = doc["cross_provider_matrix"]["rows"].as_array().unwrap();
     let has_production_ready = rows
         .iter()
-        .any(|row| row[0].as_str().map_or(false, |s| s == "production_ready"));
+        .any(|row| row[0].as_str() == Some("production_ready"));
     assert!(
         has_production_ready,
         "Matrix should have a production_ready row"
@@ -647,25 +647,24 @@ fn comprehensive_truth_table_report() {
     let providers = doc["providers"].as_object().unwrap();
     harness
         .log()
-        .info("count", &format!("Providers audited: {}", providers.len()));
+        .info("count", format!("Providers audited: {}", providers.len()));
     assert_eq!(providers.len(), 5);
 
     // Verify all are CLOSED
-    let mut total_cassettes: u64 = 0;
     for (key, provider) in providers {
         let status = provider["disposition"]["status"].as_str().unwrap();
         harness
             .log()
-            .info("disposition", &format!("{key}: {status}"));
+            .info("disposition", format!("{key}: {status}"));
         assert_eq!(status, "CLOSED", "Provider {key} should be CLOSED");
     }
 
     // Verify total cassette count
     let summary = &doc["aggregate_summary"];
-    total_cassettes = summary["total_vcr_cassettes"].as_u64().unwrap();
+    let total_cassettes = summary["total_vcr_cassettes"].as_u64().unwrap();
     harness.log().info(
         "cassettes",
-        &format!("Total VCR cassettes: {total_cassettes}"),
+        format!("Total VCR cassettes: {total_cassettes}"),
     );
     assert_eq!(total_cassettes, 47);
 
@@ -673,7 +672,7 @@ fn comprehensive_truth_table_report() {
     let blocking = summary["blocking_issues"].as_u64().unwrap();
     harness
         .log()
-        .info("blockers", &format!("Blocking issues: {blocking}"));
+        .info("blockers", format!("Blocking issues: {blocking}"));
     assert_eq!(blocking, 0);
 
     harness

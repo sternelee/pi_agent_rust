@@ -106,7 +106,7 @@ use self::file_refs::{
 };
 use self::perf::{
     CRITICAL_KEEP_MESSAGES, FrameTimingStats, MemoryLevel, MemoryMonitor, MessageRenderCache,
-    micros_as_u64,
+    RenderBuffers, micros_as_u64,
 };
 #[cfg(test)]
 use self::state::TOOL_AUTO_COLLAPSE_THRESHOLD;
@@ -1269,6 +1269,9 @@ pub struct PiApp {
 
     // Per-message render cache (PERF-1)
     message_render_cache: MessageRenderCache,
+
+    // Pre-allocated reusable buffers for view() hot path (PERF-7)
+    render_buffers: RenderBuffers,
 }
 
 impl PiApp {
@@ -1470,6 +1473,7 @@ impl PiApp {
             frame_timing: FrameTimingStats::new(),
             memory_monitor: MemoryMonitor::new_default(),
             message_render_cache: MessageRenderCache::new(),
+            render_buffers: RenderBuffers::new(),
         };
 
         if let Some(manager) = app.extensions.clone() {

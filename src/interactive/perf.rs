@@ -741,6 +741,63 @@ impl MessageRenderCache {
     }
 }
 
+// ---------------------------------------------------------------------------
+// RenderBuffers — pre-allocated reusable buffers for view() hot path (PERF-7)
+// ---------------------------------------------------------------------------
+
+/// Pre-allocated buffers that are cleared and reused each frame, avoiding
+/// repeated heap allocations in the 60fps render loop.
+///
+/// Uses `RefCell` for interior mutability because `view(&self)` cannot take
+/// `&mut self` (same pattern as `FrameTimingStats` and `MessageRenderCache`).
+pub struct RenderBuffers {
+    /// Reusable buffer for `build_conversation_content()`.
+    /// Taken via `std::mem::take`, built into, then returned.
+    /// The buffer is put back (capacity preserved) after use.
+    conversation: RefCell<String>,
+    /// Capacity of the previous frame's final view output.
+    /// Used to pre-allocate the next frame's output String via
+    /// `String::with_capacity()`, avoiding incremental grows.
+    view_capacity_hint: std::cell::Cell<usize>,
+}
+
+/// Default initial capacity for the view assembly buffer.
+/// 80 columns x 24 rows x 4 bytes (UTF-8 + ANSI escapes).
+const INITIAL_VIEW_CAPACITY: usize = 80 * 24 * 4;
+
+impl RenderBuffers {
+    pub(super) fn new() -> Self {
+        Self {
+            conversation: RefCell::new(String::with_capacity(INITIAL_VIEW_CAPACITY)),
+            view_capacity_hint: std::cell::Cell::new(INITIAL_VIEW_CAPACITY),
+        }
+    }
+
+    /// Take the conversation buffer for reuse. The caller must put it back
+    /// via [`return_conversation_buffer`] after building content.
+    pub(super) fn take_conversation_buffer(&self) -> String {
+        let mut buf = self.conversation.borrow_mut();
+        let mut taken = std::mem::take(&mut *buf);
+        taken.clear();
+        taken
+    }
+
+    /// Return the conversation buffer after use, preserving its heap capacity.
+    pub(super) fn return_conversation_buffer(&self, buf: String) {
+        *self.conversation.borrow_mut() = buf;
+    }
+
+    /// Get the capacity hint for the next frame's view assembly.
+    pub(super) fn view_capacity_hint(&self) -> usize {
+        self.view_capacity_hint.get()
+    }
+
+    /// Update the capacity hint after a frame completes.
+    pub(super) fn set_view_capacity_hint(&self, capacity: usize) {
+        self.view_capacity_hint.set(capacity);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -7208,6 +7208,8 @@ fn tui_perf_degraded_mode_skips_markdown_cache() {
     let harness = TestHarness::new("tui_perf_degraded_mode_skips_markdown_cache");
     let mut app = build_app(&harness, Vec::new());
     log_initial_state(&harness, &app);
+    app.set_terminal_size(220, 400);
+    press_ctrlt(&harness, &mut app);
 
     let rss_reader = MockRssReader::new(30_000_000);
     app.install_memory_rss_reader_for_test(rss_reader.as_reader_fn());
@@ -7247,6 +7249,29 @@ fn tui_perf_degraded_mode_skips_markdown_cache() {
     rss_reader.set_rss_bytes(142_000_000);
     app.force_memory_cycle_for_test();
 
+    let after_state = app.conversation_messages_for_test();
+    assert_eq!(
+        after_state
+            .first()
+            .and_then(|msg| msg.thinking.as_deref()),
+        None,
+        "oldest message thinking should be removed at pressure level"
+    );
+    assert_eq!(
+        after_state
+            .get(1)
+            .and_then(|msg| msg.thinking.as_deref()),
+        None,
+        "second-oldest message thinking should be removed at pressure level"
+    );
+    assert_eq!(
+        after_state
+            .last()
+            .and_then(|msg| msg.thinking.as_deref()),
+        Some("pressure-think-11"),
+        "newest message thinking should be retained at pressure level"
+    );
+
     let after = normalize_view(&BubbleteaModel::view(&app));
     assert!(
         !after.contains("Thinking: pressure-think-0"),
@@ -7282,6 +7307,7 @@ fn tui_perf_emergency_mode_raw_text_no_cache() {
     let harness = TestHarness::new("tui_perf_emergency_mode_raw_text_no_cache");
     let mut app = build_app(&harness, Vec::new());
     log_initial_state(&harness, &app);
+    app.set_terminal_size(220, 500);
 
     let rss_reader = MockRssReader::new(30_000_000);
     app.install_memory_rss_reader_for_test(rss_reader.as_reader_fn());
@@ -7333,6 +7359,19 @@ fn tui_perf_emergency_mode_raw_text_no_cache() {
     assert!(
         app.memory_summary_for_test().contains("CRITICAL"),
         "memory summary should report critical mode"
+    );
+    let after_state = app.conversation_messages_for_test();
+    assert!(
+        !after_state
+            .iter()
+            .any(|msg| msg.content.contains("critical-cache-message-0")),
+        "critical truncation state should remove oldest message"
+    );
+    assert!(
+        after_state
+            .iter()
+            .any(|msg| msg.content.contains("critical-cache-message-44")),
+        "critical truncation state should keep newest message"
     );
 
     // Ensure post-critical renders remain current and don't reintroduce stale history.
