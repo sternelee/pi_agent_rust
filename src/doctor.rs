@@ -15,6 +15,7 @@ use std::fmt;
 use std::fmt::Write as _;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 // ── Core Types ──────────────────────────────────────────────────────
 
@@ -767,45 +768,182 @@ fn check_shell(findings: &mut Vec<Finding>) {
     let cat = CheckCategory::Shell;
 
     // Required tools (Fail if missing)
-    check_tool(cat, "bash", &["--version"], Severity::Fail, findings);
-    check_tool(cat, "sh", &["--version"], Severity::Fail, findings);
+    check_tool(
+        cat,
+        "bash",
+        &["--version"],
+        Severity::Fail,
+        ToolCheckMode::PresenceOnly,
+        findings,
+    );
+    check_tool(
+        cat,
+        "sh",
+        &["--version"],
+        Severity::Fail,
+        ToolCheckMode::PresenceOnly,
+        findings,
+    );
 
     // Important tools (Warn if missing)
-    check_tool(cat, "git", &["--version"], Severity::Warn, findings);
+    check_tool(
+        cat,
+        "git",
+        &["--version"],
+        Severity::Warn,
+        ToolCheckMode::PresenceOnly,
+        findings,
+    );
 
     // Optional tools (Info if missing)
-    check_tool(cat, "gh", &["--version"], Severity::Info, findings);
+    check_tool(
+        cat,
+        "gh",
+        &["--version"],
+        Severity::Info,
+        ToolCheckMode::PresenceOnly,
+        findings,
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolCheckMode {
+    PresenceOnly,
+    ProbeExecution,
 }
 
 fn check_tool(
     cat: CheckCategory,
     tool: &str,
-    _args: &[&str],
+    args: &[&str],
+    missing_severity: Severity,
+    mode: ToolCheckMode,
+    findings: &mut Vec<Finding>,
+) {
+    let discovered_path = which_tool(tool);
+    if mode == ToolCheckMode::PresenceOnly {
+        if let Some(path) = discovered_path {
+            findings.push(Finding::pass(cat, format!("{tool} ({path})")));
+            return;
+        }
+        report_missing_tool(cat, tool, missing_severity, findings);
+        return;
+    }
+
+    let command_target = discovered_path.as_deref().unwrap_or(tool);
+
+    match Command::new(command_target).args(args).output() {
+        Ok(output) if output.status.success() => {
+            // Extract version from first line of stdout
+            let version = String::from_utf8_lossy(&output.stdout);
+            let first_line = version.lines().next().unwrap_or("").trim();
+            let label = discovered_path.as_ref().map_or_else(
+                || {
+                    if first_line.is_empty() {
+                        tool.to_string()
+                    } else {
+                        format!("{tool}: {first_line}")
+                    }
+                },
+                |path| format!("{tool} ({path})"),
+            );
+            findings.push(Finding::pass(cat, label));
+        }
+        Ok(output)
+            if discovered_path.is_some()
+                && probe_failure_is_known_nonfatal(tool, args, &output) =>
+        {
+            // Some shells (e.g. dash as /bin/sh) do not support --version.
+            // If this is the known non-fatal probe case, treat tool as present.
+            let path = discovered_path.unwrap_or_default();
+            findings.push(Finding::pass(cat, format!("{tool} ({path})")));
+        }
+        Ok(output) => {
+            let suffix = if missing_severity == Severity::Info {
+                " (optional)"
+            } else {
+                ""
+            };
+            let detail = {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                if stderr.is_empty() {
+                    format!("Exit status: {:?}", output.status.code())
+                } else {
+                    stderr
+                }
+            };
+            findings.push(Finding {
+                category: cat,
+                severity: missing_severity,
+                title: format!("{tool}: invocation failed{suffix}"),
+                detail: Some(detail),
+                remediation: discovered_path
+                    .as_ref()
+                    .map(|path| format!("Verify this executable is healthy: {path}")),
+                fixability: Fixability::NotFixable,
+            });
+        }
+        Err(err) => {
+            if discovered_path.is_some() || err.kind() != std::io::ErrorKind::NotFound {
+                let suffix = if missing_severity == Severity::Info {
+                    " (optional)"
+                } else {
+                    ""
+                };
+                findings.push(Finding {
+                    category: cat,
+                    severity: missing_severity,
+                    title: format!("{tool}: invocation failed{suffix}"),
+                    detail: Some(err.to_string()),
+                    remediation: discovered_path
+                        .as_ref()
+                        .map(|path| format!("Verify this executable is healthy: {path}")),
+                    fixability: Fixability::NotFixable,
+                });
+            } else {
+                report_missing_tool(cat, tool, missing_severity, findings);
+            }
+        }
+    }
+}
+
+fn report_missing_tool(
+    cat: CheckCategory,
+    tool: &str,
     missing_severity: Severity,
     findings: &mut Vec<Finding>,
 ) {
-    let Some(path) = which_tool(tool) else {
-        let suffix = if missing_severity == Severity::Info {
-            " (optional)"
-        } else {
-            ""
-        };
-        let mut f = Finding {
-            category: cat,
-            severity: missing_severity,
-            title: format!("{tool}: not found{suffix}"),
-            detail: None,
-            remediation: None,
-            fixability: Fixability::NotFixable,
-        };
-        if tool == "gh" {
-            f.remediation = Some("Install: https://cli.github.com/".to_string());
-        }
-        findings.push(f);
-        return;
+    let suffix = if missing_severity == Severity::Info {
+        " (optional)"
+    } else {
+        ""
     };
+    let mut f = Finding {
+        category: cat,
+        severity: missing_severity,
+        title: format!("{tool}: not found{suffix}"),
+        detail: None,
+        remediation: None,
+        fixability: Fixability::NotFixable,
+    };
+    if tool == "gh" {
+        f.remediation = Some("Install: https://cli.github.com/".to_string());
+    }
+    findings.push(f);
+}
 
-    findings.push(Finding::pass(cat, format!("{tool} ({path})")));
+fn probe_failure_is_known_nonfatal(
+    tool: &str,
+    args: &[&str],
+    output: &std::process::Output,
+) -> bool {
+    if tool != "sh" || args != ["--version"] {
+        return false;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    stderr.contains("illegal option")
+        || stderr.contains("unknown option")
+        || stderr.contains("invalid option")
 }
 
 fn which_tool(tool: &str) -> Option<String> {
@@ -1210,6 +1348,7 @@ mod tests {
             "bash",
             &["--version"],
             Severity::Fail,
+            ToolCheckMode::ProbeExecution,
             &mut findings,
         );
         // bash should be available in CI/dev environments
@@ -1226,6 +1365,7 @@ mod tests {
             "sh",
             &["--version"],
             Severity::Fail,
+            ToolCheckMode::ProbeExecution,
             &mut findings,
         );
         assert_eq!(findings.len(), 1);
@@ -1252,6 +1392,7 @@ mod tests {
             script.to_str().unwrap(),
             &["--version"],
             Severity::Fail,
+            ToolCheckMode::ProbeExecution,
             &mut findings,
         );
 
