@@ -3517,7 +3517,7 @@ async fn process_bash_chunk(
     emit_bash_update(state, on_update)
 }
 
-struct ProcessGuard {
+pub(crate) struct ProcessGuard {
     child: Option<std::process::Child>,
     kill_tree: bool,
 }

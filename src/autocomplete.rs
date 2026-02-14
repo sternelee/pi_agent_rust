@@ -438,7 +438,9 @@ impl FileCache {
     fn invalidate(&mut self) {
         self.files.clear();
         self.last_update_request = None;
-        // Keep existing update_rx to avoid hanging thread, but it will be stale
+        // Drop stale in-flight updates so old cwd results cannot repopulate cache.
+        self.update_rx = None;
+        self.updating = false;
     }
 
     fn refresh_if_needed(&mut self, cwd: &Path) {
@@ -1832,11 +1834,16 @@ mod tests {
     fn file_cache_invalidate_clears_files() {
         let mut cache = FileCache::new();
         cache.files = vec!["a.txt".to_string()];
-        cache.refreshed_at = Some(Instant::now());
+        cache.last_update_request = Some(Instant::now());
+        let (_tx, rx) = std::sync::mpsc::channel();
+        cache.update_rx = Some(rx);
+        cache.updating = true;
 
         cache.invalidate();
         assert!(cache.files.is_empty());
-        assert!(cache.refreshed_at.is_none());
+        assert!(cache.last_update_request.is_none());
+        assert!(cache.update_rx.is_none());
+        assert!(!cache.updating);
     }
 
     // ── NamedEntry equality ──────────────────────────────────────────

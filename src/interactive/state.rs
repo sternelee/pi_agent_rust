@@ -122,7 +122,7 @@ pub(super) struct AutocompleteState {
 }
 
 impl AutocompleteState {
-    pub(super) const fn new(cwd: PathBuf, catalog: AutocompleteCatalog) -> Self {
+    pub(super) fn new(cwd: PathBuf, catalog: AutocompleteCatalog) -> Self {
         Self {
             provider: AutocompleteProvider::new(cwd, catalog),
             open: false,

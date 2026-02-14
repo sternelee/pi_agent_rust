@@ -312,10 +312,6 @@ impl HostcallRequest {
     }
 }
 
-/// Stores pending Promise resolvers for hostcalls.
-///
-
-
 /// Convert a serde_json::Value to a rquickjs Value.
 #[allow(clippy::option_if_let_else)]
 pub(crate) fn json_to_js<'js>(
