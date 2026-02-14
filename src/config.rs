@@ -1102,8 +1102,8 @@ fn patch_settings_file(path: &Path, patch: Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, SettingsScope, extension_index_path_from_env, global_dir_from_env,
-        package_dir_from_env, sessions_dir_from_env,
+        Config, ExtensionRiskConfig, SettingsScope, extension_index_path_from_env,
+        global_dir_from_env, package_dir_from_env, sessions_dir_from_env,
     };
     use crate::agent::QueueMode;
     use serde_json::json;
@@ -1755,6 +1755,29 @@ mod tests {
         assert_eq!(risk.ledger_limit, Some(200));
         assert_eq!(risk.decision_timeout_ms, Some(75));
         assert_eq!(risk.fail_closed, Some(true));
+    }
+
+    #[test]
+    fn extension_risk_defaults_fail_closed() {
+        let config = Config::default();
+        let resolved = config.resolve_extension_risk_with_metadata();
+        assert_eq!(resolved.source, "default");
+        assert!(resolved.settings.fail_closed);
+    }
+
+    #[test]
+    fn extension_risk_config_can_disable_fail_closed_explicitly() {
+        let config = Config {
+            extension_risk: Some(ExtensionRiskConfig {
+                enabled: Some(true),
+                fail_closed: Some(false),
+                ..ExtensionRiskConfig::default()
+            }),
+            ..Config::default()
+        };
+        let resolved = config.resolve_extension_risk_with_metadata();
+        assert_eq!(resolved.source, "config");
+        assert!(!resolved.settings.fail_closed);
     }
 
     // ====================================================================

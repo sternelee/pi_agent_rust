@@ -794,7 +794,10 @@ pub(crate) fn resize_image_if_needed(
     let (original_width, original_height) = img.dimensions();
     let original_size = bytes.len();
 
-    if original_width <= MAX_WIDTH && original_height <= MAX_HEIGHT && original_size <= IMAGE_MAX_BYTES {
+    if original_width <= MAX_WIDTH
+        && original_height <= MAX_HEIGHT
+        && original_size <= IMAGE_MAX_BYTES
+    {
         return Ok(ResizedImage {
             bytes: bytes.to_vec(),
             mime_type,

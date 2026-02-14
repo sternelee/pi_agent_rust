@@ -2242,8 +2242,12 @@ fn looks_like_git_url(source: &str) -> bool {
 
 fn looks_like_local_path(spec: &str) -> bool {
     let spec = spec.trim();
-    spec.starts_with("file://")
+    spec == "."
+        || spec == ".."
+        || spec.starts_with("file://")
         || spec.starts_with('/')
+        || spec.starts_with(".\\")
+        || spec.starts_with("..\\")
         || spec.starts_with("./")
         || spec.starts_with("../")
         || spec.starts_with('~')
@@ -3132,6 +3136,8 @@ mod tests {
 
     #[test]
     fn looks_like_local_path_various_forms() {
+        assert!(looks_like_local_path("."));
+        assert!(looks_like_local_path(".."));
         assert!(looks_like_local_path("./relative"));
         assert!(looks_like_local_path("../parent"));
         assert!(looks_like_local_path("/absolute"));
