@@ -331,14 +331,17 @@ Vector:
 - Extension updates change behavior without clear provenance controls.
 
 Controls (current + planned):
-- Current scanner and ledger provide evidence; hard provenance lock and quarantine are tracked in SEC WS2.
+- Current: deterministic package lockfile, fail-closed digest/provenance verification, and trust-transition audit ledger (`.pi/packages.lock.json`, `.pi/package-trust-audit.jsonl`).
+- Current: extension scanner/ledger evidence path in runtime.
+- Planned: quarantine-to-trust promotion workflow (SEC-2.4).
 
 Code / Tracking:
+- Lock/provenance pipeline in `src/package_manager.rs` and docs in `docs/packages.md`.
 - Existing scanner in `src/extensions.rs`.
-- Planned enhancements tracked in `bd-f0huc`, `bd-3br2a`, `bd-21nj4`.
+- Remaining follow-on tracked in `bd-21nj4`.
 
 Residual risk:
-- Until lockfile/provenance/quarantine flow is complete, supply-chain posture is improved but not complete.
+- Quarantine/promotion controls are still pending; lock/provenance verification now blocks mismatches by default.
 
 ### 8.3 Threat Likelihood and Impact Quantification
 
@@ -351,7 +354,7 @@ Residual risk:
 | T5 evidence tampering | Runtime/post-incident | Unlikely | High | High | Hash-chaining helps, but bounded in-memory evidence and ops gaps remain |
 | T6 env secret exfiltration | Runtime | Possible | Critical | Critical | Naming-based blocklists can miss novel secret keys |
 | T7 persistent over-grant | Runtime/operations | Likely | High | High | Prompt fatigue and permissive user decisions are common operational failure modes |
-| T8 provenance/update drift | Install/update-time | Possible | High | High | Supply-chain trust controls are only partially complete |
+| T8 provenance/update drift | Install/update-time | Unlikely | High | High | Fail-closed lockfile/provenance checks are in place; quarantine workflow remains pending |
 
 ## 9. Threat-to-Control Matrix
 
@@ -364,7 +367,7 @@ Residual risk:
 | T5 evidence tampering | Hash chaining | Ledger verify/replay | Incident escalation |
 | T6 secret exfil | Env blocklist + `env` policy gate | Hostcall + risk logs | Deny/Harden + revoke decisions |
 | T7 over-grant prompts | Prompt workflow + decision store | Audit of persisted decisions | Revoke/reset permissions |
-| T8 update/provenance drift | Scanner + planned lock/provenance | Artifact diff/audit trail | Quarantine/promotion workflow |
+| T8 update/provenance drift | Scanner + deterministic lockfile/provenance verification | Lockfile + trust audit JSONL + artifact diff | Quarantine/promotion workflow |
 
 ## 10. Abuse Cases and Expected Outcomes
 
@@ -378,7 +381,7 @@ Representative abuse cases:
 
 | Residual risk | Current state | Owner role | Follow-on beads |
 |---|---|---|---|
-| Supply-chain provenance/lock completeness | Partial | WS2 lead | `bd-f0huc`, `bd-3br2a`, `bd-21nj4` |
+| Supply-chain provenance/lock completeness | In progress (lock/provenance done, quarantine pending) | WS2 lead | `bd-21nj4` |
 | Runtime threshold calibration for low FP/FN | In progress | WS3/WS6 leads | `bd-3i9da`, `bd-cu17q`, `bd-2vlb5` |
 | Secret-name blocklist coverage gaps | Partial | WS4 lead | `bd-zh0hj`, `bd-wzzp4` |
 | Prompt fatigue / trust UX clarity | Partial | WS5 lead | `bd-qudx1`, `bd-ww5br` |

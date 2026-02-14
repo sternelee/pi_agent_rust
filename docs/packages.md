@@ -116,3 +116,38 @@ Example:
   ]
 }
 ```
+
+## Deterministic Lockfile and Provenance Verification
+
+Pi writes a deterministic package lockfile after successful install/update verification:
+
+- Project scope: `.pi/packages.lock.json`
+- User scope: `~/.pi/agent/packages.lock.json`
+
+Lock entries are sorted deterministically and include:
+
+- `identity` (stable package identity, e.g. `npm:name`, `git:host/path`, `local:/abs/path`)
+- `source` and `source_kind`
+- resolved provenance (npm version, git commit/ref/origin, or resolved local path)
+- `digest_sha256` (deterministic content digest)
+- `trust_state`
+
+### Fail-Closed Verification
+
+By default, install/update is fail-closed when trusted provenance or digest does not match:
+
+- pinned npm installs must match pinned version metadata
+- pinned git installs must match pinned ref/commit resolution
+- trusted digest/provenance mismatches block install/update
+
+For unpinned `pi update`, provenance/digest rotation is allowed and re-recorded as a trusted update.
+
+### Trust Transition Audit Artifact
+
+Pi appends trust-state transitions as JSONL audit events:
+
+- Project scope: `.pi/package-trust-audit.jsonl`
+- User scope: `~/.pi/agent/package-trust-audit.jsonl`
+
+Each event records action (`install`, `update`, `remove`), scope, identity, source,
+`from_state`, `to_state`, deterministic reason codes, and optional remediation guidance.

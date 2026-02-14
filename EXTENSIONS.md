@@ -1382,7 +1382,7 @@ Minimum incident-ready artifact set:
 
 ---
 
-## 5. Alien‑Artifact Safety (Formal Decisioning)
+## 5. Capability Safety (Formal Decisioning)
 
 We apply a **loss‑aware, evidence‑driven** model to decide capability grants.
 
