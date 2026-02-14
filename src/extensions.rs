@@ -12385,6 +12385,10 @@ struct ExtensionManagerInner {
     quota_states: HashMap<String, ExtensionQuotaState>,
     /// Quota breach telemetry events (SEC-4.1).
     quota_breach_events: VecDeque<QuotaBreachEvent>,
+    /// Exec mediation decision ledger (SEC-4.3).
+    exec_mediation_ledger: VecDeque<ExecMediationLedgerEntry>,
+    /// Secret broker decision ledger (SEC-4.3).
+    secret_broker_ledger: VecDeque<SecretBrokerLedgerEntry>,
     /// Budget for extension operations (structured concurrency).
     extension_budget: Budget,
 }
