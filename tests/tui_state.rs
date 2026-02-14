@@ -7203,6 +7203,168 @@ fn tui_perf_memory_critical_forces_emergency() {
     );
 }
 
+#[test]
+fn tui_perf_degraded_mode_skips_markdown_cache() {
+    let harness = TestHarness::new("tui_perf_degraded_mode_skips_markdown_cache");
+    let mut app = build_app(&harness, Vec::new());
+    log_initial_state(&harness, &app);
+
+    let rss_reader = MockRssReader::new(30_000_000);
+    app.install_memory_rss_reader_for_test(rss_reader.as_reader_fn());
+
+    let messages = (0..12)
+        .map(|idx| ConversationMessage {
+            role: MessageRole::Assistant,
+            content: format!("cache pressure message {idx}"),
+            thinking: Some(format!("pressure-think-{idx}")),
+            collapsed: false,
+        })
+        .collect::<Vec<_>>();
+    apply_pi(
+        &harness,
+        &mut app,
+        "PiMsg::ConversationReset(cache+thinking)",
+        PiMsg::ConversationReset {
+            messages,
+            usage: Usage::default(),
+            status: None,
+        },
+    );
+
+    // Warm the render cache first.
+    let before = normalize_view(&BubbleteaModel::view(&app));
+    assert!(
+        before.contains("Thinking: pressure-think-0"),
+        "baseline should include early thinking blocks before pressure"
+    );
+    assert!(
+        before.contains("Thinking: pressure-think-11"),
+        "baseline should include recent thinking blocks before pressure"
+    );
+    let _ = normalize_view(&BubbleteaModel::view(&app));
+
+    // Pressure mode strips thinking from messages older than the last 10.
+    rss_reader.set_rss_bytes(142_000_000);
+    app.force_memory_cycle_for_test();
+
+    let after = normalize_view(&BubbleteaModel::view(&app));
+    assert!(
+        !after.contains("Thinking: pressure-think-0"),
+        "cache should not preserve stale thinking for old messages after pressure floor"
+    );
+    assert!(
+        !after.contains("Thinking: pressure-think-1"),
+        "cache should refresh old message rendering when pressure strips thinking"
+    );
+    assert!(
+        after.contains("Thinking: pressure-think-11"),
+        "recent messages should retain thinking in pressure mode"
+    );
+    assert_ne!(
+        before, after,
+        "pressure transition should produce a distinct rendered output"
+    );
+
+    log_perf_test_event(
+        "tui_perf_degraded_mode_skips_markdown_cache",
+        "cache_fidelity",
+        json!({
+            "fidelity": "degraded",
+            "cache_key_includes_fidelity": true,
+            "old_thinking_removed": true,
+            "recent_thinking_retained": true,
+        }),
+    );
+}
+
+#[test]
+fn tui_perf_emergency_mode_raw_text_no_cache() {
+    let harness = TestHarness::new("tui_perf_emergency_mode_raw_text_no_cache");
+    let mut app = build_app(&harness, Vec::new());
+    log_initial_state(&harness, &app);
+
+    let rss_reader = MockRssReader::new(30_000_000);
+    app.install_memory_rss_reader_for_test(rss_reader.as_reader_fn());
+
+    let messages = (0..45)
+        .map(|idx| ConversationMessage {
+            role: MessageRole::Assistant,
+            content: format!("**critical-cache-message-{idx}**"),
+            thinking: None,
+            collapsed: false,
+        })
+        .collect::<Vec<_>>();
+    apply_pi(
+        &harness,
+        &mut app,
+        "PiMsg::ConversationReset(cache-critical)",
+        PiMsg::ConversationReset {
+            messages,
+            usage: Usage::default(),
+            status: None,
+        },
+    );
+
+    // Warm caches/prefix before entering critical mode.
+    let before = normalize_view(&BubbleteaModel::view(&app));
+    assert!(
+        before.contains("critical-cache-message-0"),
+        "baseline should include oldest message before truncation"
+    );
+    let _ = normalize_view(&BubbleteaModel::view(&app));
+
+    rss_reader.set_rss_bytes(250_000_000);
+    app.force_memory_collapse_tick_for_test();
+    app.force_memory_cycle_for_test();
+
+    let after = normalize_view(&BubbleteaModel::view(&app));
+    assert!(
+        after.contains("truncated due to memory pressure"),
+        "critical mode should inject truncation sentinel"
+    );
+    assert!(
+        !after.contains("critical-cache-message-0"),
+        "critical truncation should not leak stale cached oldest messages"
+    );
+    assert!(
+        after.contains("critical-cache-message-44"),
+        "critical truncation should retain newest messages"
+    );
+    assert!(
+        app.memory_summary_for_test().contains("CRITICAL"),
+        "memory summary should report critical mode"
+    );
+
+    // Ensure post-critical renders remain current and don't reintroduce stale history.
+    apply_pi(
+        &harness,
+        &mut app,
+        "PiMsg::SystemNote(post-critical)",
+        PiMsg::SystemNote("post-critical-marker".to_string()),
+    );
+    let post_note = normalize_view(&BubbleteaModel::view(&app));
+    assert!(
+        post_note.contains("post-critical-marker"),
+        "new post-critical messages should render immediately"
+    );
+    assert!(
+        !post_note.contains("critical-cache-message-0"),
+        "stale pre-truncation content must remain absent after subsequent renders"
+    );
+
+    log_perf_test_event(
+        "tui_perf_emergency_mode_raw_text_no_cache",
+        "emergency_render",
+        json!({
+            "fidelity": "emergency",
+            "cache_consulted": false,
+            "raw_text": true,
+            "messages_truncated": true,
+            "post_critical_updates_rendered": true,
+        }),
+    );
+}
+
 // ============================================================================
 // Viewport Scrolling Tests
 // ============================================================================
