@@ -1281,4 +1281,61 @@ mod tests {
         let key = MessageRenderCache::compute_key(&msg, false, true);
         assert_eq!(cache.get(42, &key), None);
     }
+
+    // --- Prefix cache tests (PERF-2) ---
+
+    #[test]
+    fn prefix_initially_invalid() {
+        let cache = MessageRenderCache::new();
+        assert!(!cache.prefix_valid(0));
+        assert!(!cache.prefix_valid(1));
+    }
+
+    #[test]
+    fn prefix_valid_after_set() {
+        let cache = MessageRenderCache::new();
+        cache.prefix_set("rendered-prefix", 5);
+        assert!(cache.prefix_valid(5));
+        assert_eq!(cache.prefix_get(), "rendered-prefix");
+    }
+
+    #[test]
+    fn prefix_invalid_after_message_count_change() {
+        let cache = MessageRenderCache::new();
+        cache.prefix_set("prefix-for-5", 5);
+        assert!(cache.prefix_valid(5));
+        // New message added → count changed
+        assert!(!cache.prefix_valid(6));
+    }
+
+    #[test]
+    fn prefix_invalid_after_invalidate_all() {
+        let cache = MessageRenderCache::new();
+        cache.prefix_set("prefix", 3);
+        assert!(cache.prefix_valid(3));
+        // Simulate theme change / resize / toggle
+        cache.invalidate_all();
+        assert!(!cache.prefix_valid(3));
+    }
+
+    #[test]
+    fn prefix_cleared_on_clear() {
+        let cache = MessageRenderCache::new();
+        cache.prefix_set("prefix", 3);
+        cache.clear();
+        assert!(!cache.prefix_valid(3));
+        assert!(cache.prefix_get().is_empty());
+    }
+
+    #[test]
+    fn prefix_revalidates_after_rebuild() {
+        let cache = MessageRenderCache::new();
+        cache.prefix_set("old-prefix", 3);
+        cache.invalidate_all();
+        assert!(!cache.prefix_valid(3));
+        // Full rebuild sets new prefix
+        cache.prefix_set("new-prefix", 3);
+        assert!(cache.prefix_valid(3));
+        assert_eq!(cache.prefix_get(), "new-prefix");
+    }
 }
