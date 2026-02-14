@@ -429,47 +429,93 @@ pub fn resolve_scoped_model_entries(
     Ok(resolved)
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct ForkCandidate {
-    pub id: String,
-    pub summary: String,
+
+const fn kind_rank(kind: &DiagnosticKind) -> u8 {
+    match kind {
+        DiagnosticKind::Warning => 0,
+        DiagnosticKind::Collision => 1,
+    }
 }
 
-pub(super) fn fork_candidates(session: &Session) -> Vec<ForkCandidate> {
-    let mut out = Vec::new();
+fn format_resource_diagnostics(label: &str, diagnostics: &[ResourceDiagnostic]) -> (String, usize) {
+    let mut ordered: Vec<&ResourceDiagnostic> = diagnostics.iter().collect();
+    ordered.sort_by(|a, b| {
+        a.path
+            .cmp(&b.path)
+            .then_with(|| kind_rank(&a.kind).cmp(&kind_rank(&b.kind)))
+            .then_with(|| a.message.cmp(&b.message))
+    });
 
-    for entry in session.entries_for_current_path() {
-        let SessionEntry::Message(message_entry) = entry else {
-            continue;
+    let mut out = String::new();
+    let _ = writeln!(out, "{label}:");
+    for diag in ordered {
+        let kind = match diag.kind {
+            DiagnosticKind::Warning => "warning",
+            DiagnosticKind::Collision => "collision",
         };
+        let _ = write!(out, "- {kind}: {} ({})", diag.message, diag.path.display());
+        if let Some(collision) = &diag.collision {
+            let _ = write!(
+                out,
+                " [winner: {} loser: {}]",
+                collision.winner_path.display(),
+                collision.loser_path.display()
+            );
+        }
+        out.push('\n');
+    }
+    (out, diagnostics.len())
+}
 
-        let Some(id) = message_entry.base.id.as_ref() else {
-            continue;
-        };
+fn build_reload_diagnostics(
+    models_error: Option<String>,
+    resources: &ResourceLoader,
+) -> (Option<String>, usize) {
+    let mut sections = Vec::new();
+    let mut count = 0usize;
 
-        let SessionMessage::User { content, .. } = &message_entry.message else {
-            continue;
-        };
-
-        let text = user_content_to_text(content);
-        let first_line = text
-            .lines()
-            .find(|line| !line.trim().is_empty())
-            .unwrap_or("")
-            .trim();
-        let summary = if first_line.is_empty() {
-            "(empty)".to_string()
-        } else {
-            truncate(first_line, 80)
-        };
-
-        out.push(ForkCandidate {
-            id: id.clone(),
-            summary,
-        });
+    if let Some(err) = models_error {
+        count = count.saturating_add(1);
+        sections.push(format!("models.json:\n{err}"));
     }
 
-    out
+    let mut resource_sections = Vec::new();
+    let (skills_text, skills_count) =
+        format_resource_diagnostics("Skills", resources.skill_diagnostics());
+    if skills_count > 0 {
+        resource_sections.push(skills_text);
+        count = count.saturating_add(skills_count);
+    }
+
+    let (prompts_text, prompts_count) =
+        format_resource_diagnostics("Prompts", resources.prompt_diagnostics());
+    if prompts_count > 0 {
+        resource_sections.push(prompts_text);
+        count = count.saturating_add(prompts_count);
+    }
+
+    let (themes_text, themes_count) =
+        format_resource_diagnostics("Themes", resources.theme_diagnostics());
+    if themes_count > 0 {
+        resource_sections.push(themes_text);
+        count = count.saturating_add(themes_count);
+    }
+
+    if !resource_sections.is_empty() {
+        sections.push(format!(
+            "Resource diagnostics:\n{}",
+            resource_sections.join("\n")
+        ));
+    }
+
+    if sections.is_empty() {
+        (None, 0)
+    } else {
+        (
+            Some(format!("Reload diagnostics:\n\n{}", sections.join("\n\n"))),
+            count,
+        )
+    }
 }
 
 impl PiApp {
@@ -820,169 +866,7 @@ impl PiApp {
                 self.scroll_to_bottom();
                 None
             }
-            SlashCommand::Model => {
-                if args.trim().is_empty() {
-                    self.status_message = Some(format!("Current model: {}", self.model));
-                    return None;
-                }
-
-                if self.agent_state != AgentState::Idle {
-                    self.status_message = Some("Cannot switch models while processing".to_string());
-                    return None;
-                }
-
-                let pattern = args.trim();
-                let pattern_lower = pattern.to_ascii_lowercase();
-
-                let mut exact_matches = Vec::new();
-                for entry in &self.available_models {
-                    let full = format!("{}/{}", entry.model.provider, entry.model.id);
-                    if full.eq_ignore_ascii_case(pattern)
-                        || entry.model.id.eq_ignore_ascii_case(pattern)
-                    {
-                        exact_matches.push(entry.clone());
-                    }
-                }
-
-                let mut matches = if exact_matches.is_empty() {
-                    let mut fuzzy = Vec::new();
-                    for entry in &self.available_models {
-                        let full = format!("{}/{}", entry.model.provider, entry.model.id);
-                        let full_lower = full.to_ascii_lowercase();
-                        if full_lower.contains(&pattern_lower)
-                            || entry.model.id.to_ascii_lowercase().contains(&pattern_lower)
-                        {
-                            fuzzy.push(entry.clone());
-                        }
-                    }
-                    fuzzy
-                } else {
-                    exact_matches
-                };
-
-                matches.sort_by(|a, b| {
-                    let left = format!("{}/{}", a.model.provider, a.model.id);
-                    let right = format!("{}/{}", b.model.provider, b.model.id);
-                    left.cmp(&right)
-                });
-                matches.dedup_by(|a, b| {
-                    a.model.provider.eq_ignore_ascii_case(&b.model.provider)
-                        && a.model.id.eq_ignore_ascii_case(&b.model.id)
-                });
-
-                if matches.is_empty() {
-                    if let Some((provider, model_id)) = pattern.split_once('/') {
-                        let provider = provider.trim().to_ascii_lowercase();
-                        let model_id = model_id.trim();
-                        if !provider.is_empty() && !model_id.is_empty() {
-                            if let Some(entry) =
-                                crate::models::ad_hoc_model_entry(&provider, model_id)
-                            {
-                                matches.push(entry);
-                            }
-                        }
-                    }
-                }
-
-                if matches.is_empty() {
-                    self.status_message = Some(format!("Model not found: {pattern}"));
-                    return None;
-                }
-                if matches.len() > 1 {
-                    let preview = matches
-                        .iter()
-                        .take(8)
-                        .map(|m| format!("  - {}/{}", m.model.provider, m.model.id))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    self.messages.push(ConversationMessage {
-                        role: MessageRole::System,
-                        content: format!(
-                            "Ambiguous model pattern \"{pattern}\". Matches:\n{preview}\n\nUse /model provider/id for an exact match."
-                        ),
-                        thinking: None,
-                        collapsed: false,
-                    });
-                    self.scroll_to_bottom();
-                    return None;
-                }
-
-                let next = matches.into_iter().next().expect("matches is non-empty");
-
-                let resolved_key_opt = if next.api_key.is_some() {
-                    next.api_key.clone()
-                } else {
-                    let auth_path = crate::config::Config::auth_path();
-                    crate::auth::AuthStorage::load(auth_path)
-                        .ok()
-                        .and_then(|auth| auth.resolve_api_key(&next.model.provider, None))
-                };
-                if resolved_key_opt.is_none() {
-                    self.status_message = Some(format!(
-                        "Missing API key for provider {}",
-                        next.model.provider
-                    ));
-                    return None;
-                }
-
-                if next.model.provider == self.model_entry.model.provider
-                    && next.model.id == self.model_entry.model.id
-                {
-                    self.status_message = Some(format!("Current model: {}", self.model));
-                    return None;
-                }
-
-                let provider_impl =
-                    match providers::create_provider(&next, self.extensions.as_ref()) {
-                        Ok(provider_impl) => provider_impl,
-                        Err(err) => {
-                            self.status_message = Some(err.to_string());
-                            return None;
-                        }
-                    };
-
-                let Ok(mut agent_guard) = self.agent.try_lock() else {
-                    self.status_message = Some("Agent busy; try again".to_string());
-                    return None;
-                };
-                agent_guard.set_provider(provider_impl);
-                agent_guard
-                    .stream_options_mut()
-                    .api_key
-                    .clone_from(&resolved_key_opt);
-                agent_guard
-                    .stream_options_mut()
-                    .headers
-                    .clone_from(&next.headers);
-                drop(agent_guard);
-
-                let Ok(mut session_guard) = self.session.try_lock() else {
-                    self.status_message = Some("Session busy; try again".to_string());
-                    return None;
-                };
-                session_guard.header.provider = Some(next.model.provider.clone());
-                session_guard.header.model_id = Some(next.model.id.clone());
-                session_guard
-                    .append_model_change(next.model.provider.clone(), next.model.id.clone());
-                drop(session_guard);
-                self.spawn_save_session();
-
-                if !self
-                    .available_models
-                    .iter()
-                    .any(|entry| model_entry_matches(entry, &next))
-                {
-                    self.available_models.push(next.clone());
-                }
-                self.model_entry = next.clone();
-                if let Ok(mut guard) = self.model_entry_shared.lock() {
-                    *guard = next.clone();
-                }
-                self.model = format!("{}/{}", next.model.provider, next.model.id);
-
-                self.status_message = Some(format!("Switched model: {}", self.model));
-                None
-            }
+            SlashCommand::Model => self.handle_slash_model(args),
             SlashCommand::Thinking => {
                 let value = args.trim();
                 if value.is_empty() {
@@ -1659,14 +1543,18 @@ impl PiApp {
 
         match oauth_result {
             Ok((info, ext_config)) => {
-                let mut message =
-                    format!("OAuth login: {}\n\nOpen this URL:\n{}\n", info.provider, info.url);
+                let mut message = format!(
+                    "OAuth login: {}\n\nOpen this URL:\n{}\n",
+                    info.provider, info.url
+                );
                 if let Some(instructions) = info.instructions {
                     message.push('\n');
                     message.push_str(&instructions);
                     message.push('\n');
                 }
-                message.push_str("\nPaste the callback URL or authorization code into Pi to continue.");
+                message.push_str(
+                    "\nPaste the callback URL or authorization code into Pi to continue.",
+                );
 
                 self.messages.push(ConversationMessage {
                     role: MessageRole::System,
@@ -1716,7 +1604,8 @@ impl PiApp {
                     return None;
                 }
                 if removed {
-                    self.status_message = Some(format!("Removed stored credentials for {provider}."));
+                    self.status_message =
+                        Some(format!("Removed stored credentials for {provider}."));
                 } else {
                     self.status_message = Some(format!("No stored credentials for {provider}."));
                 }
@@ -1728,35 +1617,83 @@ impl PiApp {
         None
     }
 
-    #[allow(clippy::too_many_lines)]
-    pub(super) fn handle_slash_fork(&mut self, args: &str) -> Option<Cmd> {
+    pub(super) fn handle_slash_model(&mut self, args: &str) -> Option<Cmd> {
+        if args.trim().is_empty() {
+            self.status_message = Some(format!("Current model: {}", self.model));
+            return None;
+        }
+
         if self.agent_state != AgentState::Idle {
-            self.status_message = Some("Cannot fork while processing a request".to_string());
+            self.status_message = Some("Cannot switch models while processing".to_string());
             return None;
         }
 
-        let candidates = if let Ok(mut session_guard) = self.session.try_lock() {
-            session_guard.ensure_entry_ids();
-            fork_candidates(&session_guard)
+        let pattern = args.trim();
+        let pattern_lower = pattern.to_ascii_lowercase();
+
+        let mut exact_matches = Vec::new();
+        for entry in &self.available_models {
+            let full = format!("{}/{}", entry.model.provider, entry.model.id);
+            if full.eq_ignore_ascii_case(pattern) || entry.model.id.eq_ignore_ascii_case(pattern) {
+                exact_matches.push(entry.clone());
+            }
+        }
+
+        let mut matches = if exact_matches.is_empty() {
+            let mut fuzzy = Vec::new();
+            for entry in &self.available_models {
+                let full = format!("{}/{}", entry.model.provider, entry.model.id);
+                let full_lower = full.to_ascii_lowercase();
+                if full_lower.contains(&pattern_lower)
+                    || entry.model.id.to_ascii_lowercase().contains(&pattern_lower)
+                {
+                    fuzzy.push(entry.clone());
+                }
+            }
+            fuzzy
         } else {
-            self.status_message = Some("Session busy; try again".to_string());
-            return None;
+            exact_matches
         };
-        if candidates.is_empty() {
-            self.status_message = Some("No user messages to fork from".to_string());
-            return None;
+
+        matches.sort_by(|a, b| {
+            let left = format!("{}/{}", a.model.provider, a.model.id);
+            let right = format!("{}/{}", b.model.provider, b.model.id);
+            left.cmp(&right)
+        });
+        matches.dedup_by(|a, b| {
+            a.model.provider.eq_ignore_ascii_case(&b.model.provider)
+                && a.model.id.eq_ignore_ascii_case(&b.model.id)
+        });
+
+        if matches.is_empty()
+            && let Some((provider, model_id)) = pattern.split_once('/')
+        {
+            let provider = provider.trim().to_ascii_lowercase();
+            let model_id = model_id.trim();
+            if !provider.is_empty()
+                && !model_id.is_empty()
+                && let Some(entry) = crate::models::ad_hoc_model_entry(&provider, model_id)
+            {
+                matches.push(entry);
+            }
         }
 
-        if args.eq_ignore_ascii_case("list") || args.eq_ignore_ascii_case("ls") {
-            let list = candidates
+        if matches.is_empty() {
+            self.status_message = Some(format!("Model not found: {pattern}"));
+            return None;
+        }
+        if matches.len() > 1 {
+            let preview = matches
                 .iter()
-                .enumerate()
-                .map(|(i, c)| format!("  {}. {} - {}", i + 1, c.id, c.summary))
+                .take(8)
+                .map(|m| format!("  - {}/{}", m.model.provider, m.model.id))
                 .collect::<Vec<_>>()
                 .join("\n");
             self.messages.push(ConversationMessage {
                 role: MessageRole::System,
-                content: format!("Forkable user messages (use /fork <id|index>):\n{list}"),
+                content: format!(
+                    "Ambiguous model pattern \"{pattern}\". Matches:\n{preview}\n\nUse /model provider/id for an exact match."
+                ),
                 thinking: None,
                 collapsed: false,
             });
@@ -1764,359 +1701,75 @@ impl PiApp {
             return None;
         }
 
-        let selection = if args.is_empty() {
-            candidates.last().expect("candidates is non-empty").clone()
-        } else if let Ok(index) = args.parse::<usize>() {
-            if index == 0 || index > candidates.len() {
-                self.status_message = Some(format!("Invalid index: {index} (1-{})", candidates.len()));
-                return None;
-            }
-            candidates[index - 1].clone()
+        let next = matches.into_iter().next().expect("matches is non-empty");
+
+        let resolved_key_opt = if next.api_key.is_some() {
+            next.api_key.clone()
         } else {
-            let matches = candidates
-                .iter()
-                .filter(|c| c.id == args || c.id.starts_with(args))
-                .cloned()
-                .collect::<Vec<_>>();
-            if matches.is_empty() {
-                self.status_message = Some(format!("No user message id matches \"{args}\""));
-                return None;
-            }
-            if matches.len() > 1 {
-                self.status_message =
-                    Some(format!("Ambiguous id \"{args}\" (matches {})", matches.len()));
-                return None;
-            }
-            matches[0].clone()
+            let auth_path = crate::config::Config::auth_path();
+            crate::auth::AuthStorage::load(auth_path)
+                .ok()
+                .and_then(|auth| auth.resolve_api_key(&next.model.provider, None))
         };
-
-        let event_tx = self.event_tx.clone();
-        let session = Arc::clone(&self.session);
-        let agent = Arc::clone(&self.agent);
-        let extensions = self.extensions.clone();
-        let model_provider = self.model_entry.model.provider.clone();
-        let model_id = self.model_entry.model.id.clone();
-        let (thinking_level, session_id) = if let Ok(guard) = self.session.try_lock() {
-            (guard.header.thinking_level.clone(), guard.header.id.clone())
-        } else {
-            self.status_message = Some("Session busy; try again".to_string());
-            return None;
-        };
-
-        self.agent_state = AgentState::Processing;
-        self.status_message = Some("Forking session...".to_string());
-
-        let runtime_handle = self.runtime_handle.clone();
-        runtime_handle.spawn(async move {
-            let cx = Cx::for_request();
-            if let Some(manager) = extensions.clone() {
-                let cancelled = manager
-                    .dispatch_cancellable_event(
-                        ExtensionEventName::SessionBeforeFork,
-                        Some(json!({
-                            "entryId": selection.id.clone(),
-                            "summary": selection.summary.clone(),
-                            "sessionId": session_id.clone(),
-                        })),
-                        EXTENSION_EVENT_TIMEOUT_MS,
-                    )
-                    .await
-                    .unwrap_or(false);
-                if cancelled {
-                    let _ = event_tx.try_send(PiMsg::System("Fork cancelled by extension".to_string()));
-                    return;
-                }
-            }
-
-            let (fork_plan, parent_path, session_dir) = {
-                let guard = match session.lock(&cx).await {
-                    Ok(guard) => guard,
-                    Err(err) => {
-                        let _ =
-                            event_tx.try_send(PiMsg::AgentError(format!("Failed to lock session: {err}")));
-                        return;
-                    }
-                };
-                let fork_plan = match guard.plan_fork_from_user_message(&selection.id) {
-                    Ok(plan) => plan,
-                    Err(err) => {
-                        let _ = event_tx
-                            .try_send(PiMsg::AgentError(format!("Failed to build fork: {err}")));
-                        return;
-                    }
-                };
-                let parent_path = guard.path.as_ref().map(|p| p.display().to_string());
-                let session_dir = guard.session_dir.clone();
-                drop(guard);
-                (fork_plan, parent_path, session_dir)
-            };
-
-            let crate::session::ForkPlan {
-                entries,
-                leaf_id,
-                selected_text,
-            } = fork_plan;
-
-            let mut new_session = Session::create_with_dir(session_dir);
-            new_session.header.provider = Some(model_provider);
-            new_session.header.model_id = Some(model_id);
-            new_session.header.thinking_level = thinking_level;
-            if let Some(parent_path) = parent_path {
-                new_session.set_branched_from(Some(parent_path));
-            }
-            new_session.entries = entries;
-            new_session.leaf_id = leaf_id;
-            new_session.ensure_entry_ids();
-            let new_session_id = new_session.header.id.clone();
-
-            if let Err(err) = new_session.save().await {
-                let _ = event_tx.try_send(PiMsg::AgentError(format!("Failed to save fork: {err}")));
-                return;
-            }
-
-            let messages_for_agent = new_session.to_messages_for_current_path();
-            {
-                let mut agent_guard = match agent.lock(&cx).await {
-                    Ok(guard) => guard,
-                    Err(err) => {
-                        let _ =
-                            event_tx.try_send(PiMsg::AgentError(format!("Failed to lock agent: {err}")));
-                        return;
-                    }
-                };
-                agent_guard.replace_messages(messages_for_agent);
-            }
-
-            {
-                let mut guard = match session.lock(&cx).await {
-                    Ok(guard) => guard,
-                    Err(err) => {
-                        let _ =
-                            event_tx.try_send(PiMsg::AgentError(format!("Failed to lock session: {err}")));
-                        return;
-                    }
-                };
-                *guard = new_session;
-            }
-
-            let (messages, usage) = {
-                let guard = match session.lock(&cx).await {
-                    Ok(guard) => guard,
-                    Err(err) => {
-                        let _ =
-                            event_tx.try_send(PiMsg::AgentError(format!("Failed to lock session: {err}")));
-                        return;
-                    }
-                };
-                conversation_from_session(&guard)
-            };
-
-            let _ = event_tx.try_send(PiMsg::ConversationReset {
-                messages,
-                usage,
-                status: Some(format!("Forked new session from {}", selection.summary)),
-            });
-
-            let _ = event_tx.try_send(PiMsg::SetEditorText(selected_text));
-
-            if let Some(manager) = extensions {
-                let _ = manager
-                    .dispatch_event(
-                        ExtensionEventName::SessionFork,
-                        Some(json!({
-                            "entryId": selection.id,
-                            "summary": selection.summary,
-                            "sessionId": session_id,
-                            "newSessionId": new_session_id,
-                        })),
-                    )
-                    .await;
-            }
-        });
-        None
-    }
-
-    #[allow(clippy::too_many_lines)]
-    pub(super) fn handle_slash_compact(&mut self, args: &str) -> Option<Cmd> {
-        if self.agent_state != AgentState::Idle {
-            self.status_message = Some("Cannot compact while processing".to_string());
+        if resolved_key_opt.is_none() {
+            self.status_message = Some(format!("Missing API key for provider {}", next.model.provider));
             return None;
         }
 
-        let Ok(agent_guard) = self.agent.try_lock() else {
+        if next.model.provider == self.model_entry.model.provider
+            && next.model.id == self.model_entry.model.id
+        {
+            self.status_message = Some(format!("Current model: {}", self.model));
+            return None;
+        }
+
+        let provider_impl = match providers::create_provider(&next, self.extensions.as_ref()) {
+            Ok(provider_impl) => provider_impl,
+            Err(err) => {
+                self.status_message = Some(err.to_string());
+                return None;
+            }
+        };
+
+        let Ok(mut agent_guard) = self.agent.try_lock() else {
             self.status_message = Some("Agent busy; try again".to_string());
             return None;
         };
-        let provider = agent_guard.provider();
-        let api_key_opt = agent_guard.stream_options().api_key.clone();
+        agent_guard.set_provider(provider_impl);
+        agent_guard
+            .stream_options_mut()
+            .api_key
+            .clone_from(&resolved_key_opt);
+        agent_guard
+            .stream_options_mut()
+            .headers
+            .clone_from(&next.headers);
         drop(agent_guard);
 
-        let Some(api_key) = api_key_opt else {
-            self.status_message = Some("No API key configured; cannot run compaction".to_string());
+        let Ok(mut session_guard) = self.session.try_lock() else {
+            self.status_message = Some("Session busy; try again".to_string());
             return None;
         };
+        session_guard.header.provider = Some(next.model.provider.clone());
+        session_guard.header.model_id = Some(next.model.id.clone());
+        session_guard.append_model_change(next.model.provider.clone(), next.model.id.clone());
+        drop(session_guard);
+        self.spawn_save_session();
 
-        let event_tx = self.event_tx.clone();
-        let session = Arc::clone(&self.session);
-        let agent = Arc::clone(&self.agent);
-        let extensions = self.extensions.clone();
-        let runtime_handle = self.runtime_handle.clone();
-        let reserve_tokens = self.config.compaction_reserve_tokens();
-        let keep_recent_tokens = self.config.compaction_keep_recent_tokens();
-        let custom_instructions = args.trim().to_string();
-        let custom_instructions = if custom_instructions.is_empty() {
-            None
-        } else {
-            Some(custom_instructions)
-        };
-        let is_compacting = Arc::clone(&self.extension_compacting);
+        if !self
+            .available_models
+            .iter()
+            .any(|entry| model_entry_matches(entry, &next))
+        {
+            self.available_models.push(next.clone());
+        }
+        self.model_entry = next.clone();
+        if let Ok(mut guard) = self.model_entry_shared.lock() {
+            *guard = next.clone();
+        }
+        self.model = format!("{}/{}", next.model.provider, next.model.id);
 
-        self.agent_state = AgentState::Processing;
-        self.status_message = Some("Compacting session...".to_string());
-        self.extension_compacting.store(true, Ordering::SeqCst);
-
-        runtime_handle.spawn(async move {
-            let cx = Cx::for_request();
-
-            let (session_id, path_entries) = {
-                let mut guard = match session.lock(&cx).await {
-                    Ok(guard) => guard,
-                    Err(err) => {
-                        is_compacting.store(false, Ordering::SeqCst);
-                        let _ =
-                            event_tx.try_send(PiMsg::AgentError(format!("Failed to lock session: {err}")));
-                        return;
-                    }
-                };
-                guard.ensure_entry_ids();
-                let session_id = guard.header.id.clone();
-                let entries = guard
-                    .entries_for_current_path()
-                    .into_iter()
-                    .cloned()
-                    .collect::<Vec<_>>();
-                (session_id, entries)
-            };
-
-            if let Some(manager) = extensions.clone() {
-                let cancelled = manager
-                    .dispatch_cancellable_event(
-                        ExtensionEventName::SessionBeforeCompact,
-                        Some(json!({
-                            "sessionId": session_id,
-                            "notes": custom_instructions.as_deref(),
-                        })),
-                        EXTENSION_EVENT_TIMEOUT_MS,
-                    )
-                    .await
-                    .unwrap_or(false);
-                if cancelled {
-                    is_compacting.store(false, Ordering::SeqCst);
-                    let _ = event_tx
-                        .try_send(PiMsg::System("Compaction cancelled by extension".to_string()));
-                    return;
-                }
-            }
-
-            let settings = crate::compaction::ResolvedCompactionSettings {
-                enabled: true,
-                reserve_tokens,
-                keep_recent_tokens,
-                ..Default::default()
-            };
-            let Some(prep) = crate::compaction::prepare_compaction(&path_entries, settings) else {
-                is_compacting.store(false, Ordering::SeqCst);
-                let _ = event_tx.try_send(PiMsg::System(
-                    "Nothing to compact (already compacted or too little history)".to_string(),
-                ));
-                return;
-            };
-
-            let result = match crate::compaction::compact(
-                prep,
-                Arc::clone(&provider),
-                &api_key,
-                custom_instructions.as_deref(),
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(err) => {
-                    is_compacting.store(false, Ordering::SeqCst);
-                    let _ = event_tx.try_send(PiMsg::AgentError(format!("Compaction failed: {err}")));
-                    return;
-                }
-            };
-
-            let details = crate::compaction::compaction_details_to_value(&result.details).ok();
-
-            let messages_for_agent = {
-                let mut guard = match session.lock(&cx).await {
-                    Ok(guard) => guard,
-                    Err(err) => {
-                        is_compacting.store(false, Ordering::SeqCst);
-                        let _ =
-                            event_tx.try_send(PiMsg::AgentError(format!("Failed to lock session: {err}")));
-                        return;
-                    }
-                };
-
-                guard.append_compaction(
-                    result.summary.clone(),
-                    result.first_kept_entry_id.clone(),
-                    result.tokens_before,
-                    details,
-                    None,
-                );
-                let _ = guard.save().await;
-                guard.to_messages_for_current_path()
-            };
-
-            {
-                let mut agent_guard = match agent.lock(&cx).await {
-                    Ok(guard) => guard,
-                    Err(err) => {
-                        is_compacting.store(false, Ordering::SeqCst);
-                        let _ =
-                            event_tx.try_send(PiMsg::AgentError(format!("Failed to lock agent: {err}")));
-                        return;
-                    }
-                };
-                agent_guard.replace_messages(messages_for_agent);
-            }
-
-            let (messages, usage) = {
-                let guard = match session.lock(&cx).await {
-                    Ok(guard) => guard,
-                    Err(err) => {
-                        is_compacting.store(false, Ordering::SeqCst);
-                        let _ =
-                            event_tx.try_send(PiMsg::AgentError(format!("Failed to lock session: {err}")));
-                        return;
-                    }
-                };
-                conversation_from_session(&guard)
-            };
-
-            is_compacting.store(false, Ordering::SeqCst);
-            let _ = event_tx.try_send(PiMsg::ConversationReset {
-                messages,
-                usage,
-                status: Some("Compaction complete".to_string()),
-            });
-
-            if let Some(manager) = extensions {
-                let _ = manager
-                    .dispatch_event(
-                        ExtensionEventName::SessionCompact,
-                        Some(json!({
-                            "tokensBefore": result.tokens_before,
-                            "firstKeptEntryId": result.first_kept_entry_id,
-                        })),
-                    )
-                    .await;
-            }
-        });
+        self.status_message = Some(format!("Switched model: {}", self.model));
         None
     }
 
@@ -2176,7 +1829,6 @@ impl PiApp {
         self.status_message = Some("Reloading resources...".to_string());
         None
     }
-
 }
 
 #[cfg(test)]
