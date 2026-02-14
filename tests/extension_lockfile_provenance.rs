@@ -6,7 +6,7 @@
 mod common;
 
 use pi::package_manager::{
-    PackageEntryTrustState, PackageLockAction, PackageLockEntry, PackageLockMismatch,
+    PackageEntryTrustState, PackageLockAction, PackageLockEntry,
     PackageLockfile, PackageResolvedProvenance, PackageSourceKind, PACKAGE_LOCK_SCHEMA,
     PACKAGE_TRUST_AUDIT_SCHEMA, digest_package_path, evaluate_lock_transition,
     read_package_lockfile, sort_lock_entries, write_package_lockfile_atomic,

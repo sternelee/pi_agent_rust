@@ -22262,12 +22262,10 @@ mod tests {
         let strict = ExtensionQuotaConfig::for_mode(ExtensionPolicyMode::Strict);
         let prompt = ExtensionQuotaConfig::for_mode(ExtensionPolicyMode::Prompt);
         assert!(
-            strict.max_hostcalls_per_second.unwrap()
-                < prompt.max_hostcalls_per_second.unwrap()
+            strict.max_hostcalls_per_second.unwrap() < prompt.max_hostcalls_per_second.unwrap()
         );
         assert!(
-            strict.max_hostcalls_per_minute.unwrap()
-                < prompt.max_hostcalls_per_minute.unwrap()
+            strict.max_hostcalls_per_minute.unwrap() < prompt.max_hostcalls_per_minute.unwrap()
         );
         assert!(strict.max_subprocesses.unwrap() < prompt.max_subprocesses.unwrap());
         assert!(strict.max_hostcalls_total.is_some());
@@ -22279,12 +22277,10 @@ mod tests {
         let permissive = ExtensionQuotaConfig::for_mode(ExtensionPolicyMode::Permissive);
         let prompt = ExtensionQuotaConfig::for_mode(ExtensionPolicyMode::Prompt);
         assert!(
-            permissive.max_hostcalls_per_second.unwrap()
-                > prompt.max_hostcalls_per_second.unwrap()
+            permissive.max_hostcalls_per_second.unwrap() > prompt.max_hostcalls_per_second.unwrap()
         );
         assert!(
-            permissive.max_hostcalls_per_minute.unwrap()
-                > prompt.max_hostcalls_per_minute.unwrap()
+            permissive.max_hostcalls_per_minute.unwrap() > prompt.max_hostcalls_per_minute.unwrap()
         );
         assert!(permissive.max_subprocesses.unwrap() > prompt.max_subprocesses.unwrap());
     }
@@ -22306,8 +22302,7 @@ mod tests {
         };
         let mut state = ExtensionQuotaState::default();
         for i in 0..3 {
-            let r =
-                check_extension_quota(&config, &mut state, 1000 + i64::from(i), "tool");
+            let r = check_extension_quota(&config, &mut state, 1000 + i64::from(i), "tool");
             assert_eq!(r, QuotaCheckResult::Allowed);
         }
         let r = check_extension_quota(&config, &mut state, 1002, "tool");
@@ -22323,8 +22318,7 @@ mod tests {
         };
         let mut state = ExtensionQuotaState::default();
         for i in 0..5 {
-            let r =
-                check_extension_quota(&config, &mut state, 1000 + i * 10_000, "tool");
+            let r = check_extension_quota(&config, &mut state, 1000 + i * 10_000, "tool");
             assert_eq!(r, QuotaCheckResult::Allowed);
         }
         let r = check_extension_quota(&config, &mut state, 41_000, "tool");
