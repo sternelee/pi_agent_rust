@@ -324,6 +324,7 @@ impl PiApp {
             }
 
             self.messages = messages;
+            self.message_render_cache.clear();
             self.total_usage = usage;
             self.current_response.clear();
             self.current_thinking.clear();
