@@ -40,6 +40,8 @@ tmp_*/
 # Per-agent cargo target directories
 .target-*/
 .target_*/
+_target_*/
+_target-*/
 
 # Session export snapshots
 pi-session-*.html
