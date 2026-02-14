@@ -1698,29 +1698,60 @@ struct FuzzyMatchResult {
     content_for_replacement: String,
 }
 
-/// Build a mapping from normalized byte indices to original byte indices.
-/// Returns (normalized_string, Vec<original_byte_index_for_each_normalized_byte>).
-fn build_normalized_with_mapping(content: &str) -> (String, Vec<usize>) {
-    let mut normalized = String::with_capacity(content.len());
-    let mut mapping = Vec::with_capacity(content.len());
+/// Map a range in the normalized string back to the original string.
+///
+/// Returns (original_start_byte_idx, original_match_byte_len).
+///
+/// This avoids allocating a O(N) mapping vector by re-scanning the content.
+fn map_normalized_range_to_original(
+    content: &str,
+    norm_match_start: usize,
+    norm_match_len: usize,
+) -> (usize, usize) {
+    let mut norm_idx = 0;
+    let mut orig_idx = 0;
+    let mut match_start = None;
+    let mut match_end = None;
+
+    let norm_match_end = norm_match_start + norm_match_len;
 
     // Process line by line to handle trailing whitespace normalization
-    let lines: Vec<&str> = content.split('\n').collect();
-    let last_line_idx = lines.len().saturating_sub(1);
+    // Use split_inclusive to preserve newlines for accurate byte counting
+    let mut lines = content.split_inclusive('\n').peekable();
 
-    let mut original_byte_offset = 0;
+    while let Some(line) = lines.next() {
+        // Determine if this is the last line (which doesn't get a synthetic newline appended if it lacks one)
+        // Note: split_inclusive keeps the \n.
+        // `build_normalized_with_mapping` logic: "Add newline if not the last line"
+        // But here we are iterating actual lines.
+        // If the line ends with \n, it contributes a \n to normalized.
+        // If it doesn't (last line), it doesn't.
+        // Wait, `build_normalized_with_mapping` splits by `\n` which consumes delimiters.
+        // And adds `\n` back "if not the last line".
+        // So effectively it preserves newlines between lines.
+        
+        let line_content = line.strip_suffix('\n').unwrap_or(line);
+        let has_newline = line.ends_with('\n');
 
-    for (line_idx, line) in lines.iter().enumerate() {
-        // Trim trailing whitespace for fuzzy matching
-        let trimmed_len = line.trim_end().len();
+        let trimmed_len = line_content.trim_end().len();
 
-        for (char_offset, c) in line.char_indices() {
+        for (char_offset, c) in line_content.char_indices() {
+            // Check if we reached the start/end of the match in normalized space
+            if norm_idx == norm_match_start && match_start.is_none() {
+                match_start = Some(orig_idx + char_offset);
+            }
+            if norm_idx == norm_match_end && match_end.is_none() {
+                match_end = Some(orig_idx + char_offset);
+            }
+
+            if match_start.is_some() && match_end.is_some() {
+                break;
+            }
+
             // Skip trailing whitespace (chars beyond trimmed_len)
             if char_offset >= trimmed_len {
                 continue;
             }
-
-            let orig_byte_idx = original_byte_offset + char_offset;
 
             // Normalize the character
             let normalized_char = if is_special_unicode_space(c) {
@@ -1744,25 +1775,80 @@ fn build_normalized_with_mapping(content: &str) -> (String, Vec<usize>) {
                 c
             };
 
-            let char_len_in_normalized = normalized_char.len_utf8();
-            normalized.push(normalized_char);
-            for _ in 0..char_len_in_normalized {
-                mapping.push(orig_byte_idx);
-            }
+            norm_idx += normalized_char.len_utf8();
         }
 
-        // Move past this line in original content
-        original_byte_offset += line.len();
+        orig_idx += line_content.len();
 
-        // Add newline if not the last line
-        if line_idx < last_line_idx {
-            normalized.push('\n');
-            mapping.push(original_byte_offset); // Points to the \n in original
-            original_byte_offset += 1; // Move past the \n
+        if has_newline {
+            // Handle the newline character
+            if norm_idx == norm_match_start && match_start.is_none() {
+                match_start = Some(orig_idx);
+            }
+            if norm_idx == norm_match_end && match_end.is_none() {
+                match_end = Some(orig_idx);
+            }
+
+            norm_idx += 1; // '\n' is 1 byte
+            orig_idx += 1; // '\n' is 1 byte in original too
+        }
+
+        if match_start.is_some() && match_end.is_some() {
+            break;
         }
     }
 
-    (normalized, mapping)
+    // Handle edge case where match ends at the very end of content
+    if norm_idx == norm_match_end && match_end.is_none() {
+        match_end = Some(orig_idx);
+    }
+
+    // Fallback if we couldn't find start/end (should not happen if match is valid)
+    let start = match_start.unwrap_or(0);
+    let end = match_end.unwrap_or(content.len());
+
+    (start, end.saturating_sub(start))
+}
+
+/// Build just the normalized string without the mapping vector.
+fn build_normalized_content(content: &str) -> String {
+    let mut normalized = String::with_capacity(content.len());
+    let lines: Vec<&str> = content.split('\n').collect();
+    let last_line_idx = lines.len().saturating_sub(1);
+
+    for (line_idx, line) in lines.iter().enumerate() {
+        let trimmed_len = line.trim_end().len();
+        for (char_offset, c) in line.char_indices() {
+            if char_offset >= trimmed_len {
+                continue;
+            }
+            let normalized_char = if is_special_unicode_space(c) {
+                ' '
+            } else if matches!(c, '\u{2018}' | '\u{2019}') {
+                '\''
+            } else if matches!(c, '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}') {
+                '"'
+            } else if matches!(
+                c,
+                '\u{2010}'
+                    | '\u{2011}'
+                    | '\u{2012}'
+                    | '\u{2013}'
+                    | '\u{2014}'
+                    | '\u{2015}'
+                    | '\u{2212}'
+            ) {
+                '-'
+            } else {
+                c
+            };
+            normalized.push(normalized_char);
+        }
+        if line_idx < last_line_idx {
+            normalized.push('\n');
+        }
+    }
+    normalized
 }
 
 fn fuzzy_find_text(content: &str, old_text: &str) -> FuzzyMatchResult {
@@ -1776,34 +1862,17 @@ fn fuzzy_find_text(content: &str, old_text: &str) -> FuzzyMatchResult {
         };
     }
 
-    // Build normalized versions with index mapping
-    let (normalized_content, content_mapping) = build_normalized_with_mapping(content);
-    let (normalized_old_text, _) = build_normalized_with_mapping(old_text);
+    // Build normalized versions
+    let normalized_content = build_normalized_content(content);
+    let normalized_old_text = build_normalized_content(old_text);
 
     // Try to find the normalized old_text in normalized content
     if let Some(normalized_index) = normalized_content.find(&normalized_old_text) {
-        // Map the normalized index back to original content
-        let original_start = if normalized_index < content_mapping.len() {
-            content_mapping[normalized_index]
-        } else {
-            // Edge case: match at very end
-            content.len()
-        };
-
-        // Find the end position in original content
-        let normalized_end = normalized_index + normalized_old_text.len();
-        let original_end = if normalized_end < content_mapping.len() {
-            // Get the byte position after the match
-            // We need to find where the next character starts in original
-            content_mapping[normalized_end]
-        } else {
-            // Match goes to end of content
-            content.len()
-        };
-
-        // But we need the actual end including any trailing whitespace that was stripped
-        // Find the end of the matched region in original content by looking at line structure
-        let original_match_len = original_end - original_start;
+        let (original_start, original_match_len) = map_normalized_range_to_original(
+            content,
+            normalized_index,
+            normalized_old_text.len(),
+        );
 
         return FuzzyMatchResult {
             found: true,

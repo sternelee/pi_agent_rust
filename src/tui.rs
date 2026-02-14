@@ -389,12 +389,20 @@ fn split_markdown_fenced_code_blocks(markdown: &str) -> Vec<MarkdownChunk> {
 
         if !in_code_block {
             if is_fence {
+                fence_len = backtick_count;
+                let info = trimmed_line.get(fence_len..).unwrap_or_default();
+
+                // CommonMark: The info string may not contain any backtick characters.
+                // If it does, this is likely an inline code span at the start of a line, not a fence.
+                if info.contains('`') {
+                    text_buf.push_str(line);
+                    continue;
+                }
+
                 if !text_buf.is_empty() {
                     chunks.push(MarkdownChunk::Text(std::mem::take(&mut text_buf)));
                 }
 
-                fence_len = backtick_count;
-                let info = trimmed_line.get(fence_len..).unwrap_or_default();
                 code_language = parse_fenced_code_language(info);
                 in_code_block = true;
                 code_buf.clear();
