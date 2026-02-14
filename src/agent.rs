@@ -828,15 +828,19 @@ impl Agent {
     }
 
     async fn drain_steering_messages(&mut self) -> Vec<Message> {
-        let mut messages = self.message_queue.pop_steering();
-        messages.extend(self.fetch_messages(self.steering_fetcher.as_ref()).await);
-        messages
+        let fetched = self.fetch_messages(self.steering_fetcher.as_ref()).await;
+        for message in fetched {
+            self.message_queue.push_steering(message);
+        }
+        self.message_queue.pop_steering()
     }
 
     async fn drain_follow_up_messages(&mut self) -> Vec<Message> {
-        let mut messages = self.message_queue.pop_follow_up();
-        messages.extend(self.fetch_messages(self.follow_up_fetcher.as_ref()).await);
-        messages
+        let fetched = self.fetch_messages(self.follow_up_fetcher.as_ref()).await;
+        for message in fetched {
+            self.message_queue.push_follow_up(message);
+        }
+        self.message_queue.pop_follow_up()
     }
 
     /// Stream an assistant response and emit message events.

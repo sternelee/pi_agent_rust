@@ -782,6 +782,10 @@ pub fn prepare_compaction(
     }
     let tokens_before = estimate_context_tokens(&usage_messages).tokens;
 
+    if !should_compact(tokens_before, settings.context_window_tokens, &settings) {
+        return None;
+    }
+
     let cut_point = find_cut_point(
         path_entries,
         boundary_start,
