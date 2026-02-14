@@ -1297,7 +1297,7 @@ impl Session {
             } else {
                 self.entries
                     .iter()
-                    .any(|entry| entry.base_id().is_some_and(|id| id == candidate))
+                    .any(|entry| entry.base_id().is_some_and(|id| id == candidate.as_str()))
             };
             if !exists {
                 return candidate;

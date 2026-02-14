@@ -5,6 +5,8 @@
 //! - Sessions persist [`Message`] values as JSON (see [`crate::session`]).
 //! - Tools return [`ContentBlock`] output that can be rendered in the TUI and replayed to providers.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -18,7 +20,11 @@ pub enum Message {
     /// Message authored by the user.
     User(UserMessage),
     /// Message authored by the assistant/model.
-    Assistant(AssistantMessage),
+    ///
+    /// Wrapped in [`Arc`] for cheap cloning during streaming – the streaming
+    /// hot-path emits many events per token and [`Arc::make_mut`] gives O(1)
+    /// copy-on-write when the refcount is 1.
+    Assistant(Arc<AssistantMessage>),
     /// Tool result produced by the host after executing a tool call.
     ToolResult(ToolResultMessage),
     /// Host/extension-defined message type.
@@ -82,6 +88,13 @@ pub struct CustomMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
     pub timestamp: i64,
+}
+
+impl Message {
+    /// Convenience constructor: wraps an [`AssistantMessage`] in [`Arc`].
+    pub fn assistant(msg: AssistantMessage) -> Self {
+        Self::Assistant(Arc::new(msg))
+    }
 }
 
 // ============================================================================
@@ -264,59 +277,59 @@ pub enum StreamEvent {
 #[serde(tag = "type")]
 pub enum AssistantMessageEvent {
     #[serde(rename = "start")]
-    Start { partial: AssistantMessage },
+    Start { partial: Arc<AssistantMessage> },
     #[serde(rename = "text_start")]
     TextStart {
         #[serde(rename = "contentIndex")]
         content_index: usize,
-        partial: AssistantMessage,
+        partial: Arc<AssistantMessage>,
     },
     #[serde(rename = "text_delta")]
     TextDelta {
         #[serde(rename = "contentIndex")]
         content_index: usize,
         delta: String,
-        partial: AssistantMessage,
+        partial: Arc<AssistantMessage>,
     },
     #[serde(rename = "text_end")]
     TextEnd {
         #[serde(rename = "contentIndex")]
         content_index: usize,
         content: String,
-        partial: AssistantMessage,
+        partial: Arc<AssistantMessage>,
     },
     #[serde(rename = "thinking_start")]
     ThinkingStart {
         #[serde(rename = "contentIndex")]
         content_index: usize,
-        partial: AssistantMessage,
+        partial: Arc<AssistantMessage>,
     },
     #[serde(rename = "thinking_delta")]
     ThinkingDelta {
         #[serde(rename = "contentIndex")]
         content_index: usize,
         delta: String,
-        partial: AssistantMessage,
+        partial: Arc<AssistantMessage>,
     },
     #[serde(rename = "thinking_end")]
     ThinkingEnd {
         #[serde(rename = "contentIndex")]
         content_index: usize,
         content: String,
-        partial: AssistantMessage,
+        partial: Arc<AssistantMessage>,
     },
     #[serde(rename = "toolcall_start")]
     ToolCallStart {
         #[serde(rename = "contentIndex")]
         content_index: usize,
-        partial: AssistantMessage,
+        partial: Arc<AssistantMessage>,
     },
     #[serde(rename = "toolcall_delta")]
     ToolCallDelta {
         #[serde(rename = "contentIndex")]
         content_index: usize,
         delta: String,
-        partial: AssistantMessage,
+        partial: Arc<AssistantMessage>,
     },
     #[serde(rename = "toolcall_end")]
     ToolCallEnd {
@@ -324,17 +337,17 @@ pub enum AssistantMessageEvent {
         content_index: usize,
         #[serde(rename = "toolCall")]
         tool_call: ToolCall,
-        partial: AssistantMessage,
+        partial: Arc<AssistantMessage>,
     },
     #[serde(rename = "done")]
     Done {
         reason: StopReason,
-        message: AssistantMessage,
+        message: Arc<AssistantMessage>,
     },
     #[serde(rename = "error")]
     Error {
         reason: StopReason,
-        error: AssistantMessage,
+        error: Arc<AssistantMessage>,
     },
 }
 
@@ -694,7 +707,7 @@ mod tests {
 
     #[test]
     fn message_assistant_roundtrip() {
-        let msg = Message::Assistant(sample_assistant_message());
+        let msg = Message::assistant(sample_assistant_message());
         let json = serde_json::to_string(&msg).expect("serialize");
         let parsed: Message = serde_json::from_str(&json).expect("deserialize");
         match parsed {
@@ -760,7 +773,7 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(&user).expect("to_value");
         assert_eq!(v["role"], "user");
 
-        let assistant = Message::Assistant(sample_assistant_message());
+        let assistant = Message::assistant(sample_assistant_message());
         let v: serde_json::Value = serde_json::to_value(&assistant).expect("to_value");
         assert_eq!(v["role"], "assistant");
     }
@@ -1550,7 +1563,7 @@ mod tests {
         prop_oneof![
             (user_content_strategy(), any::<i64>())
                 .prop_map(|(content, timestamp)| Message::User(UserMessage { content, timestamp })),
-            assistant_message_strategy().prop_map(Message::Assistant),
+            assistant_message_strategy().prop_map(|m| Message::Assistant(Arc::new(m))),
             tool_result_message_strategy().prop_map(Message::ToolResult),
             custom_message_strategy().prop_map(Message::Custom),
         ]

@@ -935,36 +935,40 @@ impl Agent {
 
             match event {
                 StreamEvent::Start { partial } => {
-                    let ev = partial.clone();
-                    self.update_partial_message(partial, &mut added_partial);
+                    let shared = Arc::new(partial);
+                    self.update_partial_message(
+                        Arc::clone(&shared),
+                        &mut added_partial,
+                    );
                     on_event(AgentEvent::MessageStart {
-                        message: Message::Assistant(ev.clone()),
+                        message: Message::Assistant(Arc::clone(&shared)),
                     });
                     sent_start = true;
                     on_event(AgentEvent::MessageUpdate {
-                        message: Message::Assistant(ev.clone()),
+                        message: Message::Assistant(Arc::clone(&shared)),
                         assistant_message_event: Box::new(AssistantMessageEvent::Start {
-                            partial: ev,
+                            partial: shared,
                         }),
                     });
                 }
                 StreamEvent::TextStart { content_index, .. } => {
-                    if let Some(Message::Assistant(msg)) = self.messages.last_mut() {
+                    if let Some(Message::Assistant(msg_arc)) = self.messages.last_mut() {
+                        let msg = Arc::make_mut(msg_arc);
                         if content_index == msg.content.len() {
                             msg.content.push(ContentBlock::Text(TextContent::new("")));
                         }
-                        let ev = msg.clone();
+                        let shared = Arc::clone(msg_arc);
                         if !sent_start {
                             on_event(AgentEvent::MessageStart {
-                                message: Message::Assistant(ev.clone()),
+                                message: Message::Assistant(Arc::clone(&shared)),
                             });
                             sent_start = true;
                         }
                         on_event(AgentEvent::MessageUpdate {
-                            message: Message::Assistant(ev.clone()),
+                            message: Message::Assistant(Arc::clone(&shared)),
                             assistant_message_event: Box::new(AssistantMessageEvent::TextStart {
                                 content_index,
-                                partial: ev,
+                                partial: shared,
                             }),
                         });
                     }
@@ -974,23 +978,28 @@ impl Agent {
                     delta,
                     ..
                 } => {
-                    if let Some(Message::Assistant(msg)) = self.messages.last_mut() {
-                        if let Some(ContentBlock::Text(text)) = msg.content.get_mut(content_index) {
-                            text.text.push_str(&delta);
+                    if let Some(Message::Assistant(msg_arc)) = self.messages.last_mut() {
+                        {
+                            let msg = Arc::make_mut(msg_arc);
+                            if let Some(ContentBlock::Text(text)) =
+                                msg.content.get_mut(content_index)
+                            {
+                                text.text.push_str(&delta);
+                            }
                         }
-                        let ev = msg.clone();
+                        let shared = Arc::clone(msg_arc);
                         if !sent_start {
                             on_event(AgentEvent::MessageStart {
-                                message: Message::Assistant(ev.clone()),
+                                message: Message::Assistant(Arc::clone(&shared)),
                             });
                             sent_start = true;
                         }
                         on_event(AgentEvent::MessageUpdate {
-                            message: Message::Assistant(ev.clone()),
+                            message: Message::Assistant(Arc::clone(&shared)),
                             assistant_message_event: Box::new(AssistantMessageEvent::TextDelta {
                                 content_index,
                                 delta,
-                                partial: ev,
+                                partial: shared,
                             }),
                         });
                     }
@@ -1000,48 +1009,54 @@ impl Agent {
                     content,
                     ..
                 } => {
-                    if let Some(Message::Assistant(msg)) = self.messages.last_mut() {
-                        if let Some(ContentBlock::Text(text)) = msg.content.get_mut(content_index) {
-                            text.text.clone_from(&content);
+                    if let Some(Message::Assistant(msg_arc)) = self.messages.last_mut() {
+                        {
+                            let msg = Arc::make_mut(msg_arc);
+                            if let Some(ContentBlock::Text(text)) =
+                                msg.content.get_mut(content_index)
+                            {
+                                text.text.clone_from(&content);
+                            }
                         }
-                        let ev = msg.clone();
+                        let shared = Arc::clone(msg_arc);
                         if !sent_start {
                             on_event(AgentEvent::MessageStart {
-                                message: Message::Assistant(ev.clone()),
+                                message: Message::Assistant(Arc::clone(&shared)),
                             });
                             sent_start = true;
                         }
                         on_event(AgentEvent::MessageUpdate {
-                            message: Message::Assistant(ev.clone()),
+                            message: Message::Assistant(Arc::clone(&shared)),
                             assistant_message_event: Box::new(AssistantMessageEvent::TextEnd {
                                 content_index,
                                 content,
-                                partial: ev,
+                                partial: shared,
                             }),
                         });
                     }
                 }
                 StreamEvent::ThinkingStart { content_index, .. } => {
-                    if let Some(Message::Assistant(msg)) = self.messages.last_mut() {
+                    if let Some(Message::Assistant(msg_arc)) = self.messages.last_mut() {
+                        let msg = Arc::make_mut(msg_arc);
                         if content_index == msg.content.len() {
                             msg.content.push(ContentBlock::Thinking(ThinkingContent {
                                 thinking: String::new(),
                                 thinking_signature: None,
                             }));
                         }
-                        let ev = msg.clone();
+                        let shared = Arc::clone(msg_arc);
                         if !sent_start {
                             on_event(AgentEvent::MessageStart {
-                                message: Message::Assistant(ev.clone()),
+                                message: Message::Assistant(Arc::clone(&shared)),
                             });
                             sent_start = true;
                         }
                         on_event(AgentEvent::MessageUpdate {
-                            message: Message::Assistant(ev.clone()),
+                            message: Message::Assistant(Arc::clone(&shared)),
                             assistant_message_event: Box::new(
                                 AssistantMessageEvent::ThinkingStart {
                                     content_index,
-                                    partial: ev,
+                                    partial: shared,
                                 },
                             ),
                         });
@@ -1052,26 +1067,29 @@ impl Agent {
                     delta,
                     ..
                 } => {
-                    if let Some(Message::Assistant(msg)) = self.messages.last_mut() {
-                        if let Some(ContentBlock::Thinking(thinking)) =
-                            msg.content.get_mut(content_index)
+                    if let Some(Message::Assistant(msg_arc)) = self.messages.last_mut() {
                         {
-                            thinking.thinking.push_str(&delta);
+                            let msg = Arc::make_mut(msg_arc);
+                            if let Some(ContentBlock::Thinking(thinking)) =
+                                msg.content.get_mut(content_index)
+                            {
+                                thinking.thinking.push_str(&delta);
+                            }
                         }
-                        let ev = msg.clone();
+                        let shared = Arc::clone(msg_arc);
                         if !sent_start {
                             on_event(AgentEvent::MessageStart {
-                                message: Message::Assistant(ev.clone()),
+                                message: Message::Assistant(Arc::clone(&shared)),
                             });
                             sent_start = true;
                         }
                         on_event(AgentEvent::MessageUpdate {
-                            message: Message::Assistant(ev.clone()),
+                            message: Message::Assistant(Arc::clone(&shared)),
                             assistant_message_event: Box::new(
                                 AssistantMessageEvent::ThinkingDelta {
                                     content_index,
                                     delta,
-                                    partial: ev,
+                                    partial: shared,
                                 },
                             ),
                         });
@@ -1082,31 +1100,35 @@ impl Agent {
                     content,
                     ..
                 } => {
-                    if let Some(Message::Assistant(msg)) = self.messages.last_mut() {
-                        if let Some(ContentBlock::Thinking(thinking)) =
-                            msg.content.get_mut(content_index)
+                    if let Some(Message::Assistant(msg_arc)) = self.messages.last_mut() {
                         {
-                            thinking.thinking.clone_from(&content);
+                            let msg = Arc::make_mut(msg_arc);
+                            if let Some(ContentBlock::Thinking(thinking)) =
+                                msg.content.get_mut(content_index)
+                            {
+                                thinking.thinking.clone_from(&content);
+                            }
                         }
-                        let ev = msg.clone();
+                        let shared = Arc::clone(msg_arc);
                         if !sent_start {
                             on_event(AgentEvent::MessageStart {
-                                message: Message::Assistant(ev.clone()),
+                                message: Message::Assistant(Arc::clone(&shared)),
                             });
                             sent_start = true;
                         }
                         on_event(AgentEvent::MessageUpdate {
-                            message: Message::Assistant(ev.clone()),
+                            message: Message::Assistant(Arc::clone(&shared)),
                             assistant_message_event: Box::new(AssistantMessageEvent::ThinkingEnd {
                                 content_index,
                                 content,
-                                partial: ev,
+                                partial: shared,
                             }),
                         });
                     }
                 }
                 StreamEvent::ToolCallStart { content_index, .. } => {
-                    if let Some(Message::Assistant(msg)) = self.messages.last_mut() {
+                    if let Some(Message::Assistant(msg_arc)) = self.messages.last_mut() {
+                        let msg = Arc::make_mut(msg_arc);
                         if content_index == msg.content.len() {
                             msg.content.push(ContentBlock::ToolCall(ToolCall {
                                 id: String::new(),
@@ -1115,19 +1137,19 @@ impl Agent {
                                 thought_signature: None,
                             }));
                         }
-                        let ev = msg.clone();
+                        let shared = Arc::clone(msg_arc);
                         if !sent_start {
                             on_event(AgentEvent::MessageStart {
-                                message: Message::Assistant(ev.clone()),
+                                message: Message::Assistant(Arc::clone(&shared)),
                             });
                             sent_start = true;
                         }
                         on_event(AgentEvent::MessageUpdate {
-                            message: Message::Assistant(ev.clone()),
+                            message: Message::Assistant(Arc::clone(&shared)),
                             assistant_message_event: Box::new(
                                 AssistantMessageEvent::ToolCallStart {
                                     content_index,
-                                    partial: ev,
+                                    partial: shared,
                                 },
                             ),
                         });
@@ -1138,52 +1160,23 @@ impl Agent {
                     delta,
                     ..
                 } => {
-                    if let Some(Message::Assistant(msg)) = self.messages.last_mut() {
-                        // Note: we can't easily parse partial JSON arguments here to update the Value.
-                        // We must accumulate the string.
-                        // However, ToolCall struct stores `arguments: serde_json::Value`.
-                        // The providers were storing it in a separate `arguments_str` in `StreamState`
-                        // and only parsing it at `ToolCallEnd`.
-                        //
-                        // PROBLEM: `ContentBlock::ToolCall` stores `Value`, not `String`.
-                        // We cannot incrementally update `Value` with a partial JSON string.
-                        //
-                        // BUT `AssistantMessageEvent::ToolCallDelta` expects `partial: AssistantMessage`.
-                        // If `AssistantMessage` only has `Value`, we can't represent the partial state in `Message`.
-                        //
-                        // How did it work before?
-                        // `StreamState` had `partial: AssistantMessage`.
-                        // `StreamState` updates `self.current_tool_json` (string).
-                        // It does NOT update `self.partial.content[idx].arguments` until END!
-                        //
-                        // So `partial` in `TextDelta` (before) actually contained `arguments: Null` (or empty)
-                        // until `ToolCallEnd`?
-                        //
-                        // Let's verify `openai.rs`:
-                        // `process_choice` -> `ToolCallDelta`:
-                        // `self.pending_events.push_back(StreamEvent::ToolCallDelta { ... partial: self.partial.clone() })`
-                        // It does NOT update `self.partial.content`.
-                        //
-                        // So `ev` (partial message) sent to `on_event` has `Null` arguments during streaming.
-                        // The `delta` string is carried in `AssistantMessageEvent::ToolCallDelta { delta }`.
-                        //
-                        // So here in `agent.rs`, we don't need to update `msg.content` for `ToolCallDelta`.
-                        // We just clone the current `msg` (which has `Null` args) and pass it along.
-
-                        let ev = msg.clone();
+                    if let Some(Message::Assistant(msg_arc)) = self.messages.last_mut() {
+                        // No mutation needed for ToolCallDelta – args stay Null until ToolCallEnd.
+                        // Just share the current Arc (O(1) refcount bump, zero deep copies).
+                        let shared = Arc::clone(msg_arc);
                         if !sent_start {
                             on_event(AgentEvent::MessageStart {
-                                message: Message::Assistant(ev.clone()),
+                                message: Message::Assistant(Arc::clone(&shared)),
                             });
                             sent_start = true;
                         }
                         on_event(AgentEvent::MessageUpdate {
-                            message: Message::Assistant(ev.clone()),
+                            message: Message::Assistant(Arc::clone(&shared)),
                             assistant_message_event: Box::new(
                                 AssistantMessageEvent::ToolCallDelta {
                                     content_index,
                                     delta,
-                                    partial: ev,
+                                    partial: shared,
                                 },
                             ),
                         });
@@ -1194,24 +1187,28 @@ impl Agent {
                     tool_call,
                     ..
                 } => {
-                    if let Some(Message::Assistant(msg)) = self.messages.last_mut() {
-                        if let Some(ContentBlock::ToolCall(tc)) = msg.content.get_mut(content_index)
+                    if let Some(Message::Assistant(msg_arc)) = self.messages.last_mut() {
                         {
-                            *tc = tool_call.clone();
+                            let msg = Arc::make_mut(msg_arc);
+                            if let Some(ContentBlock::ToolCall(tc)) =
+                                msg.content.get_mut(content_index)
+                            {
+                                *tc = tool_call.clone();
+                            }
                         }
-                        let ev = msg.clone();
+                        let shared = Arc::clone(msg_arc);
                         if !sent_start {
                             on_event(AgentEvent::MessageStart {
-                                message: Message::Assistant(ev.clone()),
+                                message: Message::Assistant(Arc::clone(&shared)),
                             });
                             sent_start = true;
                         }
                         on_event(AgentEvent::MessageUpdate {
-                            message: Message::Assistant(ev.clone()),
+                            message: Message::Assistant(Arc::clone(&shared)),
                             assistant_message_event: Box::new(AssistantMessageEvent::ToolCallEnd {
                                 content_index,
                                 tool_call,
-                                partial: ev,
+                                partial: shared,
                             }),
                         });
                     }
