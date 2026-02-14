@@ -1,0 +1,272 @@
+{
+  "schema": "pi.qa.provider_closure_truth_table.v1",
+  "bead_id": "bd-3uqg.12.2.2",
+  "generated_at_utc": "2026-02-14T00:45:00Z",
+  "purpose": "Self-contained closure truth table for 5 audited providers covering implementation, auth, test evidence, docs, and disposition",
+
+  "providers": {
+    "groq": {
+      "canonical_id": "groq",
+      "aliases": [],
+      "auth_env_keys": ["GROQ_API_KEY"],
+      "implementation": {
+        "mode": "OpenAICompatiblePreset",
+        "api": "openai-completions",
+        "base_url": "https://api.groq.com/openai/v1",
+        "context_window": 128000,
+        "max_tokens": 16384,
+        "reasoning": true,
+        "vision": false,
+        "tool_calling": true,
+        "parallel_tools": true,
+        "streaming": true
+      },
+      "test_evidence": {
+        "unit_tests": true,
+        "provider_factory": true,
+        "vcr_cassettes": 7,
+        "vcr_scenarios": ["simple_text", "unicode_text", "tool_call_single", "tool_call_multiple", "error_auth_401", "error_bad_request_400", "error_rate_limit_429"],
+        "integration_suites": ["provider_native_verify", "provider_factory", "provider_smoke_matrix"],
+        "e2e_coverage": true
+      },
+      "docs": {
+        "capability_profile": "docs/provider-groq-capability-profile.json",
+        "setup_guide": "docs/provider-groq-setup.json",
+        "status": "complete"
+      },
+      "special_notes": ["Inference timing metrics in response", "Standard SSE with data: [DONE] termination"],
+      "disposition": "PRODUCTION_READY"
+    },
+
+    "cerebras": {
+      "canonical_id": "cerebras",
+      "aliases": [],
+      "auth_env_keys": ["CEREBRAS_API_KEY"],
+      "implementation": {
+        "mode": "OpenAICompatiblePreset",
+        "api": "openai-completions",
+        "base_url": "https://api.cerebras.ai/v1",
+        "context_window": 128000,
+        "max_tokens": 16384,
+        "reasoning": true,
+        "vision": false,
+        "tool_calling": "model_gated",
+        "parallel_tools": true,
+        "streaming": true
+      },
+      "test_evidence": {
+        "unit_tests": true,
+        "provider_factory": true,
+        "vcr_cassettes": "shared_suite",
+        "integration_suites": ["provider_factory", "provider_smoke_matrix"],
+        "e2e_coverage": true
+      },
+      "docs": {
+        "capability_profile": "docs/provider-cerebras-capability-profile.json",
+        "setup_guide": "docs/provider-cerebras-setup.json",
+        "status": "complete"
+      },
+      "special_notes": [
+        "WSE hardware-specific metrics (time_info in final chunk)",
+        "Non-standard rate limit headers (-requests-day, -tokens-minute)",
+        "Tool calling model-gated (gpt-oss-120b, qwen-3-32b, zai-glm-4.7)",
+        "Prompt caching, CePO reasoning, batch API, service tiers"
+      ],
+      "disposition": "PRODUCTION_READY"
+    },
+
+    "openrouter": {
+      "canonical_id": "openrouter",
+      "aliases": ["open-router"],
+      "auth_env_keys": ["OPENROUTER_API_KEY"],
+      "implementation": {
+        "mode": "OpenAICompatiblePreset",
+        "api": "openai-completions",
+        "base_url": "https://openrouter.ai/api/v1",
+        "context_window": 128000,
+        "max_tokens": 16384,
+        "reasoning": true,
+        "vision": "via_model_selection",
+        "tool_calling": true,
+        "parallel_tools": "varies_by_model",
+        "streaming": true
+      },
+      "test_evidence": {
+        "unit_tests": true,
+        "provider_factory": true,
+        "vcr_cassettes": "shared_suite",
+        "integration_suites": ["provider_factory", "provider_smoke_matrix"],
+        "e2e_coverage": true
+      },
+      "docs": {
+        "capability_profile": "docs/provider-openrouter-capability-profile.json",
+        "setup_guide": "docs/provider-openrouter-setup.json",
+        "auth_contract": "docs/provider-openrouter-auth-contract.json",
+        "model_registry": "docs/provider-openrouter-model-registry-contract.json",
+        "dynamic_models": "docs/provider-openrouter-dynamic-models-contract.json",
+        "status": "complete"
+      },
+      "special_notes": [
+        "Provider routing with order, allow_fallbacks, require_parameters, max_price",
+        "SSE includes `: OPENROUTER PROCESSING` comment frames",
+        "Mid-stream errors via finish_reason='error' (not HTTP errors)",
+        "Response includes actual serving provider/model for diagnostics",
+        "Attribution headers: HTTP-Referer, X-Title"
+      ],
+      "disposition": "PRODUCTION_READY"
+    },
+
+    "kimi": {
+      "variants": {
+        "moonshotai": {
+          "canonical_id": "moonshotai",
+          "aliases": ["moonshot", "kimi"],
+          "auth_env_keys": ["MOONSHOT_API_KEY", "KIMI_API_KEY"],
+          "implementation": {
+            "mode": "OpenAICompatiblePreset",
+            "api": "openai-completions",
+            "base_url": "https://api.moonshot.ai/v1",
+            "context_window": 128000,
+            "max_tokens": 16384,
+            "reasoning": true,
+            "vision": "kimi-k2.5 only",
+            "tool_calling": true,
+            "parallel_tools": false,
+            "streaming": true
+          },
+          "disposition": "PRODUCTION_READY"
+        },
+        "moonshotai-cn": {
+          "canonical_id": "moonshotai-cn",
+          "aliases": [],
+          "auth_env_keys": ["MOONSHOT_API_KEY"],
+          "implementation": {
+            "mode": "OpenAICompatiblePreset",
+            "api": "openai-completions",
+            "base_url": "https://api.moonshot.cn/v1",
+            "context_window": 262144,
+            "max_tokens": 262144
+          },
+          "note": "China endpoint — .ai keys NOT interchangeable with .cn keys",
+          "disposition": "PRODUCTION_READY"
+        },
+        "kimi-for-coding": {
+          "canonical_id": "kimi-for-coding",
+          "aliases": [],
+          "auth_env_keys": ["KIMI_API_KEY"],
+          "implementation": {
+            "mode": "NativeAdapterRequired",
+            "api": "anthropic-messages",
+            "base_url": "https://api.kimi.com/coding/v1/messages",
+            "context_window": 262144,
+            "max_tokens": 32768
+          },
+          "note": "Anthropic Messages API format — routes through Anthropic provider path, NOT OpenAI",
+          "disposition": "PRODUCTION_READY"
+        }
+      },
+      "test_evidence": {
+        "unit_tests": true,
+        "provider_factory": true,
+        "vcr_cassettes": "shared_suite",
+        "integration_suites": ["provider_factory", "provider_smoke_matrix"],
+        "e2e_coverage": true
+      },
+      "docs": {
+        "capability_profile": "docs/provider-kimi-capability-profile.json",
+        "setup_guide": "docs/provider-kimi-setup.json",
+        "status": "complete"
+      },
+      "special_notes": [
+        "THREE distinct provider entries — do not merge",
+        "Automatic prompt caching (75% savings)",
+        "Web search capability",
+        "6 rate limit tiers based on cumulative recharge ($1-$3000)",
+        "kimi-for-coding uses Anthropic API format (critical routing decision)"
+      ]
+    },
+
+    "qwen": {
+      "variants": {
+        "alibaba": {
+          "canonical_id": "alibaba",
+          "aliases": ["dashscope", "qwen"],
+          "auth_env_keys": ["DASHSCOPE_API_KEY", "QWEN_API_KEY"],
+          "implementation": {
+            "mode": "OpenAICompatiblePreset",
+            "api": "openai-completions",
+            "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+            "context_window": 128000,
+            "max_tokens": 16384,
+            "reasoning": true,
+            "vision": "qwen-vl-* models",
+            "tool_calling": "model_gated",
+            "parallel_tools": false,
+            "streaming": true
+          },
+          "disposition": "PRODUCTION_READY"
+        },
+        "alibaba-cn": {
+          "canonical_id": "alibaba-cn",
+          "aliases": [],
+          "auth_env_keys": ["DASHSCOPE_API_KEY"],
+          "implementation": {
+            "mode": "OpenAICompatiblePreset",
+            "api": "openai-completions",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "context_window": 128000,
+            "max_tokens": 16384
+          },
+          "note": "China/Beijing endpoint",
+          "disposition": "PRODUCTION_READY"
+        }
+      },
+      "test_evidence": {
+        "unit_tests": true,
+        "provider_factory": true,
+        "vcr_cassettes": "shared_suite",
+        "integration_suites": ["provider_factory", "provider_smoke_matrix"],
+        "e2e_coverage": true
+      },
+      "docs": {
+        "capability_profile": "docs/provider-qwen-capability-profile.json",
+        "setup_guide": "docs/provider-qwen-setup.json",
+        "status": "complete"
+      },
+      "special_notes": [
+        "CRITICAL: Tools CANNOT be combined with streaming — must force stream=false when tools defined",
+        "stream_options.include_usage=true required for token counts",
+        "Tool calling model-gated (qwen-turbo/plus/max/qwen3-coder-plus only)",
+        "n parameter: only qwen-plus supports n>1; must be 1 when tools specified",
+        "Rate limits: qps/qpm (retryable) vs quota (billing) — same 429 code, different meanings",
+        "system_fingerprint returns empty string"
+      ]
+    }
+  },
+
+  "cross_provider_matrix": {
+    "headers": ["capability", "groq", "cerebras", "openrouter", "kimi", "qwen"],
+    "rows": [
+      ["openai_compatible", true, true, true, "true + anthropic variant", true],
+      ["tool_calling", "all models", "model-gated", "normalized", "all models", "model-gated"],
+      ["parallel_tools", true, true, "varies", false, false],
+      ["streaming", true, true, "true + comment frames", true, "true (not with tools)"],
+      ["vision", false, false, "via model", "kimi-k2.5", "qwen-vl-*"],
+      ["reasoning", true, "model-gated", "via model", "thinking models", "model-gated"],
+      ["regional_variants", false, false, false, "3 (global, cn, coding)", "2 (intl, cn)"],
+      ["production_ready", true, true, true, true, true]
+    ]
+  },
+
+  "overall_verdict": {
+    "providers_audited": 5,
+    "provider_entries": 8,
+    "all_production_ready": true,
+    "blocking_issues": 0,
+    "critical_constraints": [
+      "Qwen: tools+streaming incompatible (must disable streaming when tools present)",
+      "Kimi: kimi-for-coding routes through Anthropic API, not OpenAI",
+      "Kimi: .ai and .cn auth keys are NOT interchangeable"
+    ]
+  }
+}
