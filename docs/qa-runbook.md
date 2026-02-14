@@ -9,6 +9,35 @@ Reference for running the test suite, interpreting failures, and reproducing iss
 
 ---
 
+## Contract Checklist (DROPIN-171)
+
+`docs/testing-policy.md` defines the normative contract `pi.parity.test_logging_contract.v1`.
+Use this runbook section to validate that the contract remains intact.
+
+### Required Cross-Suite Guarantees
+
+| Guarantee | Validation Source |
+|-----------|-------------------|
+| Suite taxonomy is explicit (`unit`/`vcr`/`e2e`) | `tests/suite_classification.toml` |
+| Test log schema remains `pi.test.log.v2` | `tests/common/logging.rs` validators |
+| Artifact index schema remains `pi.test.artifact.v1` | `tests/common/logging.rs` validators |
+| Evidence contract schema remains `pi.qa.evidence_contract.v1` | `docs/evidence-contract-schema.json` + schema tests |
+| Failure digest taxonomy + replay metadata remain stable | `docs/evidence-contract-schema.json` |
+
+### Contract Verification Commands
+
+```bash
+# Evidence contract schema + synthetic sample checks
+cargo test --test validate_e2e_artifact_schema -- evidence_contract_schema --nocapture
+cargo test --test validate_e2e_artifact_schema -- synthetic_evidence_contract --nocapture
+
+# Log/artifact JSONL schema validation checks
+cargo test --test e2e_artifact_retention_triage -- jsonl --nocapture
+
+# Optional: full contract gate
+cargo test --test validate_e2e_artifact_schema -- --nocapture
+```
+
 ## Quick Start
 
 ### Fast smoke check (< 60 seconds)

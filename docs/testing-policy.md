@@ -2,6 +2,51 @@
 
 This document defines Pi's test suite boundaries, classification criteria, and enforcement rules.
 
+## Parity Test + Logging Contract (DROPIN-171)
+
+This policy document is the normative home of `pi.parity.test_logging_contract.v1`.
+
+The contract binds three things together:
+- test suite taxonomy (`unit`, `vcr`, `e2e`)
+- structured logging/event artifacts used by those suites
+- required failure-triage metadata for deterministic replay/debugging
+
+### Contracted Schemas
+
+| Domain | Schema ID | Source |
+|--------|-----------|--------|
+| Test log JSONL records | `pi.test.log.v2` | `tests/common/logging.rs` |
+| Artifact index JSONL records | `pi.test.artifact.v1` | `tests/common/logging.rs` |
+| Evidence contract bundle | `pi.qa.evidence_contract.v1` | `docs/evidence-contract-schema.json` |
+| Per-suite failure digest | `pi.e2e.failure_digest.v1` | `docs/evidence-contract-schema.json` |
+| Replay bundle | `pi.e2e.replay_bundle.v1` | `tests/e2e_replay_bundles.rs` + run artifacts |
+
+### Correlation Model
+
+| Field | Scope | Requirement |
+|-------|-------|-------------|
+| `correlation_id` | Run-level aggregate artifacts | Required in evidence/replay summaries |
+| `trace_id` | Per-suite/per-test log stream | Required in `pi.test.log.v2` records |
+| `span_id` | Nested operation traces | Optional but must be string when present |
+| `parent_span_id` | Span hierarchy | Optional but must be string when present |
+| `ci_correlation_id` | Cross-shard CI linkage | Optional but must be string when present |
+
+### Failure Triage Metadata Requirements
+
+For every failed suite entry in evidence artifacts:
+- `root_cause_class` must be one of the declared taxonomy values
+- `first_failing_assertion` must be recorded as a non-empty string
+- `remediation_pointer.replay_command` should be emitted
+- `suite_replay_command` and `targeted_test_replay_command` should be emitted when available
+
+### Suite Binding Requirements
+
+| Suite | Minimum Contract Binding |
+|-------|--------------------------|
+| `unit` | Must preserve schema-valid JSONL logging when test harness logging is used |
+| `vcr` | Must preserve deterministic replay + schema-valid log/artifact records |
+| `e2e` | Must emit evidence/replay/failure-digest artifacts that satisfy the schema set above |
+
 ## Suites
 
 All tests belong to exactly one of three suites:

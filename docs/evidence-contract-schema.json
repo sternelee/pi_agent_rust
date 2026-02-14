@@ -122,6 +122,10 @@
       },
       "description": "Per-suite evidence entries. One entry per suite executed."
     },
+    "parity_contract": {
+      "$ref": "#/definitions/parity_contract",
+      "description": "Optional embedded contract descriptor for cross-suite parity test/logging requirements."
+    },
     "aggregate_artifacts": {
       "type": "object",
       "required": ["summary", "environment"],
@@ -204,6 +208,83 @@
         }
       },
       "description": "Paths to per-suite required artifacts. Null when artifact was not produced (indicates a gap)."
+    },
+    "parity_contract": {
+      "type": "object",
+      "required": [
+        "schema",
+        "suite_taxonomy_ref",
+        "log_record_schema",
+        "artifact_record_schema",
+        "failure_digest_schema",
+        "trace_model",
+        "triage_required_fields"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "pi.parity.test_logging_contract.v1",
+          "description": "Versioned contract identifier for cross-suite parity test/logging policy."
+        },
+        "suite_taxonomy_ref": {
+          "type": "string",
+          "description": "Reference path documenting suite taxonomy (typically tests/suite_classification.toml)."
+        },
+        "log_record_schema": {
+          "type": "string",
+          "const": "pi.test.log.v2",
+          "description": "Schema used for JSONL log records."
+        },
+        "artifact_record_schema": {
+          "type": "string",
+          "const": "pi.test.artifact.v1",
+          "description": "Schema used for JSONL artifact-index records."
+        },
+        "failure_digest_schema": {
+          "type": "string",
+          "const": "pi.e2e.failure_digest.v1",
+          "description": "Schema used for per-suite failure triage digests."
+        },
+        "trace_model": {
+          "type": "object",
+          "required": [
+            "correlation_id_field",
+            "trace_id_field",
+            "span_id_field",
+            "parent_span_id_field"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "correlation_id_field": {
+              "type": "string",
+              "const": "correlation_id"
+            },
+            "trace_id_field": {
+              "type": "string",
+              "const": "trace_id"
+            },
+            "span_id_field": {
+              "type": "string",
+              "const": "span_id"
+            },
+            "parent_span_id_field": {
+              "type": "string",
+              "const": "parent_span_id"
+            }
+          },
+          "description": "Canonical field names used to correlate run-level and per-suite events."
+        },
+        "triage_required_fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 3,
+          "description": "Failure-digest fields that must be present for deterministic triage."
+        }
+      },
+      "description": "Versioned parity test/logging contract overlay. Backward-compatible and optional for producers."
     },
     "failure_digest": {
       "type": "object",

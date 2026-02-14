@@ -784,16 +784,16 @@
     }
   ],
   "inventory_summary": {
-    "row_count": 30,
+    "row_count": 32,
     "status_counts": {
-      "provisional_present_both": 19,
+      "provisional_present_both": 22,
       "mostly_present_both": 1,
       "partial_contract_shape_diff": 1,
       "partial_in_progress": 1,
       "in_progress_parity_hardening": 1,
       "partial_some_not_fully_wired": 1,
       "missing_or_unverified_in_rust": 1,
-      "rust_superset": 5,
+      "rust_superset": 3,
       "unknown_needs_gap_classification": 1
     },
     "note": "This matrix is evidence-linked and now reconciled to the pinned baseline; remaining unknowns are assigned to follow-up beads."
