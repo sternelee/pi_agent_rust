@@ -2677,7 +2677,9 @@ mod tests {
         self, ArtifactSource, ArtifactSpec, SourceTier, validate_artifact_spec, validate_directory,
         validate_id,
     };
-    use serde_json::json;
+    use proptest::prelude::*;
+    use proptest::string::string_regex;
+    use serde_json::{Map, Value, json};
 
     #[test]
     fn ignores_registration_ordering_by_key() {
@@ -3882,5 +3884,311 @@ mod tests {
         assert_eq!(ConformanceStatus::Fail.as_upper_str(), "FAIL");
         assert_eq!(ConformanceStatus::Skip.as_upper_str(), "SKIP");
         assert_eq!(ConformanceStatus::Error.as_upper_str(), "ERROR");
+    }
+
+    fn ident_strategy() -> impl Strategy<Value = String> {
+        string_regex("[a-z0-9_-]{1,16}").expect("valid identifier regex")
+    }
+
+    fn semver_strategy() -> impl Strategy<Value = String> {
+        (0u8..10, 0u8..20, 0u8..20)
+            .prop_map(|(major, minor, patch)| format!("{major}.{minor}.{patch}"))
+    }
+
+    fn bounded_json(max_depth: u32) -> BoxedStrategy<Value> {
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<i64>().prop_map(|n| Value::Number(n.into())),
+            string_regex("[A-Za-z0-9 _.-]{0,32}")
+                .expect("valid scalar string regex")
+                .prop_map(Value::String),
+        ];
+
+        if max_depth == 0 {
+            return leaf.boxed();
+        }
+
+        let array_strategy =
+            prop::collection::vec(bounded_json(max_depth - 1), 0..4).prop_map(Value::Array);
+        let object_strategy = prop::collection::btree_map(
+            string_regex("[a-z]{1,8}").expect("valid object key regex"),
+            bounded_json(max_depth - 1),
+            0..4,
+        )
+        .prop_map(|map| Value::Object(map.into_iter().collect::<Map<String, Value>>()));
+
+        prop_oneof![leaf, array_strategy, object_strategy].boxed()
+    }
+
+    fn named_entry_strategy() -> BoxedStrategy<Value> {
+        (
+            ident_strategy(),
+            string_regex("[A-Za-z0-9 _.-]{0,24}").expect("valid description regex"),
+        )
+            .prop_map(|(name, description)| json!({ "name": name, "description": description }))
+            .boxed()
+    }
+
+    fn shortcut_entry_strategy() -> BoxedStrategy<Value> {
+        (
+            ident_strategy(),
+            string_regex("[A-Za-z0-9 _.-]{0,24}").expect("valid shortcut description regex"),
+        )
+            .prop_map(
+                |(key_id, description)| json!({ "key_id": key_id, "description": description }),
+            )
+            .boxed()
+    }
+
+    fn model_entry_strategy() -> BoxedStrategy<Value> {
+        ident_strategy()
+            .prop_map(|id| json!({ "id": id, "name": format!("model-{id}") }))
+            .boxed()
+    }
+
+    fn tool_def_entry_strategy() -> BoxedStrategy<Value> {
+        (
+            ident_strategy(),
+            prop::collection::vec(ident_strategy(), 0..6),
+            bounded_json(1),
+        )
+            .prop_map(|(name, required, input)| {
+                json!({
+                    "name": name,
+                    "parameters": {
+                        "type": "object",
+                        "required": required,
+                        "input": [input]
+                    }
+                })
+            })
+            .boxed()
+    }
+
+    fn hostcall_entry_strategy() -> BoxedStrategy<Value> {
+        (ident_strategy(), bounded_json(2))
+            .prop_map(|(op, payload)| json!({ "op": op, "payload": payload }))
+            .boxed()
+    }
+
+    fn conformance_output_strategy() -> impl Strategy<Value = Value> {
+        (
+            ident_strategy(),
+            ident_strategy(),
+            semver_strategy(),
+            prop::collection::vec(named_entry_strategy(), 0..6),
+            prop::collection::vec(shortcut_entry_strategy(), 0..6),
+            prop::collection::vec(named_entry_strategy(), 0..6),
+            prop::collection::vec(named_entry_strategy(), 0..6),
+            prop::collection::vec(tool_def_entry_strategy(), 0..6),
+            prop::collection::vec(model_entry_strategy(), 0..6),
+            prop::collection::vec(ident_strategy(), 0..6),
+            prop::collection::vec(hostcall_entry_strategy(), 0..8),
+            prop::option::of(bounded_json(3)),
+        )
+            .prop_map(
+                |(
+                    extension_id,
+                    name,
+                    version,
+                    commands,
+                    shortcuts,
+                    flags,
+                    providers,
+                    tool_defs,
+                    models,
+                    event_hooks,
+                    hostcall_log,
+                    events,
+                )| {
+                    let mut out = json!({
+                        "extension_id": extension_id,
+                        "name": name,
+                        "version": version,
+                        "registrations": {
+                            "commands": commands,
+                            "shortcuts": shortcuts,
+                            "flags": flags,
+                            "providers": providers,
+                            "tool_defs": tool_defs,
+                            "models": models,
+                            "event_hooks": event_hooks
+                        },
+                        "hostcall_log": hostcall_log
+                    });
+                    if let Some(events) = events {
+                        out.as_object_mut()
+                            .expect("root object")
+                            .insert("events".to_string(), events);
+                    }
+                    out
+                },
+            )
+    }
+
+    fn minimal_output_with_events(events: &Value) -> Value {
+        json!({
+            "extension_id": "ext",
+            "name": "Ext",
+            "version": "1.0.0",
+            "registrations": {
+                "commands": [],
+                "shortcuts": [],
+                "flags": [],
+                "providers": [],
+                "tool_defs": [],
+                "models": [],
+                "event_hooks": []
+            },
+            "hostcall_log": [],
+            "events": events
+        })
+    }
+
+    fn output_with_type_probe(value: &Value) -> Value {
+        json!({
+            "extension_id": "ext",
+            "name": "Ext",
+            "version": "1.0.0",
+            "registrations": {
+                "commands": [],
+                "shortcuts": [],
+                "flags": [],
+                "providers": [],
+                "tool_defs": [{ "name": "probe", "parameters": { "value": value } }],
+                "models": [],
+                "event_hooks": []
+            },
+            "hostcall_log": []
+        })
+    }
+
+    fn deeply_nested_object(depth: usize, leaf: Value) -> Value {
+        let mut current = leaf;
+        for idx in 0..depth {
+            let mut map = Map::new();
+            map.insert(format!("k{idx}"), current);
+            current = Value::Object(map);
+        }
+        current
+    }
+
+    fn primitive_value_strategy() -> impl Strategy<Value = Value> {
+        prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<i64>().prop_map(|n| Value::Number(n.into())),
+            string_regex("[A-Za-z0-9 _.-]{0,20}")
+                .expect("valid primitive string regex")
+                .prop_map(Value::String),
+            prop::collection::vec(any::<u8>(), 0..4).prop_map(|bytes| {
+                Value::Array(
+                    bytes
+                        .into_iter()
+                        .map(|b| Value::Number(u64::from(b).into()))
+                        .collect(),
+                )
+            }),
+            prop::collection::btree_map(
+                string_regex("[a-z]{1,4}").expect("valid primitive object key regex"),
+                any::<u8>(),
+                0..3
+            )
+            .prop_map(|entries| {
+                let mut map = Map::new();
+                for (key, value) in entries {
+                    map.insert(key, Value::Number(u64::from(value).into()));
+                }
+                Value::Object(map)
+            }),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 128, .. ProptestConfig::default() })]
+
+        #[test]
+        fn proptest_compare_conformance_output_reflexive(
+            sample in conformance_output_strategy()
+        ) {
+            prop_assert!(
+                compare_conformance_output(&sample, &sample).is_ok(),
+                "comparator should be reflexive on valid conformance shape"
+            );
+        }
+
+        #[test]
+        fn proptest_compare_conformance_output_symmetry(
+            expected in conformance_output_strategy(),
+            actual in conformance_output_strategy()
+        ) {
+            let left = compare_conformance_output(&expected, &actual).is_ok();
+            let right = compare_conformance_output(&actual, &expected).is_ok();
+            prop_assert_eq!(left, right);
+        }
+
+        #[test]
+        fn proptest_compare_deep_nesting_depth_200_no_panic(
+            leaf in bounded_json(1)
+        ) {
+            let nested = deeply_nested_object(200, leaf);
+            let expected = minimal_output_with_events(&nested);
+            let actual = minimal_output_with_events(&nested);
+            prop_assert!(compare_conformance_output(&expected, &actual).is_ok());
+        }
+
+        #[test]
+        fn proptest_compare_large_required_arrays_order_insensitive(
+            required in prop::collection::btree_set(ident_strategy(), 0..256)
+        ) {
+            let required_vec = required.into_iter().collect::<Vec<_>>();
+            let mut reversed = required_vec.clone();
+            reversed.reverse();
+
+            let expected = json!({
+                "extension_id": "ext",
+                "name": "Ext",
+                "version": "1.0.0",
+                "registrations": {
+                    "commands": [],
+                    "shortcuts": [],
+                    "flags": [],
+                    "providers": [],
+                    "tool_defs": [{ "name": "t", "parameters": { "required": required_vec } }],
+                    "models": [],
+                    "event_hooks": []
+                },
+                "hostcall_log": []
+            });
+            let actual = json!({
+                "extension_id": "ext",
+                "name": "Ext",
+                "version": "1.0.0",
+                "registrations": {
+                    "commands": [],
+                    "shortcuts": [],
+                    "flags": [],
+                    "providers": [],
+                    "tool_defs": [{ "name": "t", "parameters": { "required": reversed } }],
+                    "models": [],
+                    "event_hooks": []
+                },
+                "hostcall_log": []
+            });
+
+            prop_assert!(compare_conformance_output(&expected, &actual).is_ok());
+        }
+
+        #[test]
+        fn proptest_type_confusion_reports_diff(
+            left in primitive_value_strategy(),
+            right in primitive_value_strategy()
+        ) {
+            prop_assume!(super::json_type_name(&left) != super::json_type_name(&right));
+            let expected = output_with_type_probe(&left);
+            let actual = output_with_type_probe(&right);
+            prop_assert!(compare_conformance_output(&expected, &actual).is_err());
+        }
     }
 }
