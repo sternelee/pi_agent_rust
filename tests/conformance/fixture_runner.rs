@@ -295,6 +295,7 @@ fn command_value(command: Option<&Commands>) -> Value {
             path,
             format,
             policy,
+            ..
         }) => json!({
             "name": "doctor",
             "path": path,

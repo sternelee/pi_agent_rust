@@ -30,6 +30,7 @@
         { "kind": "text_start", "content_index": 0 },
         { "kind": "text_delta", "content_index": 0, "delta": "Hello " },
         { "kind": "text_delta", "content_index": 0, "delta": "world" },
+        { "kind": "text_end", "content_index": 0, "content": "Hello world" },
         { "kind": "done", "reason": "stop" }
       ]
     },
@@ -68,6 +69,7 @@
         { "kind": "text_delta", "content_index": 0, "delta": "First " },
         { "kind": "text_delta", "content_index": 0, "delta": "second " },
         { "kind": "text_delta", "content_index": 0, "delta": "third" },
+        { "kind": "text_end", "content_index": 0, "content": "First second third" },
         { "kind": "done", "reason": "stop" }
       ]
     },
@@ -162,6 +164,8 @@
         { "kind": "other" },
         { "kind": "text_start", "content_index": 1 },
         { "kind": "text_delta", "content_index": 1, "delta": "The answer is 42." },
+        { "kind": "text_end", "content_index": 1, "content": "The answer is 42." },
+        { "kind": "other" },
         { "kind": "done", "reason": "stop" }
       ]
     },
@@ -193,6 +197,7 @@
         { "kind": "text_start", "content_index": 0 },
         { "kind": "text_delta", "content_index": 0, "delta": "truncated output" },
         { "kind": "text_delta", "content_index": 0, "delta": "..." },
+        { "kind": "text_end", "content_index": 0, "content": "truncated output..." },
         { "kind": "done", "reason": "length" }
       ]
     },
@@ -249,6 +254,7 @@
         { "kind": "other" },
         { "kind": "other" },
         { "kind": "other" },
+        { "kind": "text_end", "content_index": 0, "content": "Let me check." },
         { "kind": "done", "reason": "tool_use" }
       ]
     },

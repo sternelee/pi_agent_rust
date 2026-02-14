@@ -1688,6 +1688,75 @@ mod tests {
         assert_eq!(config.thinking_budget("low"), 200);
     }
 
+    #[test]
+    fn merge_extension_risk_combines_global_and_project_values() {
+        let temp = TempDir::new().expect("create tempdir");
+        let cwd = temp.path().join("cwd");
+        let global_dir = temp.path().join("global");
+        write_file(
+            &global_dir.join("settings.json"),
+            r#"{
+                "extensionRisk": {
+                    "enabled": true,
+                    "alpha": 0.2,
+                    "windowSize": 128,
+                    "ledgerLimit": 500,
+                    "decisionTimeoutMs": 100,
+                    "failClosed": false
+                }
+            }"#,
+        );
+        write_file(
+            &cwd.join(".pi/settings.json"),
+            r#"{
+                "extensionRisk": {
+                    "alpha": 0.05,
+                    "windowSize": 256,
+                    "failClosed": true
+                }
+            }"#,
+        );
+
+        let config = Config::load_with_roots(None, &global_dir, &cwd).expect("load");
+        let risk = config.extension_risk.expect("merged extension risk");
+        assert_eq!(risk.enabled, Some(true));
+        assert_eq!(risk.alpha, Some(0.05));
+        assert_eq!(risk.window_size, Some(256));
+        assert_eq!(risk.ledger_limit, Some(500));
+        assert_eq!(risk.decision_timeout_ms, Some(100));
+        assert_eq!(risk.fail_closed, Some(true));
+    }
+
+    #[test]
+    fn merge_extension_risk_empty_project_object_keeps_global_values() {
+        let temp = TempDir::new().expect("create tempdir");
+        let cwd = temp.path().join("cwd");
+        let global_dir = temp.path().join("global");
+        write_file(
+            &global_dir.join("settings.json"),
+            r#"{
+                "extensionRisk": {
+                    "enabled": true,
+                    "alpha": 0.1,
+                    "windowSize": 64,
+                    "ledgerLimit": 200,
+                    "decisionTimeoutMs": 75,
+                    "failClosed": true
+                }
+            }"#,
+        );
+        write_file(&cwd.join(".pi/settings.json"), r#"{ "extensionRisk": {} }"#);
+
+        let config = Config::load_with_roots(None, &global_dir, &cwd).expect("load");
+        let risk = config.extension_risk.expect("merged extension risk");
+        assert_eq!(risk.enabled, Some(true));
+        assert_eq!(risk.alpha, Some(0.1));
+        assert_eq!(risk.window_size, Some(64));
+        assert_eq!(risk.ledger_limit, Some(200));
+        assert_eq!(risk.decision_timeout_ms, Some(75));
+        assert_eq!(risk.fail_closed, Some(true));
+    }
+
     // ====================================================================
     // Extension Policy Config
     // ====================================================================
