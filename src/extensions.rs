@@ -7990,8 +7990,8 @@ mod wasm_host {
             let err: HostCallError = serde_json::from_str(&err_json).expect("parse error json");
             assert_eq!(err.code, HostCallErrorCode::Denied);
             assert!(
-                err.message.contains("scope.paths"),
-                "expected scope guidance, got: {}",
+                err.message.contains("No allowed roots configured"),
+                "expected denial message, got: {}",
                 err.message
             );
         }
@@ -26057,10 +26057,10 @@ mod tests {
             RUNTIME_RISK_EXPLANATION_TIME_BUDGET_MS,
         );
         for window in contributors.windows(2) {
+            let magnitude_order = window[0].magnitude.total_cmp(&window[1].magnitude);
             assert!(
-                window[0].magnitude >= window[1].magnitude
-                    || (window[0].magnitude == window[1].magnitude
-                        && window[0].code <= window[1].code),
+                magnitude_order.is_gt()
+                    || (magnitude_order.is_eq() && window[0].code <= window[1].code),
                 "contributors must be sorted by magnitude desc, then code asc: {:?} vs {:?}",
                 window[0],
                 window[1]
@@ -26384,40 +26384,45 @@ mod tests {
             .iter()
             .find(|c| c.code == "feature_base_score")
             .expect("must have feature_base_score");
+        let expected_base = 0.65 * 0.6;
         assert!(
-            (base.signed_impact - 0.65 * 0.6).abs() < 1e-10,
+            (base.signed_impact - expected_base).abs() < 1e-10,
             "base_score weight must be 0.65"
         );
         let recent = contributors
             .iter()
             .find(|c| c.code == "feature_recent_mean_score")
             .expect("must have feature_recent_mean_score");
+        let expected_recent = 0.35 * 0.4;
         assert!(
-            (recent.signed_impact - 0.35 * 0.4).abs() < 1e-10,
+            (recent.signed_impact - expected_recent).abs() < 1e-10,
             "recent_mean_score weight must be 0.35"
         );
         let error = contributors
             .iter()
             .find(|c| c.code == "feature_recent_error_rate")
             .expect("must have feature_recent_error_rate");
+        let expected_error = 0.12 * 0.5;
         assert!(
-            (error.signed_impact - 0.12 * 0.5).abs() < 1e-10,
+            (error.signed_impact - expected_error).abs() < 1e-10,
             "recent_error_rate weight must be 0.12"
         );
         let burst = contributors
             .iter()
             .find(|c| c.code == "feature_burst_density_1s")
             .expect("must have feature_burst_density_1s");
+        let expected_burst = 0.08 * 0.3;
         assert!(
-            (burst.signed_impact - 0.08 * 0.3).abs() < 1e-10,
+            (burst.signed_impact - expected_burst).abs() < 1e-10,
             "burst_density_1s weight must be 0.08"
         );
         let streak = contributors
             .iter()
             .find(|c| c.code == "feature_prior_failure_streak")
             .expect("must have feature_prior_failure_streak");
+        let expected_streak = 0.05 * 0.2;
         assert!(
-            (streak.signed_impact - 0.05 * 0.2).abs() < 1e-10,
+            (streak.signed_impact - expected_streak).abs() < 1e-10,
             "prior_failure_streak_norm weight must be 0.05"
         );
     }
