@@ -3994,6 +3994,32 @@ impl AgentSession {
         self.auth_storage = Some(auth);
     }
 
+    pub async fn set_provider_model(&mut self, provider_id: &str, model_id: &str) -> Result<()> {
+        {
+            let cx = crate::agent_cx::AgentCx::for_request();
+            let mut session = self
+                .session
+                .lock(cx.cx())
+                .await
+                .map_err(|e| Error::session(e.to_string()))?;
+            session.set_model_header(
+                Some(provider_id.to_string()),
+                Some(model_id.to_string()),
+                None,
+            );
+        }
+
+        self.apply_session_model_selection(provider_id, model_id);
+        let provider = self.agent.provider();
+        if provider.name() != provider_id || provider.model_id() != model_id {
+            return Err(Error::validation(format!(
+                "Unable to switch provider/model to {provider_id}/{model_id}"
+            )));
+        }
+
+        self.persist_session().await
+    }
+
     fn resolve_stream_api_key_for_model(&self, entry: &ModelEntry) -> Option<String> {
         self.auth_storage
             .as_ref()
@@ -4044,6 +4070,10 @@ impl AgentSession {
 
     pub const fn save_enabled(&self) -> bool {
         self.save_enabled
+    }
+
+    pub async fn compact_now(&mut self, on_event: impl Fn(AgentEvent) + Send + Sync) -> Result<()> {
+        self.maybe_compact(&on_event).await
     }
 
     async fn maybe_compact(&self, on_event: &(impl Fn(AgentEvent) + Send + Sync)) -> Result<()> {

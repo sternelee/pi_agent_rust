@@ -148,9 +148,19 @@ impl AgentSessionHandle {
         (provider.name().to_string(), provider.model_id().to_string())
     }
 
+    /// Update the active provider/model pair and persist it to session metadata.
+    pub async fn set_model(&mut self, provider: &str, model_id: &str) -> Result<()> {
+        self.session.set_provider_model(provider, model_id).await
+    }
+
     /// Return the currently configured thinking level.
     pub const fn thinking_level(&self) -> Option<crate::model::ThinkingLevel> {
         self.session.agent.stream_options().thinking_level
+    }
+
+    /// Alias for thinking level access, matching the SDK naming style.
+    pub const fn thinking(&self) -> Option<crate::model::ThinkingLevel> {
+        self.thinking_level()
     }
 
     /// Update thinking level and persist it to session metadata.
@@ -206,6 +216,14 @@ impl AgentSessionHandle {
             save_enabled,
             message_count,
         })
+    }
+
+    /// Trigger an immediate compaction pass (if compaction is enabled).
+    pub async fn compact(
+        &mut self,
+        on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
+    ) -> Result<()> {
+        self.session.compact_now(on_event).await
     }
 
     /// Access the underlying `AgentSession`.
@@ -441,6 +459,7 @@ mod tests {
     use super::*;
     use asupersync::runtime::RuntimeBuilder;
     use asupersync::runtime::reactor::create_reactor;
+    use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
     fn run_async<F>(future: F) -> F::Output
@@ -515,5 +534,60 @@ mod tests {
             guard.path.is_none()
         });
         assert!(path_is_none);
+    }
+
+    #[test]
+    fn create_agent_session_set_model_switches_provider_model() {
+        let tmp = tempdir().expect("tempdir");
+        let options = SessionOptions {
+            working_directory: Some(tmp.path().to_path_buf()),
+            no_session: true,
+            ..SessionOptions::default()
+        };
+
+        let mut handle = run_async(create_agent_session(options)).expect("create session");
+        run_async(handle.set_model("openai", "gpt-4o")).expect("set model");
+        let provider = handle.session().agent.provider();
+        assert_eq!(provider.name(), "openai");
+        assert_eq!(provider.model_id(), "gpt-4o");
+    }
+
+    #[test]
+    fn compact_without_history_is_noop() {
+        let tmp = tempdir().expect("tempdir");
+        let options = SessionOptions {
+            working_directory: Some(tmp.path().to_path_buf()),
+            no_session: true,
+            ..SessionOptions::default()
+        };
+
+        let mut handle = run_async(create_agent_session(options)).expect("create session");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_for_callback = Arc::clone(&events);
+        run_async(handle.compact(move |event| {
+            events_for_callback
+                .lock()
+                .expect("compact callback lock")
+                .push(event);
+        }))
+        .expect("compact");
+
+        assert!(
+            events.lock().expect("events lock").is_empty(),
+            "expected no compaction lifecycle events for empty session"
+        );
+    }
+
+    #[test]
+    fn resolve_path_for_cwd_uses_cwd_for_relative_paths() {
+        let cwd = Path::new("/tmp/pi-sdk-cwd");
+        assert_eq!(
+            resolve_path_for_cwd(Path::new("relative/file.txt"), cwd),
+            PathBuf::from("/tmp/pi-sdk-cwd/relative/file.txt")
+        );
+        assert_eq!(
+            resolve_path_for_cwd(Path::new("/etc/hosts"), cwd),
+            PathBuf::from("/etc/hosts")
+        );
     }
 }
