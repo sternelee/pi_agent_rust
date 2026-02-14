@@ -1,102 +1,82 @@
 # Dependency Upgrade Log
 
-**Date:** 2026-02-02  |  **Project:** pi_agent_rust  |  **Language:** Rust
+**Date:** 2026-02-14
+**Project:** pi_agent_rust
+**Language:** Rust
+**Manifests:** `Cargo.toml`, `fuzz/Cargo.toml`
+
+---
 
 ## Summary
-- **Updated:** 4  |  **Skipped:** 3  |  **Failed:** 1  |  **Replaced:** 1  |  **Needs attention:** 0
 
-## Pre-Update Status
+| Metric | Count |
+|--------|-------|
+| **Total dependencies (direct, outdated)** | 18 |
+| **Updated** | 0 |
+| **Skipped** | 0 |
+| **Failed (rolled back)** | 0 |
+| **Requires attention** | 0 |
 
-### Path Dependencies (Skip - local development)
-- `asupersync` - path dependency (fixed Clone/Send issues during this session)
-- `rich_rust` - path dependency
-- `bubbletea` - path dependency
-- `lipgloss` - path dependency
-- `bubbles` - path dependency
-- `glamour` - path dependency
+---
 
-### Crates.io Dependencies
-| Crate | Current | Target | Status |
-|-------|---------|--------|--------|
-| crossterm | 0.28 | 0.29 | Updated |
-| sysinfo | 0.32 | 0.36 | Updated |
-| criterion | 0.5 | 0.7 | Updated |
-| dirs | 5 | 6 | Updated |
-| reqwest | 0.12 | 0.13 | Failed |
-| rusqlite | 0.33 | - | Replaced with sqlmodel-sqlite |
-| time | (transitive) | | Skipped (Rust 1.87+) |
-| vergen-gix | 1 | | Skipped (Rust 1.87+) |
+## Discovery
 
-## Updates
+Detected manifests:
+- `Cargo.toml`
+- `fuzz/Cargo.toml`
 
-### crossterm: 0.28 → 0.29
-- **Breaking:** Minor event handling changes
-- **Tests:** Passed (when project compiles)
-- **Notes:** Compatible upgrade, no code changes needed
+Outdated direct dependencies detected (current -> latest stable):
+- `anyhow` `1.0.100` -> `1.0.101`
+- `clap` `4.5.56` -> `4.5.58`
+- `clap_complete` `4.5.65` -> `4.5.66`
+- `criterion` `0.7.0` -> `0.8.2`
+- `ctrlc` `3.5.1` -> `3.5.2`
+- `getrandom` `0.2.17` -> `0.4.1`
+- `jsonschema` `0.40.2` -> `0.42.0`
+- `memchr` `2.7.6` -> `2.8.0`
+- `proptest` `1.9.0` -> `1.10.0`
+- `regex` `1.12.2` -> `1.12.3`
+- `sysinfo` `0.36.1` -> `0.38.1`
+- `tempfile` `3.24.0` -> `3.25.0`
+- `toml` `0.8.23` -> `1.0.1+spec-1.1.0`
+- `uuid` `1.20.0` -> `1.21.0`
+- `vergen` `9.0.6` -> `9.1.0` (fuzz)
+- `vergen-gix` `1.0.9` -> `9.1.0`
+- `wasmtime` `29.0.1` -> `41.0.3`
+- `wat` `1.244.0` -> `1.245.1`
 
-### sysinfo: 0.32 → 0.36
-- **Breaking:** Some API changes (system refresh methods)
-- **Tests:** Passed (when project compiles)
-- **Notes:** Project only uses basic system info, no changes needed
+---
 
-### criterion: 0.5 → 0.7
-- **Breaking:** `black_box` deprecated in favor of `std::hint::black_box`
-- **Tests:** Passed
-- **Migration:** Changed `criterion::black_box` to `std::hint::black_box` in benches/tools.rs
+## Successfully Updated
 
-### dirs: 5 → 6
-- **Breaking:** `executable_dir` removed
-- **Tests:** Passed (when project compiles)
-- **Notes:** Project doesn't use `executable_dir`, safe upgrade
+_None yet._
 
-## Failed
-
-### reqwest: 0.12 → 0.13
-- **Reason:** `reqwest-eventsource` v0.6.0 depends on reqwest 0.12, causing version conflict
-- **Error:** Type mismatch - `RequestBuilder` from different reqwest versions
-- **Affected files:** anthropic.rs, azure.rs, gemini.rs, openai.rs
-- **Action:** Stayed on 0.12
-- **Resolution path:** Wait for reqwest-eventsource to update, or migrate SSE to asupersync (already planned per AGENTS.md)
-
-## Replaced
-
-### rusqlite → sqlmodel-sqlite
-- **Reason:** User requested dogfooding their own sqlmodel_rust library
-- **Changes:**
-  - Cargo.toml: Replaced `rusqlite = { version = "0.33", features = ["bundled"] }` with `sqlmodel-sqlite` and `sqlmodel-core` path dependencies
-  - session_index.rs: Rewrote to use `SqliteConnection`, `Value`, and `Row` types from sqlmodel-sqlite/sqlmodel-core
-  - error.rs: Changed `#[from] rusqlite::Error` to `#[from] sqlmodel_core::Error`
-- **sqlmodel-sqlite modifications:** Made `query_sync()` and `execute_sync()` public for sync usage
-- **Tests:** All pass
-- **Benefits:** Consistent with asupersync ecosystem, eliminates external SQLite dependency
+---
 
 ## Skipped
 
-### time (transitive dependency)
-- **Reason:** Newer versions require Rust 1.87+
-
-### vergen-gix: 1.x
-- **Reason:** Newer versions require Rust 1.87+, current version works
-
-### arc-swap: 1.8.0 → 1.8.1
-- **Reason:** Patch update, handled by lockfile
-
-## Path Dependency Fixes
-
-### asupersync - Clone/Send trait fixes
-- **Issue:** `Cx<Caps>` type couldn't derive `Clone` (needed `Caps: Clone`) and wasn't `Send`
-- **Root cause:** `PhantomData<Caps>` requires bounds that marker types don't need
-- **Fix 1:** Manual `Clone` impl without `Caps: Clone` bound
-- **Fix 2:** Changed `PhantomData<Caps>` to `PhantomData<fn() -> Caps>` for auto `Send+Sync`
-- **Fix 3:** Moved `current()` and `set_current()` to `impl Cx<cap::All>` block (not generic)
-- **Files:** `/data/projects/asupersync/src/cx/cx.rs`
-
-## Current Build Status
-
-✓ Project compiles successfully (`cargo check` passes)
-✓ All tests pass (`cargo test`)
-✓ Clippy passes (only pre-existing warnings in test files)
-✓ Formatting correct (`cargo fmt --check` passes)
+_None yet._
 
 ---
-*Log created by library-updater skill*
+
+## Failed Updates (Rolled Back)
+
+_None yet._
+
+---
+
+## Requires Attention
+
+_None yet._
+
+---
+
+## Commands Used
+
+```bash
+# Discovery
+cargo metadata --format-version 1 --no-deps
+cargo metadata --manifest-path fuzz/Cargo.toml --format-version 1 --no-deps
+cargo tree --depth 1 -e normal,build,dev --prefix none
+cargo tree --manifest-path fuzz/Cargo.toml --depth 1 -e normal,build --prefix none
+```
