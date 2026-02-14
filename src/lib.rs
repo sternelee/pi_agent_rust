@@ -9,12 +9,13 @@
 //! ## Public API policy
 //!
 //! The `pi` crate is primarily the implementation crate for the `pi` CLI binary.
-//! Until we intentionally stabilize a library API, external consumers should treat
-//! all modules/types as **unstable** and subject to change.
+//! External consumers should treat non-`sdk` modules/types as **unstable**
+//! and subject to change. Use [`sdk`] as the stable library-facing surface.
 //!
 //! Currently intended stable exports:
 //! - [`Error`]
 //! - [`PiResult`]
+//! - [`sdk`] module
 
 #![forbid(unsafe_code)]
 #![allow(dead_code, clippy::unused_async, unused_attributes)]
@@ -80,6 +81,7 @@ pub mod providers;
 pub mod resources;
 pub mod rpc;
 pub mod scheduler;
+pub mod sdk;
 pub mod session;
 pub mod session_index;
 pub mod session_picker;
@@ -94,3 +96,23 @@ pub mod vcr;
 
 pub use error::{Error, Result as PiResult};
 pub use extension_dispatcher::ExtensionDispatcher;
+
+// Conditional re-exports for fuzz harnesses.
+// These expose internal parsing functions that are normally private,
+// gated behind the `fuzzing` feature so they do not appear in the
+// public API during normal builds.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz_exports {
+    //! Re-exports of internal parsing/deserialization functions for
+    //! `cargo-fuzz` / `libFuzzer` harnesses.
+    //!
+    //! Enabled only when the `fuzzing` Cargo feature is active.
+    //! The `fuzz/Cargo.toml` depends on this crate with
+    //! `features = ["fuzzing"]`.
+
+    pub use crate::config::Config;
+    pub use crate::model::{
+        AssistantMessage, ContentBlock, Message, TextContent, UserContent, UserMessage,
+    };
+    pub use crate::sse::{SseEvent, SseParser};
+}

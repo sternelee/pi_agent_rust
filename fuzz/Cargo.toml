@@ -1,0 +1,34 @@
+[package]
+name = "pi_agent_rust-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+pi_agent_rust = { path = "..", default-features = false, features = ["fuzzing"] }
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+# Pin asupersync to the same git revision used by the main workspace
+[patch.crates-io]
+asupersync = { git = "https://github.com/Dicklesworthstone/asupersync.git", rev = "673cf66" }
+
+# Pin vergen to avoid version conflict between vergen-lib 0.1.6 and 9.x
+[build-dependencies]
+vergen-gix = { version = "=1.0.9" }
+vergen = { version = "=9.0.6" }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "fuzz_smoke"
+path = "fuzz_targets/fuzz_smoke.rs"
+doc = false
