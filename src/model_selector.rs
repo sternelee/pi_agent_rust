@@ -3,6 +3,7 @@
 //! This is used by the interactive TUI to present a searchable list of models.
 
 use crate::models::ModelEntry;
+use crate::provider_metadata::provider_metadata;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelKey {
@@ -174,9 +175,24 @@ fn matches_query(query: &str, key: &ModelKey) -> bool {
         return true;
     }
 
-    fuzzy_match(trimmed, &key.full_id())
+    if fuzzy_match(trimmed, &key.full_id())
         || fuzzy_match(trimmed, &key.provider)
         || fuzzy_match(trimmed, &key.id)
+    {
+        return true;
+    }
+
+    // Also match against provider aliases so users can search by common
+    // names (e.g. "grok" finds xai models, "together" finds togetherai).
+    if let Some(meta) = provider_metadata(&key.provider) {
+        for alias in meta.aliases {
+            if fuzzy_match(trimmed, alias) {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 fn fuzzy_match(pattern: &str, value: &str) -> bool {
@@ -464,6 +480,53 @@ mod tests {
             id: "gpt-4o".to_string(),
         };
         assert!(matches_query("oi/g", &key));
+    }
+
+    // ── matches_query via provider aliases ─────────────────────────────
+
+    #[test]
+    fn matches_query_by_provider_alias_grok_finds_xai() {
+        let key = ModelKey {
+            provider: "xai".to_string(),
+            id: "grok-2".to_string(),
+        };
+        assert!(matches_query("grok", &key));
+    }
+
+    #[test]
+    fn matches_query_by_provider_alias_together_finds_togetherai() {
+        let key = ModelKey {
+            provider: "togetherai".to_string(),
+            id: "llama-3".to_string(),
+        };
+        assert!(matches_query("together", &key));
+    }
+
+    #[test]
+    fn matches_query_by_provider_alias_hf_finds_huggingface() {
+        let key = ModelKey {
+            provider: "huggingface".to_string(),
+            id: "meta-llama".to_string(),
+        };
+        assert!(matches_query("hf", &key));
+    }
+
+    #[test]
+    fn matches_query_by_provider_alias_gemini_finds_google() {
+        let key = ModelKey {
+            provider: "google".to_string(),
+            id: "gemini-2.0-flash".to_string(),
+        };
+        assert!(matches_query("gemini", &key));
+    }
+
+    #[test]
+    fn matches_query_alias_no_false_positive_for_unknown_provider() {
+        let key = ModelKey {
+            provider: "unknown-provider".to_string(),
+            id: "model-x".to_string(),
+        };
+        assert!(!matches_query("grok", &key));
     }
 
     // ── pop_char on empty query ──────────────────────────────────────

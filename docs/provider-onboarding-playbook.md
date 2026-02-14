@@ -10,6 +10,73 @@ Use it when you need to:
 Primary bead coverage:
 - `bd-3uqg.9` (parent)
 - working draft support for `bd-3uqg.9.2` and `bd-3uqg.9.3`
+- `bd-3uqg.9.4.1` (checklist below)
+
+## Quick checklist: adding a new provider
+
+### Determine onboarding mode
+
+| Mode | When | Dedicated `.rs` file? | Example |
+|---|---|---|---|
+| `OpenAICompatiblePreset` | Standard OpenAI-compatible API | No | groq, deepinfra, mistral |
+| `BuiltInNative` | Proprietary API format | Yes | anthropic, google, cohere |
+| `NativeAdapterRequired` | Special auth or routing | Yes | azure, bedrock, copilot, gitlab |
+
+### Phase 1: Metadata (`src/provider_metadata.rs`)
+
+- [ ] Add `ProviderMetadata` entry to `PROVIDER_METADATA` array
+  - `canonical_id`: primary lowercase provider name
+  - `aliases`: alternative names (e.g., `["gemini"]` for google)
+  - `auth_env_keys`: env var chain in priority order (e.g., `["GROQ_API_KEY"]`)
+  - `onboarding`: one of the three modes above
+  - `routing_defaults`: `Some(ProviderRoutingDefaults { api, base_url, auth_header, reasoning, input, context_window, max_tokens })` or `None` for native adapters
+  - `test_obligations`: typically `TEST_REQUIRED`
+- [ ] Verify: `provider_metadata("your-id")` returns entry
+- [ ] Verify: aliases resolve via `canonical_provider_id("alias")`
+
+### Phase 2: Factory routing (`src/providers/mod.rs`) — native only
+
+Skip this phase for `OpenAICompatiblePreset` providers.
+
+- [ ] Add `pub mod {provider};` to module declarations (line ~25)
+- [ ] Add variant to `ProviderRouteKind` enum (line ~70)
+- [ ] Add variant string in `as_str()` match (line ~89)
+- [ ] Add canonical ID pattern in `resolve_provider_route()` (line ~121)
+- [ ] Add instantiation case in `create_provider()` (line ~679)
+
+### Phase 3: Implementation (`src/providers/{provider}.rs`) — native only
+
+Skip this phase for `OpenAICompatiblePreset` providers.
+
+- [ ] Create struct with: `client: Client`, `model_id: String`, `provider_name: String`, `base_url: String`, `compat: Option<CompatConfig>`
+- [ ] Implement builder methods: `new()`, `with_base_url()`, `with_provider_name()`, `with_compat()`, `with_client()`
+- [ ] Implement `Provider` trait: `name()`, `api()`, `model_id()`, `stream()`
+- [ ] Handle streaming response parsing (JSON -> `StreamEvent` variants)
+- [ ] Handle error responses (auth, rate limit, server error)
+
+### Phase 4: Authentication (`src/auth.rs`)
+
+- [ ] Simple API key: no changes (metadata-driven via `auth_env_keys`)
+- [ ] AWS SigV4 (Bedrock-style): use `resolve_aws_credentials()`
+- [ ] OAuth / token exchange: implement in provider `.rs` or `auth.rs`
+
+### Phase 5: Tests
+
+- [ ] `tests/provider_factory.rs`: factory instantiation test
+- [ ] `tests/provider_metadata_comprehensive.rs`: metadata lookup + alias tests
+- [ ] `tests/provider_native_contract.rs`: VCR-backed streaming test (native providers)
+- [ ] `tests/provider_native_verify.rs`: conformance verification (native providers)
+- [ ] Create VCR cassettes in `tests/fixtures/vcr/` if needed
+- [ ] Run: `cargo test --test provider_factory --test provider_metadata_comprehensive`
+
+### Phase 6: Verification
+
+- [ ] `cargo check --all-targets`
+- [ ] `cargo clippy --all-targets -- -D warnings`
+- [ ] `cargo fmt --check`
+- [ ] `cargo test --lib` (all 3269+ tests pass)
+- [ ] Provider appears in `pi --list-models` (with API key set)
+- [ ] `pi --provider {id} --model {model} -p "test"` works (if live key available)
 
 ## Scope and source of truth
 

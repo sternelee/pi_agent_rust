@@ -162,6 +162,10 @@ pub struct Cli {
     // This is intentional: None = not set, Some(None) = set without value, Some(Some(x)) = set with value
     pub list_models: Option<Option<String>>,
 
+    /// List all supported providers with aliases and auth env keys
+    #[arg(long)]
+    pub list_providers: bool,
+
     // === Subcommands ===
     #[command(subcommand)]
     pub command: Option<Commands>,

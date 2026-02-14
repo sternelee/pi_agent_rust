@@ -651,7 +651,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "nano-gpt",
-        aliases: &[],
+        aliases: &["nanogpt"],
         auth_env_keys: &["NANO_GPT_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
         routing_defaults: Some(ProviderRoutingDefaults {
@@ -683,7 +683,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "novita-ai",
-        aliases: &[],
+        aliases: &["novita"],
         auth_env_keys: &["NOVITA_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
         routing_defaults: Some(ProviderRoutingDefaults {
@@ -1152,7 +1152,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     },
     ProviderMetadata {
         canonical_id: "zhipuai",
-        aliases: &[],
+        aliases: &["zhipu", "glm"],
         auth_env_keys: &["ZHIPU_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
         routing_defaults: Some(ProviderRoutingDefaults {
@@ -1505,6 +1505,10 @@ mod tests {
             ("deep-infra", "deepinfra"),
             ("mistralai", "mistral"),
             ("silicon-flow", "siliconflow"),
+            ("zhipu", "zhipuai"),
+            ("glm", "zhipuai"),
+            ("novita", "novita-ai"),
+            ("nanogpt", "nano-gpt"),
         ];
         for &(alias, expected_canonical) in cases {
             let meta =
@@ -1580,32 +1584,14 @@ mod tests {
             provider_auth_env_keys("together"),
             &["TOGETHER_API_KEY", "TOGETHER_AI_API_KEY"]
         );
-        assert_eq!(
-            provider_auth_env_keys("grok"),
-            &["XAI_API_KEY"]
-        );
+        assert_eq!(provider_auth_env_keys("grok"), &["XAI_API_KEY"]);
         assert_eq!(provider_auth_env_keys("hf"), &["HF_TOKEN"]);
         assert_eq!(provider_auth_env_keys("nim"), &["NVIDIA_API_KEY"]);
-        assert_eq!(
-            provider_auth_env_keys("lm-studio"),
-            &["LMSTUDIO_API_KEY"]
-        );
-        assert_eq!(
-            provider_auth_env_keys("deep-seek"),
-            &["DEEPSEEK_API_KEY"]
-        );
-        assert_eq!(
-            provider_auth_env_keys("pplx"),
-            &["PERPLEXITY_API_KEY"]
-        );
-        assert_eq!(
-            provider_auth_env_keys("deep-infra"),
-            &["DEEPINFRA_API_KEY"]
-        );
-        assert_eq!(
-            provider_auth_env_keys("mistralai"),
-            &["MISTRAL_API_KEY"]
-        );
+        assert_eq!(provider_auth_env_keys("lm-studio"), &["LMSTUDIO_API_KEY"]);
+        assert_eq!(provider_auth_env_keys("deep-seek"), &["DEEPSEEK_API_KEY"]);
+        assert_eq!(provider_auth_env_keys("pplx"), &["PERPLEXITY_API_KEY"]);
+        assert_eq!(provider_auth_env_keys("deep-infra"), &["DEEPINFRA_API_KEY"]);
+        assert_eq!(provider_auth_env_keys("mistralai"), &["MISTRAL_API_KEY"]);
         assert_eq!(
             provider_auth_env_keys("silicon-flow"),
             &["SILICONFLOW_API_KEY"]

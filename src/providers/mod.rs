@@ -11,7 +11,9 @@ use crate::model::{
 };
 use crate::models::ModelEntry;
 use crate::provider::{Context, Provider, StreamEvent, StreamOptions};
-use crate::provider_metadata::{canonical_provider_id, provider_routing_defaults};
+use crate::provider_metadata::{
+    PROVIDER_METADATA, canonical_provider_id, provider_routing_defaults,
+};
 use crate::vcr::{VCR_ENV_MODE, VcrRecorder};
 use async_trait::async_trait;
 use futures::stream;
@@ -143,15 +145,52 @@ fn resolve_provider_route(entry: &ModelEntry) -> Result<(ProviderRouteKind, Stri
             "google-vertex" => ProviderRouteKind::NativeGoogleVertex,
             "bedrock-converse-stream" => ProviderRouteKind::NativeBedrock,
             _ => {
-                return Err(Error::provider(
-                    &entry.model.provider,
-                    format!("Provider not implemented (api: {effective_api})"),
-                ));
+                let suggestions = suggest_similar_providers(&entry.model.provider);
+                let msg = if suggestions.is_empty() {
+                    format!("Provider not implemented (api: {effective_api})")
+                } else {
+                    format!(
+                        "Provider not implemented (api: {effective_api}). Did you mean: {}?",
+                        suggestions.join(", ")
+                    )
+                };
+                return Err(Error::provider(&entry.model.provider, msg));
             }
         },
     };
 
     Ok((route, canonical_provider.to_string(), effective_api))
+}
+
+/// Suggest provider names similar to `input` by checking substring
+/// containment and prefix matching against all canonical IDs and aliases.
+fn suggest_similar_providers(input: &str) -> Vec<String> {
+    let needle = input.to_lowercase();
+    let mut matches: Vec<(usize, String)> = Vec::new();
+
+    for meta in PROVIDER_METADATA {
+        let names: Vec<&str> = std::iter::once(meta.canonical_id)
+            .chain(meta.aliases.iter().copied())
+            .collect();
+        for name in &names {
+            let haystack = name.to_lowercase();
+            // Exact prefix match (highest quality)
+            if haystack.starts_with(&needle) || needle.starts_with(&haystack) {
+                matches.push((0, meta.canonical_id.to_string()));
+                break;
+            }
+            // Substring containment
+            if haystack.contains(&needle) || needle.contains(&haystack) {
+                matches.push((1, meta.canonical_id.to_string()));
+                break;
+            }
+        }
+    }
+
+    matches.sort_by_key(|(score, name)| (*score, name.clone()));
+    matches.dedup_by(|a, b| a.1 == b.1);
+    matches.truncate(3);
+    matches.into_iter().map(|(_, name)| name).collect()
 }
 
 const AZURE_OPENAI_RESOURCE_ENV: &str = "AZURE_OPENAI_RESOURCE";
@@ -1429,6 +1468,43 @@ export default function init(pi) {
         assert_eq!(route, ProviderRouteKind::NativeAzure);
         assert_eq!(canonical_provider, "azure-openai");
         assert_eq!(effective_api, "openai-completions");
+    }
+
+    #[test]
+    fn suggest_similar_providers_finds_prefix_match() {
+        let suggestions = suggest_similar_providers("deep");
+        assert!(
+            suggestions.contains(&"deepinfra".to_string())
+                || suggestions.contains(&"deepseek".to_string()),
+            "expected deepinfra or deepseek in suggestions: {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn suggest_similar_providers_finds_substring_match() {
+        let suggestions = suggest_similar_providers("flow");
+        assert!(
+            suggestions.contains(&"siliconflow".to_string()),
+            "expected siliconflow in suggestions: {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn suggest_similar_providers_returns_empty_for_gibberish() {
+        let suggestions = suggest_similar_providers("xyzzzabc123");
+        assert!(
+            suggestions.is_empty(),
+            "expected no suggestions for gibberish: {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn suggest_similar_providers_caps_at_three() {
+        let suggestions = suggest_similar_providers("a");
+        assert!(
+            suggestions.len() <= 3,
+            "expected at most 3 suggestions: {suggestions:?}"
+        );
     }
 
     #[test]

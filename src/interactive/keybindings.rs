@@ -1,3 +1,4 @@
+use super::commands::model_entry_matches;
 use super::*;
 
 impl PiApp {

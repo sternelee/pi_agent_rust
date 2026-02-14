@@ -750,6 +750,7 @@ fn alias_mapping_snapshot_is_current() {
         ("gemini", "google"),
         ("github-copilot-enterprise", "github-copilot"),
         ("gitlab-duo", "gitlab"),
+        ("glm", "zhipuai"),
         ("google-vertex-anthropic", "google-vertex"),
         ("grok", "xai"),
         ("hf", "huggingface"),
@@ -758,7 +759,9 @@ fn alias_mapping_snapshot_is_current() {
         ("lm-studio", "lmstudio"),
         ("mistralai", "mistral"),
         ("moonshot", "moonshotai"),
+        ("nanogpt", "nano-gpt"),
         ("nim", "nvidia"),
+        ("novita", "novita-ai"),
         ("nvidia-nim", "nvidia"),
         ("open-router", "openrouter"),
         ("pplx", "perplexity"),
@@ -769,6 +772,7 @@ fn alias_mapping_snapshot_is_current() {
         ("together-ai", "togetherai"),
         ("vertexai", "google-vertex"),
         ("x-ai", "xai"),
+        ("zhipu", "zhipuai"),
     ];
 
     let mut actual: Vec<(&str, &str)> = Vec::new();

@@ -31,6 +31,7 @@ use pi::model::{AssistantMessage, ContentBlock, StopReason};
 use pi::models::{ModelEntry, ModelRegistry, default_models_path};
 use pi::package_manager::{PackageEntry, PackageManager, PackageScope};
 use pi::provider::InputType;
+use pi::provider_metadata::PROVIDER_METADATA;
 use pi::providers;
 use pi::resources::{ResourceCliOptions, ResourceLoader};
 use pi::session::Session;
@@ -110,6 +111,12 @@ fn main_impl() -> Result<()> {
         let config = Config::load()?;
         let resolved = config.resolve_repair_policy_with_metadata(cli.repair_policy.as_deref());
         print_resolved_repair_policy(&resolved)?;
+        return Ok(());
+    }
+
+    // List-providers is a fast offline query that uses only static metadata.
+    if cli.list_providers {
+        list_providers();
         return Ok(());
     }
 
@@ -1514,6 +1521,49 @@ fn list_models(registry: &ModelRegistry, pattern: Option<&str>) {
 
     let rows = build_model_rows(&models);
     print_model_table(&rows);
+}
+
+fn list_providers() {
+    let mut rows: Vec<(&str, String, String, &str)> = PROVIDER_METADATA
+        .iter()
+        .map(|meta| {
+            let aliases = if meta.aliases.is_empty() {
+                String::new()
+            } else {
+                meta.aliases.join(", ")
+            };
+            let env_keys = meta.auth_env_keys.join(", ");
+            let api = meta
+                .routing_defaults
+                .map_or("-", |defaults| defaults.api);
+            (meta.canonical_id, aliases, env_keys, api)
+        })
+        .collect();
+    rows.sort_by_key(|(id, _, _, _)| *id);
+
+    let id_w = rows.iter().map(|r| r.0.len()).max().unwrap_or(0).max(8);
+    let alias_w = rows.iter().map(|r| r.1.len()).max().unwrap_or(0).max(7);
+    let env_w = rows.iter().map(|r| r.2.len()).max().unwrap_or(0).max(8);
+    let api_w = rows.iter().map(|r| r.3.len()).max().unwrap_or(0).max(3);
+
+    println!(
+        "{:<id_w$}  {:<alias_w$}  {:<env_w$}  {:<api_w$}",
+        "provider", "aliases", "auth env", "api",
+    );
+    println!(
+        "{:<id_w$}  {:<alias_w$}  {:<env_w$}  {:<api_w$}",
+        "-".repeat(id_w),
+        "-".repeat(alias_w),
+        "-".repeat(env_w),
+        "-".repeat(api_w),
+    );
+    for (id, aliases, env_keys, api) in &rows {
+        println!(
+            "{:<id_w$}  {:<alias_w$}  {:<env_w$}  {:<api_w$}",
+            id, aliases, env_keys, api,
+        );
+    }
+    println!("\n{} providers available.", rows.len());
 }
 
 #[derive(Clone, Copy)]
