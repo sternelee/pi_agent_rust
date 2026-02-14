@@ -522,19 +522,19 @@ fn gemini_no_tool_config_without_tools() {
 #[test]
 fn gemini_streaming_url_shape() {
     let provider = GeminiProvider::new("gemini-2.5-pro");
-    let url = provider.streaming_url("test-key-123");
+    let url = provider.streaming_url();
     assert!(
         url.contains("/models/gemini-2.5-pro:streamGenerateContent"),
         "URL must contain model and streamGenerateContent"
     );
     assert!(url.contains("alt=sse"), "URL must contain alt=sse");
     assert!(
-        url.contains("key=test-key-123"),
-        "URL must contain API key as query param"
+        !url.contains("key="),
+        "Gemini URL should not embed API key query params"
     );
     assert!(
         !url.contains("Authorization"),
-        "Gemini uses query param, not header"
+        "Gemini auth is sent via request headers, not URL"
     );
 }
 

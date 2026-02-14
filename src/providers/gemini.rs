@@ -71,10 +71,10 @@ impl GeminiProvider {
     }
 
     /// Build the streaming URL.
-    pub fn streaming_url(&self, api_key: &str) -> String {
+    pub fn streaming_url(&self) -> String {
         format!(
-            "{}/models/{}:streamGenerateContent?alt=sse&key={}",
-            self.base_url, self.model, api_key
+            "{}/models/{}:streamGenerateContent?alt=sse",
+            self.base_url, self.model
         )
     }
 
@@ -162,10 +162,14 @@ impl Provider for GeminiProvider {
             })?;
 
         let request_body = self.build_request(context, options);
-        let url = self.streaming_url(&auth_value);
+        let url = self.streaming_url();
 
         // Build request (Content-Type set by .json() below)
-        let mut request = self.client.post(&url).header("Accept", "text/event-stream");
+        let mut request = self
+            .client
+            .post(&url)
+            .header("Accept", "text/event-stream")
+            .header("x-goog-api-key", &auth_value);
 
         // Apply provider-specific custom headers from compat config.
         if let Some(compat) = &self.compat {
@@ -730,10 +734,10 @@ mod tests {
     #[test]
     fn test_streaming_url() {
         let provider = GeminiProvider::new("gemini-2.0-flash");
-        let url = provider.streaming_url("test-key");
+        let url = provider.streaming_url();
         assert!(url.contains("gemini-2.0-flash"));
         assert!(url.contains("streamGenerateContent"));
-        assert!(url.contains("key=test-key"));
+        assert!(!url.contains("key="));
     }
 
     #[derive(Debug, Deserialize)]
@@ -1028,14 +1032,14 @@ mod tests {
     // ─── API key as query parameter tests ───────────────────────────────
 
     #[test]
-    fn test_streaming_url_includes_key_as_query_param() {
+    fn test_streaming_url_no_key_query_param() {
         let provider = GeminiProvider::new("gemini-2.0-flash");
-        let url = provider.streaming_url("my-secret-key");
+        let url = provider.streaming_url();
 
-        // API key must be in the query string, not as a header.
+        // API key should NOT be in the query string.
         assert!(
-            url.contains("key=my-secret-key"),
-            "API key should be in query param"
+            !url.contains("key="),
+            "API key should not be in query param"
         );
         assert!(url.contains("alt=sse"), "alt=sse should be present");
         assert!(
@@ -1048,10 +1052,10 @@ mod tests {
     fn test_streaming_url_custom_base() {
         let provider =
             GeminiProvider::new("gemini-pro").with_base_url("https://custom.example.com/v1");
-        let url = provider.streaming_url("key123");
+        let url = provider.streaming_url();
 
         assert!(url.starts_with("https://custom.example.com/v1/models/gemini-pro"));
-        assert!(url.contains("key=key123"));
+        assert!(!url.contains("key="));
     }
 
     // ─── Content part mapping tests ─────────────────────────────────────
