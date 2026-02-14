@@ -2360,6 +2360,197 @@ fn e2e_cli_print_mode_stdin_sends_to_provider() {
     );
 }
 
+fn parse_json_mode_stdout_lines(stdout: &str) -> Vec<serde_json::Value> {
+    stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("json mode output line should be valid JSON"))
+        .collect()
+}
+
+#[test]
+fn e2e_cli_json_mode_print_flag_emits_header_and_events() {
+    let mut harness = CliTestHarness::new("e2e_cli_json_mode_print_flag_emits_header_and_events");
+
+    let request_body = json!({
+        "model": "claude-sonnet-4-5",
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "Reply with JSON mode pong."}]}
+        ],
+        "system": expected_system_prompt("JSON mode event stream test."),
+        "max_tokens": 8192,
+        "stream": true
+    });
+
+    setup_vcr_anthropic(
+        &mut harness,
+        "e2e_json_mode_print_flag",
+        &request_body,
+        "JSON mode pong.",
+    );
+
+    let mut args: Vec<&str> = vec![
+        "--mode",
+        "json",
+        "-p",
+        "--provider",
+        "anthropic",
+        "--model",
+        "claude-sonnet-4-5",
+    ];
+    args.extend_from_slice(PRINT_MODE_ISOLATION_FLAGS);
+    args.extend_from_slice(&[
+        "--system-prompt",
+        "JSON mode event stream test.",
+        "Reply with JSON mode pong.",
+    ]);
+
+    let result = harness.run(&args);
+    assert_exit_code(&harness.harness, &result, 0);
+
+    let lines = parse_json_mode_stdout_lines(&result.stdout);
+    assert!(
+        !lines.is_empty(),
+        "expected JSON mode output, got empty stdout"
+    );
+    assert_eq!(
+        lines[0]["type"], "session",
+        "first line must be session header"
+    );
+
+    let event_types = lines
+        .iter()
+        .skip(1)
+        .filter_map(|value| value.get("type").and_then(serde_json::Value::as_str))
+        .collect::<Vec<_>>();
+    assert!(
+        event_types.contains(&"agent_start"),
+        "missing agent_start event in JSON stream: {event_types:?}"
+    );
+    assert!(
+        event_types.contains(&"agent_end"),
+        "missing agent_end event in JSON stream: {event_types:?}"
+    );
+}
+
+#[test]
+fn e2e_cli_json_mode_stdin_emits_header_and_events() {
+    let mut harness = CliTestHarness::new("e2e_cli_json_mode_stdin_emits_header_and_events");
+    let stdin_text = "JSON stdin body\n";
+
+    let request_body = json!({
+        "model": "claude-sonnet-4-5",
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "JSON stdin body"}]}
+        ],
+        "system": expected_system_prompt("JSON stdin test."),
+        "max_tokens": 8192,
+        "stream": true
+    });
+
+    setup_vcr_anthropic(
+        &mut harness,
+        "e2e_json_mode_stdin",
+        &request_body,
+        "stdin ok",
+    );
+
+    let mut args: Vec<&str> = vec![
+        "--mode",
+        "json",
+        "--provider",
+        "anthropic",
+        "--model",
+        "claude-sonnet-4-5",
+    ];
+    args.extend_from_slice(PRINT_MODE_ISOLATION_FLAGS);
+    args.extend_from_slice(&["--system-prompt", "JSON stdin test."]);
+
+    let result = harness.run_with_stdin(&args, Some(stdin_text.as_bytes()));
+    assert_exit_code(&harness.harness, &result, 0);
+
+    let lines = parse_json_mode_stdout_lines(&result.stdout);
+    assert!(
+        !lines.is_empty(),
+        "expected JSON mode output with stdin, got empty stdout"
+    );
+    assert_eq!(
+        lines[0]["type"], "session",
+        "first line must be session header"
+    );
+
+    let event_types = lines
+        .iter()
+        .skip(1)
+        .filter_map(|value| value.get("type").and_then(serde_json::Value::as_str))
+        .collect::<Vec<_>>();
+    assert!(
+        event_types.contains(&"agent_start"),
+        "missing agent_start event in JSON stream: {event_types:?}"
+    );
+    assert!(
+        event_types.contains(&"agent_end"),
+        "missing agent_end event in JSON stream: {event_types:?}"
+    );
+}
+
+#[test]
+fn e2e_cli_json_mode_no_input_emits_header_and_exits_zero() {
+    let harness = CliTestHarness::new("e2e_cli_json_mode_no_input_emits_header_and_exits_zero");
+
+    let mut args: Vec<&str> = vec![
+        "--mode",
+        "json",
+        "--provider",
+        "anthropic",
+        "--model",
+        "claude-sonnet-4-5",
+        "--api-key",
+        "test-vcr-key",
+    ];
+    args.extend_from_slice(PRINT_MODE_ISOLATION_FLAGS);
+
+    let result = harness.run(&args);
+    assert_exit_code(&harness.harness, &result, 0);
+
+    let lines = parse_json_mode_stdout_lines(&result.stdout);
+    assert_eq!(
+        lines.len(),
+        1,
+        "no-input JSON mode should emit only session header, got {} lines",
+        lines.len()
+    );
+    assert_eq!(
+        lines[0]["type"], "session",
+        "first line must be session header"
+    );
+}
+
+#[test]
+fn e2e_cli_json_mode_missing_api_key_fails_startup() {
+    let harness = CliTestHarness::new("e2e_cli_json_mode_missing_api_key_fails_startup");
+
+    let mut args: Vec<&str> = vec![
+        "--mode",
+        "json",
+        "--provider",
+        "anthropic",
+        "--model",
+        "claude-sonnet-4-5",
+    ];
+    args.extend_from_slice(PRINT_MODE_ISOLATION_FLAGS);
+    args.push("hello");
+
+    let result = harness.run(&args);
+    assert!(
+        result.exit_code != 0,
+        "expected non-zero exit when API key is missing; stdout:\n{}\nstderr:\n{}",
+        result.stdout,
+        result.stderr
+    );
+    assert_contains(&harness.harness, &result.stderr, "No API key");
+}
+
 #[test]
 fn e2e_cli_print_mode_file_ref_reads_file() {
     let mut harness = CliTestHarness::new("e2e_cli_print_mode_file_ref_reads_file");
