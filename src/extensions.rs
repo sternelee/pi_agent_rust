@@ -1592,6 +1592,268 @@ impl Default for RuntimeRiskConfig {
 }
 
 // ---------------------------------------------------------------------------
+// SEC-7.2: Graduated enforcement rollout with rollback guards
+// ---------------------------------------------------------------------------
+
+/// Rollout phases for graduated enforcement. Operators progress through phases
+/// to build confidence before full enforcement.
+///
+/// Phase ordering: `Shadow` → `LogOnly` → `EnforceNew` → `EnforceAll`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum RolloutPhase {
+    /// Risk scoring runs, telemetry recorded, but no enforcement actions
+    /// taken. Equivalent to `enforce = false`.
+    Shadow = 0,
+    /// Risk decisions are logged with would-be actions but calls proceed.
+    /// Operator can review logs before enabling enforcement.
+    LogOnly = 1,
+    /// Enforcement applies only to extensions loaded after the phase
+    /// transition. Pre-existing extensions remain in log-only mode.
+    EnforceNew = 2,
+    /// Full enforcement for all extensions regardless of when they were
+    /// loaded.
+    EnforceAll = 3,
+}
+
+impl RolloutPhase {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Shadow => "shadow",
+            Self::LogOnly => "log_only",
+            Self::EnforceNew => "enforce_new",
+            Self::EnforceAll => "enforce_all",
+        }
+    }
+
+    /// Whether this phase actually enforces (blocks) calls.
+    pub const fn is_enforcing(self) -> bool {
+        matches!(self, Self::EnforceNew | Self::EnforceAll)
+    }
+}
+
+impl std::fmt::Display for RolloutPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Automatic rollback trigger conditions. When any condition is met, the
+/// rollout automatically reverts to `Shadow` phase.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RollbackTrigger {
+    /// Maximum allowed false-positive rate (blocked calls that should have
+    /// been allowed) over the evaluation window. When exceeded, rollback
+    /// fires.
+    pub max_false_positive_rate: f64,
+    /// Maximum allowed error rate (controller failures / total decisions)
+    /// over the evaluation window.
+    pub max_error_rate: f64,
+    /// Evaluation window size in number of recent decisions.
+    pub window_size: usize,
+    /// Maximum detection latency in milliseconds. If the average decision
+    /// latency in the window exceeds this, rollback fires.
+    pub max_latency_ms: u64,
+}
+
+impl Default for RollbackTrigger {
+    fn default() -> Self {
+        Self {
+            max_false_positive_rate: 0.05,
+            max_error_rate: 0.10,
+            window_size: 100,
+            max_latency_ms: 200,
+        }
+    }
+}
+
+/// Snapshot of graduated rollout state for operator inspection (SEC-7.2).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RolloutState {
+    /// Current rollout phase.
+    pub phase: RolloutPhase,
+    /// Whether the `RuntimeRiskConfig` enforce flag is active.
+    pub enforce: bool,
+    /// Whether the risk controller is enabled.
+    pub enabled: bool,
+    /// Timestamp (ms since epoch) of the last phase transition.
+    pub last_transition_ms: i64,
+    /// Number of phase transitions since system start.
+    pub transition_count: u32,
+    /// If a rollback occurred, the phase it rolled back from.
+    pub rolled_back_from: Option<RolloutPhase>,
+    /// Current evaluation window statistics for rollback triggers.
+    pub window_stats: RollbackWindowStats,
+}
+
+/// Rolling statistics over the rollback evaluation window.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RollbackWindowStats {
+    /// Total decisions evaluated in the current window.
+    pub total_decisions: u64,
+    /// Decisions where the risk controller returned an error.
+    pub error_count: u64,
+    /// Decisions flagged as false positives (operator-overridden denials).
+    pub false_positive_count: u64,
+    /// Average decision latency in milliseconds across the window.
+    pub avg_latency_ms: f64,
+}
+
+/// Mutable rollout tracking state stored inside `ExtensionManagerInner`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RolloutTracker {
+    pub phase: RolloutPhase,
+    pub last_transition_ms: i64,
+    pub transition_count: u32,
+    pub rolled_back_from: Option<RolloutPhase>,
+    pub trigger: RollbackTrigger,
+    /// Rolling window of recent decision outcomes for rollback evaluation.
+    pub recent_decisions: VecDeque<RolloutDecisionSample>,
+}
+
+/// A single decision sample in the rollback evaluation window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RolloutDecisionSample {
+    pub ts_ms: i64,
+    pub latency_ms: u64,
+    pub was_error: bool,
+    pub was_false_positive: bool,
+}
+
+impl Default for RolloutTracker {
+    fn default() -> Self {
+        Self {
+            phase: RolloutPhase::EnforceAll,
+            last_transition_ms: runtime_risk_now_ms(),
+            transition_count: 0,
+            rolled_back_from: None,
+            trigger: RollbackTrigger::default(),
+            recent_decisions: VecDeque::new(),
+        }
+    }
+}
+
+impl RolloutTracker {
+    /// Create a tracker starting in the given phase.
+    pub fn new(phase: RolloutPhase) -> Self {
+        Self {
+            phase,
+            ..Self::default()
+        }
+    }
+
+    /// Advance to the next phase. Returns `true` if the phase changed.
+    pub fn advance(&mut self) -> bool {
+        let next = match self.phase {
+            RolloutPhase::Shadow => RolloutPhase::LogOnly,
+            RolloutPhase::LogOnly => RolloutPhase::EnforceNew,
+            RolloutPhase::EnforceNew => RolloutPhase::EnforceAll,
+            RolloutPhase::EnforceAll => return false,
+        };
+        self.phase = next;
+        self.last_transition_ms = runtime_risk_now_ms();
+        self.transition_count += 1;
+        self.rolled_back_from = None;
+        true
+    }
+
+    /// Roll back to `Shadow` phase, recording what phase we rolled back from.
+    pub fn rollback(&mut self) {
+        if self.phase != RolloutPhase::Shadow {
+            self.rolled_back_from = Some(self.phase);
+            self.phase = RolloutPhase::Shadow;
+            self.last_transition_ms = runtime_risk_now_ms();
+            self.transition_count += 1;
+        }
+    }
+
+    /// Set an explicit phase (for operator override).
+    pub fn set_phase(&mut self, phase: RolloutPhase) {
+        if self.phase != phase {
+            self.rolled_back_from = None;
+            self.phase = phase;
+            self.last_transition_ms = runtime_risk_now_ms();
+            self.transition_count += 1;
+        }
+    }
+
+    /// Record a decision sample and check rollback triggers.
+    /// Returns `true` if a rollback was triggered.
+    pub fn record_decision(
+        &mut self,
+        latency_ms: u64,
+        was_error: bool,
+        was_false_positive: bool,
+    ) -> bool {
+        let sample = RolloutDecisionSample {
+            ts_ms: runtime_risk_now_ms(),
+            latency_ms,
+            was_error,
+            was_false_positive,
+        };
+        self.recent_decisions.push_back(sample);
+        while self.recent_decisions.len() > self.trigger.window_size {
+            let _ = self.recent_decisions.pop_front();
+        }
+        self.check_triggers()
+    }
+
+    /// Evaluate rollback trigger conditions against the current window.
+    #[allow(clippy::cast_precision_loss)]
+    fn check_triggers(&mut self) -> bool {
+        // Only check triggers when actually enforcing.
+        if !self.phase.is_enforcing() {
+            return false;
+        }
+        let n = self.recent_decisions.len();
+        if n < 10 {
+            // Not enough data to evaluate triggers.
+            return false;
+        }
+        let stats = self.window_stats();
+        let n_f64 = stats.total_decisions as f64;
+        let fp_rate = stats.false_positive_count as f64 / n_f64;
+        let err_rate = stats.error_count as f64 / n_f64;
+
+        let should_rollback = fp_rate > self.trigger.max_false_positive_rate
+            || err_rate > self.trigger.max_error_rate
+            || stats.avg_latency_ms > self.trigger.max_latency_ms as f64;
+
+        if should_rollback {
+            self.rollback();
+        }
+        should_rollback
+    }
+
+    /// Compute window statistics for the current evaluation window.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn window_stats(&self) -> RollbackWindowStats {
+        let n = self.recent_decisions.len() as u64;
+        if n == 0 {
+            return RollbackWindowStats::default();
+        }
+        let mut errors = 0u64;
+        let mut fps = 0u64;
+        let mut total_lat = 0u64;
+        for s in &self.recent_decisions {
+            if s.was_error {
+                errors += 1;
+            }
+            if s.was_false_positive {
+                fps += 1;
+            }
+            total_lat += s.latency_ms;
+        }
+        RollbackWindowStats {
+            total_decisions: n,
+            error_count: errors,
+            false_positive_count: fps,
+            avg_latency_ms: total_lat as f64 / n as f64,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Per-extension resource quota engine (SEC-4.1 / bd-b1d7o)
 // ---------------------------------------------------------------------------
 
@@ -14335,6 +14597,8 @@ struct ExtensionManagerInner {
     kill_switch_audit: VecDeque<KillSwitchAuditEntry>,
     /// Trust onboarding decision log (SEC-5.2).
     trust_onboarding_log: VecDeque<TrustOnboardingDecision>,
+    /// Graduated enforcement rollout tracker (SEC-7.2).
+    rollout_tracker: RolloutTracker,
     /// Budget for extension operations (structured concurrency).
     extension_budget: Budget,
 }
@@ -14631,6 +14895,78 @@ impl ExtensionManager {
 
     pub fn runtime_risk_config(&self) -> RuntimeRiskConfig {
         self.inner.lock().unwrap().runtime_risk_config.clone()
+    }
+
+    // ── SEC-7.2: Graduated enforcement rollout ──────────────────────────
+
+    /// Get the current rollout phase.
+    pub fn rollout_phase(&self) -> RolloutPhase {
+        self.inner.lock().unwrap().rollout_tracker.phase
+    }
+
+    /// Set the rollout phase explicitly (operator override).
+    pub fn set_rollout_phase(&self, phase: RolloutPhase) {
+        let mut guard = self.inner.lock().unwrap();
+        guard.rollout_tracker.set_phase(phase);
+        // Sync the `enforce` flag with the phase.
+        guard.runtime_risk_config.enforce = phase.is_enforcing();
+    }
+
+    /// Advance the rollout to the next phase. Returns `true` if changed.
+    pub fn advance_rollout(&self) -> bool {
+        let mut guard = self.inner.lock().unwrap();
+        let advanced = guard.rollout_tracker.advance();
+        if advanced {
+            guard.runtime_risk_config.enforce =
+                guard.rollout_tracker.phase.is_enforcing();
+        }
+        advanced
+    }
+
+    /// Record a risk decision for rollback trigger evaluation.
+    /// Returns `true` if a rollback was triggered.
+    pub fn record_rollout_decision(
+        &self,
+        latency_ms: u64,
+        was_error: bool,
+        was_false_positive: bool,
+    ) -> bool {
+        let mut guard = self.inner.lock().unwrap();
+        let triggered = guard
+            .rollout_tracker
+            .record_decision(latency_ms, was_error, was_false_positive);
+        if triggered {
+            guard.runtime_risk_config.enforce = false;
+        }
+        triggered
+    }
+
+    /// Configure the rollback trigger thresholds.
+    pub fn set_rollback_trigger(&self, trigger: RollbackTrigger) {
+        let mut guard = self.inner.lock().unwrap();
+        guard.rollout_tracker.trigger = trigger;
+    }
+
+    /// Get a snapshot of the current rollout state for operator inspection.
+    pub fn rollout_state(&self) -> RolloutState {
+        let guard = self.inner.lock().unwrap();
+        let phase = guard.rollout_tracker.phase;
+        let enforce = guard.runtime_risk_config.enforce;
+        let enabled = guard.runtime_risk_config.enabled;
+        let last_transition_ms = guard.rollout_tracker.last_transition_ms;
+        let transition_count = guard.rollout_tracker.transition_count;
+        let rolled_back_from = guard.rollout_tracker.rolled_back_from;
+        let window_stats = guard.rollout_tracker.window_stats();
+        drop(guard);
+        RolloutState {
+            phase,
+            enforce,
+            enabled,
+            last_transition_ms,
+            transition_count,
+            rolled_back_from,
+            window_stats,
+        }
     }
 
     // ── SEC-4.1: Per-extension resource quota check ──────────────────────

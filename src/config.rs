@@ -164,6 +164,10 @@ pub struct ExtensionRiskConfig {
     /// Fail closed when controller evaluation errors or exceeds budget.
     #[serde(alias = "failClosed")]
     pub fail_closed: Option<bool>,
+    /// Enforcement mode: `true` = enforce risk decisions, `false` = shadow
+    /// mode (score-only, no blocking).  Defaults to `true` when risk is
+    /// enabled.
+    pub enforce: Option<bool>,
 }
 
 /// Resolved extension policy plus explainability metadata.
@@ -798,6 +802,10 @@ impl Config {
                 settings.fail_closed = fail_closed;
                 source = "config";
             }
+            if let Some(enforce) = cfg.enforce {
+                settings.enforce = enforce;
+                source = "config";
+            }
         }
 
         if let Some(enabled) = parse_env_bool("PI_EXTENSION_RISK_ENABLED") {
@@ -822,6 +830,10 @@ impl Config {
         }
         if let Some(fail_closed) = parse_env_bool("PI_EXTENSION_RISK_FAIL_CLOSED") {
             settings.fail_closed = fail_closed;
+            source = "env";
+        }
+        if let Some(enforce) = parse_env_bool("PI_EXTENSION_RISK_ENFORCE") {
+            settings.enforce = enforce;
             source = "env";
         }
 
@@ -1041,6 +1053,7 @@ fn merge_extension_risk(
             ledger_limit: other.ledger_limit.or(base.ledger_limit),
             decision_timeout_ms: other.decision_timeout_ms.or(base.decision_timeout_ms),
             fail_closed: other.fail_closed.or(base.fail_closed),
+            enforce: other.enforce.or(base.enforce),
         }),
         (None, Some(other)) => Some(other),
         (Some(base), None) => Some(base),
