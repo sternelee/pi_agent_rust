@@ -1963,6 +1963,8 @@ impl PiApp {
 
         // Forward to appropriate component based on state
         if self.agent_state == AgentState::Idle {
+            let old_height = self.input.height();
+
             if let Some(key) = msg.downcast_ref::<KeyMsg>() {
                 if key.key_type == KeyType::Space {
                     let mut key = key.clone();
@@ -1970,11 +1972,20 @@ impl PiApp {
                     key.runes = vec![' '];
 
                     let result = BubbleteaModel::update(&mut self.input, Message::new(key));
+                    
+                    if self.input.height() != old_height {
+                        self.refresh_conversation_viewport(self.follow_stream_tail);
+                    }
+
                     self.maybe_trigger_autocomplete();
                     return result;
                 }
             }
             let result = BubbleteaModel::update(&mut self.input, msg);
+
+            if self.input.height() != old_height {
+                self.refresh_conversation_viewport(self.follow_stream_tail);
+            }
 
             // After text area update, check if we should trigger autocomplete
             self.maybe_trigger_autocomplete();

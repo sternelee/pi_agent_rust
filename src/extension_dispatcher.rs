@@ -737,6 +737,14 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
                 }
             });
 
+            struct CancelGuard(Arc<AtomicBool>);
+            impl Drop for CancelGuard {
+                fn drop(&mut self) {
+                    self.0.store(true, AtomicOrdering::SeqCst);
+                }
+            }
+            let _guard = CancelGuard(Arc::clone(&cancel));
+
             let mut sequence = 0_u64;
             loop {
                 if !self.runtime.is_hostcall_pending(call_id) {
