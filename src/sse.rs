@@ -381,6 +381,7 @@ mod tests {
     use proptest::prelude::*;
     use serde_json::json;
     use std::fmt::Write as _;
+    use std::io::ErrorKind;
 
     #[derive(Debug, Clone)]
     struct GeneratedEvent {
@@ -389,6 +390,23 @@ mod tests {
         retry: Option<u32>,
         data: Vec<String>,
         comment: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum LineEnding {
+        Lf,
+        Cr,
+        CrLf,
+    }
+
+    impl LineEnding {
+        fn as_str(self) -> &'static str {
+            match self {
+                Self::Lf => "\n",
+                Self::Cr => "\r",
+                Self::CrLf => "\r\n",
+            }
+        }
     }
 
     impl GeneratedEvent {
@@ -446,6 +464,51 @@ mod tests {
             })
     }
 
+    fn line_ending_strategy() -> impl Strategy<Value = LineEnding> {
+        prop_oneof![
+            Just(LineEnding::Lf),
+            Just(LineEnding::Cr),
+            Just(LineEnding::CrLf),
+        ]
+    }
+
+    fn unicode_line() -> impl Strategy<Value = String> {
+        prop::collection::vec(
+            any::<char>().prop_filter("no CR/LF", |c| *c != '\r' && *c != '\n'),
+            0..24,
+        )
+        .prop_map(|chars| chars.into_iter().collect())
+    }
+
+    fn id_field_strategy() -> impl Strategy<Value = String> {
+        prop_oneof![
+            4 => "[ -~]{0,24}".prop_map(|s| s),
+            1 => ("[ -~]{0,12}", "[ -~]{0,12}").prop_map(|(head, tail)| format!("{head}\0{tail}")),
+        ]
+    }
+
+    fn retry_field_strategy() -> impl Strategy<Value = String> {
+        prop_oneof![
+            6 => (0u64..=50_000u64).prop_map(|n| n.to_string()),
+            2 => (u64::MAX - 10..=u64::MAX).prop_map(|n| n.to_string()),
+            2 => "[a-zA-Z]{1,16}".prop_map(|s| s),
+            1 => "-[0-9]{1,24}".prop_map(|s| s),
+            1 => ((u128::from(u64::MAX) + 1)..=(u128::from(u64::MAX) + 50_000))
+                .prop_map(|n| n.to_string()),
+            1 => Just(String::new()),
+        ]
+    }
+
+    fn oversized_data_len_strategy() -> impl Strategy<Value = usize> {
+        // Keep average runtime reasonable while still exercising multi-megabyte inputs.
+        prop_oneof![
+            10 => 1024usize..=65_536usize,
+            5 => 65_537usize..=262_144usize,
+            2 => 262_145usize..=1_048_576usize,
+            1 => 1_048_577usize..=3_145_728usize,
+        ]
+    }
+
     fn render_stream(events: &[GeneratedEvent], terminal_delimiter: bool) -> String {
         let mut out = String::new();
         for event in events {
@@ -455,6 +518,19 @@ mod tests {
             out.pop();
         }
         out
+    }
+
+    fn render_stream_with_line_endings(
+        events: &[GeneratedEvent],
+        terminal_delimiter: bool,
+        line_ending: LineEnding,
+    ) -> String {
+        let canonical = render_stream(events, terminal_delimiter);
+        if matches!(line_ending, LineEnding::Lf) {
+            canonical
+        } else {
+            canonical.replace('\n', line_ending.as_str())
+        }
     }
 
     fn parse_all(input: &str) -> Vec<SseEvent> {
@@ -492,6 +568,91 @@ mod tests {
         }
 
         events
+    }
+
+    fn split_bytes(input: &[u8], chunk_sizes: &[usize]) -> Vec<Vec<u8>> {
+        let mut chunks = Vec::new();
+        let mut start = 0usize;
+
+        for &size in chunk_sizes {
+            if start >= input.len() {
+                break;
+            }
+            let end = (start + size).min(input.len());
+            chunks.push(input[start..end].to_vec());
+            start = end;
+        }
+
+        if start < input.len() {
+            chunks.push(input[start..].to_vec());
+        }
+
+        chunks
+    }
+
+    fn parse_stream_chunks(chunks: Vec<Vec<u8>>) -> (Vec<SseEvent>, Vec<ErrorKind>) {
+        let mut stream = SseStream::new(stream::iter(
+            chunks.into_iter().map(Ok::<Vec<u8>, std::io::Error>),
+        ));
+        let mut events = Vec::new();
+        let mut errors = Vec::new();
+
+        futures::executor::block_on(async {
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(event) => events.push(event),
+                    Err(err) => errors.push(err.kind()),
+                }
+            }
+        });
+
+        (events, errors)
+    }
+
+    fn parse_stream_chunks_limited(
+        chunks: Vec<Vec<u8>>,
+        max_items: usize,
+    ) -> (Vec<SseEvent>, Vec<ErrorKind>) {
+        let mut stream = SseStream::new(stream::iter(
+            chunks.into_iter().map(Ok::<Vec<u8>, std::io::Error>),
+        ));
+        let mut events = Vec::new();
+        let mut errors = Vec::new();
+
+        futures::executor::block_on(async {
+            for _ in 0..max_items {
+                let Some(item) = stream.next().await else {
+                    break;
+                };
+                match item {
+                    Ok(event) => events.push(event),
+                    Err(err) => errors.push(err.kind()),
+                }
+            }
+        });
+
+        (events, errors)
+    }
+
+    fn parse_stream_single_chunk(input: &[u8]) -> (Vec<SseEvent>, Vec<ErrorKind>) {
+        parse_stream_chunks(vec![input.to_vec()])
+    }
+
+    fn parse_stream_chunked(
+        input: &[u8],
+        chunk_sizes: &[usize],
+    ) -> (Vec<SseEvent>, Vec<ErrorKind>) {
+        let chunks = split_bytes(input, chunk_sizes);
+        parse_stream_chunks(chunks)
+    }
+
+    fn parse_stream_chunked_limited(
+        input: &[u8],
+        chunk_sizes: &[usize],
+        max_items: usize,
+    ) -> (Vec<SseEvent>, Vec<ErrorKind>) {
+        let chunks = split_bytes(input, chunk_sizes);
+        parse_stream_chunks_limited(chunks, max_items)
     }
 
     fn diag_json(
@@ -882,7 +1043,7 @@ data: {"type":"message_stop"}
 
     proptest! {
         #![proptest_config(ProptestConfig {
-            cases: 64,
+            cases: 256,
             max_shrink_iters: 200,
             .. ProptestConfig::default()
         })]
@@ -897,6 +1058,160 @@ data: {"type":"message_stop"}
             let expected = parse_all(&input);
             let actual = parse_chunked(&input, &chunk_sizes);
             prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn sse_line_ending_chunking_invariant(
+            events in prop::collection::vec(event_strategy(), 1..10),
+            chunk_sizes in prop::collection::vec(1usize..32, 0..20),
+            terminal_delimiter in any::<bool>(),
+            line_ending in line_ending_strategy(),
+        ) {
+            let input = render_stream_with_line_endings(&events, terminal_delimiter, line_ending);
+            let expected = parse_all(&input);
+            let actual = parse_chunked(&input, &chunk_sizes);
+            prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn sse_id_with_null_bytes_is_rejected(
+            id in id_field_strategy(),
+            data in ascii_line(),
+        ) {
+            let input = format!("id: {id}\ndata: {data}\n\n");
+            let events = parse_all(&input);
+
+            prop_assert_eq!(events.len(), 1);
+            let expected_id = if id.contains('\0') { None } else { Some(id) };
+            prop_assert_eq!(events[0].id.as_ref(), expected_id.as_ref());
+        }
+
+        #[test]
+        fn sse_retry_field_fuzz_last_assignment_wins(
+            retry_values in prop::collection::vec(retry_field_strategy(), 1..6),
+            data in ascii_line(),
+        ) {
+            let mut input = String::new();
+            for value in &retry_values {
+                let _ = writeln!(&mut input, "retry: {value}");
+            }
+            let _ = writeln!(&mut input, "data: {data}");
+            input.push('\n');
+
+            let events = parse_all(&input);
+            prop_assert_eq!(events.len(), 1);
+
+            let expected_retry = retry_values
+                .last()
+                .and_then(|value| value.parse::<u64>().ok());
+            prop_assert_eq!(events[0].retry, expected_retry);
+        }
+
+        #[test]
+        fn sse_duplicate_fields_apply_spec_semantics(
+            event_names in prop::collection::vec("[a-z_]{1,12}", 1..6),
+            ids in prop::collection::vec(id_field_strategy(), 0..6),
+            data_lines in prop::collection::vec(ascii_line(), 1..6),
+        ) {
+            let mut input = String::new();
+
+            for event_name in &event_names {
+                let _ = writeln!(&mut input, "event: {event_name}");
+            }
+            for id in &ids {
+                let _ = writeln!(&mut input, "id: {id}");
+            }
+            for line in &data_lines {
+                let _ = writeln!(&mut input, "data: {line}");
+            }
+            input.push('\n');
+
+            let events = parse_all(&input);
+            prop_assert_eq!(events.len(), 1);
+            prop_assert_eq!(events[0].event.as_ref(), event_names.last().expect("non-empty"));
+
+            let expected_id = ids.iter().rfind(|id| !id.contains('\0')).cloned();
+            prop_assert_eq!(events[0].id.as_ref(), expected_id.as_ref());
+
+            let expected_data = data_lines.join("\n");
+            prop_assert_eq!(events[0].data.as_str(), expected_data);
+        }
+
+        #[test]
+        fn sse_oversized_data_fields_round_trip(len in oversized_data_len_strategy(),) {
+            let payload = "x".repeat(len);
+            let input = format!("data: {payload}\n\n");
+            let events = parse_all(&input);
+
+            prop_assert_eq!(events.len(), 1);
+            prop_assert_eq!(events[0].data.len(), len);
+            prop_assert_eq!(events[0].data.as_str(), payload);
+        }
+
+        #[test]
+        fn sse_stream_utf8_valid_input_chunking_invariant(
+            lines in prop::collection::vec(unicode_line(), 1..5),
+            chunk_sizes in prop::collection::vec(1usize..16, 0..24),
+        ) {
+            let mut input = String::new();
+            for line in &lines {
+                let _ = writeln!(&mut input, "data: {line}");
+            }
+            input.push('\n');
+
+            let (single_events, single_errors) = parse_stream_single_chunk(input.as_bytes());
+            let (chunked_events, chunked_errors) =
+                parse_stream_chunked(input.as_bytes(), &chunk_sizes);
+
+            prop_assert!(single_errors.is_empty(), "single-chunk had UTF-8 errors");
+            prop_assert!(chunked_errors.is_empty(), "chunked parse had UTF-8 errors");
+            prop_assert_eq!(chunked_events, single_events);
+        }
+
+        #[test]
+        fn sse_stream_bom_start_stripped_embedded_preserved(
+            left in unicode_line(),
+            right in unicode_line(),
+            chunk_sizes in prop::collection::vec(1usize..8, 0..24),
+        ) {
+            let start_bom = format!("\u{FEFF}data: {left}{right}\n\n");
+            let (start_events, start_errors) =
+                parse_stream_chunked(start_bom.as_bytes(), &chunk_sizes);
+            prop_assert!(start_errors.is_empty(), "start BOM should be valid UTF-8");
+            prop_assert_eq!(start_events.len(), 1);
+            let expected_start = format!("{left}{right}");
+            prop_assert_eq!(start_events[0].data.as_str(), expected_start);
+
+            let embedded_bom = format!("data: {left}\u{FEFF}{right}\n\n");
+            let (embedded_events, embedded_errors) =
+                parse_stream_chunked(embedded_bom.as_bytes(), &chunk_sizes);
+            prop_assert!(embedded_errors.is_empty(), "embedded BOM should be preserved");
+            prop_assert_eq!(embedded_events.len(), 1);
+            let expected_embedded = format!("{left}\u{FEFF}{right}");
+            prop_assert_eq!(embedded_events[0].data.as_str(), expected_embedded);
+        }
+
+        #[test]
+        fn sse_stream_invalid_utf8_yields_invalid_data_errors(
+            prefix in ascii_line(),
+            suffix in ascii_line(),
+            invalid_len in 1usize..4,
+            chunk_sizes in prop::collection::vec(1usize..8, 0..20),
+        ) {
+            let mut bytes = format!("data: {prefix}\n\n").into_bytes();
+            bytes.extend(std::iter::repeat_n(0xFFu8, invalid_len));
+            bytes.extend(format!("data: {suffix}\n\n").as_bytes());
+
+            let (events, errors) = parse_stream_chunked_limited(&bytes, &chunk_sizes, 32);
+            prop_assert!(
+                events.iter().any(|event| event.data == prefix),
+                "event before invalid sequence should still be surfaced"
+            );
+            prop_assert!(!errors.is_empty(), "invalid UTF-8 should emit at least one error");
+            prop_assert!(
+                errors.iter().all(|kind| *kind == ErrorKind::InvalidData),
+                "all stream decoding errors must be InvalidData"
+            );
         }
     }
 }
