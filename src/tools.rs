@@ -1384,8 +1384,14 @@ pub(crate) async fn run_bash_command(
 
     let tick = Duration::from_millis(10);
     loop {
+        let mut updated = false;
         while let Ok(chunk) = rx.try_recv() {
-            process_bash_chunk(&chunk, &mut bash_output, on_update).await?;
+            ingest_bash_chunk(&chunk, &mut bash_output).await?;
+            updated = true;
+        }
+
+        if updated {
+            emit_bash_update(&bash_output, on_update)?;
         }
 
         match guard.try_wait_child() {
@@ -1429,7 +1435,7 @@ pub(crate) async fn run_bash_command(
     let drain_deadline = Instant::now() + Duration::from_secs(2);
     loop {
         match rx.try_recv() {
-            Ok(chunk) => process_bash_chunk(&chunk, &mut bash_output, None).await?,
+            Ok(chunk) => ingest_bash_chunk(&chunk, &mut bash_output).await?,
             Err(mpsc::TryRecvError::Empty) => {
                 if Instant::now() >= drain_deadline {
                     break;
@@ -1690,6 +1696,100 @@ fn restore_line_endings(text: &str, ending: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone)]
+struct FuzzyMatchResult {
+    found: bool,
+    index: usize,
+    match_length: usize,
+    content_for_replacement: String,
+}
+
+/// Map a range in normalized content back to byte offsets in the original text.
+///
+/// Returns `(original_start_byte_idx, original_match_byte_len)`.
+fn map_normalized_range_to_original(
+    content: &str,
+    norm_match_start: usize,
+    norm_match_len: usize,
+) -> (usize, usize) {
+    let mut norm_idx = 0;
+    let mut orig_idx = 0;
+    let mut match_start = None;
+    let mut match_end = None;
+    let norm_match_end = norm_match_start + norm_match_len;
+
+    let mut lines = content.split_inclusive('\n').peekable();
+    while let Some(line) = lines.next() {
+        let line_content = line.strip_suffix('\n').unwrap_or(line);
+        let has_newline = line.ends_with('\n');
+        let trimmed_len = line_content.trim_end().len();
+
+        for (char_offset, c) in line_content.char_indices() {
+            if norm_idx == norm_match_start && match_start.is_none() {
+                match_start = Some(orig_idx + char_offset);
+            }
+            if norm_idx == norm_match_end && match_end.is_none() {
+                match_end = Some(orig_idx + char_offset);
+            }
+            if match_start.is_some() && match_end.is_some() {
+                break;
+            }
+
+            if char_offset >= trimmed_len {
+                continue;
+            }
+
+            let normalized_char = if is_special_unicode_space(c) {
+                ' '
+            } else if matches!(c, '\u{2018}' | '\u{2019}') {
+                '\''
+            } else if matches!(c, '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}') {
+                '"'
+            } else if matches!(
+                c,
+                '\u{2010}'
+                    | '\u{2011}'
+                    | '\u{2012}'
+                    | '\u{2013}'
+                    | '\u{2014}'
+                    | '\u{2015}'
+                    | '\u{2212}'
+            ) {
+                '-'
+            } else {
+                c
+            };
+
+            norm_idx += normalized_char.len_utf8();
+        }
+
+        orig_idx += line_content.len();
+
+        if has_newline {
+            if norm_idx == norm_match_start && match_start.is_none() {
+                match_start = Some(orig_idx);
+            }
+            if norm_idx == norm_match_end && match_end.is_none() {
+                match_end = Some(orig_idx);
+            }
+
+            norm_idx += 1;
+            orig_idx += 1;
+        }
+
+        if match_start.is_some() && match_end.is_some() {
+            break;
+        }
+    }
+
+    if norm_idx == norm_match_end && match_end.is_none() {
+        match_end = Some(orig_idx);
+    }
+
+    let start = match_start.unwrap_or(0);
+    let end = match_end.unwrap_or(content.len());
+    (start, end.saturating_sub(start))
+}
 
 fn build_normalized_content(content: &str) -> String {
     let mut normalized = String::with_capacity(content.len());
@@ -3322,10 +3422,9 @@ impl BashOutputState {
     }
 }
 
-async fn process_bash_chunk(
+async fn ingest_bash_chunk(
     chunk: &[u8],
     state: &mut BashOutputState,
-    on_update: Option<&(dyn Fn(ToolUpdate) + Send + Sync)>,
 ) -> Result<()> {
     state.total_bytes = state.total_bytes.saturating_add(chunk.len());
     state.line_count = state
@@ -3364,7 +3463,13 @@ async fn process_bash_chunk(
             state.chunks_bytes = state.chunks_bytes.saturating_sub(front.len());
         }
     }
+    Ok(())
+}
 
+fn emit_bash_update(
+    state: &BashOutputState,
+    on_update: Option<&(dyn Fn(ToolUpdate) + Send + Sync)>,
+) -> Result<()> {
     if let Some(callback) = on_update {
         let full_text = String::from_utf8_lossy(&concat_chunks(&state.chunks)).to_string();
         let truncation = truncate_tail(&full_text, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
@@ -3399,8 +3504,17 @@ async fn process_bash_chunk(
             details: Some(serde_json::Value::Object(details_map)),
         });
     }
-
     Ok(())
+}
+
+#[allow(dead_code)]
+async fn process_bash_chunk(
+    chunk: &[u8],
+    state: &mut BashOutputState,
+    on_update: Option<&(dyn Fn(ToolUpdate) + Send + Sync)>,
+) -> Result<()> {
+    ingest_bash_chunk(chunk, state).await?;
+    emit_bash_update(state, on_update)
 }
 
 struct ProcessGuard {
