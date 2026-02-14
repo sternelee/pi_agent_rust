@@ -498,8 +498,7 @@ impl PiApp {
                     let _ = write!(output, "\n  {rendered}\n");
                 } else {
                     let header = msg.content.lines().next().unwrap_or("Tool output");
-                    let line_count =
-                        memchr::memchr_iter(b'\n', msg.content.as_bytes()).count() + 1;
+                    let line_count = memchr::memchr_iter(b'\n', msg.content.as_bytes()).count() + 1;
                     let summary = format!(
                         "\u{25b6} {} ({line_count} lines, collapsed)",
                         header.trim_end()
@@ -543,17 +542,30 @@ impl PiApp {
 
     /// Build the conversation content string for the viewport.
     ///
-    /// Uses `MessageRenderCache` to avoid re-rendering unchanged messages
-    /// every frame. Streaming content (current_response) always renders fresh.
+    /// Uses `MessageRenderCache` (PERF-1) to avoid re-rendering unchanged
+    /// messages and a conversation prefix cache (PERF-2) to skip iterating
+    /// all messages during streaming. Streaming content (current_response)
+    /// always renders fresh.
     pub fn build_conversation_content(&self) -> String {
+        let is_streaming =
+            !self.current_response.is_empty() || !self.current_thinking.is_empty();
+
+        // PERF-2 fast path: during streaming, reuse the cached prefix
+        // (all finalized messages) and only rebuild the streaming tail.
+        if is_streaming
+            && self.message_render_cache.prefix_valid(self.messages.len())
+        {
+            let mut output = self.message_render_cache.prefix_get();
+            self.append_streaming_tail(&mut output);
+            return output;
+        }
+
+        // Full rebuild: iterate all messages with per-message cache (PERF-1).
         let mut output = String::new();
 
         for (index, msg) in self.messages.iter().enumerate() {
-            let key = MessageRenderCache::compute_key(
-                msg,
-                self.thinking_visible,
-                self.tools_expanded,
-            );
+            let key =
+                MessageRenderCache::compute_key(msg, self.thinking_visible, self.tools_expanded);
 
             if let Some(cached) = self.message_render_cache.get(index, &key) {
                 output.push_str(&cached);
@@ -564,35 +576,45 @@ impl PiApp {
             }
         }
 
-        // Add current streaming response (always render fresh, never cached)
-        if !self.current_response.is_empty() || !self.current_thinking.is_empty() {
-            let _ = write!(
-                output,
-                "\n  {}\n",
-                self.styles.success_bold.render("Assistant:")
-            );
+        // Snapshot the prefix for future streaming frames (PERF-2).
+        self.message_render_cache
+            .prefix_set(&output, self.messages.len());
 
-            // Show thinking if present
-            if self.thinking_visible && !self.current_thinking.is_empty() {
-                let truncated = truncate(&self.current_thinking, 100);
-                let _ = writeln!(
-                    output,
-                    "  {}",
-                    self.styles
-                        .muted_italic
-                        .render(&format!("Thinking: {truncated}"))
-                );
-            }
-
-            // Show response (no markdown rendering while streaming)
-            if !self.current_response.is_empty() {
-                for line in self.current_response.lines() {
-                    let _ = writeln!(output, "  {line}");
-                }
-            }
+        // Append streaming content if active.
+        if is_streaming {
+            self.append_streaming_tail(&mut output);
         }
 
         output
+    }
+
+    /// Render the current streaming response / thinking into `output`.
+    /// Always renders fresh — never cached.
+    fn append_streaming_tail(&self, output: &mut String) {
+        let _ = write!(
+            output,
+            "\n  {}\n",
+            self.styles.success_bold.render("Assistant:")
+        );
+
+        // Show thinking if present
+        if self.thinking_visible && !self.current_thinking.is_empty() {
+            let truncated = truncate(&self.current_thinking, 100);
+            let _ = writeln!(
+                output,
+                "  {}",
+                self.styles
+                    .muted_italic
+                    .render(&format!("Thinking: {truncated}"))
+            );
+        }
+
+        // Show response (no markdown rendering while streaming)
+        if !self.current_response.is_empty() {
+            for line in self.current_response.lines() {
+                let _ = writeln!(output, "  {line}");
+            }
+        }
     }
 
     pub(super) fn render_pending_message_queue(&self) -> Option<String> {

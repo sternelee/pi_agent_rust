@@ -607,6 +607,19 @@ pub struct MessageRenderCache {
     /// The generation at which each entry was cached. Stored separately
     /// to avoid duplicating generation in every entry.
     entry_generations: RefCell<Vec<u64>>,
+
+    // -- PERF-2: Conversation prefix cache --
+    // During streaming, only the tail (current_response/current_thinking)
+    // changes. The prefix (all finalized messages) is cached here so
+    // `build_conversation_content()` can skip re-iterating messages.
+
+    /// Cached rendered content of all finalized messages.
+    prefix: RefCell<String>,
+    /// Number of messages included when the prefix was built.
+    prefix_message_count: std::cell::Cell<usize>,
+    /// The render-cache generation at which the prefix was built.
+    /// If the generation has advanced, the prefix is stale.
+    prefix_generation: std::cell::Cell<u64>,
 }
 
 impl MessageRenderCache {
@@ -616,19 +629,29 @@ impl MessageRenderCache {
             entries: RefCell::new(Vec::new()),
             generation: std::cell::Cell::new(0),
             entry_generations: RefCell::new(Vec::new()),
+            prefix: RefCell::new(String::new()),
+            prefix_message_count: std::cell::Cell::new(0),
+            prefix_generation: std::cell::Cell::new(0),
         }
     }
 
-    /// Bump the generation counter, causing all cached entries to be
-    /// considered stale on next lookup. O(1) — does not touch entries.
+    /// Bump the generation counter, causing all cached entries and the
+    /// conversation prefix to be considered stale on next lookup.
+    /// O(1) — does not touch entries or the prefix buffer.
     pub(super) fn invalidate_all(&self) {
         self.generation.set(self.generation.get() + 1);
+        // Prefix staleness is detected by comparing prefix_generation
+        // with the current generation — no explicit flag needed.
     }
 
-    /// Clear all cached entries. Used on `/clear` or conversation reset.
+    /// Clear all cached entries and the prefix. Used on `/clear` or
+    /// conversation reset.
     pub(super) fn clear(&self) {
         self.entries.borrow_mut().clear();
         self.entry_generations.borrow_mut().clear();
+        self.prefix.borrow_mut().clear();
+        self.prefix_message_count.set(0);
+        self.prefix_generation.set(0);
     }
 
     /// Look up the cached rendered string for message at `index`.
@@ -689,6 +712,33 @@ impl MessageRenderCache {
             collapsed: msg.collapsed,
             role: msg.role,
         }
+    }
+
+    // -- PERF-2: Prefix cache accessors --
+
+    /// Returns `true` if the cached prefix is still valid for the given
+    /// message count. The prefix is stale when:
+    /// - The message count changed (messages added/removed)
+    /// - The render-cache generation advanced (theme/resize/toggle)
+    /// - The prefix is empty and there are messages to render
+    pub(super) fn prefix_valid(&self, message_count: usize) -> bool {
+        message_count > 0
+            && self.prefix_message_count.get() == message_count
+            && self.prefix_generation.get() == self.generation.get()
+    }
+
+    /// Return a clone of the cached prefix string.
+    pub(super) fn prefix_get(&self) -> String {
+        self.prefix.borrow().clone()
+    }
+
+    /// Store a new prefix and snapshot the current message count / generation.
+    pub(super) fn prefix_set(&self, content: &str, message_count: usize) {
+        let mut p = self.prefix.borrow_mut();
+        p.clear();
+        p.push_str(content);
+        self.prefix_message_count.set(message_count);
+        self.prefix_generation.set(self.generation.get());
     }
 }
 
