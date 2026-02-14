@@ -531,6 +531,224 @@ impl PiApp {
 
         None
     }
+
+    pub(super) fn handle_slash_reload(&mut self) -> Option<Cmd> {
+        if self.agent_state != AgentState::Idle {
+            self.status_message = Some("Cannot reload while processing".to_string());
+            return None;
+        }
+
+        let config = self.config.clone();
+        let cli = self.resource_cli.clone();
+        let cwd = self.cwd.clone();
+        let event_tx = self.event_tx.clone();
+        let runtime_handle = self.runtime_handle.clone();
+
+        runtime_handle.spawn(async move {
+            let manager = PackageManager::new(cwd.clone());
+            match ResourceLoader::load(&manager, &cwd, &config, &cli).await {
+                Ok(resources) => {
+                    let models_error = match crate::auth::AuthStorage::load_async(Config::auth_path())
+                        .await
+                    {
+                        Ok(auth) => {
+                            let models_path = default_models_path(&Config::global_dir());
+                            let registry = ModelRegistry::load(&auth, Some(models_path));
+                            registry.error().map(ToString::to_string)
+                        }
+                        Err(err) => Some(format!("Failed to load auth.json: {err}")),
+                    };
+
+                    let (diagnostics, diag_count) = build_reload_diagnostics(models_error, &resources);
+
+                    let mut status = format!(
+                        "Reloaded resources: {} skills, {} prompts, {} themes",
+                        resources.skills().len(),
+                        resources.prompts().len(),
+                        resources.themes().len()
+                    );
+                    if diag_count > 0 {
+                        let _ = write!(status, " ({diag_count} diagnostics)");
+                    }
+
+                    let _ = event_tx.try_send(PiMsg::ResourcesReloaded {
+                        resources,
+                        status,
+                        diagnostics,
+                    });
+                }
+                Err(err) => {
+                    let _ = event_tx
+                        .try_send(PiMsg::AgentError(format!("Failed to reload resources: {err}")));
+                }
+            }
+        });
+
+        self.status_message = Some("Reloading resources...".to_string());
+        None
+    }
+
+    pub(super) fn handle_slash_share(&mut self, args: &str) -> Option<Cmd> {
+        if self.agent_state != AgentState::Idle {
+            self.status_message = Some("Cannot share while processing".to_string());
+            return None;
+        }
+
+        let is_public = parse_share_is_public(args);
+
+        self.agent_state = AgentState::Processing;
+        self.status_message = Some("Sharing session... (Esc to cancel)".to_string());
+
+        let (abort_handle, abort_signal) = AbortHandle::new();
+        self.abort_handle = Some(abort_handle);
+
+        let event_tx = self.event_tx.clone();
+        let runtime_handle = self.runtime_handle.clone();
+        let session = Arc::clone(&self.session);
+        let cwd = self.cwd.clone();
+        let gh_path_override = self.config.gh_path.clone();
+
+        runtime_handle.spawn(async move {
+            let gh = gh_path_override
+                .as_ref()
+                .filter(|value| !value.trim().is_empty())
+                .cloned()
+                .unwrap_or_else(|| "gh".to_string());
+
+            let auth_args = vec![OsString::from("auth"), OsString::from("status")];
+            match run_command_output(&gh, &auth_args, &cwd, &abort_signal) {
+                Ok(output) => {
+                    if !output.status.success() {
+                        let details = format_command_output(&output);
+                        let message = format!(
+                            "`gh` is not authenticated.\n\
+                             Run `gh auth login` to authenticate, then retry `/share`.\n\n\
+                             {details}"
+                        );
+                        let _ = event_tx.try_send(PiMsg::AgentError(message));
+                        return;
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    let message = "GitHub CLI `gh` not found.\n\
+                             Install it from https://cli.github.com, then run `gh auth login`."
+                        .to_string();
+                    let _ = event_tx.try_send(PiMsg::AgentError(message));
+                    return;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
+                    let _ = event_tx.try_send(PiMsg::System("Share cancelled".to_string()));
+                    return;
+                }
+                Err(err) => {
+                    let _ = event_tx
+                        .try_send(PiMsg::AgentError(format!("Failed to run `gh auth status`: {err}")));
+                    return;
+                }
+            }
+
+            if abort_signal.is_aborted() {
+                let _ = event_tx.try_send(PiMsg::System("Share cancelled".to_string()));
+                return;
+            }
+
+            let cx = Cx::for_request();
+            let (html, session_name) = match session.lock(&cx).await {
+                Ok(guard) => (guard.to_html(), guard.get_name()),
+                Err(err) => {
+                    let _ = event_tx
+                        .try_send(PiMsg::AgentError(format!("Failed to lock session: {err}")));
+                    return;
+                }
+            };
+
+            if abort_signal.is_aborted() {
+                let _ = event_tx.try_send(PiMsg::System("Share cancelled".to_string()));
+                return;
+            }
+
+            let gist_desc = share_gist_description(session_name.as_deref());
+
+            let temp_file = match tempfile::Builder::new()
+                .prefix("pi-share-")
+                .suffix(".html")
+                .tempfile()
+            {
+                Ok(file) => file,
+                Err(err) => {
+                    let _ = event_tx
+                        .try_send(PiMsg::AgentError(format!("Failed to create temp file: {err}")));
+                    return;
+                }
+            };
+            let temp_path = temp_file.into_temp_path();
+            if let Err(err) = std::fs::write(&temp_path, html.as_bytes()) {
+                let _ = event_tx
+                    .try_send(PiMsg::AgentError(format!("Failed to write temp file: {err}")));
+                return;
+            }
+
+            let gist_args = vec![
+                OsString::from("gist"),
+                OsString::from("create"),
+                OsString::from(format!("--public={is_public}")),
+                OsString::from("--desc"),
+                OsString::from(&gist_desc),
+                temp_path.as_os_str().to_os_string(),
+            ];
+            let output = match run_command_output(&gh, &gist_args, &cwd, &abort_signal) {
+                Ok(output) => output,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    let message = "GitHub CLI `gh` not found.\n\
+                             Install it from https://cli.github.com, then run `gh auth login`."
+                        .to_string();
+                    let _ = event_tx.try_send(PiMsg::AgentError(message));
+                    return;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
+                    let _ = event_tx.try_send(PiMsg::System("Share cancelled".to_string()));
+                    return;
+                }
+                Err(err) => {
+                    let _ = event_tx
+                        .try_send(PiMsg::AgentError(format!("Failed to run `gh gist create`: {err}")));
+                    return;
+                }
+            };
+
+            if !output.status.success() {
+                let details = format_command_output(&output);
+                let _ = event_tx.try_send(PiMsg::AgentError(format!(
+                    "`gh gist create` failed.\n\n{details}"
+                )));
+                return;
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let Some((gist_url, gist_id)) = parse_gist_url_and_id(&stdout) else {
+                let details = format_command_output(&output);
+                let _ = event_tx.try_send(PiMsg::AgentError(format!(
+                    "Failed to parse gist URL from `gh gist create` output.\n\n{details}"
+                )));
+                return;
+            };
+
+            let share_url = crate::session::get_share_viewer_url(&gist_id);
+            drop(temp_path);
+
+            // Copy viewer URL to clipboard (best-effort).
+            #[cfg(feature = "clipboard")]
+            {
+                let _ = ClipboardProvider::new()
+                    .and_then(|mut ctx: ClipboardContext| ctx.set_contents(share_url.clone()));
+            }
+
+            let privacy = if is_public { "public" } else { "private" };
+            let message = format!("Created {privacy} gist\nShare URL: {share_url}\nGist: {gist_url}");
+            let _ = event_tx.try_send(PiMsg::System(message));
+        });
+        None
+    }
 }
 
 #[cfg(test)]
