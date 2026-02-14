@@ -480,8 +480,7 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
                             .collect()
                     })
                     .unwrap_or_default();
-                let mediation =
-                    evaluate_exec_mediation(&self.policy.exec_mediation, cmd, &args);
+                let mediation = evaluate_exec_mediation(&self.policy.exec_mediation, cmd, &args);
                 match &mediation {
                     ExecMediationResult::Deny { class, reason } => {
                         tracing::warn!(
