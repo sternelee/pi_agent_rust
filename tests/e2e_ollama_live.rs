@@ -48,7 +48,7 @@ fn ollama_entry() -> ModelEntry {
             max_tokens: 512,
             headers: HashMap::new(),
         },
-        api_key: None,
+        api_key: Some("ollama-no-key-needed".to_string()),
         headers: HashMap::new(),
         auth_header: false,
         compat: None,

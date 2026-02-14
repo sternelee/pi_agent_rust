@@ -1,0 +1,249 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "pi.qa.evidence_contract.v1",
+  "title": "Evidence Contract",
+  "description": "Audit trail linking test results to artifact locations. Each full e2e run produces one evidence_contract.json that maps suite outcomes to their structured artifacts, enabling post-hoc traceability from CI dashboards to per-suite JSONL logs.",
+  "type": "object",
+  "required": [
+    "schema",
+    "generated_at",
+    "correlation_id",
+    "run_summary",
+    "environment",
+    "suite_evidence",
+    "aggregate_artifacts"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "pi.qa.evidence_contract.v1",
+      "description": "Schema identifier. Must be exactly pi.qa.evidence_contract.v1."
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 timestamp when this evidence contract was generated."
+    },
+    "correlation_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique identifier for this run. In CI, set via CI_CORRELATION_ID env var. Locally, a 32-char hex trace ID."
+    },
+    "run_summary": {
+      "type": "object",
+      "required": ["total_suites", "passed", "failed", "skipped", "elapsed_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "total_suites": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total number of suites executed in this run."
+        },
+        "passed": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of suites that passed."
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of suites that failed."
+        },
+        "skipped": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of suites that were skipped."
+        },
+        "elapsed_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total wall-clock time for the run in milliseconds."
+        }
+      },
+      "description": "Aggregate pass/fail/skip counts for the run."
+    },
+    "environment": {
+      "type": "object",
+      "required": ["profile", "rustc_version", "git_sha", "git_branch", "os"],
+      "additionalProperties": true,
+      "properties": {
+        "profile": {
+          "type": "string",
+          "description": "Build profile used (e.g. debug, release)."
+        },
+        "shard_kind": {
+          "type": "string",
+          "description": "Shard partitioning strategy (e.g. provider, suite)."
+        },
+        "shard_index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Zero-based shard index for this run."
+        },
+        "shard_total": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Total number of shards in this CI job."
+        },
+        "rustc_version": {
+          "type": "string",
+          "description": "Rust compiler version string."
+        },
+        "cargo_target_dir": {
+          "type": "string",
+          "description": "CARGO_TARGET_DIR used for this run."
+        },
+        "vcr_mode": {
+          "type": "string",
+          "enum": ["record", "playback", "disabled"],
+          "description": "VCR mode: record, playback, or disabled."
+        },
+        "git_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{7,40}$",
+          "description": "Git commit SHA (short or full) for the source under test."
+        },
+        "git_branch": {
+          "type": "string",
+          "description": "Git branch name."
+        },
+        "os": {
+          "type": "string",
+          "description": "Operating system identifier (e.g. linux, macos)."
+        }
+      },
+      "description": "Build and runtime environment metadata. Matches replay_bundle.environment fields."
+    },
+    "suite_evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/suite_entry"
+      },
+      "description": "Per-suite evidence entries. One entry per suite executed."
+    },
+    "aggregate_artifacts": {
+      "type": "object",
+      "required": ["summary", "environment"],
+      "additionalProperties": false,
+      "properties": {
+        "summary": {
+          "type": "string",
+          "description": "Path to summary.json (aggregate pass/fail counts, timing)."
+        },
+        "environment": {
+          "type": "string",
+          "description": "Path to environment.json (toolchain, OS, git SHA, VCR mode)."
+        },
+        "replay_bundle": {
+          "type": ["string", "null"],
+          "description": "Path to replay_bundle.json, or null if not generated (clean runs)."
+        }
+      },
+      "description": "Paths to per-run aggregate artifacts."
+    }
+  },
+  "definitions": {
+    "suite_entry": {
+      "type": "object",
+      "required": ["suite_id", "status", "artifacts", "elapsed_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "suite_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Unique identifier for the test suite (e.g. provider name or workflow ID)."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pass", "fail", "skip"],
+          "description": "Suite outcome."
+        },
+        "artifacts": {
+          "$ref": "#/definitions/suite_artifacts"
+        },
+        "trace_id": {
+          "type": "string",
+          "description": "Trace ID linking to JSONL records in test-log.jsonl for this suite."
+        },
+        "elapsed_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Wall-clock time for this suite in milliseconds."
+        },
+        "failure_digest": {
+          "oneOf": [
+            { "$ref": "#/definitions/failure_digest" },
+            { "type": "null" }
+          ],
+          "description": "Failure digest for failed suites. Null or absent for passing suites."
+        }
+      },
+      "description": "Evidence record for a single test suite."
+    },
+    "suite_artifacts": {
+      "type": "object",
+      "required": ["test_log", "artifact_index", "result", "output_log"],
+      "additionalProperties": false,
+      "properties": {
+        "test_log": {
+          "type": ["string", "null"],
+          "description": "Path to test-log.jsonl (pi.test.log.v2 schema)."
+        },
+        "artifact_index": {
+          "type": ["string", "null"],
+          "description": "Path to artifact-index.jsonl (pi.test.artifact.v1 schema)."
+        },
+        "result": {
+          "type": ["string", "null"],
+          "description": "Path to result.json (pass/fail summary with exit code)."
+        },
+        "output_log": {
+          "type": ["string", "null"],
+          "description": "Path to output.log (stdout+stderr capture)."
+        }
+      },
+      "description": "Paths to per-suite required artifacts. Null when artifact was not produced (indicates a gap)."
+    },
+    "failure_digest": {
+      "type": "object",
+      "required": ["schema", "suite", "root_cause_class", "first_failing_assertion"],
+      "additionalProperties": true,
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "pi.e2e.failure_digest.v1",
+          "description": "Schema identifier for failure digests."
+        },
+        "suite": {
+          "type": "string",
+          "description": "Suite that failed."
+        },
+        "root_cause_class": {
+          "type": "string",
+          "enum": ["timeout", "assertion_failure", "permission_denied", "network_io", "missing_file", "panic"],
+          "description": "Classified root cause from the defined taxonomy."
+        },
+        "impacted_scenario_ids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Scenario IDs impacted by this failure."
+        },
+        "first_failing_assertion": {
+          "type": "string",
+          "description": "Text of the first failing assertion or error message."
+        },
+        "remediation_pointer": {
+          "type": "object",
+          "properties": {
+            "replay_command": { "type": "string" },
+            "suite_replay_command": { "type": "string" },
+            "targeted_test_replay_command": { "type": "string" }
+          },
+          "description": "Commands to reproduce and investigate the failure."
+        }
+      },
+      "description": "Structured failure analysis for a failed suite (pi.e2e.failure_digest.v1)."
+    }
+  }
+}
