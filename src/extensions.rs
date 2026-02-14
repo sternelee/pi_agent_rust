@@ -603,9 +603,8 @@ fn collect_js_like_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result
     let mut stack = vec![dir.to_path_buf()];
 
     while let Some(current_dir) = stack.pop() {
-        let entries = match fs::read_dir(&current_dir) {
-            Ok(entries) => entries,
-            Err(_) => continue, // Skip unreadable directories
+        let Ok(entries) = fs::read_dir(&current_dir) else {
+            continue; // Skip unreadable directories
         };
 
         for entry in entries {
