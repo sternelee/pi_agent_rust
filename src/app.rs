@@ -758,6 +758,26 @@ pub fn resolve_model_scope(
 }
 
 fn parse_model_pattern(pattern: &str, available_models: &[ModelEntry]) -> ParsedModelResult {
+    // Try stripping a valid thinking-level suffix FIRST. This prevents
+    // `provider/model:high` from being swallowed by `ad_hoc_model_entry`
+    // which would create a model with id `model:high` instead of `model`.
+    if let Some((prefix, suffix)) = pattern.rsplit_once(':') {
+        if let Some(thinking_level) = parse_thinking_level_opt(suffix) {
+            let result = parse_model_pattern(prefix, available_models);
+            if result.model.is_some() {
+                return ParsedModelResult {
+                    model: result.model,
+                    thinking_level: if result.warning.is_some() {
+                        None
+                    } else {
+                        Some(thinking_level)
+                    },
+                    warning: result.warning,
+                };
+            }
+        }
+    }
+
     if let Some(model) = try_match_model(pattern, available_models) {
         return ParsedModelResult {
             model: Some(model),
@@ -774,22 +794,7 @@ fn parse_model_pattern(pattern: &str, available_models: &[ModelEntry]) -> Parsed
         };
     };
 
-    if let Some(thinking_level) = parse_thinking_level_opt(suffix) {
-        let result = parse_model_pattern(prefix, available_models);
-        if result.model.is_some() {
-            return ParsedModelResult {
-                model: result.model,
-                thinking_level: if result.warning.is_some() {
-                    None
-                } else {
-                    Some(thinking_level)
-                },
-                warning: result.warning,
-            };
-        }
-        return result;
-    }
-
+    // Invalid thinking level suffix — still match the model but warn
     let result = parse_model_pattern(prefix, available_models);
     if result.model.is_some() {
         return ParsedModelResult {
