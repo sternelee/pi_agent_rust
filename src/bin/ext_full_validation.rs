@@ -113,89 +113,112 @@ struct ManifestEntry {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct OnboardingQueueDoc {
+    #[serde(default)]
     all: Vec<OnboardingQueueEntry>,
+    #[serde(default, alias = "top500")]
+    top_500: Vec<OnboardingQueueEntry>,
+    #[serde(default, alias = "top300")]
+    top_300: Vec<OnboardingQueueEntry>,
+    #[serde(default, alias = "top100")]
+    top_100: Vec<OnboardingQueueEntry>,
+}
+
+impl OnboardingQueueDoc {
+    fn into_entries(self) -> Vec<OnboardingQueueEntry> {
+        if !self.all.is_empty() {
+            self.all
+        } else if !self.top_500.is_empty() {
+            self.top_500
+        } else if !self.top_300.is_empty() {
+            self.top_300
+        } else {
+            self.top_100
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct OnboardingQueueEntry {
     id: String,
-    rank: usize,
-    pi_relevant: bool,
-    pi_relevance_score: u32,
+    #[serde(default)]
+    rank: Option<usize>,
+    #[serde(default, alias = "piRelevant")]
+    pi_relevant: Option<bool>,
+    #[serde(default, alias = "piRelevanceScore")]
+    pi_relevance_score: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct ShardReport {
+    #[serde(alias = "manifestCount")]
     manifest_count: usize,
     results: Vec<ShardResult>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct ShardResult {
     id: String,
     tier: u32,
     status: String,
+    #[serde(alias = "failureReason")]
     failure_reason: Option<String>,
+    #[serde(alias = "failureCategory")]
     failure_category: Option<String>,
+    #[serde(alias = "durationMs")]
     duration_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct DossierIndex {
     dossiers: Vec<DossierRecord>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct DossierRecord {
+    #[serde(alias = "extensionId")]
     extension_id: String,
     category: Option<String>,
     reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct AutoRepairSummary {
     total: usize,
     loaded: usize,
+    #[serde(alias = "cleanPass")]
     clean_pass: usize,
+    #[serde(alias = "repairedPass")]
     repaired_pass: usize,
     failed: usize,
     skipped: usize,
+    #[serde(alias = "repairsByPattern")]
     repairs_by_pattern: BTreeMap<String, usize>,
+    #[serde(alias = "perExtension")]
     per_extension: Vec<AutoRepairExtension>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct AutoRepairExtension {
     id: String,
     loaded: bool,
     error: Option<String>,
+    #[serde(alias = "repairEvents")]
     repair_events: Vec<RepairEventRecord>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct RepairEventRecord {
     pattern: String,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct ScenarioSummary {
     counts: ScenarioCounts,
     results: Vec<ScenarioResult>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct ScenarioCounts {
     total: usize,
     pass: usize,
@@ -205,26 +228,31 @@ struct ScenarioCounts {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct ScenarioResult {
+    #[serde(alias = "extensionId")]
     extension_id: String,
     status: String,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct ProviderCompatReport {
+    #[serde(alias = "totalCells")]
     total_cells: usize,
+    #[serde(alias = "passedCells")]
     passed_cells: usize,
+    #[serde(alias = "failedCells")]
     failed_cells: usize,
+    #[serde(alias = "skippedCells")]
     skipped_cells: usize,
+    #[serde(alias = "providerFailures")]
     provider_failures: Vec<ProviderFailure>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct ProviderFailure {
+    #[serde(alias = "extensionId")]
     extension_id: String,
+    #[serde(alias = "providerMode")]
     provider_mode: String,
 }
 
@@ -789,7 +817,7 @@ fn aggregate_report(
 
     let queue_map: HashMap<String, OnboardingQueueEntry> = onboarding
         .map(|doc| {
-            doc.all
+            doc.into_entries()
                 .into_iter()
                 .map(|entry| (entry.id.clone(), entry))
                 .collect()
@@ -833,7 +861,7 @@ fn aggregate_report(
 
     let mut onboarding_hotlist = assessments
         .iter()
-        .filter(|entry| entry.candidate_status == "unvendored")
+        .filter(|entry| entry.candidate_status.eq_ignore_ascii_case("unvendored"))
         .filter(|entry| entry.onboarding_pi_relevant.unwrap_or(false))
         .cloned()
         .collect::<Vec<_>>();
@@ -861,11 +889,15 @@ fn aggregate_report(
 
     let corpus = CorpusSummary {
         total_candidates: pool.items.len(),
-        vendored: pool.items.iter().filter(|i| i.status == "vendored").count(),
+        vendored: pool
+            .items
+            .iter()
+            .filter(|i| i.status.eq_ignore_ascii_case("vendored"))
+            .count(),
         unvendored: pool
             .items
             .iter()
-            .filter(|i| i.status == "unvendored")
+            .filter(|i| i.status.eq_ignore_ascii_case("unvendored"))
             .count(),
         manifest_count: manifest_map.len(),
     };
@@ -993,7 +1025,7 @@ fn classify_item(
         .or_else(|| dossier.and_then(|record| record.reason.clone()))
         .or_else(|| repair.and_then(|entry| entry.error.clone()));
 
-    let classification = if item.status == "unvendored" {
+    let classification = if item.status.eq_ignore_ascii_case("unvendored") {
         classify_unvendored(item, queue)
     } else {
         classify_vendored(
@@ -1031,9 +1063,9 @@ fn classify_item(
         scenario_error,
         provider_failures: provider_failure_count,
         provider_failure_modes,
-        onboarding_rank: queue.map(|entry| entry.rank),
-        onboarding_pi_relevant: queue.map(|entry| entry.pi_relevant),
-        onboarding_pi_relevance_score: queue.map(|entry| entry.pi_relevance_score),
+        onboarding_rank: queue.and_then(|entry| entry.rank),
+        onboarding_pi_relevant: queue.and_then(onboarding_entry_relevant),
+        onboarding_pi_relevance_score: queue.and_then(|entry| entry.pi_relevance_score),
         verdict: classification.verdict,
         confidence: classification.confidence,
         needs_review,
@@ -1071,7 +1103,11 @@ fn classify_unvendored(
         |entry| {
             format!(
                 "Onboarding rank {} (pi_relevant={}).",
-                entry.rank, entry.pi_relevant
+                entry
+                    .rank
+                    .map_or_else(|| "n/a".to_string(), |rank| rank.to_string()),
+                onboarding_entry_relevant(entry)
+                    .map_or_else(|| "n/a".to_string(), |flag| flag.to_string())
             )
         },
     );
@@ -1121,7 +1157,7 @@ fn classify_vendored(
     };
 
     let status = conformance.status.to_ascii_lowercase();
-    if status == "pass" {
+    if status == "pass" || status == "passed" {
         if let Some(repair_entry) = repair {
             let repair_error = repair_entry
                 .error
@@ -1208,7 +1244,7 @@ fn classify_vendored(
         };
     }
 
-    if status == "skip" {
+    if status == "skip" || status == "skipped" {
         return Classification {
             verdict: Verdict::HarnessGap,
             confidence: 0.9,
@@ -1357,9 +1393,10 @@ fn load_sharded_conformance(
     let mut fail = 0usize;
     let mut skip = 0usize;
     for result in result_map.values() {
-        match result.status.as_str() {
-            "pass" => pass += 1,
-            "fail" => fail += 1,
+        let status = result.status.to_ascii_lowercase();
+        match status.as_str() {
+            "pass" | "passed" => pass += 1,
+            "fail" | "failed" => fail += 1,
             _ => skip += 1,
         }
     }
@@ -1453,11 +1490,11 @@ fn load_scenarios(project_root: &Path) -> Result<(Option<ScenarioCounts>, Scenar
         let entry = by_ext
             .entry(result.extension_id.clone())
             .or_insert((0, 0, 0));
-        if result.status == "pass" {
+        if result.status.eq_ignore_ascii_case("pass") {
             entry.0 += 1;
-        } else if result.status == "fail" {
+        } else if result.status.eq_ignore_ascii_case("fail") {
             entry.1 += 1;
-        } else if result.status == "error" {
+        } else if result.status.eq_ignore_ascii_case("error") {
             entry.2 += 1;
         }
     }
@@ -1471,16 +1508,18 @@ fn load_provider_compat(
     let path = project_root
         .join("tests/ext_conformance/reports/provider_compat/provider_compat_report.json");
     let report: Option<ProviderCompatReport> = read_json_optional(&path)?;
-    let Some(report) = report else {
-        return Ok((None, HashMap::new()));
-    };
 
     let mut by_ext: ProviderFailuresByExtension = HashMap::new();
-    for failure in &report.provider_failures {
-        by_ext
-            .entry(failure.extension_id.clone())
-            .or_default()
-            .push(failure.clone());
+    if let Some(report) = &report {
+        for failure in &report.provider_failures {
+            by_ext
+                .entry(failure.extension_id.clone())
+                .or_default()
+                .push(ProviderFailure {
+                    extension_id: failure.extension_id.clone(),
+                    provider_mode: failure.provider_mode.to_ascii_lowercase(),
+                });
+        }
     }
 
     // Augment provider-specific failures from events. We only treat non-default
@@ -1508,7 +1547,7 @@ fn load_provider_compat(
             if mode == "default" && status == "pass" {
                 entry.0 = true;
             } else if mode != "default" && status == "fail" {
-                entry.1.insert(event.provider_mode);
+                entry.1.insert(mode);
             }
         }
 
@@ -1526,21 +1565,26 @@ fn load_provider_compat(
         }
     }
 
-    Ok((
-        Some(ProviderAggregate {
-            total_cells: report.total_cells,
-            passed_cells: report.passed_cells,
-            failed_cells: report.failed_cells,
-            skipped_cells: report.skipped_cells,
-        }),
-        by_ext,
-    ))
+    let aggregate = report.map(|report| ProviderAggregate {
+        total_cells: report.total_cells,
+        passed_cells: report.passed_cells,
+        failed_cells: report.failed_cells,
+        skipped_cells: report.skipped_cells,
+    });
+
+    for failures in by_ext.values_mut() {
+        failures.sort_by(|left, right| left.provider_mode.cmp(&right.provider_mode));
+        failures.dedup_by(|left, right| left.provider_mode == right.provider_mode);
+    }
+
+    Ok((aggregate, by_ext))
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct ProviderCompatEvent {
+    #[serde(alias = "extensionId")]
     extension_id: String,
+    #[serde(alias = "providerMode")]
     provider_mode: String,
     status: String,
 }
@@ -1600,13 +1644,13 @@ fn render_markdown(report: &PipelineReport, out_json: &Path, out_md: &Path) -> S
         let _ = writeln!(
             md,
             "| {} | {} | {} | {} | {} |",
-            stage.name,
+            markdown_table_cell(stage.name.as_str()),
             status,
             stage
                 .exit_code
                 .map_or_else(|| "-".to_string(), |code| code.to_string()),
             stage.duration_ms,
-            stage.notes.as_deref().unwrap_or("-")
+            markdown_table_cell(stage.notes.as_deref().unwrap_or("-"))
         );
     }
     md.push('\n');
@@ -1657,10 +1701,10 @@ fn render_markdown(report: &PipelineReport, out_json: &Path, out_md: &Path) -> S
             let _ = writeln!(
                 md,
                 "| {} | {} | {:.2} | {} |",
-                item.id,
+                markdown_table_cell(item.id.as_str()),
                 verdict_label(item.verdict),
                 item.confidence,
-                item.classification_reason
+                markdown_table_cell(item.classification_reason.as_str())
             );
         }
         md.push('\n');
@@ -1675,12 +1719,12 @@ fn render_markdown(report: &PipelineReport, out_json: &Path, out_md: &Path) -> S
             let _ = writeln!(
                 md,
                 "| {} | {} | {} | {} |",
-                item.id,
+                markdown_table_cell(item.id.as_str()),
                 item.onboarding_rank
                     .map_or_else(|| "-".to_string(), |v| v.to_string()),
                 item.onboarding_pi_relevance_score
                     .map_or_else(|| "-".to_string(), |v| v.to_string()),
-                item.candidate_status
+                markdown_table_cell(item.candidate_status.as_str())
             );
         }
     }
@@ -1706,17 +1750,33 @@ fn lookup_by_id_or_alias<'a, T>(
     })
 }
 
+fn onboarding_entry_relevant(entry: &OnboardingQueueEntry) -> Option<bool> {
+    entry
+        .pi_relevant
+        .or_else(|| entry.pi_relevance_score.map(|score| score > 0))
+}
+
 fn dedup_sorted(mut values: Vec<String>) -> Vec<String> {
     values.sort();
     values.dedup();
     values
 }
 
+fn markdown_table_cell(input: &str) -> String {
+    input
+        .replace('\\', "\\\\")
+        .replace('|', "\\|")
+        .replace('\r', "")
+        .replace('\n', "<br/>")
+}
+
 fn shard_status_rank(status: &str) -> u8 {
-    match status {
-        "fail" => 0,
-        "pass" => 1,
-        _ => 2,
+    if status.eq_ignore_ascii_case("fail") || status.eq_ignore_ascii_case("failed") {
+        0
+    } else if status.eq_ignore_ascii_case("pass") || status.eq_ignore_ascii_case("passed") {
+        1
+    } else {
+        2
     }
 }
 
