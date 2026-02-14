@@ -24,9 +24,10 @@ use crate::connectors::{Connector, http::HttpConnector};
 use crate::error::Result;
 use crate::extensions::EXTENSION_EVENT_TIMEOUT_MS;
 use crate::extensions::{
-    ExtensionBody, ExtensionMessage, ExtensionPolicy, ExtensionSession, ExtensionUiRequest,
-    ExtensionUiResponse, HostCallError, HostCallErrorCode, HostCallPayload, HostResultPayload,
-    HostStreamChunk, PROTOCOL_VERSION, PolicyDecision, PolicyProfile, classify_ui_hostcall_error,
+    DangerousCommandClass, ExecMediationResult, ExtensionBody, ExtensionMessage, ExtensionPolicy,
+    ExtensionSession, ExtensionUiRequest, ExtensionUiResponse, HostCallError, HostCallErrorCode,
+    HostCallPayload, HostResultPayload, HostStreamChunk, PROTOCOL_VERSION, PolicyDecision,
+    PolicyProfile, classify_ui_hostcall_error, evaluate_exec_mediation,
     required_capability_for_host_call_static, ui_response_value_for_op,
 };
 use crate::extensions_js::{HostcallKind, HostcallRequest, PiJsRuntime, js_to_json, json_to_js};
@@ -418,7 +419,7 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
         })
     }
 
-    #[allow(clippy::future_not_send)]
+    #[allow(clippy::future_not_send, clippy::too_many_lines)]
     async fn dispatch_protocol_host_call(&self, payload: &HostCallPayload) -> HostcallOutcome {
         if let Some(cap) = required_capability_for_host_call_static(payload) {
             let check = self.policy.evaluate_for(cap, None);
@@ -467,6 +468,44 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
                         message: "host_call exec requires params.cmd or params.command".to_string(),
                     };
                 };
+
+                // SEC-4.3: Exec mediation — classify and gate dangerous commands.
+                let args: Vec<String> = payload
+                    .params
+                    .get("args")
+                    .and_then(Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(ToString::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mediation =
+                    evaluate_exec_mediation(&self.policy.exec_mediation, cmd, &args);
+                match &mediation {
+                    ExecMediationResult::Deny { class, reason } => {
+                        tracing::warn!(
+                            event = "exec.mediation.deny",
+                            command_class = ?class.map(DangerousCommandClass::label),
+                            reason = %reason,
+                            "Exec command denied by mediation policy"
+                        );
+                        return HostcallOutcome::Error {
+                            code: "denied".to_string(),
+                            message: format!("Exec denied by mediation policy: {reason}"),
+                        };
+                    }
+                    ExecMediationResult::AllowWithAudit { class, reason } => {
+                        tracing::info!(
+                            event = "exec.mediation.audit",
+                            command_class = class.label(),
+                            reason = %reason,
+                            "Exec command allowed with audit"
+                        );
+                    }
+                    ExecMediationResult::Allow => {}
+                }
+
                 self.dispatch_exec(&payload.call_id, cmd, payload.params.clone())
                     .await
             }

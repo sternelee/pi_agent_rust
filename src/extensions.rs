@@ -27360,9 +27360,15 @@ mod tests {
         // Then: clamp01(0.43 + (0.12 * 0.4) + (0.08 * 0.2) + (0.05 * 0.1))
         //     = clamp01(0.43 + 0.048 + 0.016 + 0.005)
         //     = 0.499
-        let step1 = runtime_risk_clamp01(0.65 * 0.5 + 0.35 * 0.3);
+        let step1 = runtime_risk_clamp01(0.65f64.mul_add(0.5, 0.35 * 0.3));
         let step2 = runtime_risk_clamp01(
-            step1 + 0.12 * features.recent_error_rate + 0.08 * features.burst_density_1s + 0.05 * features.prior_failure_streak_norm,
+            0.05f64.mul_add(
+                features.prior_failure_streak_norm,
+                0.08f64.mul_add(
+                    features.burst_density_1s,
+                    0.12f64.mul_add(features.recent_error_rate, step1),
+                ),
+            ),
         );
         assert!((step1 - 0.43).abs() < 1e-10, "step1 weight check");
         assert!((step2 - 0.499).abs() < 1e-10, "step2 weight check");
