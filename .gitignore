@@ -33,15 +33,37 @@ tests/ext_conformance/reports/*
 .codex_space_probe
 .tmp-*/
 .tmp-*
-.tmp_*/
+.tmp_*
 .white_deer_target/
 tmp_*/
+tmp_link
+tmp_probe*
+_tmp-*/
+_tmp_*/
+
+# Per-agent cargo home directories (Codex/concurrent agents)
+.cargo-home*/
 
 # Per-agent cargo target directories
+.cargo-target*/
 .target-*/
 .target_*/
 _target_*/
 _target-*/
+
+# Benchmark result directories
+.bench*/
+
+# Fuzz build artifacts and corpus data
+fuzz/corpus/
+fuzz/target/
+
+# Proptest regression artifacts
+proptest-regressions/
+
+# Recovery backup files (from crash recovery)
+*.root_full_recovery
+*.empty_recovery
 
 # Session export snapshots
 pi-session-*.html
