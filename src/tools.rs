@@ -20,7 +20,7 @@ use std::fmt::Write as _;
 use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{mpsc, OnceLock};
+use std::sync::{OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -3374,12 +3374,14 @@ fn pump_stream<R: Read + Send + 'static>(mut reader: R, tx: &mpsc::SyncSender<Ve
     let mut buf = vec![0u8; 8192];
     loop {
         match reader.read(&mut buf) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break,
             Ok(n) => {
                 if tx.send(buf[..n].to_vec()).is_err() {
                     break;
                 }
             }
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
         }
     }
 }
@@ -3421,10 +3423,7 @@ impl BashOutputState {
     }
 }
 
-async fn ingest_bash_chunk(
-    chunk: &[u8],
-    state: &mut BashOutputState,
-) -> Result<()> {
+async fn ingest_bash_chunk(chunk: &[u8], state: &mut BashOutputState) -> Result<()> {
     state.total_bytes = state.total_bytes.saturating_add(chunk.len());
     state.line_count = state
         .line_count
@@ -3437,6 +3436,15 @@ async fn ingest_bash_chunk(
         let mut file = asupersync::fs::File::create(&path)
             .await
             .map_err(|e| Error::tool("bash", e.to_string()))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let permissions = std::fs::Permissions::from_mode(0o600);
+            file.set_permissions(permissions).await.map_err(|e| {
+                Error::tool("bash", format!("Failed to set temp file permissions: {e}"))
+            })?;
+        }
 
         // Write buffered chunks to file first so it contains output from the beginning.
         for existing in &state.chunks {
@@ -4246,11 +4254,11 @@ mod tests {
                 .await
                 .unwrap();
             assert!(!out.is_error);
-            
+
             let meta = std::fs::metadata(&path).unwrap();
             let mode = meta.permissions().mode();
             // Check for rw-r--r-- (0o644)
-            // Note: umask might affect this, but 0o644 is the target baseline. 
+            // Note: umask might affect this, but 0o644 is the target baseline.
             // Often umask is 0o022, resulting in 0o644.
             // If umask is 0o077, it would be 0o600.
             // However, the key fix was changing from tempfile's default 0o600 to 0o644 (subject to umask).
@@ -4258,8 +4266,8 @@ mod tests {
             // Better: we explicitly set 0o644 in the code.
             // If we run this where umask is 0, we expect 0o644.
             // We can just check that group/other read bits are set if umask permits.
-            // But we don't know umask. 
-            // The fix was: 
+            // But we don't know umask.
+            // The fix was:
             // temp_file.as_file().set_permissions(std::fs::Permissions::from_mode(0o644));
             // This sets the mode on the file descriptor, ignoring umask? No, set_permissions usually ignores umask.
             // Let's assert it is exactly 0o644.

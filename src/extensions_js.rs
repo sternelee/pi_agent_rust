@@ -11712,18 +11712,19 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
 
                             #[cfg(target_os = "linux")]
                             {
-                                use std::os::fd::AsRawFd;
                                 use std::io::Read;
+                                use std::os::fd::AsRawFd;
 
                                 // Open first to get a handle, then verify the handle's path.
                                 // This prevents TOCTOU attacks where the path is swapped
                                 // between check and read.
-                                let mut file = std::fs::File::open(&requested_abs).map_err(|err| {
-                                    rquickjs::Error::new_loading_message(
-                                        &path,
-                                        format!("host read open: {err}"),
-                                    )
-                                })?;
+                                let mut file =
+                                    std::fs::File::open(&requested_abs).map_err(|err| {
+                                        rquickjs::Error::new_loading_message(
+                                            &path,
+                                            format!("host read open: {err}"),
+                                        )
+                                    })?;
 
                                 let secure_path_buf = std::fs::read_link(format!(
                                     "/proc/self/fd/{}",
@@ -11738,18 +11739,16 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                                 let secure_path =
                                     crate::extensions::strip_unc_prefix(secure_path_buf);
 
-                                let in_ext_root =
-                                    allowed_read_roots.lock().is_ok_and(|roots| {
-                                        roots.iter().any(|root| secure_path.starts_with(root))
-                                    });
+                                let in_ext_root = allowed_read_roots.lock().is_ok_and(|roots| {
+                                    roots.iter().any(|root| secure_path.starts_with(root))
+                                });
                                 let allowed =
                                     secure_path.starts_with(&workspace_root) || in_ext_root;
 
                                 if !allowed {
                                     return Err(rquickjs::Error::new_loading_message(
                                         &path,
-                                        "host read denied: path outside extension root"
-                                            .to_string(),
+                                        "host read denied: path outside extension root".to_string(),
                                     ));
                                 }
 
@@ -11760,7 +11759,7 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                                         format!("host read content: {err}"),
                                     )
                                 })?;
-                                return Ok(content);
+                                Ok(content)
                             }
 
                             #[cfg(not(target_os = "linux"))]
@@ -11783,12 +11782,15 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                                                     std::fs::canonicalize(ancestor)
                                                         .map(crate::extensions::strip_unc_prefix)
                                                 {
-                                                    if canonical_ancestor.starts_with(&workspace_root) {
+                                                    if canonical_ancestor
+                                                        .starts_with(&workspace_root)
+                                                    {
                                                         return Ok(requested_abs.clone());
                                                     }
                                                     if let Ok(roots) = allowed_read_roots.lock() {
                                                         for root in roots.iter() {
-                                                            if canonical_ancestor.starts_with(root) {
+                                                            if canonical_ancestor.starts_with(root)
+                                                            {
                                                                 return Ok(requested_abs.clone());
                                                             }
                                                         }
@@ -11811,7 +11813,8 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                                 let in_ext_root = allowed_read_roots.lock().is_ok_and(|roots| {
                                     roots.iter().any(|root| checked_path.starts_with(root))
                                 });
-                                let allowed = checked_path.starts_with(&workspace_root) || in_ext_root;
+                                let allowed =
+                                    checked_path.starts_with(&workspace_root) || in_ext_root;
                                 if !allowed {
                                     return Err(rquickjs::Error::new_loading_message(
                                         &path,
@@ -11867,7 +11870,9 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                                                     "ENOENT: {}",
                                                     checked_path.display()
                                                 ),
-                                                repair_action: format!("returned empty {ext} fallback"),
+                                                repair_action: format!(
+                                                    "returned empty {ext} fallback"
+                                                ),
                                                 success: true,
                                                 timestamp_ms: 0,
                                             });

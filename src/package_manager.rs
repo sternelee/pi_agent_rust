@@ -2206,11 +2206,14 @@ fn parse_git_source(spec: &str, cwd: &Path) -> ParsedSource {
             .trim_end_matches(".git")
             .to_string();
 
-        let mut segments = normalized.split('/').collect::<Vec<_>>();
+        let segments = normalized
+            .split('/')
+            .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+            .collect::<Vec<_>>();
+
         let host = segments.first().copied().unwrap_or("").to_string();
         let path = if segments.len() >= 2 {
-            segments.remove(0);
-            segments.join("/")
+            segments[1..].join("/")
         } else {
             String::new()
         };
@@ -4307,5 +4310,40 @@ mod tests {
         let cwd = Path::new("/home/user/project");
         let result = local_path_from_spec("./my-repo", cwd);
         assert_eq!(result, PathBuf::from("/home/user/project/my-repo"));
+    }
+
+    #[test]
+    fn parse_git_source_sanitizes_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Case 1: Traversal in host/path
+        match parse_git_source("git:../../evil/repo", dir.path()) {
+            ParsedSource::Git { host, path, .. } => {
+                // Should strip .. and result in empty host/path or sanitized versions
+                // "evil/repo" -> host="evil", path="repo"
+                assert_eq!(host, "evil");
+                assert_eq!(path, "repo");
+            }
+            other => panic!("expected Git, got {other:?}"),
+        }
+
+        // Case 2: Traversal in middle
+        match parse_git_source("git:github.com/../../user/repo", dir.path()) {
+            ParsedSource::Git { host, path, .. } => {
+                // "github.com/../../user/repo" -> "github.com/user/repo"
+                assert_eq!(host, "github.com");
+                assert_eq!(path, "user/repo");
+            }
+            other => panic!("expected Git, got {other:?}"),
+        }
+
+        // Case 3: Just dots
+        match parse_git_source("git:..", dir.path()) {
+            ParsedSource::Git { host, path, .. } => {
+                assert_eq!(host, "");
+                assert_eq!(path, "");
+            }
+            other => panic!("expected Git, got {other:?}"),
+        }
     }
 }

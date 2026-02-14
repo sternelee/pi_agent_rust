@@ -776,10 +776,17 @@ fn extract_import_specifiers_simple(line: &str) -> Vec<String> {
     let mut specs = Vec::new();
     let trimmed = line.trim();
 
-    // import ... from "spec" / import ... from 'spec'
+    // import ... from "spec" / import ... from 'spec' / import "spec"
     if trimmed.starts_with("import ") || trimmed.starts_with("export ") {
         if let Some(from_idx) = trimmed.find(" from ") {
             let rest = &trimmed[from_idx + 6..];
+            if let Some(spec) = extract_quoted_string(rest) {
+                if !spec.starts_with('.') && !spec.starts_with('/') {
+                    specs.push(spec);
+                }
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("import ") {
+            // Check for side-effect import: import "spec"
             if let Some(spec) = extract_quoted_string(rest) {
                 if !spec.starts_with('.') && !spec.starts_with('/') {
                     specs.push(spec);

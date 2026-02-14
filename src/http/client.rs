@@ -19,7 +19,7 @@ use futures::stream::{self, BoxStream};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-const DEFAULT_USER_AGENT: &str = "pi_agent_rust/0.1";
+const DEFAULT_USER_AGENT: &str = concat!("pi_agent_rust/", env!("CARGO_PKG_VERSION"));
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const READ_CHUNK_BYTES: usize = 16 * 1024;
 const MAX_BUFFERED_BYTES: usize = 256 * 1024;
@@ -313,7 +313,10 @@ impl Response {
             .await
             .map_err(Error::from)?;
 
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+        match String::from_utf8(bytes) {
+            Ok(s) => Ok(s),
+            Err(e) => Ok(String::from_utf8_lossy(e.as_bytes()).into_owned()),
+        }
     }
 }
 

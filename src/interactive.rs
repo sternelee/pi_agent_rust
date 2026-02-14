@@ -1972,7 +1972,7 @@ impl PiApp {
                     key.runes = vec![' '];
 
                     let result = BubbleteaModel::update(&mut self.input, Message::new(key));
-                    
+
                     if self.input.height() != old_height {
                         self.refresh_conversation_viewport(self.follow_stream_tail);
                     }

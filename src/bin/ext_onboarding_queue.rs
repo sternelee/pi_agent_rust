@@ -348,8 +348,8 @@ fn assign_repo_rank(drafts: &mut [QueueDraft]) {
 fn recompute_debiased_scores(drafts: &mut [QueueDraft]) {
     for draft in drafts.iter_mut() {
         let repo_count = draft.entry.repo_candidate_count as f64;
-        let rank_exponent = i32::try_from(draft.entry.repo_rank.saturating_sub(1))
-            .unwrap_or(i32::MAX);
+        let rank_exponent =
+            i32::try_from(draft.entry.repo_rank.saturating_sub(1)).unwrap_or(i32::MAX);
         let rank_penalty = 0.85_f64.powi(rank_exponent);
         let multiplicity_penalty = 1.0 / (1.0 + repo_count.ln());
         let relevance_multiplier = if draft.entry.pi_relevant { 1.0 } else { 0.45 };

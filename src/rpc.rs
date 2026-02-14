@@ -195,7 +195,12 @@ struct RpcUiBridgeState {
     queue: VecDeque<ExtensionUiRequest>,
 }
 
-pub async fn run_stdio(session: AgentSession, options: RpcOptions) -> Result<()> {
+pub async fn run_stdio(mut session: AgentSession, options: RpcOptions) -> Result<()> {
+    session.agent.set_queue_modes(
+        options.config.steering_queue_mode(),
+        options.config.follow_up_queue_mode(),
+    );
+
     let (in_tx, in_rx) = mpsc::channel::<String>(1024);
     let (out_tx, out_rx) = std::sync::mpsc::channel::<String>();
 
