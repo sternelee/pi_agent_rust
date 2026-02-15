@@ -33,6 +33,7 @@ REQUIRE_PREFLIGHT="${RELEASE_GATE_REQUIRE_PREFLIGHT:-0}"
 REQUIRE_QUALITY="${RELEASE_GATE_REQUIRE_QUALITY:-0}"
 EVIDENCE_DIR=""
 REPORT_JSON=0
+EVIDENCE_DIR_SELECTION_DETAIL=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -46,11 +47,44 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Auto-detect latest evidence directory if not specified.
+# Auto-detect latest complete evidence directory if not specified.
 if [[ -z "$EVIDENCE_DIR" ]]; then
     E2E_RESULTS="$PROJECT_ROOT/tests/e2e_results"
     if [[ -d "$E2E_RESULTS" ]]; then
-        EVIDENCE_DIR=$(ls -d "$E2E_RESULTS"/*/ 2>/dev/null | sort | tail -1)
+        # "Complete" currently means the run produced the required gate artifact(s).
+        # Add additional required files here as the evidence contract evolves.
+        required_artifacts=("evidence_contract.json")
+        skipped_count=0
+        declare -a skipped_examples=()
+
+        while IFS= read -r candidate; do
+            [[ -z "$candidate" ]] && continue
+
+            missing_artifacts=()
+            for artifact in "${required_artifacts[@]}"; do
+                if [[ ! -f "$candidate/$artifact" ]]; then
+                    missing_artifacts+=("$artifact")
+                fi
+            done
+
+            if [[ ${#missing_artifacts[@]} -eq 0 ]]; then
+                EVIDENCE_DIR="$candidate"
+                if [[ "$skipped_count" -gt 0 ]]; then
+                    EVIDENCE_DIR_SELECTION_DETAIL="Selected ${candidate#$PROJECT_ROOT/} after skipping $skipped_count incomplete newer run(s): ${skipped_examples[*]}"
+                fi
+                break
+            fi
+
+            skipped_count=$((skipped_count + 1))
+            if [[ ${#skipped_examples[@]} -lt 3 ]]; then
+                missing_csv="$(IFS=,; echo "${missing_artifacts[*]}")"
+                skipped_examples+=("${candidate#$PROJECT_ROOT/} (missing: $missing_csv)")
+            fi
+        done < <(find "$E2E_RESULTS" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -r)
+
+        if [[ -z "$EVIDENCE_DIR" ]] && [[ "$skipped_count" -gt 0 ]]; then
+            EVIDENCE_DIR_SELECTION_DETAIL="No complete evidence bundle found under tests/e2e_results; skipped $skipped_count incomplete run(s): ${skipped_examples[*]}"
+        fi
     fi
 fi
 
@@ -93,9 +127,18 @@ check_warn() {
 
 # ─── Gate checks ────────────────────────────────────────────────────────────
 
+# Emit evidence-directory selection diagnostics before gate checks.
+if [[ -n "$EVIDENCE_DIR_SELECTION_DETAIL" ]]; then
+    check_warn "evidence_dir_selection" "$EVIDENCE_DIR_SELECTION_DETAIL"
+fi
+
 # Gate 1: Evidence directory exists
 if [[ -z "$EVIDENCE_DIR" ]] || [[ ! -d "$EVIDENCE_DIR" ]]; then
-    check_fail "evidence_dir" "No evidence directory found"
+    if [[ -n "$EVIDENCE_DIR_SELECTION_DETAIL" ]]; then
+        check_fail "evidence_dir" "No evidence directory found. $EVIDENCE_DIR_SELECTION_DETAIL"
+    else
+        check_fail "evidence_dir" "No evidence directory found"
+    fi
 else
     check_pass "evidence_dir" "Found: $EVIDENCE_DIR"
 fi
@@ -190,7 +233,7 @@ else
 fi
 
 # Gate 7: Clippy lint
-if cargo clippy --lib -- -D warnings --quiet 2>/dev/null; then
+if cargo clippy --lib --quiet -- -D warnings 2>/dev/null; then
     check_pass "clippy" "No clippy warnings"
 else
     check_fail "clippy" "Clippy has warnings"
@@ -300,7 +343,10 @@ from pathlib import Path
 project_root = Path("$PROJECT_ROOT")
 contract_path = Path("$DROPIN_CONTRACT")
 verdict_path = Path("$DROPIN_VERDICT")
-strict_required = os.environ.get("REQUIRE_DROPIN_CERTIFIED", "0") == "1"
+# IMPORTANT: this must track the shell-resolved gate toggle derived from
+# RELEASE_GATE_REQUIRE_DROPIN_CERTIFIED. Reading an unrelated env var here
+# can silently disable strict drop-in enforcement.
+strict_required = "$REQUIRE_DROPIN_CERTIFIED" == "1"
 
 if not contract_path.is_file():
     print("fail|contract missing; cannot validate verdict")
