@@ -66,6 +66,42 @@ for t in \
   done
 ```
 
+## Phase 1 Validation Suite (`bd-26ecm`)
+
+Use the P1 validator to run the curated Phase 1 proptest matrix and emit a
+structured summary report with per-function status, timing, and case counts.
+
+```bash
+# Default: require >=2000 aggregate generated cases
+./scripts/validate_fuzz_p1.sh
+
+# Raise the aggregate case threshold
+./scripts/validate_fuzz_p1.sh --min-cases=2500
+```
+
+`validate_fuzz_p1.sh` uses `rch exec --` automatically when available.
+
+```bash
+# Require remote execution
+./scripts/validate_fuzz_p1.sh --require-rch
+
+# Force local execution
+./scripts/validate_fuzz_p1.sh --no-rch
+```
+
+Report files are written to `fuzz/reports/`:
+- `p1_validation_*.json` final summary report
+- `p1_validation_*.jsonl` per-test machine-readable event stream
+- `p1_validation_*.log` suite-level execution log
+
+The JSON summary includes:
+- total proptest functions executed
+- total aggregate generated cases and threshold verification
+- per-function pass/fail status, time, configured/recorded case count, log path
+- overall pass/fail summary suitable for CI consumption
+
+The terminal output prints colored `PASS`/`FAIL` indicators for quick human review.
+
 ## Phase 2 Validation Suite (`bd-1uny7`)
 
 Use the dedicated validation runner to build all harnesses, run each for a bounded smoke duration,
