@@ -9,8 +9,9 @@ rustc-ice-*.txt
 # bv (beads viewer) local config and caches
 .bv/
 
-# br local history backups
+# br local history backups and quarantine
 .beads/.br_history/
+.beads/.br_history_quarantine/
 
 # local Pi agent config (may contain API keys)
 .pi/
@@ -54,9 +55,10 @@ _target-*/
 # Benchmark result directories
 .bench*/
 
-# Fuzz build artifacts and corpus data
+# Fuzz build artifacts, corpus data, and run reports
 fuzz/corpus/
 fuzz/target/
+fuzz/reports/
 
 # Proptest regression artifacts
 proptest-regressions/
@@ -78,3 +80,6 @@ tests/e2e_results/
 # Python bytecode caches
 __pycache__/
 *.pyc
+
+# Ephemeral agent progress trackers
+claude-upgrade-progress.json
