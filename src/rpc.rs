@@ -35,6 +35,7 @@ use asupersync::channel::{mpsc, oneshot};
 use asupersync::runtime::RuntimeHandle;
 use asupersync::sync::Mutex;
 use asupersync::time::{sleep, wall_now};
+use memchr::memchr_iter;
 use serde_json::{Value, json};
 use std::collections::{HashSet, VecDeque};
 use std::io::{self, BufRead, Write};
@@ -3107,29 +3108,32 @@ async fn run_bash_rpc(
     let mut combined = stdout_bytes;
     combined.extend_from_slice(&stderr_bytes);
     let full_output = String::from_utf8_lossy(&combined).to_string();
-    let truncation = truncate_tail(&full_output, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
-    let truncated = truncation.truncated;
 
-    let (output_text, full_output_path) = if truncated {
+    // Write the full output to a temp file before truncation consumes the
+    // string, but only when truncation will actually be needed.
+    let total_lines = memchr_iter(b'\n', full_output.as_bytes()).count() + 1;
+    let will_truncate = total_lines > DEFAULT_MAX_LINES || full_output.len() > DEFAULT_MAX_BYTES;
+    let full_output_path = if will_truncate {
         let id = uuid::Uuid::new_v4().simple().to_string();
         let path = std::env::temp_dir().join(format!("pi-rpc-bash-{id}.log"));
-        asupersync::fs::write(&path, &full_output).await?;
-        (truncation.content, Some(path.display().to_string()))
+        asupersync::fs::write(&path, full_output.as_bytes()).await?;
+        Some(path.display().to_string())
     } else {
-        (truncation.content, None)
+        None
     };
 
-    let output_text = if output_text.is_empty() {
+    let truncation = truncate_tail(full_output, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
+    let output_text = if truncation.content.is_empty() {
         "(no output)".to_string()
     } else {
-        output_text
+        truncation.content
     };
 
     Ok(BashRpcResult {
         output: output_text,
         exit_code,
         cancelled,
-        truncated,
+        truncated: will_truncate,
         full_output_path,
     })
 }

@@ -12,26 +12,23 @@ pub(super) fn clamp_to_terminal_height(mut output: String, term_height: usize) -
     }
     let max_newlines = term_height.saturating_sub(1);
 
-    // Fast path: count newlines and bail if we fit.
-    let newline_count = memchr::memchr_iter(b'\n', output.as_bytes()).count();
-    if newline_count <= max_newlines {
-        return output;
+    // Single-pass: use memchr to jump directly to each newline position.
+    // Finds the (max_newlines+1)-th newline and truncates there, or returns
+    // early if the output has fewer newlines than the limit.
+    let bytes = output.as_bytes();
+    let mut pos = 0;
+    for _ in 0..max_newlines {
+        match memchr::memchr(b'\n', &bytes[pos..]) {
+            Some(offset) => pos += offset + 1,
+            None => return output, // Fewer newlines than limit — fits.
+        }
     }
-
-    // Truncate: keep only the first `max_newlines` newlines.
-    let mut seen = 0usize;
-    let cut = output
-        .bytes()
-        .position(|b| {
-            if b == b'\n' {
-                seen += 1;
-                seen > max_newlines
-            } else {
-                false
-            }
-        })
-        .unwrap_or(output.len());
-    output.truncate(cut);
+    // `pos` is now past the max_newlines-th newline.  If there's another
+    // newline at or after `pos`, the output exceeds the limit — truncate
+    // just before that next newline.
+    if let Some(offset) = memchr::memchr(b'\n', &bytes[pos..]) {
+        output.truncate(pos + offset);
+    }
     output
 }
 
@@ -132,19 +129,32 @@ impl PiApp {
                 Cow::Borrowed(&conversation_content)
             };
 
-            let conversation_lines: Vec<&str> = viewport_content.lines().collect();
+            // PERF: Count total lines with memchr (O(n) byte scan, no alloc)
+            // instead of collecting all lines into a Vec.  For a 10K-line
+            // conversation this avoids a ~80KB Vec<&str> allocation per frame.
+            let total_lines = memchr::memchr_iter(b'\n', viewport_content.as_bytes()).count() + 1;
             let start = self
                 .conversation_viewport
                 .y_offset()
-                .min(conversation_lines.len().saturating_sub(1));
-            let end = (start + effective_vp).min(conversation_lines.len());
-            let visible_lines = conversation_lines.get(start..end).unwrap_or(&[]);
-            output.push_str(&visible_lines.join("\n"));
+                .min(total_lines.saturating_sub(1));
+            let end = (start + effective_vp).min(total_lines);
+
+            // Skip `start` lines, then take `end - start` lines — no Vec
+            // allocation needed.
+            let mut first = true;
+            for line in viewport_content.lines().skip(start).take(end - start) {
+                if first {
+                    first = false;
+                } else {
+                    output.push('\n');
+                }
+                output.push_str(line);
+            }
             output.push('\n');
 
             // Scroll indicator
-            if conversation_lines.len() > effective_vp {
-                let total = conversation_lines.len().saturating_sub(effective_vp);
+            if total_lines > effective_vp {
+                let total = total_lines.saturating_sub(effective_vp);
                 let percent = (start * 100).checked_div(total).map_or(100, |p| p.min(100));
                 let indicator = format!("  [{percent}%] ↑/↓ PgUp/PgDn to scroll");
                 output.push_str(&self.styles.muted.render(&indicator));
@@ -614,8 +624,10 @@ impl PiApp {
                 continue;
             }
             let rendered = self.render_single_message(msg);
-            self.message_render_cache.put(index, key, rendered.clone());
+            // PERF: push_str first, then move into cache — avoids cloning
+            // the rendered String (which can be several KB for tool output).
             output.push_str(&rendered);
+            self.message_render_cache.put(index, key, rendered);
         }
 
         // Snapshot the prefix for future streaming frames (PERF-2).
