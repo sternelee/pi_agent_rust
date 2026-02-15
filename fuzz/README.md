@@ -66,6 +66,38 @@ for t in \
   done
 ```
 
+## Phase 2 Validation Suite (`bd-1uny7`)
+
+Use the dedicated validation runner to build all harnesses, run each for a bounded smoke duration,
+and emit a structured JSON report.
+
+```bash
+# Default: 60s per target
+./scripts/validate_fuzz_p2.sh
+
+# Faster local smoke while iterating
+./scripts/validate_fuzz_p2.sh --time=15
+
+# Limit to specific targets
+./scripts/validate_fuzz_p2.sh --target=fuzz_sse_parser --target=fuzz_tool_paths --time=30
+```
+
+`validate_fuzz_p2.sh` runs `cargo fuzz` commands through `rch exec --` automatically when `rch`
+is available. Override behavior explicitly when needed:
+
+```bash
+# Require remote execution and fail if rch is unavailable
+./scripts/validate_fuzz_p2.sh --require-rch
+
+# Force local execution
+./scripts/validate_fuzz_p2.sh --no-rch
+```
+
+Report files are written to `fuzz/reports/p2_validation_*.json` and include:
+- build status/exit code/time and build log path
+- per-target status (`pass`/`fail`/`crashed`), exit code, duration, corpus growth, artifact growth
+- summary counters for pass/fail/crash totals and aggregate timings
+
 ## Seed Corpus Management
 
 General rule: each corpus should contain diverse valid inputs plus known edge/failure shapes.

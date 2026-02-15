@@ -13,6 +13,7 @@ mod common;
 
 use common::TestHarness;
 use pi::agent::AgentEvent;
+use pi::extensions::ExtensionUiRequest;
 use pi::model::{
     AssistantMessage, AssistantMessageEvent, ContentBlock, Message, StopReason, TextContent,
     ToolCall, Usage,
@@ -1155,4 +1156,590 @@ fn json_parity_all_event_type_strings() {
         .info_ctx("json_parity", "all event type strings ok", |ctx| {
             ctx.push(("variants".to_string(), cases.len().to_string()));
         });
+}
+
+// ============================================================================
+// Extension UI Request Parity (DROPIN-124: bd-359pl)
+//
+// Validates that `ExtensionUiRequest::to_rpc_event()` produces JSON events
+// matching the TypeScript `RpcExtensionUIRequest` schema from pi-mono.
+// Reference: legacy_pi_mono_code/.../rpc-types.ts lines 207-247.
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// 1. Select method — dialog, expects response
+// ---------------------------------------------------------------------------
+
+#[test]
+fn json_parity_extension_ui_select_schema() {
+    let harness = TestHarness::new("json_parity_extension_ui_select_schema");
+    let req = ExtensionUiRequest::new(
+        "sel-1",
+        "select",
+        json!({"title": "Pick a tool", "options": ["read", "write", "bash"]}),
+    );
+    let event = req.to_rpc_event();
+
+    assert_eq!(event["type"], "extension_ui_request");
+    assert_eq!(event["id"], "sel-1");
+    assert_eq!(event["method"], "select");
+    assert_eq!(event["title"], "Pick a tool");
+    assert_eq!(event["options"], json!(["read", "write", "bash"]));
+    // Payload fields are flattened — no nested "payload" key.
+    assert!(event.get("payload").is_none(), "payload must be flattened");
+
+    harness.log().info_ctx(
+        "json_parity",
+        "extension_ui select schema ok",
+        |ctx| ctx.push(("method".to_string(), "select".to_string())),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 2. Confirm method — dialog, expects response
+// ---------------------------------------------------------------------------
+
+#[test]
+fn json_parity_extension_ui_confirm_schema() {
+    let harness = TestHarness::new("json_parity_extension_ui_confirm_schema");
+    let req = ExtensionUiRequest::new(
+        "cfm-1",
+        "confirm",
+        json!({"title": "Allow exec?", "message": "Extension wants to run commands"}),
+    );
+    let event = req.to_rpc_event();
+
+    assert_eq!(event["type"], "extension_ui_request");
+    assert_eq!(event["id"], "cfm-1");
+    assert_eq!(event["method"], "confirm");
+    assert_eq!(event["title"], "Allow exec?");
+    assert_eq!(event["message"], "Extension wants to run commands");
+
+    harness.log().info_ctx(
+        "json_parity",
+        "extension_ui confirm schema ok",
+        |ctx| ctx.push(("method".to_string(), "confirm".to_string())),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 3. Input method — dialog, expects response
+// ---------------------------------------------------------------------------
+
+#[test]
+fn json_parity_extension_ui_input_schema() {
+    let harness = TestHarness::new("json_parity_extension_ui_input_schema");
+    let req = ExtensionUiRequest::new(
+        "inp-1",
+        "input",
+        json!({"title": "API Key", "placeholder": "sk-ant-..."}),
+    );
+    let event = req.to_rpc_event();
+
+    assert_eq!(event["type"], "extension_ui_request");
+    assert_eq!(event["id"], "inp-1");
+    assert_eq!(event["method"], "input");
+    assert_eq!(event["title"], "API Key");
+    assert_eq!(event["placeholder"], "sk-ant-...");
+
+    harness.log().info_ctx(
+        "json_parity",
+        "extension_ui input schema ok",
+        |ctx| ctx.push(("method".to_string(), "input".to_string())),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 4. Editor method — dialog, expects response
+// ---------------------------------------------------------------------------
+
+#[test]
+fn json_parity_extension_ui_editor_schema() {
+    let harness = TestHarness::new("json_parity_extension_ui_editor_schema");
+    let req = ExtensionUiRequest::new(
+        "edt-1",
+        "editor",
+        json!({"title": "Edit prompt", "prefill": "Hello, world!"}),
+    );
+    let event = req.to_rpc_event();
+
+    assert_eq!(event["type"], "extension_ui_request");
+    assert_eq!(event["id"], "edt-1");
+    assert_eq!(event["method"], "editor");
+    assert_eq!(event["title"], "Edit prompt");
+    assert_eq!(event["prefill"], "Hello, world!");
+
+    harness.log().info_ctx(
+        "json_parity",
+        "extension_ui editor schema ok",
+        |ctx| ctx.push(("method".to_string(), "editor".to_string())),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 5. Notify method — fire-and-forget
+// ---------------------------------------------------------------------------
+
+#[test]
+fn json_parity_extension_ui_notify_schema() {
+    let harness = TestHarness::new("json_parity_extension_ui_notify_schema");
+    let req = ExtensionUiRequest::new(
+        "ntf-1",
+        "notify",
+        json!({"message": "Build complete", "notifyType": "info"}),
+    );
+    let event = req.to_rpc_event();
+
+    assert_eq!(event["type"], "extension_ui_request");
+    assert_eq!(event["id"], "ntf-1");
+    assert_eq!(event["method"], "notify");
+    assert_eq!(event["message"], "Build complete");
+    assert_eq!(event["notifyType"], "info");
+
+    // Also test warning and error notify types.
+    let req_warn = ExtensionUiRequest::new(
+        "ntf-2",
+        "notify",
+        json!({"message": "Deprecation", "notifyType": "warning"}),
+    );
+    assert_eq!(req_warn.to_rpc_event()["notifyType"], "warning");
+
+    let req_err = ExtensionUiRequest::new(
+        "ntf-3",
+        "notify",
+        json!({"message": "Failed", "notifyType": "error"}),
+    );
+    assert_eq!(req_err.to_rpc_event()["notifyType"], "error");
+
+    harness.log().info_ctx(
+        "json_parity",
+        "extension_ui notify schema ok",
+        |ctx| ctx.push(("variants".to_string(), "3".to_string())),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 6. setStatus method — fire-and-forget
+// ---------------------------------------------------------------------------
+
+#[test]
+fn json_parity_extension_ui_set_status_schema() {
+    let harness = TestHarness::new("json_parity_extension_ui_set_status_schema");
+    let req = ExtensionUiRequest::new(
+        "sts-1",
+        "setStatus",
+        json!({"statusKey": "build", "statusText": "compiling..."}),
+    );
+    let event = req.to_rpc_event();
+
+    assert_eq!(event["type"], "extension_ui_request");
+    assert_eq!(event["id"], "sts-1");
+    assert_eq!(event["method"], "setStatus");
+    assert_eq!(event["statusKey"], "build");
+    assert_eq!(event["statusText"], "compiling...");
+
+    // Test clearing status (statusText undefined → null in JSON).
+    let req_clear = ExtensionUiRequest::new(
+        "sts-2",
+        "setStatus",
+        json!({"statusKey": "build", "statusText": null}),
+    );
+    let event_clear = req_clear.to_rpc_event();
+    assert_eq!(event_clear["statusKey"], "build");
+    assert!(event_clear["statusText"].is_null());
+
+    harness.log().info_ctx(
+        "json_parity",
+        "extension_ui setStatus schema ok",
+        |ctx| ctx.push(("method".to_string(), "setStatus".to_string())),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 7. setWidget method — fire-and-forget
+// ---------------------------------------------------------------------------
+
+#[test]
+fn json_parity_extension_ui_set_widget_schema() {
+    let harness = TestHarness::new("json_parity_extension_ui_set_widget_schema");
+    let req = ExtensionUiRequest::new(
+        "wdg-1",
+        "setWidget",
+        json!({
+            "widgetKey": "metrics",
+            "widgetLines": ["CPU: 42%", "RAM: 8GB"],
+            "widgetPlacement": "aboveEditor"
+        }),
+    );
+    let event = req.to_rpc_event();
+
+    assert_eq!(event["type"], "extension_ui_request");
+    assert_eq!(event["id"], "wdg-1");
+    assert_eq!(event["method"], "setWidget");
+    assert_eq!(event["widgetKey"], "metrics");
+    assert_eq!(event["widgetLines"], json!(["CPU: 42%", "RAM: 8GB"]));
+    assert_eq!(event["widgetPlacement"], "aboveEditor");
+
+    // Test clearing widget (widgetLines undefined → null).
+    let req_clear = ExtensionUiRequest::new(
+        "wdg-2",
+        "setWidget",
+        json!({"widgetKey": "metrics", "widgetLines": null}),
+    );
+    let event_clear = req_clear.to_rpc_event();
+    assert_eq!(event_clear["widgetKey"], "metrics");
+    assert!(event_clear["widgetLines"].is_null());
+
+    harness.log().info_ctx(
+        "json_parity",
+        "extension_ui setWidget schema ok",
+        |ctx| ctx.push(("method".to_string(), "setWidget".to_string())),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 8. setTitle method — fire-and-forget
+// ---------------------------------------------------------------------------
+
+#[test]
+fn json_parity_extension_ui_set_title_schema() {
+    let harness = TestHarness::new("json_parity_extension_ui_set_title_schema");
+    let req = ExtensionUiRequest::new(
+        "ttl-1",
+        "setTitle",
+        json!({"title": "My Agent Session"}),
+    );
+    let event = req.to_rpc_event();
+
+    assert_eq!(event["type"], "extension_ui_request");
+    assert_eq!(event["id"], "ttl-1");
+    assert_eq!(event["method"], "setTitle");
+    assert_eq!(event["title"], "My Agent Session");
+
+    harness.log().info_ctx(
+        "json_parity",
+        "extension_ui setTitle schema ok",
+        |ctx| ctx.push(("method".to_string(), "setTitle".to_string())),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 9. set_editor_text method — fire-and-forget
+// ---------------------------------------------------------------------------
+
+#[test]
+fn json_parity_extension_ui_set_editor_text_schema() {
+    let harness = TestHarness::new("json_parity_extension_ui_set_editor_text_schema");
+    let req = ExtensionUiRequest::new(
+        "set-1",
+        "set_editor_text",
+        json!({"text": "prefilled prompt text"}),
+    );
+    let event = req.to_rpc_event();
+
+    assert_eq!(event["type"], "extension_ui_request");
+    assert_eq!(event["id"], "set-1");
+    assert_eq!(event["method"], "set_editor_text");
+    assert_eq!(event["text"], "prefilled prompt text");
+
+    harness.log().info_ctx(
+        "json_parity",
+        "extension_ui set_editor_text schema ok",
+        |ctx| ctx.push(("method".to_string(), "set_editor_text".to_string())),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 10. Dialog vs fire-and-forget classification matches TypeScript
+// ---------------------------------------------------------------------------
+
+#[test]
+fn json_parity_extension_ui_expects_response_classification() {
+    let harness = TestHarness::new("json_parity_extension_ui_expects_response_classification");
+
+    // Dialog methods (expects response = true).
+    for method in &["select", "confirm", "input", "editor"] {
+        let req = ExtensionUiRequest::new("x", *method, json!({}));
+        assert!(
+            req.expects_response(),
+            "{method} should expect a response (dialog)"
+        );
+    }
+
+    // Fire-and-forget methods (expects response = false).
+    for method in &["notify", "setStatus", "setWidget", "setTitle", "set_editor_text"] {
+        let req = ExtensionUiRequest::new("x", *method, json!({}));
+        assert!(
+            !req.expects_response(),
+            "{method} should NOT expect a response (fire-and-forget)"
+        );
+    }
+
+    harness.log().info_ctx(
+        "json_parity",
+        "extension_ui dialog classification ok",
+        |ctx| ctx.push(("dialog_count".to_string(), "4".to_string())),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 11. All 9 methods produce extension_ui_request type tag
+// ---------------------------------------------------------------------------
+
+#[test]
+fn json_parity_extension_ui_all_methods_type_tag() {
+    let harness = TestHarness::new("json_parity_extension_ui_all_methods_type_tag");
+    let methods = [
+        "select", "confirm", "input", "editor",
+        "notify", "setStatus", "setWidget", "setTitle", "set_editor_text",
+    ];
+
+    for method in &methods {
+        let req = ExtensionUiRequest::new("id-1", *method, json!({}));
+        let event = req.to_rpc_event();
+        assert_eq!(
+            event["type"], "extension_ui_request",
+            "method {method} should produce extension_ui_request type"
+        );
+        assert_eq!(event["method"], *method);
+    }
+
+    harness.log().info_ctx(
+        "json_parity",
+        "all 9 extension_ui methods ok",
+        |ctx| ctx.push(("methods".to_string(), methods.len().to_string())),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 12. Payload flattening — object payloads merge into top-level
+// ---------------------------------------------------------------------------
+
+#[test]
+fn json_parity_extension_ui_payload_flattening() {
+    let harness = TestHarness::new("json_parity_extension_ui_payload_flattening");
+
+    // Object payload: fields should appear at top level.
+    let req = ExtensionUiRequest::new(
+        "r1",
+        "select",
+        json!({"title": "Pick", "options": ["A"], "custom_key": 42}),
+    );
+    let event = req.to_rpc_event();
+    assert!(
+        event.get("payload").is_none(),
+        "object payload must be flattened"
+    );
+    assert_eq!(event["title"], "Pick");
+    assert_eq!(event["custom_key"], 42);
+
+    // Non-object payload: falls back to a "payload" key.
+    let req_str = ExtensionUiRequest::new("r2", "notify", Value::String("raw".to_string()));
+    let event_str = req_str.to_rpc_event();
+    assert_eq!(event_str["payload"], "raw");
+
+    harness.log().info_ctx(
+        "json_parity",
+        "extension_ui payload flattening ok",
+        |_| {},
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 13. No snake_case leaks in extension UI events
+// ---------------------------------------------------------------------------
+
+#[test]
+fn json_parity_extension_ui_no_snake_case_leaks() {
+    let harness = TestHarness::new("json_parity_extension_ui_no_snake_case_leaks");
+
+    // Build events for all methods and verify no keys contain underscores
+    // (except the event "type" value and method names which are allowed).
+    let cases = vec![
+        ExtensionUiRequest::new("r1", "select", json!({"title": "T", "options": ["A"]})),
+        ExtensionUiRequest::new("r2", "confirm", json!({"title": "T", "message": "M"})),
+        ExtensionUiRequest::new("r3", "input", json!({"title": "T", "placeholder": "P"})),
+        ExtensionUiRequest::new("r4", "editor", json!({"title": "T", "prefill": "P"})),
+        ExtensionUiRequest::new("r5", "notify", json!({"message": "M", "notifyType": "info"})),
+        ExtensionUiRequest::new("r6", "setStatus", json!({"statusKey": "K", "statusText": "V"})),
+        ExtensionUiRequest::new(
+            "r7",
+            "setWidget",
+            json!({"widgetKey": "K", "widgetLines": ["L"], "widgetPlacement": "aboveEditor"}),
+        ),
+        ExtensionUiRequest::new("r8", "setTitle", json!({"title": "T"})),
+        ExtensionUiRequest::new("r9", "set_editor_text", json!({"text": "T"})),
+    ];
+
+    // Known keys that intentionally use snake_case (matching TS reference exactly).
+    let allowed_snake_keys = ["set_editor_text"]; // method value, not a key
+
+    for req in &cases {
+        let event = req.to_rpc_event();
+        if let Value::Object(map) = &event {
+            for key in map.keys() {
+                // The "type" key is a standard JSON discriminator.
+                if key == "type" {
+                    continue;
+                }
+                // Keys themselves should use camelCase (like TypeScript).
+                // Exception: keys from the payload that match TS reference exactly.
+                let has_underscore = key.contains('_');
+                if has_underscore {
+                    // Only allow keys that are intentional in the TS schema.
+                    let allowed = allowed_snake_keys.contains(&key.as_str());
+                    assert!(
+                        allowed,
+                        "unexpected snake_case key '{key}' in {method} event",
+                        method = req.method
+                    );
+                }
+            }
+        }
+    }
+
+    harness.log().info_ctx(
+        "json_parity",
+        "no snake_case leaks in extension_ui events",
+        |_| {},
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 14. Extension ID provenance — when set, included in event
+// ---------------------------------------------------------------------------
+
+#[test]
+fn json_parity_extension_ui_extension_id_provenance() {
+    let harness = TestHarness::new("json_parity_extension_ui_extension_id_provenance");
+
+    // The extension_id is part of the struct but NOT part of `to_rpc_event()` output
+    // because it's tracked on the Rust side for provenance, not emitted to RPC clients.
+    // The payload may carry an extension_id field if the extension puts it there.
+    let req = ExtensionUiRequest::new(
+        "r1",
+        "confirm",
+        json!({"title": "T", "message": "M", "extension_id": "my-ext"}),
+    )
+    .with_extension_id(Some("my-ext".to_string()));
+
+    let event = req.to_rpc_event();
+    // Payload-provided extension_id should be flattened.
+    assert_eq!(event["extension_id"], "my-ext");
+
+    harness.log().info_ctx(
+        "json_parity",
+        "extension_ui extension_id provenance ok",
+        |_| {},
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 15. Timeout field in dialog requests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn json_parity_extension_ui_timeout_field() {
+    let harness = TestHarness::new("json_parity_extension_ui_timeout_field");
+
+    // TypeScript schema: `timeout?: number` on select/confirm/input methods.
+    let mut req = ExtensionUiRequest::new(
+        "r1",
+        "select",
+        json!({"title": "Pick", "options": ["A"], "timeout": 5000}),
+    );
+    let event = req.to_rpc_event();
+    assert_eq!(event["timeout"], 5000);
+
+    // effective_timeout_ms reads from payload.
+    assert_eq!(req.effective_timeout_ms(), Some(5000));
+
+    // Explicit timeout_ms on struct takes precedence.
+    req.timeout_ms = Some(3000);
+    assert_eq!(req.effective_timeout_ms(), Some(3000));
+
+    harness.log().info_ctx(
+        "json_parity",
+        "extension_ui timeout field ok",
+        |_| {},
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 16. Select with label/value objects (rich options)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn json_parity_extension_ui_select_rich_options() {
+    let harness = TestHarness::new("json_parity_extension_ui_select_rich_options");
+    let req = ExtensionUiRequest::new(
+        "sel-rich",
+        "select",
+        json!({
+            "title": "Choose provider",
+            "options": [
+                {"label": "Anthropic", "value": "anthropic"},
+                {"label": "OpenAI", "value": "openai"},
+            ]
+        }),
+    );
+    let event = req.to_rpc_event();
+
+    assert_eq!(event["method"], "select");
+    let options = event["options"].as_array().expect("options should be array");
+    assert_eq!(options.len(), 2);
+    assert_eq!(options[0]["label"], "Anthropic");
+    assert_eq!(options[0]["value"], "anthropic");
+
+    harness.log().info_ctx(
+        "json_parity",
+        "extension_ui select rich options ok",
+        |_| {},
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 17. Tool + Extension UI event ordering in complete lifecycle
+// ---------------------------------------------------------------------------
+
+#[test]
+fn json_parity_complete_lifecycle_with_extension_ui() {
+    let harness = TestHarness::new("json_parity_complete_lifecycle_with_extension_ui");
+
+    // Validate that tool events and extension UI events can coexist in a
+    // complete agent lifecycle without schema conflicts.
+    let tool_start = event_to_json(&AgentEvent::ToolExecutionStart {
+        tool_call_id: "tc-1".to_string(),
+        tool_name: "bash".to_string(),
+        args: json!({"command": "echo hi"}),
+    });
+    let tool_end = event_to_json(&AgentEvent::ToolExecutionEnd {
+        tool_call_id: "tc-1".to_string(),
+        tool_name: "bash".to_string(),
+        result: test_tool_output(),
+        is_error: false,
+    });
+    let ui_req = ExtensionUiRequest::new(
+        "ui-1",
+        "confirm",
+        json!({"title": "Proceed?", "message": "Continue with deployment?"}),
+    )
+    .to_rpc_event();
+
+    // All three should have distinct type tags.
+    assert_eq!(tool_start["type"], "tool_execution_start");
+    assert_eq!(tool_end["type"], "tool_execution_end");
+    assert_eq!(ui_req["type"], "extension_ui_request");
+
+    // No field name collisions between event types.
+    // Tool events use toolCallId/toolName, UI events use id/method.
+    assert!(tool_start.get("id").is_none() || tool_start["id"] != ui_req["id"]);
+    assert!(ui_req.get("toolCallId").is_none());
+    assert!(ui_req.get("toolName").is_none());
+
+    harness.log().info_ctx(
+        "json_parity",
+        "tool + extension_ui lifecycle ok",
+        |_| {},
+    );
 }

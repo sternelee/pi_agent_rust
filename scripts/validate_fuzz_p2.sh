@@ -2,14 +2,9 @@
 # validate_fuzz_p2.sh — Phase 2 Fuzz Validation Suite
 #
 # Builds all fuzz harnesses, runs each for a configurable duration (default 60s),
-# and generates a structured JSON report.
+# and emits a machine-readable JSON report under fuzz/reports/.
 #
-# Usage:
-#   ./scripts/validate_fuzz_p2.sh              # 60s per target
-#   ./scripts/validate_fuzz_p2.sh --time=10    # 10s per target (quick smoke)
-#   ./scripts/validate_fuzz_p2.sh --time=300   # 5 min per target (thorough)
-#
-# Reports are saved to fuzz/reports/
+# CPU-heavy operations run through `rch exec --` by default when `rch` is present.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -17,58 +12,178 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FUZZ_DIR="$PROJECT_ROOT/fuzz"
 REPORT_DIR="$FUZZ_DIR/reports"
 
+usage() {
+    cat <<'EOF'
+Usage: ./scripts/validate_fuzz_p2.sh [OPTIONS]
+
+Options:
+  --time=SECONDS       Max fuzz run time per target (default: 60)
+  --target=NAME        Run only the named target (repeatable)
+  --no-rch             Never use rch; run cargo-fuzz locally
+  --require-rch        Fail if rch is unavailable
+  -h, --help           Show help
+
+Examples:
+  ./scripts/validate_fuzz_p2.sh
+  ./scripts/validate_fuzz_p2.sh --time=15
+  ./scripts/validate_fuzz_p2.sh --target=fuzz_sse_parser --target=fuzz_tool_paths --time=30
+  ./scripts/validate_fuzz_p2.sh --require-rch
+EOF
+}
+
+is_positive_int() {
+    case "$1" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+        *)
+            [ "$1" -gt 0 ]
+            ;;
+    esac
+}
+
+count_files() {
+    local dir="$1"
+    if [ ! -d "$dir" ]; then
+        echo 0
+        return
+    fi
+    find "$dir" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' '
+}
+
+run_cmd() {
+    if [ "$RCH_MODE" = "enabled" ]; then
+        rch exec -- "$@"
+    else
+        "$@"
+    fi
+}
+
+# -------------------------------------------------------------------
 # Parse arguments
+# -------------------------------------------------------------------
 MAX_TIME=60
+RCH_REQUEST="auto" # auto | always | never
+declare -a TARGET_FILTERS=()
+
 for arg in "$@"; do
     case "$arg" in
-        --time=*) MAX_TIME="${arg#--time=}" ;;
+        --time=*)
+            MAX_TIME="${arg#--time=}"
+            ;;
+        --target=*)
+            TARGET_FILTERS+=("${arg#--target=}")
+            ;;
+        --no-rch)
+            RCH_REQUEST="never"
+            ;;
+        --require-rch)
+            RCH_REQUEST="always"
+            ;;
         --help|-h)
-            echo "Usage: $0 [--time=SECONDS]"
-            echo "  Default: 60 seconds per target"
+            usage
             exit 0
+            ;;
+        *)
+            echo "Unknown argument: $arg" >&2
+            usage >&2
+            exit 2
             ;;
     esac
 done
 
+if ! is_positive_int "$MAX_TIME"; then
+    echo "Invalid --time value: '$MAX_TIME' (must be positive integer seconds)" >&2
+    exit 2
+fi
+
+if [ ! -d "$FUZZ_DIR" ]; then
+    echo "Missing fuzz directory: $FUZZ_DIR" >&2
+    exit 2
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "cargo is required but was not found on PATH" >&2
+    exit 2
+fi
+
+RCH_AVAILABLE=0
+if command -v rch >/dev/null 2>&1; then
+    RCH_AVAILABLE=1
+fi
+
+case "$RCH_REQUEST" in
+    always)
+        if [ "$RCH_AVAILABLE" -eq 0 ]; then
+            echo "--require-rch was set but rch is unavailable on PATH" >&2
+            exit 2
+        fi
+        RCH_MODE="enabled"
+        ;;
+    never)
+        RCH_MODE="disabled"
+        ;;
+    auto)
+        if [ "$RCH_AVAILABLE" -eq 1 ]; then
+            RCH_MODE="enabled"
+        else
+            RCH_MODE="fallback"
+        fi
+        ;;
+    *)
+        echo "Internal error: invalid RCH_REQUEST='$RCH_REQUEST'" >&2
+        exit 2
+        ;;
+esac
+
 mkdir -p "$REPORT_DIR"
 
-TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-REPORT_FILE="$REPORT_DIR/p2_validation_$(date +%Y%m%d_%H%M%S).json"
+TIMESTAMP_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+STAMP="$(date +%Y%m%d_%H%M%S)"
+REPORT_FILE="$REPORT_DIR/p2_validation_${STAMP}.json"
+BUILD_LOG="$REPORT_DIR/build_${STAMP}.log"
 
 echo "=== FUZZ-V2 Phase 2 Validation Suite ==="
 echo "Time per target: ${MAX_TIME}s"
+echo "RCH mode: $RCH_MODE (request=$RCH_REQUEST, available=$RCH_AVAILABLE)"
 echo "Report: $REPORT_FILE"
 echo ""
+
+cd "$FUZZ_DIR"
 
 # -------------------------------------------------------------------
 # Step 1: Build all fuzz targets
 # -------------------------------------------------------------------
 echo ">>> Building all fuzz targets..."
-BUILD_LOG="$REPORT_DIR/build.log"
-cd "$FUZZ_DIR"
+BUILD_START_NS=$(date +%s%N)
+run_cmd cargo fuzz build 2>&1 | tee "$BUILD_LOG"
+BUILD_EXIT=${PIPESTATUS[0]}
+BUILD_END_NS=$(date +%s%N)
+BUILD_TIME_MS=$(( (BUILD_END_NS - BUILD_START_NS) / 1000000 ))
 
-BUILD_START=$(date +%s)
-if cargo fuzz build 2>&1 | tee "$BUILD_LOG"; then
+if [ "$BUILD_EXIT" -eq 0 ]; then
     BUILD_STATUS="pass"
-    BUILD_EXIT=0
 else
     BUILD_STATUS="fail"
-    BUILD_EXIT=$?
 fi
-BUILD_END=$(date +%s)
-BUILD_TIME_MS=$(( (BUILD_END - BUILD_START) * 1000 ))
+
 echo ""
 echo "Build status: $BUILD_STATUS (${BUILD_TIME_MS}ms)"
 echo ""
 
 if [ "$BUILD_STATUS" = "fail" ]; then
-    # Generate minimal report and exit
     cat > "$REPORT_FILE" <<EOFJSON
 {
   "phase": "P2",
-  "timestamp": "$TIMESTAMP",
+  "timestamp": "$TIMESTAMP_UTC",
+  "rch_mode": "$RCH_MODE",
+  "rch_request": "$RCH_REQUEST",
   "build_status": "fail",
+  "build_exit_code": $BUILD_EXIT,
   "build_time_ms": $BUILD_TIME_MS,
+  "build_log_file": "fuzz/reports/$(basename "$BUILD_LOG")",
+  "max_time_per_target_s": $MAX_TIME,
+  "targets_requested": [],
   "targets": [],
   "summary": {
     "total_targets": 0,
@@ -76,6 +191,7 @@ if [ "$BUILD_STATUS" = "fail" ]; then
     "failed": 0,
     "crashed": 0,
     "total_corpus_growth": 0,
+    "total_new_artifacts": 0,
     "total_time_ms": $BUILD_TIME_MS
   }
 }
@@ -85,11 +201,41 @@ EOFJSON
 fi
 
 # -------------------------------------------------------------------
-# Step 2: List all fuzz targets
+# Step 2: List/filter fuzz targets
 # -------------------------------------------------------------------
-TARGETS=$(cargo fuzz list 2>/dev/null)
-TOTAL_TARGETS=$(echo "$TARGETS" | wc -l)
-echo "Found $TOTAL_TARGETS fuzz targets."
+mapfile -t ALL_TARGETS < <(run_cmd cargo fuzz list 2>/dev/null | sed '/^[[:space:]]*$/d')
+
+if [ "${#ALL_TARGETS[@]}" -eq 0 ]; then
+    echo "No fuzz targets found." >&2
+    exit 1
+fi
+
+declare -a TARGETS=()
+if [ "${#TARGET_FILTERS[@]}" -eq 0 ]; then
+    TARGETS=("${ALL_TARGETS[@]}")
+else
+    for wanted in "${TARGET_FILTERS[@]}"; do
+        found=0
+        for candidate in "${ALL_TARGETS[@]}"; do
+            if [ "$candidate" = "$wanted" ]; then
+                TARGETS+=("$candidate")
+                found=1
+                break
+            fi
+        done
+        if [ "$found" -eq 0 ]; then
+            echo "Warning: requested target '$wanted' not found in cargo fuzz list" >&2
+        fi
+    done
+fi
+
+if [ "${#TARGETS[@]}" -eq 0 ]; then
+    echo "No runnable targets after applying --target filters." >&2
+    exit 2
+fi
+
+TOTAL_TARGETS="${#TARGETS[@]}"
+echo "Found ${#ALL_TARGETS[@]} total fuzz targets; running $TOTAL_TARGETS target(s)."
 echo ""
 
 # -------------------------------------------------------------------
@@ -97,65 +243,58 @@ echo ""
 # -------------------------------------------------------------------
 OVERALL_EXIT=0
 TARGET_RESULTS=""
+TARGET_RESULTS_SEP=""
 PASSED=0
 FAILED=0
 CRASHED=0
 TOTAL_CORPUS_GROWTH=0
-TOTAL_RUN_TIME=0
+TOTAL_NEW_ARTIFACTS=0
+TOTAL_RUN_TIME_MS=0
 TARGET_IDX=0
 
-for target in $TARGETS; do
+for target in "${TARGETS[@]}"; do
     TARGET_IDX=$((TARGET_IDX + 1))
     echo ">>> [$TARGET_IDX/$TOTAL_TARGETS] Running $target for ${MAX_TIME}s..."
 
-    TARGET_LOG="$REPORT_DIR/${target}.log"
+    TARGET_LOG="$REPORT_DIR/${target}_${STAMP}.log"
     CORPUS_DIR="$FUZZ_DIR/corpus/$target"
     ARTIFACT_DIR="$FUZZ_DIR/artifacts/$target"
 
     mkdir -p "$CORPUS_DIR" "$ARTIFACT_DIR"
 
-    # Count initial corpus size
-    INITIAL_CORPUS=0
-    if [ -d "$CORPUS_DIR" ]; then
-        INITIAL_CORPUS=$(find "$CORPUS_DIR" -maxdepth 1 -type f 2>/dev/null | wc -l)
-    fi
-
-    # Count seed corpus (in corpus/<target>/ subdirectory)
+    INITIAL_CORPUS="$(count_files "$CORPUS_DIR")"
+    INITIAL_ARTIFACTS="$(count_files "$ARTIFACT_DIR")"
     SEED_CORPUS="$INITIAL_CORPUS"
 
-    # Run the fuzzer
-    RUN_START=$(date +%s%N)
-    cargo fuzz run "$target" \
+    RUN_START_NS=$(date +%s%N)
+    run_cmd cargo fuzz run "$target" \
         -- -max_total_time="$MAX_TIME" \
         -artifact_prefix="$ARTIFACT_DIR/" \
         2>&1 | tee "$TARGET_LOG"
     TARGET_EXIT=${PIPESTATUS[0]}
-    RUN_END=$(date +%s%N)
-    RUN_MS=$(( (RUN_END - RUN_START) / 1000000 ))
-    TOTAL_RUN_TIME=$((TOTAL_RUN_TIME + RUN_MS))
+    RUN_END_NS=$(date +%s%N)
+    RUN_TIME_MS=$(( (RUN_END_NS - RUN_START_NS) / 1000000 ))
+    TOTAL_RUN_TIME_MS=$((TOTAL_RUN_TIME_MS + RUN_TIME_MS))
 
-    # Count final corpus size
-    FINAL_CORPUS=0
-    if [ -d "$CORPUS_DIR" ]; then
-        FINAL_CORPUS=$(find "$CORPUS_DIR" -maxdepth 1 -type f 2>/dev/null | wc -l)
-    fi
+    FINAL_CORPUS="$(count_files "$CORPUS_DIR")"
+    FINAL_ARTIFACTS="$(count_files "$ARTIFACT_DIR")"
+
     NEW_CORPUS=$((FINAL_CORPUS - INITIAL_CORPUS))
     if [ "$NEW_CORPUS" -lt 0 ]; then
         NEW_CORPUS=0
     fi
     TOTAL_CORPUS_GROWTH=$((TOTAL_CORPUS_GROWTH + NEW_CORPUS))
 
-    # Count crashes
-    CRASH_COUNT=0
-    if [ -d "$ARTIFACT_DIR" ]; then
-        CRASH_COUNT=$(find "$ARTIFACT_DIR" -maxdepth 1 -type f -name "crash-*" 2>/dev/null | wc -l)
+    NEW_ARTIFACTS=$((FINAL_ARTIFACTS - INITIAL_ARTIFACTS))
+    if [ "$NEW_ARTIFACTS" -lt 0 ]; then
+        NEW_ARTIFACTS=0
     fi
+    TOTAL_NEW_ARTIFACTS=$((TOTAL_NEW_ARTIFACTS + NEW_ARTIFACTS))
 
-    # Determine status
-    if [ "$TARGET_EXIT" -eq 0 ]; then
+    if [ "$TARGET_EXIT" -eq 0 ] && [ "$NEW_ARTIFACTS" -eq 0 ]; then
         TARGET_STATUS="pass"
         PASSED=$((PASSED + 1))
-    elif [ "$CRASH_COUNT" -gt 0 ]; then
+    elif [ "$NEW_ARTIFACTS" -gt 0 ]; then
         TARGET_STATUS="crashed"
         CRASHED=$((CRASHED + 1))
         OVERALL_EXIT=1
@@ -165,40 +304,53 @@ for target in $TARGETS; do
         OVERALL_EXIT=1
     fi
 
-    echo "    Status: $TARGET_STATUS | Time: ${RUN_MS}ms | Corpus: $INITIAL_CORPUS -> $FINAL_CORPUS (+$NEW_CORPUS) | Crashes: $CRASH_COUNT"
+    echo "    Status: $TARGET_STATUS | Exit: $TARGET_EXIT | Time: ${RUN_TIME_MS}ms"
+    echo "    Corpus: $INITIAL_CORPUS -> $FINAL_CORPUS (+$NEW_CORPUS)"
+    echo "    Artifacts: $INITIAL_ARTIFACTS -> $FINAL_ARTIFACTS (+$NEW_ARTIFACTS)"
     echo ""
 
-    # Build JSON entry (using printf to avoid jq dependency)
-    if [ -n "$TARGET_RESULTS" ]; then
-        TARGET_RESULTS="${TARGET_RESULTS},"
-    fi
-    TARGET_RESULTS="${TARGET_RESULTS}
+    TARGET_RESULTS="${TARGET_RESULTS}${TARGET_RESULTS_SEP}
     {
       \"name\": \"$target\",
       \"status\": \"$TARGET_STATUS\",
       \"exit_code\": $TARGET_EXIT,
-      \"time_ms\": $RUN_MS,
+      \"time_ms\": $RUN_TIME_MS,
       \"corpus_size\": $FINAL_CORPUS,
       \"new_corpus_entries\": $NEW_CORPUS,
       \"seed_corpus_size\": $SEED_CORPUS,
-      \"crashes_found\": $CRASH_COUNT,
-      \"log_file\": \"fuzz/reports/${target}.log\"
+      \"artifacts_total\": $FINAL_ARTIFACTS,
+      \"new_artifacts\": $NEW_ARTIFACTS,
+      \"crashes_found\": $NEW_ARTIFACTS,
+      \"log_file\": \"fuzz/reports/$(basename "$TARGET_LOG")\"
     }"
+    TARGET_RESULTS_SEP=","
 done
 
 # -------------------------------------------------------------------
 # Step 4: Generate JSON report
 # -------------------------------------------------------------------
-TOTAL_TIME_MS=$((BUILD_TIME_MS + TOTAL_RUN_TIME))
+TOTAL_TIME_MS=$((BUILD_TIME_MS + TOTAL_RUN_TIME_MS))
+
+TARGETS_REQUESTED_JSON=""
+TARGETS_REQUESTED_SEP=""
+for target in "${TARGET_FILTERS[@]}"; do
+    TARGETS_REQUESTED_JSON="${TARGETS_REQUESTED_JSON}${TARGETS_REQUESTED_SEP}\"$target\""
+    TARGETS_REQUESTED_SEP=", "
+done
 
 cat > "$REPORT_FILE" <<EOFJSON
 {
   "phase": "P2",
-  "timestamp": "$TIMESTAMP",
+  "timestamp": "$TIMESTAMP_UTC",
+  "rch_mode": "$RCH_MODE",
+  "rch_request": "$RCH_REQUEST",
   "build_status": "$BUILD_STATUS",
+  "build_exit_code": $BUILD_EXIT,
   "build_time_ms": $BUILD_TIME_MS,
+  "build_log_file": "fuzz/reports/$(basename "$BUILD_LOG")",
   "max_time_per_target_s": $MAX_TIME,
-  "targets": [$TARGET_RESULTS
+  "targets_requested": [${TARGETS_REQUESTED_JSON}],
+  "targets": [${TARGET_RESULTS}
   ],
   "summary": {
     "total_targets": $TOTAL_TARGETS,
@@ -206,6 +358,7 @@ cat > "$REPORT_FILE" <<EOFJSON
     "failed": $FAILED,
     "crashed": $CRASHED,
     "total_corpus_growth": $TOTAL_CORPUS_GROWTH,
+    "total_new_artifacts": $TOTAL_NEW_ARTIFACTS,
     "total_time_ms": $TOTAL_TIME_MS
   }
 }
@@ -216,6 +369,7 @@ echo "=== Summary ==="
 echo "Total targets: $TOTAL_TARGETS"
 echo "Passed: $PASSED | Failed: $FAILED | Crashed: $CRASHED"
 echo "Total corpus growth: $TOTAL_CORPUS_GROWTH"
+echo "Total new artifacts: $TOTAL_NEW_ARTIFACTS"
 echo "Total time: $((TOTAL_TIME_MS / 1000))s"
 echo "Report: $REPORT_FILE"
 echo ""
