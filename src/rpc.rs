@@ -2283,7 +2283,7 @@ mod retry_tests {
             let events = if call == 0 {
                 // First call fails with an explicit error event.
                 partial.stop_reason = StopReason::Error;
-                partial.error_message = Some("boom".to_string());
+                partial.error_message = Some("server error".to_string());
                 vec![
                     Ok(crate::model::StreamEvent::Start {
                         partial: partial.clone(),
@@ -2347,7 +2347,7 @@ mod retry_tests {
                 model: self.model_id().to_string(),
                 usage: Usage::default(),
                 stop_reason: StopReason::Error,
-                error_message: Some("boom".to_string()),
+                error_message: Some("server error".to_string()),
                 timestamp: 0,
             };
 

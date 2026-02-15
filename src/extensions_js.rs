@@ -12300,7 +12300,9 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                     ),
                 )?;
 
-                // __pi_crypto_random_bytes_native(len) -> number[] (0-255)
+                // __pi_crypto_random_bytes_native(len) -> byte-like JS value
+                // (string/Array/Uint8Array/ArrayBuffer depending on bridge coercion).
+                // The JS shim normalizes this into plain number[] bytes.
                 global.set(
                     "__pi_crypto_random_bytes_native",
                     Func::from(
@@ -14604,9 +14606,39 @@ pi.path = {
     normalize: __pi_path_normalize,
 };
 
+function __pi_crypto_bytes_to_array(raw) {
+    if (raw == null) return [];
+    if (Array.isArray(raw)) {
+        return raw.map((value) => Number(value) & 0xff);
+    }
+    if (raw instanceof Uint8Array) {
+        return Array.from(raw, (value) => Number(value) & 0xff);
+    }
+    if (raw instanceof ArrayBuffer) {
+        return Array.from(new Uint8Array(raw), (value) => Number(value) & 0xff);
+    }
+    if (typeof raw === 'string') {
+        // Vec<u8> arrives as a hex string (2 chars per byte) via rquickjs.
+        const out = [];
+        for (let i = 0; i + 1 < raw.length; i += 2) {
+            out.push(parseInt(raw.slice(i, i + 2), 16));
+        }
+        return out;
+    }
+    if (typeof raw.length === 'number') {
+        const len = Number(raw.length) || 0;
+        const out = new Array(len);
+        for (let i = 0; i < len; i++) out[i] = Number(raw[i] || 0) & 0xff;
+        return out;
+    }
+    return [];
+}
+
 pi.crypto = {
     sha256Hex: __pi_crypto_sha256_hex_native,
-    randomBytes: __pi_crypto_random_bytes_native,
+    randomBytes: function(n) {
+        return __pi_crypto_bytes_to_array(__pi_crypto_random_bytes_native(n));
+    },
 };
 
 pi.time = {
@@ -15093,7 +15125,7 @@ if (typeof globalThis.crypto === 'undefined') {
 if (typeof globalThis.crypto.getRandomValues !== 'function') {
     globalThis.crypto.getRandomValues = (arr) => {
         const len = Number(arr && arr.length ? arr.length : 0);
-        const bytes = __pi_crypto_random_bytes_native(len);
+        const bytes = __pi_crypto_bytes_to_array(__pi_crypto_random_bytes_native(len));
         for (let i = 0; i < len; i++) {
             arr[i] = bytes[i] || 0;
         }
@@ -15128,7 +15160,8 @@ if (typeof globalThis.crypto.subtle.digest !== 'function') {
 
 if (typeof globalThis.crypto.randomUUID !== 'function') {
     globalThis.crypto.randomUUID = () => {
-        const bytes = __pi_crypto_random_bytes_native(16);
+        const bytes = __pi_crypto_bytes_to_array(__pi_crypto_random_bytes_native(16));
+        while (bytes.length < 16) bytes.push(0);
         bytes[6] = (bytes[6] & 0x0f) | 0x40;
         bytes[8] = (bytes[8] & 0x3f) | 0x80;
         const hex = Array.from(bytes, (b) => (b & 0xff).toString(16).padStart(2, '0')).join('');
@@ -17265,58 +17298,35 @@ export default ConfigLoader;
                 .await
                 .expect("eval apis");
 
-            assert_eq!(
-                get_global_json(&runtime, "cwd").await,
-                serde_json::json!("/virtual/cwd")
-            );
-            assert_eq!(
-                get_global_json(&runtime, "args").await,
-                serde_json::json!(["a", "b"])
-            );
-            assert_eq!(
-                get_global_json(&runtime, "pi_process_is_frozen").await,
-                serde_json::json!(true)
-            );
-            assert_eq!(
-                get_global_json(&runtime, "pi_args_is_frozen").await,
-                serde_json::json!(true)
-            );
-            assert_eq!(
-                get_global_json(&runtime, "cwd_after_mut").await,
-                serde_json::json!("/virtual/cwd")
-            );
-            assert_eq!(
-                get_global_json(&runtime, "args_after_mut").await,
-                serde_json::json!(["a", "b"])
-            );
-
-            assert_eq!(
-                get_global_json(&runtime, "joined").await,
-                serde_json::json!("/a/c")
-            );
-            assert_eq!(
-                get_global_json(&runtime, "base").await,
-                serde_json::json!("c.txt")
-            );
-            assert_eq!(
-                get_global_json(&runtime, "norm").await,
-                serde_json::json!("/a/c")
-            );
-
-            assert_eq!(
-                get_global_json(&runtime, "hash").await,
-                serde_json::json!(
-                    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-                )
-            );
+            for (key, expected) in [
+                ("cwd", serde_json::json!("/virtual/cwd")),
+                ("args", serde_json::json!(["a", "b"])),
+                ("pi_process_is_frozen", serde_json::json!(true)),
+                ("pi_args_is_frozen", serde_json::json!(true)),
+                ("cwd_after_mut", serde_json::json!("/virtual/cwd")),
+                ("args_after_mut", serde_json::json!(["a", "b"])),
+                ("joined", serde_json::json!("/a/c")),
+                ("base", serde_json::json!("c.txt")),
+                ("norm", serde_json::json!("/a/c")),
+                (
+                    "hash",
+                    serde_json::json!(
+                        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                    ),
+                ),
+            ] {
+                assert_eq!(get_global_json(&runtime, key).await, expected);
+            }
 
             let bytes = get_global_json(&runtime, "bytes").await;
             let bytes_arr = bytes.as_array().expect("bytes array");
             assert_eq!(bytes_arr.len(), 32);
-            for value in bytes_arr {
-                let n = value.as_u64().expect("byte number");
-                assert!(n <= 255);
-            }
+            assert!(
+                bytes_arr
+                    .iter()
+                    .all(|value| value.as_u64().is_some_and(|n| n <= 255)),
+                "bytes must be numbers in 0..=255: {bytes}"
+            );
 
             assert_eq!(
                 get_global_json(&runtime, "now").await,

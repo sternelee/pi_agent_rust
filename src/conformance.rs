@@ -2680,6 +2680,7 @@ mod tests {
     use proptest::prelude::*;
     use proptest::string::string_regex;
     use serde_json::{Map, Value, json};
+    use std::collections::BTreeSet;
 
     #[test]
     fn ignores_registration_ordering_by_key() {
@@ -3972,6 +3973,21 @@ mod tests {
             .boxed()
     }
 
+    /// Dedup a vec of JSON objects by a string key field, keeping the first
+    /// occurrence of each key. This ensures generated registration lists have
+    /// unique keys, matching the comparator's expectations.
+    fn dedup_by_key(items: Vec<Value>, key_field: &str) -> Vec<Value> {
+        let mut seen = BTreeSet::new();
+        items
+            .into_iter()
+            .filter(|item| {
+                item.get(key_field)
+                    .and_then(Value::as_str)
+                    .is_none_or(|k| seen.insert(k.to_string()))
+            })
+            .collect()
+    }
+
     fn conformance_output_strategy() -> impl Strategy<Value = Value> {
         (
             ident_strategy(),
@@ -4007,12 +4023,12 @@ mod tests {
                         "name": name,
                         "version": version,
                         "registrations": {
-                            "commands": commands,
-                            "shortcuts": shortcuts,
-                            "flags": flags,
-                            "providers": providers,
-                            "tool_defs": tool_defs,
-                            "models": models,
+                            "commands": dedup_by_key(commands, "name"),
+                            "shortcuts": dedup_by_key(shortcuts, "key_id"),
+                            "flags": dedup_by_key(flags, "name"),
+                            "providers": dedup_by_key(providers, "name"),
+                            "tool_defs": dedup_by_key(tool_defs, "name"),
+                            "models": dedup_by_key(models, "id"),
                             "event_hooks": event_hooks
                         },
                         "hostcall_log": hostcall_log
