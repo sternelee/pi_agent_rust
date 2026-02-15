@@ -2077,3 +2077,252 @@ fn evidence_logging_contract_perf_statistical_fields_include_required_percentile
         assert!(a_strs.contains(a), "required_aggregates must include {a}");
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Section: Reproducible Benchmark/Test Orchestration (bd-3ar8v.1.8)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const ORCHESTRATE_SCRIPT_PATH: &str = "scripts/perf/orchestrate.sh";
+const BUNDLE_SCRIPT_PATH: &str = "scripts/perf/bundle.sh";
+
+#[test]
+fn orchestrate_script_exists_and_is_executable() {
+    let path = std::path::Path::new(ORCHESTRATE_SCRIPT_PATH);
+    assert!(path.exists(), "orchestrate.sh must exist at {ORCHESTRATE_SCRIPT_PATH}");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::metadata(path).unwrap().permissions();
+        assert!(
+            perms.mode() & 0o111 != 0,
+            "orchestrate.sh must be executable"
+        );
+    }
+}
+
+#[test]
+fn bundle_script_exists_and_is_executable() {
+    let path = std::path::Path::new(BUNDLE_SCRIPT_PATH);
+    assert!(path.exists(), "bundle.sh must exist at {BUNDLE_SCRIPT_PATH}");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::metadata(path).unwrap().permissions();
+        assert!(
+            perms.mode() & 0o111 != 0,
+            "bundle.sh must be executable"
+        );
+    }
+}
+
+#[test]
+fn orchestrate_script_defines_all_required_suites() {
+    let content = load_text(ORCHESTRATE_SCRIPT_PATH);
+
+    let required_suites = [
+        "bench_schema",
+        "bench_scenario",
+        "perf_bench_harness",
+        "perf_budgets",
+        "perf_regression",
+        "perf_comparison",
+    ];
+
+    for suite in &required_suites {
+        assert!(
+            content.contains(suite),
+            "orchestrate.sh must reference suite: {suite}"
+        );
+    }
+}
+
+#[test]
+fn orchestrate_script_defines_required_profiles() {
+    let content = load_text(ORCHESTRATE_SCRIPT_PATH);
+
+    for profile in &["full", "quick", "ci"] {
+        assert!(
+            content.contains(profile),
+            "orchestrate.sh must support profile: {profile}"
+        );
+    }
+}
+
+#[test]
+fn orchestrate_script_generates_manifest_with_required_schema() {
+    let content = load_text(ORCHESTRATE_SCRIPT_PATH);
+
+    assert!(
+        content.contains("pi.perf.run_manifest.v1"),
+        "orchestrate.sh must emit manifest with schema pi.perf.run_manifest.v1"
+    );
+
+    let required_manifest_fields = [
+        "correlation_id",
+        "git_commit",
+        "run_summary",
+        "suite_results",
+        "contract_refs",
+    ];
+
+    for field in &required_manifest_fields {
+        assert!(
+            content.contains(field),
+            "manifest must include field: {field}"
+        );
+    }
+}
+
+#[test]
+fn orchestrate_script_generates_checksums() {
+    let content = load_text(ORCHESTRATE_SCRIPT_PATH);
+
+    assert!(
+        content.contains("sha256sum") || content.contains("sha256"),
+        "orchestrate.sh must generate SHA-256 checksums"
+    );
+
+    assert!(
+        content.contains("checksums.sha256"),
+        "orchestrate.sh must write checksums.sha256 file"
+    );
+}
+
+#[test]
+fn orchestrate_script_generates_env_fingerprint() {
+    let content = load_text(ORCHESTRATE_SCRIPT_PATH);
+
+    assert!(
+        content.contains("env_fingerprint"),
+        "orchestrate.sh must generate environment fingerprint"
+    );
+
+    for field in &["cpu_model", "cpu_cores", "mem_total_mb", "build_profile"] {
+        assert!(
+            content.contains(field),
+            "env fingerprint must include field: {field}"
+        );
+    }
+}
+
+#[test]
+fn orchestrate_script_references_contract_schemas() {
+    let content = load_text(ORCHESTRATE_SCRIPT_PATH);
+
+    let contract_schemas = [
+        "pi.test.evidence_logging_contract.v1",
+        "pi.qa.evidence_contract.v1",
+        "pi.bench.protocol.v1",
+        "pi.perf.sli_ux_matrix.v1",
+    ];
+
+    for schema in &contract_schemas {
+        assert!(
+            content.contains(schema),
+            "orchestrate.sh must reference contract schema: {schema}"
+        );
+    }
+}
+
+#[test]
+fn orchestrate_script_supports_correlation_id() {
+    let content = load_text(ORCHESTRATE_SCRIPT_PATH);
+
+    assert!(
+        content.contains("CI_CORRELATION_ID"),
+        "orchestrate.sh must accept CI_CORRELATION_ID env var"
+    );
+
+    assert!(
+        content.contains("correlation_id") || content.contains("CORRELATION_ID"),
+        "orchestrate.sh must propagate correlation ID to suites"
+    );
+}
+
+#[test]
+fn bundle_script_supports_required_operations() {
+    let content = load_text(BUNDLE_SCRIPT_PATH);
+
+    let required_ops = [
+        "--verify",
+        "--extract",
+        "--list",
+        "--inventory",
+        "--latest",
+    ];
+
+    for op in &required_ops {
+        assert!(
+            content.contains(op),
+            "bundle.sh must support operation: {op}"
+        );
+    }
+}
+
+#[test]
+fn bundle_script_generates_metadata_sidecar() {
+    let content = load_text(BUNDLE_SCRIPT_PATH);
+
+    assert!(
+        content.contains("pi.perf.bundle_meta.v1"),
+        "bundle.sh must emit metadata with schema pi.perf.bundle_meta.v1"
+    );
+
+    assert!(
+        content.contains("bundle_sha256"),
+        "bundle metadata must include bundle_sha256 checksum"
+    );
+}
+
+#[test]
+fn bundle_script_generates_inventory() {
+    let content = load_text(BUNDLE_SCRIPT_PATH);
+
+    assert!(
+        content.contains("pi.perf.bundle_inventory.v1"),
+        "bundle.sh must emit inventory with schema pi.perf.bundle_inventory.v1"
+    );
+
+    assert!(
+        content.contains("inventory.json"),
+        "bundle.sh must write inventory.json"
+    );
+}
+
+#[test]
+fn bundle_script_verifies_checksums_before_bundling() {
+    let content = load_text(BUNDLE_SCRIPT_PATH);
+
+    assert!(
+        content.contains("checksums.sha256"),
+        "bundle.sh must verify checksums.sha256 during bundling"
+    );
+
+    assert!(
+        content.contains("sha256sum"),
+        "bundle.sh must use sha256sum for integrity verification"
+    );
+}
+
+#[test]
+fn orchestrate_script_supports_validate_only_mode() {
+    let content = load_text(ORCHESTRATE_SCRIPT_PATH);
+
+    assert!(
+        content.contains("--validate-only"),
+        "orchestrate.sh must support --validate-only mode for existing bundles"
+    );
+}
+
+#[test]
+fn orchestrate_script_has_deterministic_parallelism_default() {
+    let content = load_text(ORCHESTRATE_SCRIPT_PATH);
+
+    assert!(
+        content.contains("PARALLELISM=\"${PERF_PARALLELISM:-1}\"")
+            || content.contains("PARALLELISM=${PERF_PARALLELISM:-1}"),
+        "orchestrate.sh must default parallelism to 1 for determinism"
+    );
+}
