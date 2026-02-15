@@ -42,8 +42,8 @@ Always run heavy fuzz commands through `rch`.
 Set high-capacity temporary paths first:
 
 ```bash
-export CARGO_TARGET_DIR="/dev/shm/pi_agent_rust/${USER:-agent}"
-export TMPDIR="/dev/shm/pi_agent_rust/${USER:-agent}/tmp"
+export CARGO_TARGET_DIR="/data/tmp/pi_agent_rust/${USER:-agent}"
+export TMPDIR="/data/tmp/pi_agent_rust/${USER:-agent}/tmp"
 mkdir -p "$TMPDIR"
 cd fuzz
 ```

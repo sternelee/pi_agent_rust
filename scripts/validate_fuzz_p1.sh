@@ -149,7 +149,7 @@ echo ""
 
 if [ -z "${CARGO_TARGET_DIR:-}" ]; then
     if [ -d /dev/shm ] && [ -w /dev/shm ]; then
-        TARGET_ROOT="/dev/shm/pi_agent_rust/${USER:-agent}"
+        TARGET_ROOT="/data/tmp/pi_agent_rust/${USER:-agent}"
     else
         TARGET_ROOT="$PROJECT_ROOT/.tmp/${USER:-agent}"
     fi

@@ -90,7 +90,7 @@ resolve_target_binary() {
 
 choose_target_root() {
     local local_root="$PROJECT_ROOT/.tmp/${USER:-agent}"
-    local shm_root="/dev/shm/pi_agent_rust/${USER:-agent}"
+    local shm_root="/data/tmp/pi_agent_rust/${USER:-agent}"
     local min_shm_free_kb="${FUZZ_VALIDATE_MIN_SHM_KB:-8388608}" # 8 GiB default
     local shm_free_kb=""
 
