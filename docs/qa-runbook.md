@@ -291,6 +291,11 @@ Before release messaging can claim strict drop-in parity, evaluate
 Blocking rule:
 - if `overall_verdict != CERTIFIED`, release language must not claim strict drop-in replacement.
 
+Parity incident handling for this gate is defined in
+`docs/ci-operator-runbook.md` under
+**Parity Incident Response (DROPIN-162)**. Treat `overall_verdict != CERTIFIED`
+or a missing verdict artifact on release paths as a parity incident, not a docs-only warning.
+
 ### Gate reproduce commands
 
 Every gate includes a `reproduce_command` field. To replay a specific gate failure:

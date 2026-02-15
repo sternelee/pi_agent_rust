@@ -217,6 +217,101 @@ done
 
 ---
 
+## Parity Incident Response (DROPIN-162)
+
+This section defines the operator workflow for parity regressions that threaten
+strict drop-in claims.
+
+### Incident triggers (open incident immediately)
+
+- `tests/e2e_results/<ts>/triage_diff.json` has `status = "regression"` or
+  `summary.regression_count > 0`.
+- `tests/full_suite_gate/full_suite_verdict.json` shows a failed blocking gate
+  affecting parity/test-log evidence (`e2e_log_contract`, `suite_classification`,
+  `conformance_pass_rate`, `evidence_bundle`, or other blocking gate).
+- `docs/dropin-certification-verdict.json` is missing or has
+  `overall_verdict != CERTIFIED` when release messaging needs strict drop-in wording.
+- CI parity suite gate fails (`PARITY GATE FAIL`) in `.github/workflows/ci.yml`.
+
+### Severity and response targets
+
+| Severity | Criteria | Response target |
+|----------|----------|-----------------|
+| `SEV-1` | Blocking parity regression on `main` or release cut path | Assign owner + post incident context within 30 minutes |
+| `SEV-2` | New regression in PR/branch with no current release block | Assign owner + post context within 4 hours |
+| `SEV-3` | Evidence/documentation drift without active behavior regression | Assign owner + post context within 1 business day |
+
+### Evidence bundle for every parity incident
+
+Collect and attach these artifacts to the incident bead and Agent Mail thread:
+
+- `tests/e2e_results/<ts>/summary.json`
+- `tests/e2e_results/<ts>/triage_diff.json`
+- `tests/e2e_results/<ts>/replay_bundle.json`
+- `tests/e2e_results/<ts>/failure_diagnostics_index.json`
+- `tests/full_suite_gate/full_suite_verdict.json`
+- `tests/full_suite_gate/full_suite_events.jsonl`
+- `tests/full_suite_gate/full_suite_report.md`
+- `tests/evidence_bundle/index.json`
+- `docs/dropin-certification-contract.json`
+- `docs/dropin-certification-verdict.json` (if present in the run)
+
+### Response flow
+
+1. Capture a reproducible baseline diff:
+```bash
+./scripts/e2e/run_all.sh --profile ci \
+  --diff-from tests/e2e_results/<baseline-ts>/summary.json
+```
+
+2. Run gate replay commands for failing lanes:
+```bash
+cargo test --test ci_full_suite_gate -- full_suite_gate --nocapture --exact
+cargo test --test ci_full_suite_gate -- preflight_fast_fail --nocapture --exact
+cargo test --test ci_full_suite_gate -- full_certification --nocapture --exact
+```
+
+3. Extract exact per-gate remediation commands from the verdict:
+```bash
+python3 - <<'PY'
+import json
+from pathlib import Path
+p = Path("tests/full_suite_gate/full_suite_verdict.json")
+if not p.exists():
+    raise SystemExit("missing full_suite_verdict.json")
+data = json.loads(p.read_text(encoding="utf-8"))
+for gate in data.get("gates", []):
+    if gate.get("status") == "fail":
+        print(f"{gate['id']}: {gate.get('reproduce_command', 'N/A')}")
+PY
+```
+
+4. Create/update the owning bead and notify the swarm in-thread (`thread_id = bead id`)
+   with: failing gate IDs, `triage_diff.status`, top `ranked_diagnostics`, and
+   one-command replay.
+
+5. Apply fix and rerun:
+```bash
+./scripts/e2e/run_all.sh --rerun-from tests/e2e_results/<ts>/summary.json
+cargo test --test ci_full_suite_gate -- full_suite_gate --nocapture --exact
+```
+
+6. Close only when all exit criteria are true:
+   - `triage_diff.status` is not `regression`.
+   - Blocking full-suite gates pass.
+   - Drop-in wording guard is satisfied (`overall_verdict = CERTIFIED`) for release claims.
+   - Bead + Agent Mail thread contain artifact links and final remediation note.
+
+### Escalation path
+
+- If unresolved beyond response target: escalate to maintainer in the same bead thread.
+- If release train is active and `SEV-1` persists: freeze strict drop-in messaging until
+  parity incident is closed.
+- Use rollback mode (`CI_GATE_PROMOTION_MODE=rollback`) only as a short-lived emergency
+  control; record rationale + expiry in the incident bead and restore `strict` after fix.
+
+---
+
 ## Evidence Artifact Interpretation
 
 ### summary.json
