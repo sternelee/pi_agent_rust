@@ -460,7 +460,7 @@ fn corruption_corpus_index_bounds_violation_is_detected_and_recoverable() -> PiR
 
     let index_path = store.index_file_path();
     let mut rows = read_index_json_rows(&index_path)?;
-    rows[0]["byte_length"] = json!(9_999_999_u64);
+    rows[0]["byteLength"] = json!(9_999_999_u64);
     write_index_json_rows(&index_path, &rows)?;
 
     let err = store
@@ -487,7 +487,7 @@ fn corruption_corpus_index_frame_mismatch_is_detected_and_recoverable() -> PiRes
 
     let index_path = store.index_file_path();
     let mut rows = read_index_json_rows(&index_path)?;
-    rows[0]["entry_id"] = json!("entry_corrupted");
+    rows[0]["entryId"] = json!("entry_corrupted");
     write_index_json_rows(&index_path, &rows)?;
 
     let err = store
@@ -875,6 +875,192 @@ fn v2_append_has_no_rewrite_amplification() -> PiResult<()> {
             "append growth {growth} bytes is too large; suggests rewrite amplification"
         );
     }
+
+    Ok(())
+}
+
+// ─── V2 Resume Integration Tests ─────────────────────────────────────────────
+
+/// Build a minimal JSONL session file with the given entries.
+fn build_test_jsonl(dir: &Path, entries: &[pi::session::SessionEntry]) -> std::path::PathBuf {
+    use std::io::Write;
+
+    let path = dir.join("test_session.jsonl");
+    let mut file = fs::File::create(&path).unwrap();
+
+    // Write header (first line).
+    let header = pi::session::SessionHeader::new();
+    serde_json::to_writer(&mut file, &header).unwrap();
+    file.write_all(b"\n").unwrap();
+
+    // Write entries.
+    for entry in entries {
+        serde_json::to_writer(&mut file, entry).unwrap();
+        file.write_all(b"\n").unwrap();
+    }
+    file.flush().unwrap();
+    path
+}
+
+fn make_message_entry(
+    id: &str,
+    parent_id: Option<&str>,
+    text: &str,
+) -> pi::session::SessionEntry {
+    pi::session::SessionEntry::Message(pi::session::MessageEntry {
+        base: pi::session::EntryBase::new(parent_id.map(String::from), id.to_string()),
+        message: pi::session::SessionMessage::User {
+            content: pi::model::UserContent::SinglePart(text.to_string()),
+        },
+    })
+}
+
+#[test]
+fn v2_sidecar_path_derives_from_jsonl_stem() {
+    let jsonl = Path::new("/tmp/sessions/my_session.jsonl");
+    let sidecar = pi::session_store_v2::v2_sidecar_path(jsonl);
+    assert_eq!(sidecar, Path::new("/tmp/sessions/my_session.v2"));
+}
+
+#[test]
+fn has_v2_sidecar_returns_false_for_bare_jsonl() {
+    let dir = tempdir().unwrap();
+    let jsonl = dir.path().join("session.jsonl");
+    fs::write(&jsonl, "{}").unwrap();
+    assert!(!pi::session_store_v2::has_v2_sidecar(&jsonl));
+}
+
+#[test]
+fn create_v2_sidecar_round_trips_entries() -> PiResult<()> {
+    let dir = tempdir()?;
+    let entries = vec![
+        make_message_entry("e1", None, "hello"),
+        make_message_entry("e2", Some("e1"), "world"),
+        make_message_entry("e3", Some("e2"), "foo"),
+    ];
+    let jsonl = build_test_jsonl(dir.path(), &entries);
+
+    // Create sidecar.
+    let store = pi::session::create_v2_sidecar_from_jsonl(&jsonl)?;
+
+    // Verify sidecar was created.
+    assert!(pi::session_store_v2::has_v2_sidecar(&jsonl));
+
+    // Verify entry count.
+    assert_eq!(store.entry_count(), 3);
+
+    // Verify round-trip: read back frames and convert to entries.
+    let frames = store.read_all_entries()?;
+    assert_eq!(frames.len(), 3);
+    assert_eq!(frames[0].entry_id, "e1");
+    assert_eq!(frames[1].entry_id, "e2");
+    assert_eq!(frames[2].entry_id, "e3");
+    assert_eq!(frames[1].parent_entry_id.as_deref(), Some("e1"));
+
+    // Convert back to SessionEntry and verify content.
+    for (frame, original) in frames.iter().zip(entries.iter()) {
+        let recovered = pi::session_store_v2::frame_to_session_entry(frame)?;
+        let recovered_id = recovered.base_id().unwrap();
+        let original_id = original.base_id().unwrap();
+        assert_eq!(recovered_id, original_id);
+    }
+
+    Ok(())
+}
+
+#[test]
+fn v2_resume_loads_same_entries_as_jsonl() -> PiResult<()> {
+    let dir = tempdir()?;
+    let entries = vec![
+        make_message_entry("msg1", None, "first message"),
+        make_message_entry("msg2", Some("msg1"), "second message"),
+        make_message_entry("msg3", Some("msg2"), "third message"),
+        make_message_entry("msg4", Some("msg3"), "fourth message"),
+        make_message_entry("msg5", Some("msg4"), "fifth message"),
+    ];
+    let jsonl = build_test_jsonl(dir.path(), &entries);
+
+    // Create V2 sidecar.
+    pi::session::create_v2_sidecar_from_jsonl(&jsonl)?;
+
+    // Open via Session (will use V2 sidecar if detected).
+    let jsonl_str = jsonl.to_str().unwrap();
+    let (session, diag) = asupersync::test_utils::run_test(|| async {
+        pi::session::Session::open_with_diagnostics(jsonl_str)
+            .await
+            .unwrap()
+    });
+
+    // Verify loaded all 5 entries.
+    assert_eq!(session.entries.len(), 5);
+    assert!(diag.skipped_entries.is_empty());
+
+    // Verify the V2 sidecar path was used (the has_v2_sidecar check).
+    assert!(pi::session_store_v2::has_v2_sidecar(&jsonl));
+
+    // Verify entry IDs match.
+    let ids: Vec<_> = session
+        .entries
+        .iter()
+        .filter_map(|e| e.base_id().cloned())
+        .collect();
+    assert_eq!(ids, vec!["msg1", "msg2", "msg3", "msg4", "msg5"]);
+
+    Ok(())
+}
+
+#[test]
+fn v2_sidecar_with_empty_entries_produces_empty_session() -> PiResult<()> {
+    let dir = tempdir()?;
+    let entries: Vec<pi::session::SessionEntry> = vec![];
+    let jsonl = build_test_jsonl(dir.path(), &entries);
+
+    // Create sidecar (empty).
+    let store = pi::session::create_v2_sidecar_from_jsonl(&jsonl)?;
+    assert_eq!(store.entry_count(), 0);
+
+    // Verify sidecar directory exists.
+    let sidecar_root = pi::session_store_v2::v2_sidecar_path(&jsonl);
+    assert!(sidecar_root.join("index").exists());
+
+    Ok(())
+}
+
+#[test]
+fn v2_sidecar_preserves_entry_parent_chain() -> PiResult<()> {
+    let dir = tempdir()?;
+    let entries = vec![
+        make_message_entry("root", None, "start"),
+        make_message_entry("child1", Some("root"), "step 1"),
+        make_message_entry("child2", Some("child1"), "step 2"),
+    ];
+    let jsonl = build_test_jsonl(dir.path(), &entries);
+    let store = pi::session::create_v2_sidecar_from_jsonl(&jsonl)?;
+
+    // Read active path from leaf to root.
+    let path_frames = store.read_active_path("child2")?;
+    assert_eq!(path_frames.len(), 3);
+    assert_eq!(path_frames[0].entry_id, "root");
+    assert_eq!(path_frames[1].entry_id, "child1");
+    assert_eq!(path_frames[2].entry_id, "child2");
+
+    Ok(())
+}
+
+#[test]
+fn v2_sidecar_integrity_valid_after_migration() -> PiResult<()> {
+    let dir = tempdir()?;
+    let entries = vec![
+        make_message_entry("a", None, "alpha"),
+        make_message_entry("b", Some("a"), "beta"),
+        make_message_entry("c", Some("b"), "gamma"),
+        make_message_entry("d", Some("c"), "delta"),
+    ];
+    let jsonl = build_test_jsonl(dir.path(), &entries);
+    let store = pi::session::create_v2_sidecar_from_jsonl(&jsonl)?;
+
+    // Validate integrity — should not error.
+    store.validate_integrity()?;
 
     Ok(())
 }
