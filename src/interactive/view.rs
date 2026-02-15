@@ -54,6 +54,33 @@ pub(super) fn normalize_raw_terminal_newlines(input: String) -> String {
     out
 }
 
+fn format_persistence_footer_segment(
+    mode: crate::session::AutosaveDurabilityMode,
+    metrics: crate::session::AutosaveQueueMetrics,
+) -> String {
+    let mut details = Vec::new();
+    if metrics.pending_mutations > 0 {
+        details.push(format!(
+            "pending {}/{}",
+            metrics.pending_mutations, metrics.max_pending_mutations
+        ));
+    }
+    if metrics.flush_failed > 0 {
+        details.push(format!("flush-fail {}", metrics.flush_failed));
+    }
+    if metrics.max_pending_mutations > 0
+        && metrics.pending_mutations >= metrics.max_pending_mutations
+    {
+        details.push("backpressure".to_string());
+    }
+
+    if details.is_empty() {
+        format!("Persist: {}", mode.as_str())
+    } else {
+        format!("Persist: {} ({})", mode.as_str(), details.join(", "))
+    }
+}
+
 impl PiApp {
     fn header_binding_hint(&self, action: AppAction, fallback: &str) -> String {
         self.keybindings
@@ -464,6 +491,17 @@ impl PiApp {
 
         let input = self.total_usage.input;
         let output_tokens = self.total_usage.output;
+        let persistence_str = self
+            .session
+            .try_lock()
+            .ok()
+            .map(|session| {
+                format_persistence_footer_segment(
+                    session.autosave_durability_mode(),
+                    session.autosave_metrics(),
+                )
+            })
+            .unwrap_or_else(|| "Persist: unavailable".to_string());
         let branch_str = self
             .git_branch
             .as_ref()
@@ -473,10 +511,10 @@ impl PiApp {
             InputMode::MultiLine => "Enter: newline  |  Alt+Enter: send  |  Esc: single-line",
         };
         let footer_long = format!(
-            "Tokens: {input} in / {output_tokens} out{cost_str}{branch_str}  |  {mode_hint}  |  /help  |  Ctrl+C: quit"
+            "Tokens: {input} in / {output_tokens} out{cost_str}{branch_str}  |  {persistence_str}  |  {mode_hint}  |  /help  |  Ctrl+C: quit"
         );
         let footer_short = format!(
-            "Tokens: {input} in / {output_tokens} out{cost_str}{branch_str}  |  /help  |  Ctrl+C: quit"
+            "Tokens: {input} in / {output_tokens} out{cost_str}{branch_str}  |  {persistence_str}  |  /help  |  Ctrl+C: quit"
         );
         let max_width = self.term_width.saturating_sub(2);
         let mut footer = if footer_long.chars().count() <= max_width {
@@ -1270,6 +1308,7 @@ impl PiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::{AutosaveDurabilityMode, AutosaveQueueMetrics};
 
     #[test]
     fn normalize_raw_terminal_newlines_inserts_crlf() {
@@ -1323,5 +1362,47 @@ mod tests {
         // term_height=2 => max 1 newline => "a\nb"
         let clamped = clamp_to_terminal_height("a\nb\n".to_string(), 2);
         assert_eq!(clamped, "a\nb");
+    }
+
+    #[test]
+    fn persistence_footer_segment_healthy() {
+        let metrics = AutosaveQueueMetrics {
+            pending_mutations: 0,
+            max_pending_mutations: 256,
+            coalesced_mutations: 0,
+            backpressure_events: 0,
+            flush_started: 0,
+            flush_succeeded: 0,
+            flush_failed: 0,
+            last_flush_batch_size: 0,
+            last_flush_duration_ms: None,
+            last_flush_trigger: None,
+        };
+        assert_eq!(
+            format_persistence_footer_segment(AutosaveDurabilityMode::Balanced, metrics),
+            "Persist: balanced"
+        );
+    }
+
+    #[test]
+    fn persistence_footer_segment_includes_backlog_and_failures() {
+        let metrics = AutosaveQueueMetrics {
+            pending_mutations: 256,
+            max_pending_mutations: 256,
+            coalesced_mutations: 99,
+            backpressure_events: 4,
+            flush_started: 5,
+            flush_succeeded: 3,
+            flush_failed: 2,
+            last_flush_batch_size: 64,
+            last_flush_duration_ms: Some(42),
+            last_flush_trigger: Some(crate::session::AutosaveFlushTrigger::Periodic),
+        };
+        let rendered =
+            format_persistence_footer_segment(AutosaveDurabilityMode::Throughput, metrics);
+        assert!(rendered.contains("Persist: throughput"));
+        assert!(rendered.contains("pending 256/256"));
+        assert!(rendered.contains("flush-fail 2"));
+        assert!(rendered.contains("backpressure"));
     }
 }

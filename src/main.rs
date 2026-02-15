@@ -9,12 +9,6 @@
 // Allow dead code and unused async during scaffolding phase - remove once implementation is complete
 #![allow(dead_code, clippy::unused_async)]
 
-// Gap H: jemalloc allocator for 10-20% improvement on allocation-heavy paths.
-// Enable with `--features jemalloc` (e.g. perf benchmarks).
-#[cfg(feature = "jemalloc")]
-#[global_allocator]
-static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
 use std::fmt::Write as _;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -2960,14 +2954,22 @@ async fn run_print_mode(
     let make_event_handler = move || {
         let extensions = extensions.clone();
         let runtime_for_events = runtime_for_events.clone();
+        let coalescer = extensions
+            .as_ref()
+            .map(|m| pi::extensions::EventCoalescer::new(m.clone()));
         move |event: AgentEvent| {
             if emit_json_events {
                 if let Ok(serialized) = serde_json::to_string(&event) {
                     println!("{serialized}");
                 }
             }
-            if let Some(manager) = &extensions {
-                if let Some((event_name, data)) = extension_event_from_agent(&event) {
+            if let Some((event_name, data)) = extension_event_from_agent(&event) {
+                // Use the coalescer for high-frequency fire-and-forget events.
+                if pi::extensions::is_coalescable_event(&event_name) {
+                    if let Some(coal) = &coalescer {
+                        coal.dispatch_fire_and_forget(event_name, data, &runtime_for_events);
+                    }
+                } else if let Some(manager) = &extensions {
                     let manager = manager.clone();
                     let runtime_handle = runtime_for_events.clone();
                     let emit_json = emit_json_events;
@@ -2984,8 +2986,6 @@ async fn run_print_mode(
                                     println!("{serialized}");
                                 }
                             } else {
-                                // Text mode: emit extension errors to stderr
-                                // (matches pi-mono's console.error() behavior).
                                 eprintln!(
                                     "Warning: extension event '{ext_event_name}' failed: {err}"
                                 );

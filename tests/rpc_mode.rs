@@ -238,6 +238,10 @@ fn rpc_get_state_and_prompt() {
         assert!(get_state_response["data"]["sessionName"].is_null());
         assert!(get_state_data.get("model").is_some());
         assert!(get_state_response["data"]["model"].is_null());
+        assert!(get_state_data.get("pendingMessageCount").is_some());
+        assert_eq!(get_state_response["data"]["pendingMessageCount"], 0);
+        assert!(get_state_data.get("durabilityMode").is_some());
+        assert_eq!(get_state_response["data"]["durabilityMode"], "balanced");
 
         // prompt
         in_tx

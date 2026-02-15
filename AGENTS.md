@@ -137,12 +137,12 @@ cargo fmt --check
 For heavyweight local runs (especially `--all-targets`) in multi-agent environments, set both build artifacts and test temp files to a high-capacity tmpfs to avoid `No space left on device` failures:
 
 ```bash
-export CARGO_TARGET_DIR="/dev/shm/pi_agent_rust/${USER:-agent}"
-export TMPDIR="/dev/shm/pi_agent_rust/${USER:-agent}/tmp"
+export CARGO_TARGET_DIR="/data/tmp/pi_agent_rust/${USER:-agent}"
+export TMPDIR="/data/tmp/pi_agent_rust/${USER:-agent}/tmp"
 mkdir -p "$TMPDIR"
 ```
 
-Use an agent-specific suffix (for example `/dev/shm/pi_agent_rust/topazfalcon`) to avoid collisions across concurrent agents.
+Use an agent-specific suffix (for example `/data/tmp/pi_agent_rust/topazfalcon`) to avoid collisions across concurrent agents.
 
 If you see errors, **carefully understand and resolve each issue**. Read sufficient context to fix them the RIGHT way.
 

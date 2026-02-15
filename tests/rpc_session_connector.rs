@@ -25,12 +25,14 @@ use pi::provider::Provider;
 use pi::providers::openai::OpenAIProvider;
 use pi::resources::ResourceLoader;
 use pi::rpc::{RpcOptions, run};
-use pi::session::{Session, SessionMessage};
+use pi::session::{AutosaveDurabilityMode, Session, SessionMessage};
 use pi::tools::ToolRegistry;
 use serde_json::Value;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+const MAX_BACKLOG_STATS_ROUNDTRIP_MS: u128 = 750;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -190,6 +192,8 @@ fn rpc_get_state_fresh_session() {
             "sessionName",
             "model",
             "messageCount",
+            "pendingMessageCount",
+            "durabilityMode",
             "isStreaming",
         ];
         for key in &required_keys {
@@ -660,6 +664,161 @@ fn rpc_get_session_stats_with_tool_calls() {
         assert_eq!(resp["data"]["tokens"]["input"], 35);
         assert_eq!(resp["data"]["tokens"]["output"], 18);
         assert_eq!(resp["data"]["tokens"]["total"], 53);
+
+        drop(in_tx);
+        let _ = server.await;
+    });
+}
+
+#[test]
+fn rpc_get_session_stats_reports_durability_backlog_diagnostics() {
+    let _harness = TestHarness::new("rpc_get_session_stats_durability_backlog");
+
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut session = Session::in_memory();
+        session.set_autosave_durability_mode(AutosaveDurabilityMode::Throughput);
+        session.append_message(SessionMessage::User {
+            content: UserContent::Text("queued-1".to_string()),
+            timestamp: Some(now),
+        });
+        session.append_message(SessionMessage::User {
+            content: UserContent::Text("queued-2".to_string()),
+            timestamp: Some(now + 1),
+        });
+        let expected_pending = session.autosave_metrics().pending_mutations as u64;
+        assert!(
+            expected_pending >= 2,
+            "expected pending autosave backlog before RPC stats query"
+        );
+
+        let (in_tx, out_rx, server) = setup_rpc(session, &handle);
+        let resp = send_recv(
+            &in_tx,
+            &out_rx,
+            r#"{"id":"1","type":"get_session_stats"}"#,
+            "get_session_stats durability backlog",
+        )
+        .await;
+
+        assert_eq!(resp["success"], true);
+        assert_eq!(resp["data"]["durabilityMode"], "throughput");
+        assert_eq!(
+            resp["data"]["persistenceStatus"]["event"],
+            "session.persistence.backlog"
+        );
+        assert_eq!(resp["data"]["persistenceStatus"]["severity"], "warning");
+
+        let pending = resp["data"]["pendingMessageCount"]
+            .as_u64()
+            .unwrap_or_default();
+        assert!(
+            pending >= expected_pending,
+            "pending backlog should be surfaced in diagnostics"
+        );
+
+        let action = resp["data"]["persistenceStatus"]["action"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            action.contains("manual save"),
+            "expected actionable persistence guidance, got: {action}"
+        );
+
+        let markers = resp["data"]["uxEventMarkers"]
+            .as_array()
+            .expect("uxEventMarkers array");
+        assert!(!markers.is_empty(), "uxEventMarkers should not be empty");
+        let marker = &markers[0];
+        assert_eq!(marker["event"], "session.persistence.backlog");
+        assert_eq!(marker["durabilityMode"], "throughput");
+        let marker_sli_ids: Vec<&str> = marker["sliIds"]
+            .as_array()
+            .expect("marker sliIds array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(
+            marker_sli_ids.contains(&"sli_resume_ready_p95_ms"),
+            "expected resume SLI marker"
+        );
+        assert!(
+            marker_sli_ids.contains(&"sli_failure_recovery_success_rate"),
+            "expected recovery SLI marker"
+        );
+
+        drop(in_tx);
+        let _ = server.await;
+    });
+}
+
+#[test]
+fn rpc_get_session_stats_stays_responsive_with_backlog() {
+    let harness = TestHarness::new("rpc_get_session_stats_backlog_responsive");
+    let logger = harness.log();
+
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let mut session = Session::in_memory();
+        session.set_autosave_durability_mode(AutosaveDurabilityMode::Balanced);
+        for index in 0..256 {
+            session.append_message(SessionMessage::User {
+                content: UserContent::Text(format!("queued-{index}")),
+                timestamp: Some(chrono::Utc::now().timestamp_millis()),
+            });
+        }
+        let expected_pending = session.autosave_metrics().pending_mutations as u64;
+        assert!(
+            expected_pending >= 256,
+            "expected large pending queue for responsiveness probe"
+        );
+
+        let (in_tx, out_rx, server) = setup_rpc(session, &handle);
+
+        let mut max_roundtrip_ms = 0u128;
+        for req_id in 0..8 {
+            let cmd = format!(r#"{{"id":"{req_id}","type":"get_session_stats"}}"#);
+            let label = format!("get_session_stats backlog probe {req_id}");
+            let start = Instant::now();
+            let resp = send_recv(&in_tx, &out_rx, &cmd, &label).await;
+            let elapsed_ms = start.elapsed().as_millis();
+            max_roundtrip_ms = max_roundtrip_ms.max(elapsed_ms);
+
+            assert_eq!(resp["success"], true);
+            assert_eq!(
+                resp["data"]["persistenceStatus"]["event"],
+                "session.persistence.backlog"
+            );
+            assert_eq!(resp["data"]["durabilityMode"], "balanced");
+            let pending = resp["data"]["pendingMessageCount"]
+                .as_u64()
+                .unwrap_or_default();
+            assert!(
+                pending >= expected_pending,
+                "stats response should preserve pending backlog visibility"
+            );
+        }
+
+        logger.info_ctx("rpc", "backlog responsiveness probe", |ctx| {
+            ctx.push(("max_roundtrip_ms".into(), max_roundtrip_ms.to_string()));
+            ctx.push(("pending_messages".into(), expected_pending.to_string()));
+        });
+
+        assert!(
+            max_roundtrip_ms <= MAX_BACKLOG_STATS_ROUNDTRIP_MS,
+            "get_session_stats should remain responsive under backlog (max={}ms, budget={}ms)",
+            max_roundtrip_ms,
+            MAX_BACKLOG_STATS_ROUNDTRIP_MS
+        );
 
         drop(in_tx);
         let _ = server.await;

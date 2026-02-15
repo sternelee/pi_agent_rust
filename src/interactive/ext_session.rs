@@ -134,30 +134,75 @@ impl ExtensionSession for InteractiveExtensionSession {
         };
 
         let cx = Cx::for_request();
-        let (session_file, session_id, session_name, message_count, thinking_level) =
-            self.session.lock(&cx).await.map_or_else(
-                |_| (None, String::new(), None, 0, "off".to_string()),
-                |guard| {
-                    let message_count = guard
-                        .entries_for_current_path()
-                        .iter()
-                        .filter(|entry| matches!(entry, SessionEntry::Message(_)))
-                        .count();
-                    let session_name = guard.get_name();
-                    let thinking_level = guard
-                        .header
-                        .thinking_level
-                        .clone()
-                        .unwrap_or_else(|| "off".to_string());
-                    (
-                        guard.path.as_ref().map(|p| p.display().to_string()),
-                        guard.header.id.clone(),
-                        session_name,
-                        message_count,
-                        thinking_level,
-                    )
-                },
-            );
+        let (
+            session_file,
+            session_id,
+            session_name,
+            message_count,
+            thinking_level,
+            durability_mode,
+            autosave_pending_mutations,
+            autosave_max_pending_mutations,
+            autosave_flush_failed_count,
+            autosave_backpressure,
+            persistence_status,
+        ) = self.session.lock(&cx).await.map_or_else(
+            |_| {
+                (
+                    None,
+                    String::new(),
+                    None,
+                    0,
+                    "off".to_string(),
+                    "balanced".to_string(),
+                    0usize,
+                    0usize,
+                    0u64,
+                    false,
+                    "unknown".to_string(),
+                )
+            },
+            |guard| {
+                let message_count = guard
+                    .entries_for_current_path()
+                    .iter()
+                    .filter(|entry| matches!(entry, SessionEntry::Message(_)))
+                    .count();
+                let session_name = guard.get_name();
+                let thinking_level = guard
+                    .header
+                    .thinking_level
+                    .clone()
+                    .unwrap_or_else(|| "off".to_string());
+                let autosave_metrics = guard.autosave_metrics();
+                let durability_mode = guard.autosave_durability_mode().as_str().to_string();
+                let autosave_backpressure = autosave_metrics.max_pending_mutations > 0
+                    && autosave_metrics.pending_mutations >= autosave_metrics.max_pending_mutations;
+                let persistence_status = if autosave_metrics.flush_failed > 0 {
+                    "degraded"
+                } else if autosave_backpressure {
+                    "backpressure"
+                } else if autosave_metrics.pending_mutations > 0 {
+                    "draining"
+                } else {
+                    "healthy"
+                }
+                .to_string();
+                (
+                    guard.path.as_ref().map(|p| p.display().to_string()),
+                    guard.header.id.clone(),
+                    session_name,
+                    message_count,
+                    thinking_level,
+                    durability_mode,
+                    autosave_metrics.pending_mutations,
+                    autosave_metrics.max_pending_mutations,
+                    autosave_metrics.flush_failed,
+                    autosave_backpressure,
+                    persistence_status,
+                )
+            },
+        );
 
         json!({
             "model": model,
@@ -171,7 +216,13 @@ impl ExtensionSession for InteractiveExtensionSession {
             "sessionName": session_name,
             "autoCompactionEnabled": self.config.compaction_enabled(),
             "messageCount": message_count,
-            "pendingMessageCount": 0,
+            "pendingMessageCount": autosave_pending_mutations,
+            "durabilityMode": durability_mode,
+            "autosavePendingMutations": autosave_pending_mutations,
+            "autosaveMaxPendingMutations": autosave_max_pending_mutations,
+            "autosaveFlushFailedCount": autosave_flush_failed_count,
+            "autosaveBackpressure": autosave_backpressure,
+            "persistenceStatus": persistence_status,
         })
     }
 

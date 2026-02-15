@@ -957,6 +957,8 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
             timeout_ms: None,
             cancel_token: None,
             context: None,
+            cached_params_hash: None,
+            cached_shape_hash: None,
         };
 
         match self.http_connector.dispatch(&call).await {

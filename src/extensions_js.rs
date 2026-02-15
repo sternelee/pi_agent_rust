@@ -241,9 +241,14 @@ fn canonical_exec_params(cmd: &str, payload: &serde_json::Value) -> serde_json::
 }
 
 fn canonical_op_params(op: &str, payload: &serde_json::Value) -> serde_json::Value {
+    // Fast path: null payload (common for get_state, get_name, etc.) — build
+    // result directly without creating an intermediate Map.
+    if payload.is_null() {
+        return serde_json::json!({ "op": op });
+    }
+
     let mut obj = match payload {
         serde_json::Value::Object(map) => map.clone(),
-        serde_json::Value::Null => serde_json::Map::new(),
         other => {
             let mut out = serde_json::Map::new();
             // Reserved key for non-object args to avoid dropping semantics.
@@ -2348,6 +2353,16 @@ pub struct PiJsTickStats {
     pub peak_memory_used_bytes: u64,
     /// Number of auto-repair events recorded since the runtime was created.
     pub repairs_total: u64,
+    /// Number of module cache hits accumulated by this runtime.
+    pub module_cache_hits: u64,
+    /// Number of module cache misses accumulated by this runtime.
+    pub module_cache_misses: u64,
+    /// Number of module cache invalidations accumulated by this runtime.
+    pub module_cache_invalidations: u64,
+    /// Number of module entries currently retained in the cache.
+    pub module_cache_entries: u64,
+    /// Number of disk cache hits (transpiled source loaded from persistent storage).
+    pub module_disk_cache_hits: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -4346,6 +4361,13 @@ pub struct PiJsRuntimeConfig {
     /// Explicitly deny environment variable access regardless of `is_env_var_allowed` blocklist.
     /// Used to enforce `ExtensionPolicy` with `deny_caps=[\"env\"]` for synchronous `pi.env` access.
     pub deny_env: bool,
+    /// Directory for persistent transpiled-source disk cache.
+    ///
+    /// When set, transpiled module sources are cached on disk keyed by a
+    /// content-aware hash so that SWC transpilation is skipped across process
+    /// restarts. Defaults to `~/.pi/agent/cache/modules/` (overridden by
+    /// `PIJS_MODULE_CACHE_DIR`). Set to `None` to disable.
+    pub disk_cache_dir: Option<PathBuf>,
 }
 
 impl PiJsRuntimeConfig {
@@ -4365,8 +4387,24 @@ impl Default for PiJsRuntimeConfig {
             repair_mode: RepairMode::default(),
             allow_unsafe_sync_exec: false,
             deny_env: true,
+            disk_cache_dir: runtime_disk_cache_dir(),
         }
     }
+}
+
+/// Resolve the persistent module disk cache directory.
+///
+/// Priority: `PIJS_MODULE_CACHE_DIR` env var > `~/.pi/agent/cache/modules/`.
+/// Set `PIJS_MODULE_CACHE_DIR=""` to explicitly disable the disk cache.
+fn runtime_disk_cache_dir() -> Option<PathBuf> {
+    if let Some(raw) = std::env::var_os("PIJS_MODULE_CACHE_DIR") {
+        return if raw.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(raw))
+        };
+    }
+    dirs::home_dir().map(|home| home.join(".pi").join("agent").join("cache").join("modules"))
 }
 
 #[derive(Debug)]
@@ -4427,6 +4465,12 @@ enum HostcallCompletion {
 }
 
 impl HostcallTracker {
+    fn clear(&mut self) {
+        self.pending.clear();
+        self.call_to_timer.clear();
+        self.timer_to_call.clear();
+    }
+
     fn register(&mut self, call_id: String, timer_id: Option<u64>) {
         self.pending.insert(call_id.clone());
         if let Some(timer_id) = timer_id {
@@ -4478,7 +4522,8 @@ struct PiJsModuleState {
     dynamic_virtual_modules: HashMap<String, String>,
     /// Tracked named exports for dynamic virtual modules keyed by specifier.
     dynamic_virtual_named_exports: HashMap<String, BTreeSet<String>>,
-    compiled_sources: HashMap<String, Vec<u8>>,
+    compiled_sources: HashMap<String, CompiledModuleCacheEntry>,
+    module_cache_counters: ModuleCacheCounters,
     /// Repair mode propagated from `PiJsRuntimeConfig` so the resolver can
     /// gate fallback patterns without executing any broken code.
     repair_mode: RepairMode,
@@ -4493,6 +4538,8 @@ struct PiJsModuleState {
     extension_root_scopes: HashMap<PathBuf, String>,
     /// Shared handle for recording repair events from the resolver.
     repair_events: Arc<std::sync::Mutex<Vec<ExtensionRepairEvent>>>,
+    /// Directory for persistent transpiled-source disk cache.
+    disk_cache_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4502,6 +4549,20 @@ enum ProxyStubSourceTier {
     Unknown,
 }
 
+#[derive(Debug, Clone)]
+struct CompiledModuleCacheEntry {
+    cache_key: Option<String>,
+    source: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ModuleCacheCounters {
+    hits: u64,
+    misses: u64,
+    invalidations: u64,
+    disk_hits: u64,
+}
+
 impl PiJsModuleState {
     fn new() -> Self {
         Self {
@@ -4509,11 +4570,13 @@ impl PiJsModuleState {
             dynamic_virtual_modules: HashMap::new(),
             dynamic_virtual_named_exports: HashMap::new(),
             compiled_sources: HashMap::new(),
+            module_cache_counters: ModuleCacheCounters::default(),
             repair_mode: RepairMode::default(),
             extension_roots: Vec::new(),
             extension_root_tiers: HashMap::new(),
             extension_root_scopes: HashMap::new(),
             repair_events: Arc::new(std::sync::Mutex::new(Vec::new())),
+            disk_cache_dir: None,
         }
     }
 
@@ -4527,6 +4590,11 @@ impl PiJsModuleState {
         events: Arc<std::sync::Mutex<Vec<ExtensionRepairEvent>>>,
     ) -> Self {
         self.repair_events = events;
+        self
+    }
+
+    fn with_disk_cache_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.disk_cache_dir = dir;
         self
     }
 }
@@ -4963,7 +5031,10 @@ impl JsModuleResolver for PiJsResolver {
                 if exports_changed || !state.dynamic_virtual_modules.contains_key(spec) {
                     let stub = generate_proxy_stub_module(spec, &export_names);
                     state.dynamic_virtual_modules.insert(entry_key, stub);
-                    state.compiled_sources.remove(spec);
+                    if state.compiled_sources.remove(spec).is_some() {
+                        state.module_cache_counters.invalidations =
+                            state.module_cache_counters.invalidations.saturating_add(1);
+                    }
                 }
 
                 if let Ok(mut events) = state.repair_events.lock() {
@@ -5005,19 +5076,7 @@ impl JsModuleLoader for PiJsLoader {
     ) -> rquickjs::Result<Module<'js, JsModuleDeclared>> {
         let source = {
             let mut state = self.state.borrow_mut();
-            if let Some(cached) = state.compiled_sources.get(name) {
-                cached.clone()
-            } else {
-                let compiled = compile_module_source(
-                    &state.static_virtual_modules,
-                    &state.dynamic_virtual_modules,
-                    name,
-                )?;
-                state
-                    .compiled_sources
-                    .insert(name.to_string(), compiled.clone());
-                compiled
-            }
+            load_compiled_module_source(&mut state, name)?
         };
 
         Module::declare(ctx.clone(), name, source)
@@ -5068,6 +5127,204 @@ fn compile_module_source(
     };
 
     Ok(prefix_import_meta_url(name, &compiled))
+}
+
+fn module_cache_key(
+    static_virtual_modules: &HashMap<String, String>,
+    dynamic_virtual_modules: &HashMap<String, String>,
+    name: &str,
+) -> Option<String> {
+    if let Some(source) = dynamic_virtual_modules
+        .get(name)
+        .or_else(|| static_virtual_modules.get(name))
+    {
+        let mut hasher = Sha256::new();
+        hasher.update(b"virtual\0");
+        hasher.update(name.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(source.as_bytes());
+        return Some(format!("v:{:x}", hasher.finalize()));
+    }
+
+    let path = Path::new(name);
+    if !path.is_file() {
+        return None;
+    }
+
+    let metadata = fs::metadata(path).ok()?;
+    let modified_nanos = metadata
+        .modified()
+        .ok()
+        .and_then(|ts| ts.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |duration| duration.as_nanos());
+
+    Some(format!("f:{name}:{}:{modified_nanos}", metadata.len()))
+}
+
+// ============================================================================
+// Persistent disk cache for transpiled module sources (bd-3ar8v.4.16)
+// ============================================================================
+
+/// Build the on-disk path for a cached transpiled module.
+///
+/// Layout: `{cache_dir}/{first_2_hex}/{full_hex}.js` to shard entries and
+/// avoid a single flat directory with thousands of files.
+fn disk_cache_path(cache_dir: &Path, cache_key: &str) -> PathBuf {
+    let mut hasher = Sha256::new();
+    hasher.update(cache_key.as_bytes());
+    let hex = format!("{:x}", hasher.finalize());
+    let prefix = &hex[..2];
+    cache_dir.join(prefix).join(format!("{hex}.js"))
+}
+
+/// Attempt to load a transpiled module source from persistent disk cache.
+fn try_load_from_disk_cache(cache_dir: &Path, cache_key: &str) -> Option<Vec<u8>> {
+    let path = disk_cache_path(cache_dir, cache_key);
+    fs::read(path).ok()
+}
+
+/// Persist a transpiled module source to the disk cache (best-effort).
+fn store_to_disk_cache(cache_dir: &Path, cache_key: &str, source: &[u8]) {
+    let path = disk_cache_path(cache_dir, cache_key);
+    if let Some(parent) = path.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            tracing::debug!(event = "pijs.module_cache.disk.mkdir_failed", path = %parent.display(), %err);
+            return;
+        }
+    }
+    if let Err(err) = fs::write(&path, source) {
+        tracing::debug!(event = "pijs.module_cache.disk.write_failed", path = %path.display(), %err);
+    }
+}
+
+fn load_compiled_module_source(
+    state: &mut PiJsModuleState,
+    name: &str,
+) -> rquickjs::Result<Vec<u8>> {
+    let cache_key = module_cache_key(
+        &state.static_virtual_modules,
+        &state.dynamic_virtual_modules,
+        name,
+    );
+
+    // 1. Check in-memory cache.
+    if let Some(cached) = state.compiled_sources.get(name).cloned() {
+        if cached.cache_key == cache_key {
+            state.module_cache_counters.hits = state.module_cache_counters.hits.saturating_add(1);
+            return Ok(cached.source);
+        }
+
+        state.module_cache_counters.invalidations =
+            state.module_cache_counters.invalidations.saturating_add(1);
+    }
+
+    // 2. Check persistent disk cache.
+    if let Some(cache_key_str) = cache_key.as_deref()
+        && let Some(cache_dir) = state.disk_cache_dir.as_deref()
+        && let Some(disk_cached) = try_load_from_disk_cache(cache_dir, cache_key_str)
+    {
+        state.module_cache_counters.disk_hits =
+            state.module_cache_counters.disk_hits.saturating_add(1);
+        state.compiled_sources.insert(
+            name.to_string(),
+            CompiledModuleCacheEntry {
+                cache_key,
+                source: disk_cached.clone(),
+            },
+        );
+        return Ok(disk_cached);
+    }
+
+    // 3. Compile from source (SWC transpile + CJS->ESM rewrite).
+    state.module_cache_counters.misses = state.module_cache_counters.misses.saturating_add(1);
+    let compiled = compile_module_source(
+        &state.static_virtual_modules,
+        &state.dynamic_virtual_modules,
+        name,
+    )?;
+    state.compiled_sources.insert(
+        name.to_string(),
+        CompiledModuleCacheEntry {
+            cache_key: cache_key.clone(),
+            source: compiled.clone(),
+        },
+    );
+
+    // 4. Persist to disk cache for next session.
+    if let Some(cache_key_str) = cache_key.as_deref()
+        && let Some(cache_dir) = state.disk_cache_dir.as_deref()
+    {
+        store_to_disk_cache(cache_dir, cache_key_str, &compiled);
+    }
+
+    Ok(compiled)
+}
+
+// ============================================================================
+// Warm Isolate Pool (bd-3ar8v.4.16)
+// ============================================================================
+
+/// Configuration holder and factory for pre-warmed JS extension runtimes.
+///
+/// Since `PiJsRuntime` uses `Rc` internally and cannot cross thread
+/// boundaries, the pool does not hold live runtime instances. Instead, it
+/// provides a factory that produces pre-configured `PiJsRuntimeConfig` values,
+/// and runtimes can be returned to a "warm" state via
+/// [`PiJsRuntime::reset_transient_state`].
+///
+/// # Lifecycle
+///
+/// 1. Create pool with desired config via [`WarmIsolatePool::new`].
+/// 2. Call [`make_config`](WarmIsolatePool::make_config) to get a pre-warmed
+///    `PiJsRuntimeConfig` for each runtime thread.
+/// 3. After use, call [`PiJsRuntime::reset_transient_state`] to return the
+///    runtime to a clean state (keeping the transpiled source cache).
+#[derive(Debug, Clone)]
+pub struct WarmIsolatePool {
+    /// Template configuration for new runtimes.
+    template: PiJsRuntimeConfig,
+    /// Number of runtimes created from this pool.
+    created_count: Arc<AtomicU64>,
+    /// Number of resets performed.
+    reset_count: Arc<AtomicU64>,
+}
+
+impl WarmIsolatePool {
+    /// Create a new warm isolate pool with the given template config.
+    pub fn new(template: PiJsRuntimeConfig) -> Self {
+        Self {
+            template,
+            created_count: Arc::new(AtomicU64::new(0)),
+            reset_count: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Create a pre-configured `PiJsRuntimeConfig` with shared pool state.
+    pub fn make_config(&self) -> PiJsRuntimeConfig {
+        self.created_count.fetch_add(1, AtomicOrdering::Relaxed);
+        self.template.clone()
+    }
+
+    /// Record that a runtime was reset for reuse.
+    pub fn record_reset(&self) {
+        self.reset_count.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    /// Number of runtimes created from this pool.
+    pub fn created_count(&self) -> u64 {
+        self.created_count.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Number of runtime resets performed.
+    pub fn reset_count(&self) -> u64 {
+        self.reset_count.load(AtomicOrdering::Relaxed)
+    }
+}
+
+impl Default for WarmIsolatePool {
+    fn default() -> Self {
+        Self::new(PiJsRuntimeConfig::default())
+    }
 }
 
 fn prefix_import_meta_url(module_name: &str, body: &str) -> Vec<u8> {
@@ -11111,6 +11368,49 @@ pub struct PiJsRuntime<C: SchedulerClock = WallClock> {
     module_state: Rc<RefCell<PiJsModuleState>>,
 }
 
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JsRuntimeRegistrySnapshot {
+    extensions: u64,
+    tools: u64,
+    commands: u64,
+    hooks: u64,
+    event_bus_hooks: u64,
+    providers: u64,
+    shortcuts: u64,
+    message_renderers: u64,
+    pending_tasks: u64,
+    pending_hostcalls: u64,
+    pending_timers: u64,
+    pending_event_listener_lists: u64,
+    provider_streams: u64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct JsRuntimeResetPayload {
+    before: JsRuntimeRegistrySnapshot,
+    after: JsRuntimeRegistrySnapshot,
+    clean: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PiJsWarmResetReport {
+    pub reused: bool,
+    pub reason_code: Option<String>,
+    pub rust_pending_hostcalls: u64,
+    pub rust_pending_hostcall_queue: u64,
+    pub rust_scheduler_pending: bool,
+    pub pending_tasks_before: u64,
+    pub pending_hostcalls_before: u64,
+    pub pending_timers_before: u64,
+    pub residual_entries_after: u64,
+    pub dynamic_module_invalidations: u64,
+    pub module_cache_hits: u64,
+    pub module_cache_misses: u64,
+    pub module_cache_invalidations: u64,
+    pub module_cache_entries: u64,
+}
+
 #[allow(clippy::future_not_send)]
 impl PiJsRuntime<WallClock> {
     /// Create a new PiJS runtime with the default wall clock.
@@ -11183,7 +11483,8 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
         let module_state = Rc::new(RefCell::new(
             PiJsModuleState::new()
                 .with_repair_mode(config.repair_mode)
-                .with_repair_events(Arc::clone(&repair_events)),
+                .with_repair_events(Arc::clone(&repair_events))
+                .with_disk_cache_dir(config.disk_cache_dir.clone()),
         ));
         runtime
             .set_loader(
@@ -11256,6 +11557,146 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
 
         let tick = self.tick_counter.fetch_add(1, AtomicOrdering::SeqCst) + 1;
         tick == 1 || (tick % UNBOUNDED_MEMORY_USAGE_SAMPLE_EVERY_TICKS == 0)
+    }
+
+    fn module_cache_snapshot(&self) -> (u64, u64, u64, u64, u64) {
+        let state = self.module_state.borrow();
+        let entries = u64::try_from(state.compiled_sources.len()).unwrap_or(u64::MAX);
+        (
+            state.module_cache_counters.hits,
+            state.module_cache_counters.misses,
+            state.module_cache_counters.invalidations,
+            entries,
+            state.module_cache_counters.disk_hits,
+        )
+    }
+
+    #[allow(clippy::future_not_send)]
+    pub async fn reset_for_warm_reload(&self) -> Result<PiJsWarmResetReport> {
+        let rust_pending_hostcalls =
+            u64::try_from(self.hostcall_tracker.borrow().pending_count()).unwrap_or(u64::MAX);
+        let rust_pending_hostcall_queue =
+            u64::try_from(self.hostcall_queue.borrow().len()).unwrap_or(u64::MAX);
+        let rust_scheduler_pending = self.scheduler.borrow().has_pending();
+
+        let mut report = PiJsWarmResetReport {
+            rust_pending_hostcalls,
+            rust_pending_hostcall_queue,
+            rust_scheduler_pending,
+            ..PiJsWarmResetReport::default()
+        };
+
+        if rust_pending_hostcalls > 0 || rust_pending_hostcall_queue > 0 || rust_scheduler_pending {
+            report.reason_code = Some("pending_rust_work".to_string());
+            return Ok(report);
+        }
+
+        let reset_payload_value = match self
+            .context
+            .with(|ctx| {
+                let global = ctx.globals();
+                let reset_fn: Function<'_> = global.get("__pi_reset_extension_runtime_state")?;
+                let value: Value<'_> = reset_fn.call(())?;
+                js_to_json(&value)
+            })
+            .await
+        {
+            Ok(value) => value,
+            Err(err) => return Err(self.map_quickjs_error(&err)),
+        };
+
+        let reset_payload: JsRuntimeResetPayload = serde_json::from_value(reset_payload_value)
+            .map_err(|err| {
+                Error::extension(format!("PiJS warm reset payload decode failed: {err}"))
+            })?;
+
+        report.pending_tasks_before = reset_payload.before.pending_tasks;
+        report.pending_hostcalls_before = reset_payload.before.pending_hostcalls;
+        report.pending_timers_before = reset_payload.before.pending_timers;
+
+        let _before_registry_entries = reset_payload.before.extensions
+            + reset_payload.before.tools
+            + reset_payload.before.commands
+            + reset_payload.before.hooks
+            + reset_payload.before.event_bus_hooks
+            + reset_payload.before.providers
+            + reset_payload.before.shortcuts
+            + reset_payload.before.message_renderers
+            + reset_payload.before.pending_tasks
+            + reset_payload.before.pending_hostcalls
+            + reset_payload.before.pending_timers
+            + reset_payload.before.pending_event_listener_lists
+            + reset_payload.before.provider_streams;
+
+        let residual_after = reset_payload.after.extensions
+            + reset_payload.after.tools
+            + reset_payload.after.commands
+            + reset_payload.after.hooks
+            + reset_payload.after.event_bus_hooks
+            + reset_payload.after.providers
+            + reset_payload.after.shortcuts
+            + reset_payload.after.message_renderers
+            + reset_payload.after.pending_tasks
+            + reset_payload.after.pending_hostcalls
+            + reset_payload.after.pending_timers
+            + reset_payload.after.pending_event_listener_lists
+            + reset_payload.after.provider_streams;
+        report.residual_entries_after = residual_after;
+
+        self.hostcall_queue.borrow_mut().clear();
+        *self.hostcall_tracker.borrow_mut() = HostcallTracker::default();
+
+        if let Ok(mut roots) = self.allowed_read_roots.lock() {
+            roots.clear();
+        }
+
+        let mut dynamic_invalidations = 0_u64;
+        {
+            let mut state = self.module_state.borrow_mut();
+            let dynamic_specs: Vec<String> =
+                state.dynamic_virtual_modules.keys().cloned().collect();
+            state.dynamic_virtual_modules.clear();
+            state.dynamic_virtual_named_exports.clear();
+            state.extension_roots.clear();
+            state.extension_root_tiers.clear();
+            state.extension_root_scopes.clear();
+
+            for spec in dynamic_specs {
+                if state.compiled_sources.remove(&spec).is_some() {
+                    dynamic_invalidations = dynamic_invalidations.saturating_add(1);
+                }
+            }
+            if dynamic_invalidations > 0 {
+                state.module_cache_counters.invalidations = state
+                    .module_cache_counters
+                    .invalidations
+                    .saturating_add(dynamic_invalidations);
+            }
+        }
+        report.dynamic_module_invalidations = dynamic_invalidations;
+
+        let (cache_hits, cache_misses, cache_invalidations, cache_entries, _disk_hits) =
+            self.module_cache_snapshot();
+        report.module_cache_hits = cache_hits;
+        report.module_cache_misses = cache_misses;
+        report.module_cache_invalidations = cache_invalidations;
+        report.module_cache_entries = cache_entries;
+
+        if report.pending_tasks_before > 0
+            || report.pending_hostcalls_before > 0
+            || report.pending_timers_before > 0
+        {
+            report.reason_code = Some("pending_js_work".to_string());
+            return Ok(report);
+        }
+
+        if !reset_payload.clean || residual_after > 0 {
+            report.reason_code = Some("reset_residual_state".to_string());
+            return Ok(report);
+        }
+
+        report.reused = true;
+        Ok(report)
     }
 
     /// Evaluate JavaScript source code.
@@ -11335,6 +11776,42 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
     /// Number of repair events recorded since the runtime was created.
     pub fn repair_count(&self) -> u64 {
         self.repair_events.lock().map_or(0, |v| v.len() as u64)
+    }
+
+    /// Reset transient module state for warm isolate reuse.
+    ///
+    /// Clears extension roots, dynamic virtual modules, named export tracking,
+    /// repair events, and cache counters while **preserving** the compiled
+    /// sources cache (both in-memory and disk). This lets the runtime be
+    /// reloaded with a fresh set of extensions without paying the SWC
+    /// transpilation cost again.
+    pub fn reset_transient_state(&self) {
+        let mut state = self.module_state.borrow_mut();
+        state.extension_roots.clear();
+        state.extension_root_tiers.clear();
+        state.extension_root_scopes.clear();
+        state.dynamic_virtual_modules.clear();
+        state.dynamic_virtual_named_exports.clear();
+        state.module_cache_counters = ModuleCacheCounters::default();
+        // Keep compiled_sources — the transpiled source cache is still valid.
+        // Keep disk_cache_dir — reuse the same persistent cache.
+        // Keep static_virtual_modules — immutable, shared via Arc.
+        drop(state);
+
+        // Clear hostcall state.
+        self.hostcall_queue.borrow_mut().clear();
+        self.hostcall_tracker.borrow_mut().clear();
+        // Drain repair events.
+        if let Ok(mut events) = self.repair_events.lock() {
+            events.clear();
+        }
+        // Reset counters.
+        self.hostcalls_total
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        self.hostcalls_timed_out
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        self.tick_counter
+            .store(0, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Evaluate a JavaScript file.
@@ -11558,6 +12035,13 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                 .load(std::sync::atomic::Ordering::SeqCst);
         }
         stats.repairs_total = self.repair_count();
+        let (cache_hits, cache_misses, cache_invalidations, cache_entries, disk_hits) =
+            self.module_cache_snapshot();
+        stats.module_cache_hits = cache_hits;
+        stats.module_cache_misses = cache_misses;
+        stats.module_cache_invalidations = cache_invalidations;
+        stats.module_cache_entries = cache_entries;
+        stats.module_disk_cache_hits = disk_hits;
 
         if let Some(limit) = self.config.limits.memory_limit_bytes {
             let limit = u64::try_from(limit).unwrap_or(u64::MAX);
@@ -13146,6 +13630,94 @@ function __pi_task_take(task_id) {
         __pi_tasks.delete(id);
     }
     return state;
+}
+
+function __pi_runtime_registry_snapshot() {
+    return {
+        extensions: __pi_extensions.size,
+        tools: __pi_tool_index.size,
+        commands: __pi_command_index.size,
+        hooks: __pi_hook_index.size,
+        eventBusHooks: __pi_event_bus_index.size,
+        providers: __pi_provider_index.size,
+        shortcuts: __pi_shortcut_index.size,
+        messageRenderers: __pi_message_renderer_index.size,
+        pendingTasks: __pi_tasks.size,
+        pendingHostcalls: __pi_pending_hostcalls.size,
+        pendingTimers: __pi_timer_callbacks.size,
+        pendingEventListenerLists: __pi_event_listeners.size,
+        providerStreams:
+            typeof __pi_provider_streams !== 'undefined' &&
+            __pi_provider_streams &&
+            typeof __pi_provider_streams.size === 'number'
+                ? __pi_provider_streams.size
+                : 0,
+    };
+}
+
+function __pi_reset_extension_runtime_state() {
+    const before = __pi_runtime_registry_snapshot();
+
+    if (
+        typeof __pi_provider_streams !== 'undefined' &&
+        __pi_provider_streams &&
+        typeof __pi_provider_streams.values === 'function'
+    ) {
+        for (const stream of __pi_provider_streams.values()) {
+            try {
+                if (stream && stream.controller && typeof stream.controller.abort === 'function') {
+                    stream.controller.abort();
+                }
+            } catch (_) {}
+            try {
+                if (
+                    stream &&
+                    stream.iterator &&
+                    typeof stream.iterator.return === 'function'
+                ) {
+                    stream.iterator.return();
+                }
+            } catch (_) {}
+        }
+        if (typeof __pi_provider_streams.clear === 'function') {
+            __pi_provider_streams.clear();
+        }
+    }
+    if (typeof __pi_provider_stream_seq === 'number') {
+        __pi_provider_stream_seq = 0;
+    }
+
+    __pi_current_extension_id = null;
+    __pi_extensions.clear();
+    __pi_tool_index.clear();
+    __pi_command_index.clear();
+    __pi_hook_index.clear();
+    __pi_event_bus_index.clear();
+    __pi_provider_index.clear();
+    __pi_shortcut_index.clear();
+    __pi_message_renderer_index.clear();
+    __pi_tasks.clear();
+    __pi_pending_hostcalls.clear();
+    __pi_timer_callbacks.clear();
+    __pi_event_listeners.clear();
+
+    const after = __pi_runtime_registry_snapshot();
+    const clean =
+        after.extensions === 0 &&
+        after.tools === 0 &&
+        after.commands === 0 &&
+        after.hooks === 0 &&
+        after.eventBusHooks === 0 &&
+        after.providers === 0 &&
+        after.shortcuts === 0 &&
+        after.messageRenderers === 0 &&
+        after.pendingTasks === 0 &&
+        after.pendingHostcalls === 0 &&
+        after.pendingTimers === 0 &&
+        after.pendingEventListenerLists === 0 &&
+        after.providerStreams === 0;
+
+    return { before, after, clean };
 }
 
 function __pi_get_or_create_extension(extension_id, meta) {
@@ -15866,6 +16438,23 @@ mod tests {
     }
 
     #[allow(clippy::future_not_send)]
+    async fn call_global_fn_json<C: SchedulerClock + 'static>(
+        runtime: &PiJsRuntime<C>,
+        name: &str,
+    ) -> serde_json::Value {
+        runtime
+            .context
+            .with(|ctx| {
+                let global = ctx.globals();
+                let function: Function<'_> = global.get(name)?;
+                let value: Value<'_> = function.call(())?;
+                js_to_json(&value)
+            })
+            .await
+            .expect("js context")
+    }
+
+    #[allow(clippy::future_not_send)]
     async fn runtime_with_sync_exec_enabled(
         clock: Arc<DeterministicClock>,
     ) -> PiJsRuntime<Arc<DeterministicClock>> {
@@ -16090,6 +16679,218 @@ mod tests {
             message.contains("Unsupported module extension"),
             "unexpected error: {message}"
         );
+    }
+
+    #[test]
+    fn module_cache_key_changes_when_virtual_module_changes() {
+        let static_modules = HashMap::new();
+        let mut dynamic_modules = HashMap::new();
+        dynamic_modules.insert("pijs://virt".to_string(), "export const x = 1;".to_string());
+
+        let key_before = module_cache_key(&static_modules, &dynamic_modules, "pijs://virt")
+            .expect("virtual key should exist");
+
+        dynamic_modules.insert("pijs://virt".to_string(), "export const x = 2;".to_string());
+        let key_after = module_cache_key(&static_modules, &dynamic_modules, "pijs://virt")
+            .expect("virtual key should exist");
+
+        assert_ne!(key_before, key_after);
+    }
+
+    #[test]
+    fn module_cache_key_changes_when_file_size_changes() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let module_path = temp_dir.path().join("module.js");
+        std::fs::write(&module_path, "export const x = 1;\n").expect("write module");
+        let name = module_path.to_string_lossy().to_string();
+
+        let key_before =
+            module_cache_key(&HashMap::new(), &HashMap::new(), &name).expect("file key");
+
+        std::fs::write(&module_path, "export const xyz = 123456;\n").expect("rewrite module");
+        let key_after =
+            module_cache_key(&HashMap::new(), &HashMap::new(), &name).expect("file key");
+
+        assert_ne!(key_before, key_after);
+    }
+
+    #[test]
+    fn load_compiled_module_source_tracks_hit_miss_and_invalidation_counters() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let module_path = temp_dir.path().join("module.js");
+        std::fs::write(&module_path, "export const x = 1;\n").expect("write module");
+        let name = module_path.to_string_lossy().to_string();
+
+        let mut state = PiJsModuleState::new();
+
+        let _first = load_compiled_module_source(&mut state, &name).expect("first compile");
+        assert_eq!(state.module_cache_counters.hits, 0);
+        assert_eq!(state.module_cache_counters.misses, 1);
+        assert_eq!(state.module_cache_counters.invalidations, 0);
+        assert_eq!(state.compiled_sources.len(), 1);
+
+        let _second = load_compiled_module_source(&mut state, &name).expect("cache hit");
+        assert_eq!(state.module_cache_counters.hits, 1);
+        assert_eq!(state.module_cache_counters.misses, 1);
+        assert_eq!(state.module_cache_counters.invalidations, 0);
+
+        std::fs::write(&module_path, "export const xyz = 123456;\n").expect("rewrite module");
+        let _third = load_compiled_module_source(&mut state, &name).expect("recompile");
+        assert_eq!(state.module_cache_counters.hits, 1);
+        assert_eq!(state.module_cache_counters.misses, 2);
+        assert_eq!(state.module_cache_counters.invalidations, 1);
+    }
+
+    #[test]
+    fn load_compiled_module_source_uses_disk_cache_between_states() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let cache_dir = temp_dir.path().join("cache");
+        let module_path = temp_dir.path().join("module.js");
+        std::fs::write(&module_path, "export const x = 1;\n").expect("write module");
+        let name = module_path.to_string_lossy().to_string();
+
+        let mut first_state = PiJsModuleState::new().with_disk_cache_dir(Some(cache_dir.clone()));
+        let first = load_compiled_module_source(&mut first_state, &name).expect("first compile");
+        assert_eq!(first_state.module_cache_counters.misses, 1);
+        assert_eq!(first_state.module_cache_counters.disk_hits, 0);
+
+        let key = module_cache_key(&HashMap::new(), &HashMap::new(), &name).expect("file key");
+        let cache_path = disk_cache_path(&cache_dir, &key);
+        assert!(
+            cache_path.exists(),
+            "expected persisted cache at {cache_path:?}"
+        );
+
+        let mut second_state = PiJsModuleState::new().with_disk_cache_dir(Some(cache_dir));
+        let second =
+            load_compiled_module_source(&mut second_state, &name).expect("load from disk cache");
+        assert_eq!(second_state.module_cache_counters.disk_hits, 1);
+        assert_eq!(second_state.module_cache_counters.misses, 0);
+        assert_eq!(second_state.module_cache_counters.hits, 0);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn load_compiled_module_source_disk_cache_invalidates_when_file_changes() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let cache_dir = temp_dir.path().join("cache");
+        let module_path = temp_dir.path().join("module.js");
+        std::fs::write(&module_path, "export const x = 1;\n").expect("write module");
+        let name = module_path.to_string_lossy().to_string();
+
+        let mut prime_state = PiJsModuleState::new().with_disk_cache_dir(Some(cache_dir.clone()));
+        let first = load_compiled_module_source(&mut prime_state, &name).expect("first compile");
+        let first_key = module_cache_key(&HashMap::new(), &HashMap::new(), &name).expect("key");
+
+        std::fs::write(
+            &module_path,
+            "export const xyz = 1234567890;\nexport const more = true;\n",
+        )
+        .expect("rewrite module");
+        let second_key = module_cache_key(&HashMap::new(), &HashMap::new(), &name).expect("key");
+        assert_ne!(first_key, second_key);
+
+        let mut second_state = PiJsModuleState::new().with_disk_cache_dir(Some(cache_dir));
+        let second = load_compiled_module_source(&mut second_state, &name).expect("recompile");
+        assert_eq!(second_state.module_cache_counters.disk_hits, 0);
+        assert_eq!(second_state.module_cache_counters.misses, 1);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn warm_reset_clears_extension_registry_state() {
+        futures::executor::block_on(async {
+            let runtime = PiJsRuntime::with_clock(DeterministicClock::new(0))
+                .await
+                .expect("create runtime");
+
+            runtime
+                .eval(
+                    r#"
+                    __pi_begin_extension("ext.reset", { name: "ext.reset" });
+                    pi.registerTool({
+                        name: "warm_reset_tool",
+                        execute: async (_callId, _input) => ({ ok: true }),
+                    });
+                    pi.registerCommand("warm_reset_cmd", {
+                        handler: async (_args, _ctx) => ({ ok: true }),
+                    });
+                    pi.on("startup", async () => {});
+                    __pi_end_extension();
+                    "#,
+                )
+                .await
+                .expect("register extension state");
+
+            let before = call_global_fn_json(&runtime, "__pi_runtime_registry_snapshot").await;
+            assert_eq!(before["extensions"], serde_json::json!(1));
+            assert_eq!(before["tools"], serde_json::json!(1));
+            assert_eq!(before["commands"], serde_json::json!(1));
+
+            let report = runtime
+                .reset_for_warm_reload()
+                .await
+                .expect("warm reset should run");
+            assert!(report.reused, "expected warm reuse, got report: {report:?}");
+            assert!(
+                report.reason_code.is_none(),
+                "unexpected warm-reset reason: {:?}",
+                report.reason_code
+            );
+
+            let after = call_global_fn_json(&runtime, "__pi_runtime_registry_snapshot").await;
+            assert_eq!(after["extensions"], serde_json::json!(0));
+            assert_eq!(after["tools"], serde_json::json!(0));
+            assert_eq!(after["commands"], serde_json::json!(0));
+            assert_eq!(after["hooks"], serde_json::json!(0));
+            assert_eq!(after["pendingTasks"], serde_json::json!(0));
+            assert_eq!(after["pendingHostcalls"], serde_json::json!(0));
+        });
+    }
+
+    #[test]
+    fn warm_reset_reports_pending_rust_work() {
+        futures::executor::block_on(async {
+            let runtime = PiJsRuntime::with_clock(DeterministicClock::new(0))
+                .await
+                .expect("create runtime");
+            let _timer = runtime.set_timeout(10);
+
+            let report = runtime
+                .reset_for_warm_reload()
+                .await
+                .expect("warm reset should return report");
+            assert!(!report.reused);
+            assert_eq!(report.reason_code.as_deref(), Some("pending_rust_work"));
+        });
+    }
+
+    #[test]
+    fn warm_reset_reports_pending_js_work() {
+        futures::executor::block_on(async {
+            let runtime = PiJsRuntime::with_clock(DeterministicClock::new(0))
+                .await
+                .expect("create runtime");
+
+            runtime
+                .eval(
+                    r#"
+                    __pi_tasks.set("pending-task", { status: "pending" });
+                    "#,
+                )
+                .await
+                .expect("inject pending JS task");
+
+            let report = runtime
+                .reset_for_warm_reload()
+                .await
+                .expect("warm reset should return report");
+            assert!(!report.reused);
+            assert_eq!(report.reason_code.as_deref(), Some("pending_js_work"));
+
+            let after = call_global_fn_json(&runtime, "__pi_runtime_registry_snapshot").await;
+            assert_eq!(after["pendingTasks"], serde_json::json!(0));
+        });
     }
 
     #[test]

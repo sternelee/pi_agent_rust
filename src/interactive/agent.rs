@@ -828,6 +828,9 @@ impl PiApp {
             let event_sender = event_tx.clone();
             let extensions = extensions.clone();
             let runtime_handle = runtime_handle_for_task.clone();
+            let coalescer = extensions
+                .as_ref()
+                .map(|m| crate::extensions::EventCoalescer::new(m.clone()));
             let result = agent_guard
                 .run_with_content_with_abort(content_for_agent, Some(abort_signal), move |event| {
                     let extension_event = extension_event_from_agent(&event);
@@ -899,7 +902,7 @@ impl PiApp {
                         let _ = event_sender.try_send(msg);
                     }
 
-                    if let Some(manager) = &extensions {
+                    if let Some(coal) = &coalescer {
                         if let Some((event_name, data)) = extension_event {
                             if !matches!(
                                 event_name,
@@ -908,11 +911,7 @@ impl PiApp {
                                     | ExtensionEventName::TurnStart
                                     | ExtensionEventName::TurnEnd
                             ) {
-                                let manager = manager.clone();
-                                let runtime_handle = runtime_handle.clone();
-                                runtime_handle.spawn(async move {
-                                    let _ = manager.dispatch_event(event_name, data).await;
-                                });
+                                coal.dispatch_fire_and_forget(event_name, data, &runtime_handle);
                             }
                         }
                     }
@@ -1121,6 +1120,9 @@ impl PiApp {
 
             let event_sender = event_tx.clone();
             let extensions = extensions.clone();
+            let coalescer = extensions
+                .as_ref()
+                .map(|m| crate::extensions::EventCoalescer::new(m.clone()));
             let result = if input_images.is_empty() {
                 agent_guard
                     .run_with_abort(message_for_agent, Some(abort_signal), move |event| {
@@ -1193,7 +1195,7 @@ impl PiApp {
                             let _ = event_sender.try_send(msg);
                         }
 
-                        if let Some(manager) = &extensions {
+                        if let Some(coal) = &coalescer {
                             if let Some((event_name, data)) = extension_event {
                                 if !matches!(
                                     event_name,
@@ -1202,10 +1204,11 @@ impl PiApp {
                                         | ExtensionEventName::TurnStart
                                         | ExtensionEventName::TurnEnd
                                 ) {
-                                    let manager = manager.clone();
-                                    runtime_handle_for_agent.spawn(async move {
-                                        let _ = manager.dispatch_event(event_name, data).await;
-                                    });
+                                    coal.dispatch_fire_and_forget(
+                                        event_name,
+                                        data,
+                                        &runtime_handle_for_agent,
+                                    );
                                 }
                             }
                         }
@@ -1288,7 +1291,7 @@ impl PiApp {
                                 let _ = event_sender.try_send(msg);
                             }
 
-                            if let Some(manager) = &extensions {
+                            if let Some(coal) = &coalescer {
                                 if let Some((event_name, data)) = extension_event {
                                     if !matches!(
                                         event_name,
@@ -1297,10 +1300,11 @@ impl PiApp {
                                             | ExtensionEventName::TurnStart
                                             | ExtensionEventName::TurnEnd
                                     ) {
-                                        let manager = manager.clone();
-                                        runtime_handle_for_agent.spawn(async move {
-                                            let _ = manager.dispatch_event(event_name, data).await;
-                                        });
+                                        coal.dispatch_fire_and_forget(
+                                            event_name,
+                                            data,
+                                            &runtime_handle_for_agent,
+                                        );
                                     }
                                 }
                             }

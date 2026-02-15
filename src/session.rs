@@ -354,7 +354,7 @@ impl AutosaveDurabilityMode {
         matches!(self, Self::Balanced)
     }
 
-    const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Strict => "strict",
             Self::Balanced => "balanced",

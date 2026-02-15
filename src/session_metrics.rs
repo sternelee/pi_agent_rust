@@ -729,6 +729,7 @@ mod tests {
         assert!(summary.contains("JSONL bytes:"));
         assert!(summary.contains("JSONL queue wait:"));
         assert!(summary.contains("SQLite save:"));
+        assert!(summary.contains("SQLite append:"));
         assert!(summary.contains("SQLite serialize:"));
         assert!(summary.contains("SQLite bytes:"));
         assert!(summary.contains("SQLite load:"));

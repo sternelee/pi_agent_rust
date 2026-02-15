@@ -39,6 +39,7 @@ fn get_state_returns_required_fields() {
         let required_keys = [
             "model",
             "thinkingLevel",
+            "durabilityMode",
             "isStreaming",
             "isCompacting",
             "steeringMode",
@@ -68,6 +69,7 @@ fn get_state_defaults_for_fresh_session() {
         let state = handle.get_state().await;
 
         assert_eq!(state["thinkingLevel"], "off");
+        assert_eq!(state["durabilityMode"], "balanced");
         assert_eq!(state["isStreaming"], false);
         assert_eq!(state["isCompacting"], false);
         assert_eq!(state["steeringMode"], "one-at-a-time");

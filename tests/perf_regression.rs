@@ -25,6 +25,7 @@ mod common;
 
 use chrono::{SecondsFormat, Utc};
 use common::harness::TestHarness;
+use pi::perf_build;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -104,6 +105,10 @@ struct EnvFingerprint {
     cpu_cores: u32,
     mem_total_mb: u64,
     build_profile: String,
+    allocator_requested: String,
+    allocator_effective: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allocator_fallback_reason: Option<String>,
     git_commit: String,
     config_hash: String,
 }
@@ -121,13 +126,15 @@ fn collect_fingerprint() -> EnvFingerprint {
     let mem_total_mb = system.total_memory() / (1024 * 1024);
     let os = System::long_os_version().unwrap_or_else(|| std::env::consts::OS.to_string());
     let arch = std::env::consts::ARCH.to_string();
-    let build_profile = detect_build_profile();
+    let build_profile = perf_build::detect_build_profile();
+    let allocator = perf_build::resolve_bench_allocator();
     let git_commit = option_env!("VERGEN_GIT_SHA")
         .unwrap_or("unknown")
         .to_string();
 
     let config_str = format!(
-        "os={os} arch={arch} cpu={cpu_model} cores={cpu_cores} mem={mem_total_mb} profile={build_profile}"
+        "os={os} arch={arch} cpu={cpu_model} cores={cpu_cores} mem={mem_total_mb} profile={build_profile} allocator={}",
+        allocator.effective.as_str()
     );
     let config_hash = sha256_short(&config_str);
 
@@ -138,61 +145,12 @@ fn collect_fingerprint() -> EnvFingerprint {
         cpu_cores,
         mem_total_mb,
         build_profile,
+        allocator_requested: allocator.requested,
+        allocator_effective: allocator.effective.as_str().to_string(),
+        allocator_fallback_reason: allocator.fallback_reason,
         git_commit,
         config_hash,
     }
-}
-
-fn detect_build_profile() -> String {
-    if let Ok(value) = std::env::var("PI_BENCH_BUILD_PROFILE") {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-    }
-
-    if let Ok(path) = std::env::current_exe() {
-        if let Some(profile) = profile_from_target_path(&path) {
-            return profile;
-        }
-    }
-
-    if cfg!(debug_assertions) {
-        "debug".to_string()
-    } else {
-        "release".to_string()
-    }
-}
-
-fn profile_from_target_path(path: &Path) -> Option<String> {
-    let components: Vec<String> = path
-        .components()
-        .filter_map(|component| match component {
-            std::path::Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect();
-
-    let target_idx = components
-        .iter()
-        .rposition(|component| component == "target")?;
-    let tail = components.get(target_idx + 1..)?;
-    if tail.len() < 2 {
-        return None;
-    }
-
-    let profile_idx = if tail.len() >= 3 && tail[tail.len() - 2] == "deps" {
-        tail.len().checked_sub(3)?
-    } else {
-        tail.len().checked_sub(2)?
-    };
-
-    let candidate = tail.get(profile_idx)?.trim();
-    if !candidate.is_empty() {
-        return Some(candidate.to_string());
-    }
-
-    None
 }
 
 fn sha256_short(input: &str) -> String {

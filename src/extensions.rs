@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::Digest as _;
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -7576,6 +7576,10 @@ pub struct HostCallPayload {
     pub cancel_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_params_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_shape_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -9384,6 +9388,8 @@ mod wasm_host {
                 timeout_ms: call.timeout_ms,
                 cancel_token: call.cancel_token.clone(),
                 context: call.context.clone(),
+                cached_params_hash: None,
+                cached_shape_hash: None,
             };
 
             let result = self.http.dispatch(&connector_call).await.map_err(|err| {
@@ -9459,6 +9465,8 @@ mod wasm_host {
                 timeout_ms: call.timeout_ms,
                 cancel_token: call.cancel_token.clone(),
                 context: call.context.clone(),
+                cached_params_hash: None,
+                cached_shape_hash: None,
             };
 
             self.dispatch_tool(&bash_call).await
@@ -11773,6 +11781,11 @@ enum JsRuntimeCommand {
     DrainRepairEvents {
         reply: oneshot::Sender<Vec<ExtensionRepairEvent>>,
     },
+    /// Reset transient runtime state for reuse (warm pool deterministic reset).
+    ///
+    /// Clears extension roots, dynamic virtual modules, and repair events while
+    /// preserving the transpiled source cache and disk cache configuration.
+    ResetTransientState { reply: oneshot::Sender<Result<()>> },
     /// Request the runtime thread to shut down gracefully.
     Shutdown,
 }
@@ -11863,9 +11876,13 @@ impl JsExtensionRuntimeHandle {
                 .expect("extension runtime build");
             runtime.block_on(async move {
                 let cx = Cx::for_request();
-                let init =
-                    PiJsRuntime::with_clock_and_config(crate::scheduler::WallClock, config).await;
-                let js_runtime = match init {
+                let runtime_config = config.clone();
+                let init = PiJsRuntime::with_clock_and_config(
+                    crate::scheduler::WallClock,
+                    runtime_config.clone(),
+                )
+                .await;
+                let mut js_runtime = match init {
                     Ok(runtime) => {
                         let _ = init_tx.send(&cx, Ok(()));
                         runtime
@@ -11876,11 +11893,117 @@ impl JsExtensionRuntimeHandle {
                     }
                 };
 
+                let mut has_loaded_extensions = false;
+                let mut warm_reset_attempts = 0_u64;
+                let mut warm_reset_successes = 0_u64;
+                let mut warm_reset_failures = 0_u64;
+                let mut cold_fallbacks = 0_u64;
+
                 while let Ok(cmd) = rx.recv(&cx).await {
                     match cmd {
                         JsRuntimeCommand::Shutdown => break,
                         JsRuntimeCommand::LoadExtensions { specs, reply } => {
+                            let mut fallback_reason: Option<String> = None;
+                            let mut reset_report = None;
+
+                            if has_loaded_extensions {
+                                warm_reset_attempts = warm_reset_attempts.saturating_add(1);
+                                match js_runtime.reset_for_warm_reload().await {
+                                    Ok(report) => {
+                                        if report.reused {
+                                            warm_reset_successes =
+                                                warm_reset_successes.saturating_add(1);
+                                        } else {
+                                            warm_reset_failures =
+                                                warm_reset_failures.saturating_add(1);
+                                            fallback_reason = report
+                                                .reason_code
+                                                .clone()
+                                                .or_else(|| Some("warm_reset_unknown".to_string()));
+                                        }
+                                        reset_report = Some(report);
+                                    }
+                                    Err(err) => {
+                                        warm_reset_failures =
+                                            warm_reset_failures.saturating_add(1);
+                                        fallback_reason = Some("warm_reset_error".to_string());
+                                        tracing::warn!(
+                                            event = "extension_runtime.warm_reset.error",
+                                            error = %err,
+                                            "Warm reload reset failed; falling back to cold runtime rebuild"
+                                        );
+                                    }
+                                }
+
+                                if fallback_reason.is_some() {
+                                    cold_fallbacks = cold_fallbacks.saturating_add(1);
+                                    let rebuild = PiJsRuntime::with_clock_and_config(
+                                        crate::scheduler::WallClock,
+                                        runtime_config.clone(),
+                                    )
+                                    .await;
+                                    match rebuild {
+                                        Ok(runtime) => {
+                                            js_runtime = runtime;
+                                            has_loaded_extensions = false;
+                                        }
+                                        Err(err) => {
+                                            let _ = reply.send(&cx, Err(err));
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+
                             let result = load_all_extensions(&js_runtime, &host, &specs).await;
+                            if result.is_ok() {
+                                has_loaded_extensions = true;
+                            }
+
+                            let warm_reuse_rate = if warm_reset_attempts == 0 {
+                                0.0
+                            } else {
+                                warm_reset_successes as f64 / warm_reset_attempts as f64
+                            };
+
+                            if let Some(report) = reset_report.as_ref() {
+                                let module_cache_denominator =
+                                    report.module_cache_hits.saturating_add(report.module_cache_misses);
+                                let module_cache_hit_rate = if module_cache_denominator == 0 {
+                                    0.0
+                                } else {
+                                    report.module_cache_hits as f64 / module_cache_denominator as f64
+                                };
+                                tracing::info!(
+                                    event = "extension_runtime.warm_reload.metrics",
+                                    reused = report.reused,
+                                    reason_code = report.reason_code.as_deref().unwrap_or("none"),
+                                    pending_tasks_before = report.pending_tasks_before,
+                                    pending_hostcalls_before = report.pending_hostcalls_before,
+                                    pending_timers_before = report.pending_timers_before,
+                                    residual_entries_after = report.residual_entries_after,
+                                    module_cache_entries = report.module_cache_entries,
+                                    module_cache_hit_rate,
+                                    warm_reuse_rate,
+                                    warm_reset_attempts,
+                                    warm_reset_successes,
+                                    warm_reset_failures,
+                                    cold_fallbacks,
+                                    "Warm-reload reset diagnostics"
+                                );
+                            } else {
+                                tracing::info!(
+                                    event = "extension_runtime.warm_reload.metrics",
+                                    reused = false,
+                                    reason_code = fallback_reason.as_deref().unwrap_or("none"),
+                                    warm_reuse_rate,
+                                    warm_reset_attempts,
+                                    warm_reset_successes,
+                                    warm_reset_failures,
+                                    cold_fallbacks,
+                                    "Warm-reload reset diagnostics"
+                                );
+                            }
                             let _ = reply.send(&cx, result);
                         }
                         JsRuntimeCommand::GetRegisteredTools { reply } => {
@@ -12037,6 +12160,10 @@ impl JsExtensionRuntimeHandle {
                         JsRuntimeCommand::DrainRepairEvents { reply } => {
                             let events = js_runtime.drain_repair_events();
                             let _ = reply.send(&cx, events);
+                        }
+                        JsRuntimeCommand::ResetTransientState { reply } => {
+                            js_runtime.reset_transient_state();
+                            let _ = reply.send(&cx, Ok(()));
                         }
                     }
                 }
@@ -12379,6 +12506,26 @@ impl JsExtensionRuntimeHandle {
             return Vec::new();
         };
         reply_rx.recv(&cx).await.unwrap_or_default()
+    }
+
+    /// Reset transient runtime state for warm isolate reuse.
+    ///
+    /// Clears extension roots, dynamic virtual modules, and repair events while
+    /// preserving the transpiled source cache (memory + disk). This enables a
+    /// runtime to be returned to a warm pool and reloaded with a fresh set of
+    /// extensions without paying the full cold-start cost.
+    pub async fn reset_transient_state(&self) -> Result<()> {
+        let cx = cx_with_deadline(EXTENSION_QUERY_BUDGET_MS);
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let command = JsRuntimeCommand::ResetTransientState { reply: reply_tx };
+        self.sender
+            .send(&cx, command)
+            .await
+            .map_err(|_| Error::extension("runtime channel closed during reset"))?;
+        reply_rx
+            .recv(&cx)
+            .await
+            .map_err(|_| Error::extension("reset reply channel closed"))?
     }
 
     pub async fn provider_stream_simple_start(
@@ -15245,6 +15392,8 @@ async fn dispatch_hostcall_http(
         timeout_ms: None,
         cancel_token: None,
         context: None,
+        cached_params_hash: None,
+        cached_shape_hash: None,
     };
 
     match connector.dispatch(&call).await {
@@ -16101,6 +16250,19 @@ impl ExtensionManagerHandle {
     }
 }
 
+/// Cached context payload for event dispatch.
+///
+/// Avoids rebuilding the JSON context (session state, entries, branch, cwd,
+/// model registry) on every event dispatch.  The cache is invalidated when
+/// `ctx_generation` on `ExtensionManagerInner` advances past `generation`.
+#[derive(Clone)]
+struct CachedEventContext {
+    /// The generation at which this cache was built.
+    generation: u64,
+    /// The pre-built context payload.
+    payload: Value,
+}
+
 #[derive(Default)]
 struct ExtensionManagerInner {
     extensions: Vec<RegisterPayload>,
@@ -16151,6 +16313,16 @@ struct ExtensionManagerInner {
     rollout_tracker: RolloutTracker,
     /// Budget for extension operations (structured concurrency).
     extension_budget: Budget,
+    /// Pre-computed set of event names that have at least one registered hook.
+    /// Updated on `register()` to enable O(1) hook-presence checks instead of
+    /// iterating all extensions on every event dispatch.
+    hook_bitmap: HashSet<String>,
+    /// Cached context payload for event dispatch.  Rebuilt lazily when the
+    /// generation counter (`ctx_cache_generation`) is stale.
+    ctx_cache: Option<CachedEventContext>,
+    /// Monotonic counter incremented whenever session or context-affecting state
+    /// changes (e.g. session set, cwd change, model registry update).
+    ctx_generation: u64,
 }
 
 impl std::fmt::Debug for ExtensionManager {
@@ -17789,11 +17961,13 @@ impl ExtensionManager {
     pub fn set_cwd(&self, cwd: String) {
         let mut guard = self.inner.lock().unwrap();
         guard.cwd = Some(cwd);
+        guard.ctx_generation = guard.ctx_generation.wrapping_add(1);
     }
 
     pub fn set_model_registry_values(&self, values: HashMap<String, String>) {
         let mut guard = self.inner.lock().unwrap();
         guard.model_registry_values = values;
+        guard.ctx_generation = guard.ctx_generation.wrapping_add(1);
     }
 
     #[cfg(feature = "wasm-host")]
@@ -18066,6 +18240,7 @@ impl ExtensionManager {
     pub fn set_session(&self, session: Arc<dyn ExtensionSession>) {
         let mut guard = self.inner.lock().unwrap();
         guard.session = Some(session);
+        guard.ctx_generation = guard.ctx_generation.wrapping_add(1);
     }
 
     pub fn session_handle(&self) -> Option<Arc<dyn ExtensionSession>> {
@@ -18090,6 +18265,7 @@ impl ExtensionManager {
         let mut guard = self.inner.lock().unwrap();
         guard.current_provider = provider;
         guard.current_model_id = model_id;
+        guard.ctx_generation = guard.ctx_generation.wrapping_add(1);
     }
 
     pub fn current_thinking_level(&self) -> Option<String> {
@@ -18114,6 +18290,10 @@ impl ExtensionManager {
 
     pub fn register(&self, payload: RegisterPayload) {
         let mut guard = self.inner.lock().unwrap();
+        // Update the hook bitmap with any new event hooks.
+        for hook in &payload.event_hooks {
+            guard.hook_bitmap.insert(hook.clone());
+        }
         guard.extensions.push(payload);
     }
 
@@ -18615,6 +18795,93 @@ impl ExtensionManager {
         tx.is_some_and(|sender| sender.send(&cx, response).is_ok())
     }
 
+    /// Build the context payload from the current inner state.
+    ///
+    /// This is extracted so that it can be called once and the result cached
+    /// across multiple rapid-fire event dispatches.
+    async fn build_ctx_payload(
+        has_ui: bool,
+        session: Option<Arc<dyn ExtensionSession>>,
+        cwd_override: Option<String>,
+        model_registry_values: &HashMap<String, String>,
+    ) -> Value {
+        let mut ctx = serde_json::Map::new();
+        ctx.insert("hasUI".into(), Value::Bool(has_ui));
+        if let Some(cwd) = cwd_override.or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.display().to_string())
+        }) {
+            ctx.insert("cwd".into(), Value::String(cwd));
+        }
+
+        if !model_registry_values.is_empty() {
+            let mut map = serde_json::Map::new();
+            for (key, value) in model_registry_values {
+                map.insert(key.clone(), Value::String(value.clone()));
+            }
+            ctx.insert("modelRegistry".into(), Value::Object(map));
+        }
+
+        if let Some(session) = session {
+            let state = session.get_state().await;
+            let entries = session.get_entries().await;
+            let branch = session.get_branch().await;
+            let leaf_entry = entries.last().cloned().unwrap_or(Value::Null);
+            ctx.insert("sessionState".into(), state);
+            ctx.insert("sessionEntries".into(), Value::Array(entries));
+            ctx.insert("sessionBranch".into(), Value::Array(branch));
+            ctx.insert("sessionLeafEntry".into(), leaf_entry);
+        }
+
+        Value::Object(ctx)
+    }
+
+    /// Obtain the context payload, using the cache when the generation matches.
+    ///
+    /// On cache miss the context is rebuilt from the current inner state and
+    /// stored for future dispatches within the same generation.
+    async fn get_or_build_ctx_payload(&self) -> Value {
+        // Snapshot cache and state under lock.
+        let (cached, generation, has_ui, session, cwd, registry) = {
+            let guard = self.inner.lock().unwrap();
+            (
+                guard.ctx_cache.clone(),
+                guard.ctx_generation,
+                guard.ui_sender.is_some(),
+                guard.session.clone(),
+                guard.cwd.clone(),
+                guard.model_registry_values.clone(),
+            )
+        };
+
+        // If the cache is still valid, return it.
+        if let Some(ref c) = cached {
+            if c.generation == generation {
+                return c.payload.clone();
+            }
+        }
+
+        // Rebuild.
+        let payload = Self::build_ctx_payload(has_ui, session, cwd, &registry).await;
+
+        // Store in cache (best-effort; if another thread updated generation
+        // between our snapshot and now, the cache will simply be stale and
+        // rebuilt on the next call).
+        {
+            let mut guard = self.inner.lock().unwrap();
+            // Only store if our generation is still current.
+            if guard.ctx_generation == generation {
+                guard.ctx_cache = Some(CachedEventContext {
+                    generation,
+                    payload: payload.clone(),
+                });
+            }
+        }
+
+        payload
+    }
+
     #[allow(clippy::too_many_lines)]
     async fn dispatch_event_value(
         &self,
@@ -18625,20 +18892,12 @@ impl ExtensionManager {
         let started_at = Instant::now();
         let timeout_ms = self.effective_timeout(timeout_ms);
         let event_name = event.to_string();
-        let (runtime, has_ui, session, cwd_override, model_registry_values, has_hook) = {
+
+        // --- Fast path: O(1) hook bitmap check instead of iterating all extensions ---
+        let (runtime, has_hook) = {
             let guard = self.inner.lock().unwrap();
-            let has_hook = guard
-                .extensions
-                .iter()
-                .any(|ext| ext.event_hooks.iter().any(|hook| hook == &event_name));
-            (
-                guard.js_runtime.clone(),
-                guard.ui_sender.is_some(),
-                guard.session.clone(),
-                guard.cwd.clone(),
-                guard.model_registry_values.clone(),
-                has_hook,
-            )
+            let has_hook = guard.hook_bitmap.contains(&event_name);
+            (guard.js_runtime.clone(), has_hook)
         };
 
         #[cfg(feature = "wasm-host")]
@@ -18673,45 +18932,17 @@ impl ExtensionManager {
             "Extension event dispatch start"
         );
 
-        let mut ctx = serde_json::Map::new();
-        ctx.insert("hasUI".to_string(), Value::Bool(has_ui));
-        if let Some(cwd) = cwd_override.or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .map(|p| p.display().to_string())
-        }) {
-            ctx.insert("cwd".to_string(), Value::String(cwd));
-        }
-
-        if !model_registry_values.is_empty() {
-            let mut map = serde_json::Map::new();
-            for (key, value) in model_registry_values {
-                map.insert(key, Value::String(value));
-            }
-            ctx.insert("modelRegistry".to_string(), Value::Object(map));
-        }
-
-        if let Some(session) = session {
-            let state = session.get_state().await;
-            let entries = session.get_entries().await;
-            let branch = session.get_branch().await;
-            let leaf_entry = entries.last().cloned().unwrap_or(Value::Null);
-            ctx.insert("sessionState".to_string(), state);
-            ctx.insert("sessionEntries".to_string(), Value::Array(entries));
-            ctx.insert("sessionBranch".to_string(), Value::Array(branch));
-            ctx.insert("sessionLeafEntry".to_string(), leaf_entry);
-        }
+        // --- Use cached context when generation hasn't changed ---
+        let ctx_payload = self.get_or_build_ctx_payload().await;
 
         let event_payload = match data {
             None => json!({ "type": event_name }),
             Some(Value::Object(mut map)) => {
-                map.insert("type".to_string(), Value::String(event_name.clone()));
+                map.insert("type".into(), Value::String(event_name.clone()));
                 Value::Object(map)
             }
             Some(other) => json!({ "type": event_name, "data": other }),
         };
-
-        let ctx_payload = Value::Object(ctx);
 
         let mut response = None;
         if let Some(runtime) = runtime {
@@ -18732,7 +18963,7 @@ impl ExtensionManager {
         if has_hook_wasm {
             let mut wasm_payload = event_payload;
             if let Value::Object(map) = &mut wasm_payload {
-                map.insert("ctx".to_string(), ctx_payload);
+                map.insert("ctx".into(), ctx_payload);
             }
             if let Some(value) = Self::dispatch_wasm_event_value(
                 &wasm_extensions,
@@ -18970,20 +19201,12 @@ impl ExtensionManager {
     ) -> Result<Option<ToolResultEventResult>> {
         let timeout_ms = self.effective_timeout(timeout_ms);
         let event_name = "tool_result".to_string();
-        let (runtime, has_ui, session, cwd_override, model_registry_values, has_hook_js) = {
+
+        // O(1) hook bitmap check.
+        let (runtime, has_hook_js) = {
             let guard = self.inner.lock().unwrap();
-            let has_hook = guard
-                .extensions
-                .iter()
-                .any(|ext| ext.event_hooks.iter().any(|hook| hook == &event_name));
-            (
-                guard.js_runtime.clone(),
-                guard.ui_sender.is_some(),
-                guard.session.clone(),
-                guard.cwd.clone(),
-                guard.model_registry_values.clone(),
-                has_hook,
-            )
+            let has_hook = guard.hook_bitmap.contains(&event_name);
+            (guard.js_runtime.clone(), has_hook)
         };
 
         #[cfg(feature = "wasm-host")]
@@ -19011,36 +19234,9 @@ impl ExtensionManager {
             return Ok(None);
         }
 
-        let mut ctx = serde_json::Map::new();
-        ctx.insert("hasUI".to_string(), Value::Bool(has_ui));
-        if let Some(cwd) = cwd_override.or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .map(|p| p.display().to_string())
-        }) {
-            ctx.insert("cwd".to_string(), Value::String(cwd));
-        }
+        // Use cached context payload.
+        let ctx_payload = self.get_or_build_ctx_payload().await;
 
-        if !model_registry_values.is_empty() {
-            let mut map = serde_json::Map::new();
-            for (key, value) in model_registry_values {
-                map.insert(key, Value::String(value));
-            }
-            ctx.insert("modelRegistry".to_string(), Value::Object(map));
-        }
-
-        if let Some(session) = session {
-            let state = session.get_state().await;
-            let entries = session.get_entries().await;
-            let branch = session.get_branch().await;
-            let leaf_entry = entries.last().cloned().unwrap_or(Value::Null);
-            ctx.insert("sessionState".to_string(), state);
-            ctx.insert("sessionEntries".to_string(), Value::Array(entries));
-            ctx.insert("sessionBranch".to_string(), Value::Array(branch));
-            ctx.insert("sessionLeafEntry".to_string(), leaf_entry);
-        }
-
-        let ctx_payload = Value::Object(ctx);
         let event_payload = json!({
             "type": "tool_result",
             "toolName": tool_call.name.clone(),
@@ -19076,7 +19272,7 @@ impl ExtensionManager {
         if has_hook_wasm {
             let mut wasm_payload = event_payload;
             if let Value::Object(map) = &mut wasm_payload {
-                map.insert("ctx".to_string(), ctx_payload);
+                map.insert("ctx".into(), ctx_payload);
             }
             if let Some(value) = Self::dispatch_wasm_event_value(
                 &wasm_extensions,
@@ -19094,6 +19290,22 @@ impl ExtensionManager {
         }
 
         Ok(response)
+    }
+
+    /// Invalidate the context cache, forcing the next dispatch to rebuild it.
+    ///
+    /// Call this when session content changes outside the normal setter flow
+    /// (e.g. after appending messages to a session).
+    pub fn invalidate_ctx_cache(&self) {
+        let mut guard = self.inner.lock().unwrap();
+        guard.ctx_generation = guard.ctx_generation.wrapping_add(1);
+    }
+
+    /// Check whether any extension has registered a hook for the given event
+    /// name.  O(1) lookup via pre-computed bitmap.
+    pub fn has_hook_for(&self, event_name: &str) -> bool {
+        let guard = self.inner.lock().unwrap();
+        guard.hook_bitmap.contains(event_name)
     }
 }
 
@@ -19122,6 +19334,134 @@ pub fn extension_event_from_agent(
 
     let payload = serde_json::to_value(event).ok();
     Some((name, payload))
+}
+
+/// Returns `true` if the given event is fire-and-forget (response is discarded)
+/// and can be safely coalesced — i.e. only the most recent version matters.
+///
+/// Events that can modify agent behavior (tool_call blocking, input
+/// transformation) must never be coalesced.
+pub fn is_coalescable_event(event: &ExtensionEventName) -> bool {
+    matches!(
+        event,
+        ExtensionEventName::MessageUpdate | ExtensionEventName::ToolExecutionUpdate
+    )
+}
+
+/// A coalescing dispatcher for fire-and-forget extension events.
+///
+/// For high-frequency events like `MessageUpdate` (fired per token delta)
+/// and `ToolExecutionUpdate`, the coalescer replaces older pending events
+/// of the same type so that at most one dispatch per event type is
+/// in-flight at any time.  Non-coalescable events pass through immediately.
+///
+/// # Usage
+///
+/// ```ignore
+/// let coalescer = EventCoalescer::new(manager.clone());
+/// // In the hot loop:
+/// coalescer.dispatch_fire_and_forget(event_name, data, &runtime_handle);
+/// ```
+pub struct EventCoalescer {
+    manager: ExtensionManager,
+    /// For coalescable events, stores the latest pending payload keyed by
+    /// event name.  When a dispatch task completes and a newer payload is
+    /// waiting, it dispatches the replacement instead of discarding it.
+    pending: Arc<Mutex<HashMap<String, Option<Value>>>>,
+    /// Tracks whether a dispatch task is currently in-flight for a given
+    /// coalescable event type.
+    in_flight: Arc<Mutex<HashSet<String>>>,
+}
+
+impl EventCoalescer {
+    /// Create a new coalescer backed by the given extension manager.
+    pub fn new(manager: ExtensionManager) -> Self {
+        Self {
+            manager,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            in_flight: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    /// Dispatch a fire-and-forget event, coalescing if applicable.
+    ///
+    /// For coalescable events (`MessageUpdate`, `ToolExecutionUpdate`):
+    /// - If no dispatch is in-flight for this event type, spawns one immediately.
+    /// - If a dispatch is already in-flight, replaces the pending payload so
+    ///   the in-flight task will dispatch the latest version on completion.
+    ///
+    /// For non-coalescable events, spawns a dispatch task immediately.
+    pub fn dispatch_fire_and_forget(
+        &self,
+        event: ExtensionEventName,
+        data: Option<Value>,
+        runtime_handle: &asupersync::runtime::RuntimeHandle,
+    ) {
+        let event_name_str = event.to_string();
+
+        // Fast path: skip entirely if no hooks registered.
+        if !self.manager.has_hook_for(&event_name_str) {
+            return;
+        }
+
+        if !is_coalescable_event(&event) {
+            // Non-coalescable: spawn immediately.
+            let manager = self.manager.clone();
+            runtime_handle.spawn(async move {
+                let _ = manager.dispatch_event(event, data).await;
+            });
+            return;
+        }
+
+        // Coalescable path: check if a dispatch is already in-flight.
+        let should_spawn = {
+            let mut in_flight = self.in_flight.lock().unwrap();
+            if in_flight.contains(&event_name_str) {
+                // Replace pending payload; the in-flight task will pick it up.
+                let mut pending = self.pending.lock().unwrap();
+                pending.insert(event_name_str.clone(), data.clone());
+                false
+            } else {
+                in_flight.insert(event_name_str.clone());
+                true
+            }
+        };
+
+        if should_spawn {
+            let manager = self.manager.clone();
+            let pending = self.pending.clone();
+            let in_flight = self.in_flight.clone();
+            let event_name_owned = event_name_str;
+            runtime_handle.spawn(async move {
+                // Dispatch the initial payload.
+                let _ = manager.dispatch_event(event, data).await;
+
+                // Drain any pending replacement payloads.
+                loop {
+                    let replacement = {
+                        let mut p = pending.lock().unwrap();
+                        p.remove(&event_name_owned)
+                    };
+                    match replacement {
+                        Some(new_data) => {
+                            // Re-parse the event name back.
+                            let re_event = match event_name_owned.as_str() {
+                                "message_update" => ExtensionEventName::MessageUpdate,
+                                "tool_execution_update" => ExtensionEventName::ToolExecutionUpdate,
+                                _ => break,
+                            };
+                            let _ = manager.dispatch_event(re_event, new_data).await;
+                        }
+                        None => break,
+                    }
+                }
+
+                // Mark no longer in-flight.
+                let mut f = in_flight.lock().unwrap();
+                f.remove(&event_name_owned);
+            });
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone)]

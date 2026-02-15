@@ -34,6 +34,12 @@
 // paths the same way integration tests do.
 extern crate self as pi;
 
+// Gap H: jemalloc allocator for allocation-heavy paths.
+// Declared in the library so all project binaries/tests share allocator behavior.
+#[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 pub mod agent;
 pub mod agent_cx;
 pub mod app;
@@ -73,6 +79,7 @@ pub mod model;
 pub mod model_selector;
 pub mod models;
 pub mod package_manager;
+pub mod perf_build;
 pub mod permissions;
 #[cfg(feature = "wasm-host")]
 pub mod pi_wasm;

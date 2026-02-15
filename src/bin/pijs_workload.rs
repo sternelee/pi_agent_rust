@@ -5,9 +5,9 @@ use clap::Parser;
 use futures::executor::block_on;
 use pi::error::{Error, Result};
 use pi::extensions_js::PiJsRuntime;
+use pi::perf_build;
 use pi::scheduler::HostcallOutcome;
 use serde_json::json;
-use std::path::Path;
 use std::time::Instant;
 
 const BENCH_BEGIN_FN: &str = "__bench_begin_roundtrip";
@@ -59,7 +59,8 @@ fn run() -> Result<()> {
     let args = Args::parse();
     let runtime = block_on(PiJsRuntime::new())?;
     block_on(runtime.eval(BENCH_TOOL_SETUP))?;
-    let build_profile = detect_build_profile();
+    let build_profile = perf_build::detect_build_profile();
+    let allocator = perf_build::resolve_bench_allocator();
     let binary_path = std::env::current_exe()
         .ok()
         .map_or_else(|| "unknown".to_string(), |path| path.display().to_string());
@@ -96,63 +97,15 @@ fn run() -> Result<()> {
             "per_call_us": per_call_us,
             "calls_per_sec": calls_per_sec,
             "build_profile": build_profile,
+            "allocator_requested": allocator.requested,
+            "allocator_request_source": allocator.requested_source,
+            "allocator_effective": allocator.effective.as_str(),
+            "allocator_fallback_reason": allocator.fallback_reason,
             "binary_path": binary_path,
         })
     );
 
     Ok(())
-}
-
-fn detect_build_profile() -> String {
-    if let Ok(value) = std::env::var("PI_BENCH_BUILD_PROFILE") {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-    }
-
-    if let Ok(path) = std::env::current_exe() {
-        if let Some(profile) = profile_from_target_path(&path) {
-            return profile;
-        }
-    }
-
-    if cfg!(debug_assertions) {
-        "debug".to_string()
-    } else {
-        "release".to_string()
-    }
-}
-
-fn profile_from_target_path(path: &Path) -> Option<String> {
-    let components: Vec<String> = path
-        .components()
-        .filter_map(|component| match component {
-            std::path::Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect();
-
-    let target_idx = components
-        .iter()
-        .rposition(|component| component == "target")?;
-    let tail = components.get(target_idx + 1..)?;
-    if tail.len() < 2 {
-        return None;
-    }
-
-    let profile_idx = if tail.len() >= 3 && tail[tail.len() - 2] == "deps" {
-        tail.len().checked_sub(3)?
-    } else {
-        tail.len().checked_sub(2)?
-    };
-
-    let candidate = tail.get(profile_idx)?.trim();
-    if !candidate.is_empty() {
-        return Some(candidate.to_string());
-    }
-
-    None
 }
 
 fn run_tool_roundtrip(runtime: &PiJsRuntime) -> Result<()> {
@@ -180,7 +133,7 @@ fn run_tool_roundtrip(runtime: &PiJsRuntime) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::profile_from_target_path;
+    use pi::perf_build::profile_from_target_path;
     use std::path::Path;
 
     #[test]

@@ -1578,6 +1578,9 @@ async fn run_prompt_with_retry(
             let event_extensions = extensions.clone();
             let runtime_for_events_handler = runtime_for_events.clone();
             let event_tx = out_tx.clone();
+            let coalescer = event_extensions
+                .as_ref()
+                .map(|m| crate::extensions::EventCoalescer::new(m.clone()));
             let event_handler = move |event: AgentEvent| {
                 let serialized = if let AgentEvent::AgentEnd {
                     messages, error, ..
@@ -1599,8 +1602,16 @@ async fn run_prompt_with_retry(
                     })
                 };
                 let _ = event_tx.send(serialized);
-                if let Some(manager) = &event_extensions {
-                    if let Some((event_name, data)) = extension_event_from_agent(&event) {
+                if let Some((event_name, data)) = extension_event_from_agent(&event) {
+                    if crate::extensions::is_coalescable_event(&event_name) {
+                        if let Some(coal) = &coalescer {
+                            coal.dispatch_fire_and_forget(
+                                event_name,
+                                data,
+                                &runtime_for_events_handler,
+                            );
+                        }
+                    } else if let Some(manager) = &event_extensions {
                         let manager = manager.clone();
                         let runtime_handle = runtime_for_events_handler.clone();
                         let error_tx = event_tx.clone();
@@ -2842,6 +2853,10 @@ fn session_state(
         "pendingMessageCount".to_string(),
         Value::Number(snapshot.pending_count().into()),
     );
+    state.insert(
+        "durabilityMode".to_string(),
+        Value::String(session.autosave_durability_mode().as_str().to_string()),
+    );
     Value::Object(state)
 }
 
@@ -2882,6 +2897,52 @@ fn session_stats(session: &crate::session::Session) -> Value {
     let total_messages = messages.len() as u64;
 
     let total_tokens = total_input + total_output + total_cache_read + total_cache_write;
+    let autosave = session.autosave_metrics();
+    let pending_message_count = autosave.pending_mutations as u64;
+    let durability_mode = session.autosave_durability_mode();
+    let durability_mode_label = match durability_mode {
+        crate::session::AutosaveDurabilityMode::Strict => "strict",
+        crate::session::AutosaveDurabilityMode::Balanced => "balanced",
+        crate::session::AutosaveDurabilityMode::Throughput => "throughput",
+    };
+    let (status_event, status_severity, status_summary, status_action, status_sli_ids) =
+        if pending_message_count == 0 {
+            (
+                "session.persistence.healthy",
+                "ok",
+                "Persistence queue is clear.",
+                "No action required.",
+                vec!["sli_resume_ready_p95_ms"],
+            )
+        } else {
+            let summary = match durability_mode {
+                crate::session::AutosaveDurabilityMode::Strict => {
+                    "Pending persistence backlog under strict durability mode."
+                }
+                crate::session::AutosaveDurabilityMode::Balanced => {
+                    "Pending persistence backlog under balanced durability mode."
+                }
+                crate::session::AutosaveDurabilityMode::Throughput => {
+                    "Pending persistence backlog under throughput durability mode."
+                }
+            };
+            let action = match durability_mode {
+                crate::session::AutosaveDurabilityMode::Throughput => {
+                    "Expect deferred writes; trigger manual save before critical transitions."
+                }
+                _ => "Allow autosave flush to complete or trigger manual save before exit.",
+            };
+            (
+                "session.persistence.backlog",
+                "warning",
+                summary,
+                action,
+                vec![
+                    "sli_resume_ready_p95_ms",
+                    "sli_failure_recovery_success_rate",
+                ],
+            )
+        };
 
     let mut data = serde_json::Map::new();
     data.insert(
@@ -2913,6 +2974,14 @@ fn session_stats(session: &crate::session::Session) -> Value {
         Value::Number(total_messages.into()),
     );
     data.insert(
+        "durabilityMode".to_string(),
+        Value::String(durability_mode_label.to_string()),
+    );
+    data.insert(
+        "pendingMessageCount".to_string(),
+        Value::Number(pending_message_count.into()),
+    );
+    data.insert(
         "tokens".to_string(),
         json!({
             "input": total_input,
@@ -2921,6 +2990,34 @@ fn session_stats(session: &crate::session::Session) -> Value {
             "cacheWrite": total_cache_write,
             "total": total_tokens,
         }),
+    );
+    data.insert(
+        "persistenceStatus".to_string(),
+        json!({
+            "event": status_event,
+            "severity": status_severity,
+            "summary": status_summary,
+            "action": status_action,
+            "sliIds": status_sli_ids,
+            "pendingMessageCount": pending_message_count,
+            "flushCounters": {
+                "started": autosave.flush_started,
+                "succeeded": autosave.flush_succeeded,
+                "failed": autosave.flush_failed,
+            },
+        }),
+    );
+    data.insert(
+        "uxEventMarkers".to_string(),
+        json!([
+            {
+                "event": status_event,
+                "severity": status_severity,
+                "durabilityMode": durability_mode_label,
+                "pendingMessageCount": pending_message_count,
+                "sliIds": status_sli_ids,
+            }
+        ]),
     );
     data.insert("cost".to_string(), Value::from(total_cost));
     Value::Object(data)
