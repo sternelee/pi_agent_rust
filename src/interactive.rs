@@ -1534,6 +1534,19 @@ impl PiApp {
         }
 
         app.scroll_to_bottom();
+
+        // Version update check (non-blocking, cache-only on startup)
+        if app.config.should_check_for_updates() {
+            if let crate::version_check::VersionCheckResult::UpdateAvailable { latest } =
+                crate::version_check::check_cached()
+            {
+                app.status_message = Some(format!(
+                    "New version {latest} available (current: {})",
+                    crate::version_check::CURRENT_VERSION
+                ));
+            }
+        }
+
         app
     }
 

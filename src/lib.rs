@@ -94,6 +94,7 @@ pub mod theme;
 pub mod tools;
 pub mod tui;
 pub mod vcr;
+pub mod version_check;
 
 pub use error::{Error, Result as PiResult};
 pub use extension_dispatcher::ExtensionDispatcher;

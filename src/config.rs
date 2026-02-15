@@ -35,6 +35,10 @@ pub struct Config {
     #[serde(alias = "followUpMode")]
     pub follow_up_mode: Option<String>,
 
+    // Version check
+    #[serde(alias = "checkForUpdates")]
+    pub check_for_updates: Option<bool>,
+
     // Terminal Behavior
     #[serde(alias = "quietStartup")]
     pub quiet_startup: Option<bool>,
@@ -440,6 +444,9 @@ impl Config {
             steering_mode: other.steering_mode.or(base.steering_mode),
             follow_up_mode: other.follow_up_mode.or(base.follow_up_mode),
 
+            // Version check
+            check_for_updates: other.check_for_updates.or(base.check_for_updates),
+
             // Terminal Behavior
             quiet_startup: other.quiet_startup.or(base.quiet_startup),
             collapse_changelog: other.collapse_changelog.or(base.collapse_changelog),
@@ -562,6 +569,11 @@ impl Config {
             .as_ref()
             .and_then(|i| i.auto_resize)
             .unwrap_or(true)
+    }
+
+    /// Whether to check for version updates on startup (default: true).
+    pub fn should_check_for_updates(&self) -> bool {
+        self.check_for_updates.unwrap_or(true)
     }
 
     pub fn image_block_images(&self) -> bool {
@@ -2472,5 +2484,27 @@ mod tests {
         let other: Config = serde_json::from_str(r#"{"markdown":{"codeBlockIndent":4}}"#).unwrap();
         let merged = Config::merge(base, other);
         assert_eq!(merged.markdown.as_ref().unwrap().code_block_indent, Some(4));
+    }
+
+    // ── check_for_updates config ──────────────────────────────────────
+
+    #[test]
+    fn check_for_updates_default_is_true() {
+        let config: Config = serde_json::from_str("{}").unwrap();
+        assert!(config.should_check_for_updates());
+    }
+
+    #[test]
+    fn check_for_updates_explicit_false() {
+        let json = r#"{"checkForUpdates": false}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert!(!config.should_check_for_updates());
+    }
+
+    #[test]
+    fn check_for_updates_explicit_true() {
+        let json = r#"{"check_for_updates": true}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert!(config.should_check_for_updates());
     }
 }
