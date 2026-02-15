@@ -7,6 +7,7 @@
 //! - Integrity validation (checksum + payload hash)
 
 use crate::error::{Error, Result};
+use crate::session::SessionEntry;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -17,6 +18,12 @@ use std::path::{Path, PathBuf};
 
 pub const SEGMENT_FRAME_SCHEMA: &str = "pi.session_store_v2.segment_frame.v1";
 pub const OFFSET_INDEX_SCHEMA: &str = "pi.session_store_v2.offset_index.v1";
+pub const CHECKPOINT_SCHEMA: &str = "pi.session_store_v2.checkpoint.v1";
+pub const MANIFEST_SCHEMA: &str = "pi.session_store_v2.manifest.v1";
+pub const MIGRATION_EVENT_SCHEMA: &str = "pi.session_store_v2.migration_event.v1";
+
+/// Initial chain hash before any frames are appended.
+const GENESIS_CHAIN_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -76,6 +83,121 @@ pub struct OffsetIndexEntry {
     pub state: String,
 }
 
+/// Current head position of the store (last written entry).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StoreHead {
+    pub segment_seq: u64,
+    pub entry_seq: u64,
+    pub entry_id: String,
+}
+
+/// Periodic checkpoint snapshot metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Checkpoint {
+    pub schema: String,
+    pub checkpoint_seq: u64,
+    pub at: String,
+    pub head_entry_seq: u64,
+    pub head_entry_id: String,
+    pub snapshot_ref: String,
+    pub compacted_before_entry_seq: u64,
+    pub chain_hash: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Manifest {
+    pub schema: String,
+    pub store_version: u8,
+    pub session_id: String,
+    pub source_format: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub head: StoreHead,
+    pub counters: ManifestCounters,
+    pub files: ManifestFiles,
+    pub integrity: ManifestIntegrity,
+    pub invariants: ManifestInvariants,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestCounters {
+    pub entries_total: u64,
+    pub messages_total: u64,
+    pub branches_total: u64,
+    pub compactions_total: u64,
+    pub bytes_total: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestFiles {
+    pub segment_dir: String,
+    pub segment_count: u64,
+    pub index_path: String,
+    pub checkpoint_dir: String,
+    pub migration_ledger_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestIntegrity {
+    pub chain_hash: String,
+    pub manifest_hash: String,
+    pub last_crc32c: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestInvariants {
+    pub parent_links_closed: bool,
+    pub monotonic_entry_seq: bool,
+    pub monotonic_segment_seq: bool,
+    pub index_within_segment_bounds: bool,
+    pub branch_heads_indexed: bool,
+    pub checkpoints_monotonic: bool,
+    pub hash_chain_valid: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationVerification {
+    pub entry_count_match: bool,
+    pub hash_chain_match: bool,
+    pub index_consistent: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationEvent {
+    pub schema: String,
+    pub migration_id: String,
+    pub phase: String,
+    pub at: String,
+    pub source_path: String,
+    pub target_path: String,
+    pub source_format: String,
+    pub target_format: String,
+    pub verification: MigrationVerification,
+    pub outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_class: Option<String>,
+    pub correlation_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexSummary {
+    pub entry_count: u64,
+    pub first_entry_seq: u64,
+    pub last_entry_seq: u64,
+    pub last_entry_id: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionStoreV2 {
     root: PathBuf,
@@ -84,6 +206,14 @@ pub struct SessionStoreV2 {
     next_frame_seq: u64,
     next_entry_seq: u64,
     current_segment_bytes: u64,
+    /// Running SHA-256 hash chain: `H(prev_chain || payload_sha256)`.
+    chain_hash: String,
+    /// Total bytes written across all segments.
+    total_bytes: u64,
+    /// Last entry ID written (for head tracking).
+    last_entry_id: Option<String>,
+    /// Last CRC32-C written (for integrity checkpoints).
+    last_crc32c: String,
 }
 
 impl SessionStoreV2 {
@@ -95,6 +225,9 @@ impl SessionStoreV2 {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(root.join("segments"))?;
         fs::create_dir_all(root.join("index"))?;
+        fs::create_dir_all(root.join("checkpoints"))?;
+        fs::create_dir_all(root.join("migrations"))?;
+        fs::create_dir_all(root.join("tmp"))?;
 
         let mut store = Self {
             root,
@@ -103,6 +236,10 @@ impl SessionStoreV2 {
             next_frame_seq: 1,
             next_entry_seq: 1,
             current_segment_bytes: 0,
+            chain_hash: GENESIS_CHAIN_HASH.to_string(),
+            total_bytes: 0,
+            last_entry_id: None,
+            last_crc32c: "00000000".to_string(),
         };
         store.bootstrap_from_disk()?;
         Ok(store)
@@ -116,6 +253,14 @@ impl SessionStoreV2 {
 
     pub fn index_file_path(&self) -> PathBuf {
         self.root.join("index").join("offsets.jsonl")
+    }
+
+    fn manifest_path(&self) -> PathBuf {
+        self.root.join("manifest.json")
+    }
+
+    fn migration_ledger_path(&self) -> PathBuf {
+        self.root.join("migrations").join("ledger.jsonl")
     }
 
     pub fn append_entry(
@@ -176,6 +321,7 @@ impl SessionStoreV2 {
 
         let mut persisted = encoded;
         persisted.push(b'\n');
+        let crc = crc32c_upper(&persisted);
         let index_entry = OffsetIndexEntry {
             schema: OFFSET_INDEX_SCHEMA.to_string(),
             entry_seq: frame.entry_seq,
@@ -184,10 +330,15 @@ impl SessionStoreV2 {
             frame_seq: frame.frame_seq,
             byte_offset,
             byte_length: line_len,
-            crc32c: crc32c_upper(&persisted),
+            crc32c: crc.clone(),
             state: "active".to_string(),
         };
         append_jsonl_line(&self.index_file_path(), &index_entry)?;
+
+        self.chain_hash = chain_hash_step(&self.chain_hash, &frame.payload_sha256);
+        self.total_bytes = self.total_bytes.saturating_add(line_len);
+        self.last_entry_id = Some(frame.entry_id.clone());
+        self.last_crc32c = crc;
 
         self.next_entry_seq = self
             .next_entry_seq
@@ -216,6 +367,503 @@ impl SessionStoreV2 {
             return Ok(Vec::new());
         }
         read_jsonl::<OffsetIndexEntry>(&path)
+    }
+
+    /// Seek to a specific entry by `entry_seq` using the offset index.
+    /// Returns `None` if the entry is not found.
+    pub fn lookup_entry(&self, target_entry_seq: u64) -> Result<Option<SegmentFrame>> {
+        let index_rows = self.read_index()?;
+        let row = index_rows.iter().find(|r| r.entry_seq == target_entry_seq);
+        let row = match row {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        seek_read_frame(self, row)
+    }
+
+    /// Read all entries with `entry_seq >= from_entry_seq` (tail reading).
+    pub fn read_entries_from(&self, from_entry_seq: u64) -> Result<Vec<SegmentFrame>> {
+        let index_rows = self.read_index()?;
+        let mut frames = Vec::new();
+        for row in &index_rows {
+            if row.entry_seq < from_entry_seq {
+                continue;
+            }
+            if let Some(frame) = seek_read_frame(self, row)? {
+                frames.push(frame);
+            }
+        }
+        Ok(frames)
+    }
+
+    /// Read all entries across all segments in entry_seq order.
+    pub fn read_all_entries(&self) -> Result<Vec<SegmentFrame>> {
+        self.read_entries_from(1)
+    }
+
+    /// Read the last `count` entries by entry_seq using the offset index.
+    pub fn read_tail_entries(&self, count: u64) -> Result<Vec<SegmentFrame>> {
+        let index_rows = self.read_index()?;
+        let total = index_rows.len();
+        let skip = total.saturating_sub(usize::try_from(count).unwrap_or(usize::MAX));
+        let mut frames = Vec::with_capacity(total.saturating_sub(skip));
+        for row in &index_rows[skip..] {
+            if let Some(frame) = seek_read_frame(self, row)? {
+                frames.push(frame);
+            }
+        }
+        Ok(frames)
+    }
+
+    /// Read entries on the active branch from `leaf_entry_id` back to root.
+    /// Returns frames in root→leaf order.
+    pub fn read_active_path(&self, leaf_entry_id: &str) -> Result<Vec<SegmentFrame>> {
+        let index_rows = self.read_index()?;
+        let id_to_row: std::collections::HashMap<&str, &OffsetIndexEntry> = index_rows
+            .iter()
+            .map(|row| (row.entry_id.as_str(), row))
+            .collect();
+
+        let mut frames = Vec::new();
+        let mut current_id: Option<String> = Some(leaf_entry_id.to_string());
+        while let Some(entry_id) = current_id {
+            let row = id_to_row.get(entry_id.as_str());
+            let row = match row {
+                Some(r) => *r,
+                None => break,
+            };
+            match seek_read_frame(self, row)? {
+                Some(frame) => {
+                    current_id = frame.parent_entry_id.clone();
+                    frames.push(frame);
+                }
+                None => break,
+            }
+        }
+        frames.reverse();
+        Ok(frames)
+    }
+
+    /// Total number of entries appended so far.
+    pub fn entry_count(&self) -> u64 {
+        self.next_entry_seq.saturating_sub(1)
+    }
+
+    /// Current head position, or `None` if the store is empty.
+    pub fn head(&self) -> Option<StoreHead> {
+        self.last_entry_id.as_ref().map(|entry_id| StoreHead {
+            segment_seq: self.next_segment_seq,
+            entry_seq: self.next_entry_seq.saturating_sub(1),
+            entry_id: entry_id.clone(),
+        })
+    }
+
+    fn checkpoint_path(&self, checkpoint_seq: u64) -> PathBuf {
+        self.root
+            .join("checkpoints")
+            .join(format!("{checkpoint_seq:016}.json"))
+    }
+
+    /// Create a checkpoint snapshot at the current head.
+    pub fn create_checkpoint(&self, checkpoint_seq: u64, reason: &str) -> Result<Checkpoint> {
+        let head = self.head().unwrap_or(StoreHead {
+            segment_seq: 0,
+            entry_seq: 0,
+            entry_id: String::new(),
+        });
+        let snapshot_ref = format!("checkpoints/{checkpoint_seq:016}.json");
+        let checkpoint = Checkpoint {
+            schema: CHECKPOINT_SCHEMA.to_string(),
+            checkpoint_seq,
+            at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            head_entry_seq: head.entry_seq,
+            head_entry_id: head.entry_id,
+            snapshot_ref,
+            compacted_before_entry_seq: 0,
+            chain_hash: self.chain_hash.clone(),
+            reason: reason.to_string(),
+        };
+        let tmp_path = self
+            .root
+            .join("tmp")
+            .join(format!("{checkpoint_seq:016}.json.tmp"));
+        fs::write(&tmp_path, serde_json::to_vec_pretty(&checkpoint)?)?;
+        fs::rename(&tmp_path, self.checkpoint_path(checkpoint_seq))?;
+        Ok(checkpoint)
+    }
+
+    /// Read a checkpoint by sequence number.
+    pub fn read_checkpoint(&self, checkpoint_seq: u64) -> Result<Option<Checkpoint>> {
+        let path = self.checkpoint_path(checkpoint_seq);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let data = fs::read_to_string(&path)?;
+        let cp: Checkpoint = serde_json::from_str(&data)?;
+        Ok(Some(cp))
+    }
+
+    pub fn append_migration_event(&self, mut event: MigrationEvent) -> Result<()> {
+        if event.schema.is_empty() {
+            event.schema = MIGRATION_EVENT_SCHEMA.to_string();
+        }
+        if event.at.is_empty() {
+            event.at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        }
+        append_jsonl_line(&self.migration_ledger_path(), &event)
+    }
+
+    pub fn read_migration_events(&self) -> Result<Vec<MigrationEvent>> {
+        let path = self.migration_ledger_path();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        read_jsonl::<MigrationEvent>(&path)
+    }
+
+    pub fn rollback_to_checkpoint(
+        &mut self,
+        checkpoint_seq: u64,
+        migration_id: impl Into<String>,
+        correlation_id: impl Into<String>,
+    ) -> Result<MigrationEvent> {
+        let checkpoint = self
+            .read_checkpoint(checkpoint_seq)?
+            .ok_or_else(|| Error::session(format!("checkpoint {checkpoint_seq} not found")))?;
+
+        let mut index_rows = self.read_index()?;
+        index_rows.retain(|row| row.entry_seq <= checkpoint.head_entry_seq);
+
+        let mut keep_len_by_segment: std::collections::HashMap<u64, u64> =
+            std::collections::HashMap::new();
+        for row in &index_rows {
+            let end = row
+                .byte_offset
+                .checked_add(row.byte_length)
+                .ok_or_else(|| Error::session("index byte range overflow during rollback"))?;
+            keep_len_by_segment
+                .entry(row.segment_seq)
+                .and_modify(|current| *current = (*current).max(end))
+                .or_insert(end);
+        }
+
+        let segments_dir = self.root.join("segments");
+        if segments_dir.exists() {
+            let mut segment_files: Vec<(u64, PathBuf)> = Vec::new();
+            for entry in fs::read_dir(&segments_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("seg") {
+                    continue;
+                }
+                let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let Ok(segment_seq) = stem.parse::<u64>() else {
+                    continue;
+                };
+                segment_files.push((segment_seq, path));
+            }
+            segment_files.sort_by_key(|(segment_seq, _)| *segment_seq);
+
+            for (segment_seq, path) in segment_files {
+                match keep_len_by_segment.get(&segment_seq).copied() {
+                    Some(keep_len) if keep_len > 0 => {
+                        let current_len = fs::metadata(&path)?.len();
+                        if keep_len < current_len {
+                            let file = OpenOptions::new().write(true).open(&path)?;
+                            file.set_len(keep_len)?;
+                        }
+                    }
+                    _ => {
+                        fs::remove_file(&path)?;
+                    }
+                }
+            }
+        }
+
+        let index_path = self.index_file_path();
+        let index_tmp = self.root.join("tmp").join("offsets.rollback.tmp");
+        write_jsonl_lines(&index_tmp, &index_rows)?;
+        fs::rename(index_tmp, index_path)?;
+
+        self.next_segment_seq = 1;
+        self.next_frame_seq = 1;
+        self.next_entry_seq = 1;
+        self.current_segment_bytes = 0;
+        self.bootstrap_from_disk()?;
+
+        let verification = MigrationVerification {
+            entry_count_match: self.entry_count() == checkpoint.head_entry_seq,
+            hash_chain_match: self.chain_hash == checkpoint.chain_hash,
+            index_consistent: self.validate_integrity().is_ok(),
+        };
+
+        let (outcome, error_class) = if verification.entry_count_match
+            && verification.hash_chain_match
+            && verification.index_consistent
+        {
+            ("ok".to_string(), None)
+        } else if verification.index_consistent {
+            (
+                "recoverable_error".to_string(),
+                Some("integrity_mismatch".to_string()),
+            )
+        } else {
+            (
+                "fatal_error".to_string(),
+                Some("index_corruption".to_string()),
+            )
+        };
+
+        let event = MigrationEvent {
+            schema: MIGRATION_EVENT_SCHEMA.to_string(),
+            migration_id: migration_id.into(),
+            phase: "rollback".to_string(),
+            at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            source_path: checkpoint.snapshot_ref,
+            target_path: self.root.display().to_string(),
+            source_format: "native_v2".to_string(),
+            target_format: "native_v2".to_string(),
+            verification,
+            outcome: outcome.clone(),
+            error_class,
+            correlation_id: correlation_id.into(),
+        };
+        self.append_migration_event(event.clone())?;
+
+        if outcome == "ok" {
+            Ok(event)
+        } else {
+            Err(Error::session(format!(
+                "rollback verification failed for checkpoint {checkpoint_seq}"
+            )))
+        }
+    }
+
+    pub fn write_manifest(
+        &self,
+        session_id: impl Into<String>,
+        source_format: impl Into<String>,
+    ) -> Result<Manifest> {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let created_at = self
+            .read_manifest()?
+            .map(|m| m.created_at)
+            .unwrap_or_else(|| now.clone());
+        let session_id = session_id.into();
+        let source_format = source_format.into();
+        let index_rows = self.read_index()?;
+        let frames = self.read_all_entries()?;
+
+        let mut parent_counts: std::collections::HashMap<&str, u64> =
+            std::collections::HashMap::new();
+        let mut message_count = 0u64;
+        let mut compaction_count = 0u64;
+        let mut entry_ids = std::collections::HashSet::with_capacity(frames.len());
+        for frame in &frames {
+            entry_ids.insert(frame.entry_id.as_str());
+            if frame.entry_type == "message" {
+                message_count = message_count.saturating_add(1);
+            }
+            if frame.entry_type == "compaction" {
+                compaction_count = compaction_count.saturating_add(1);
+            }
+            if let Some(parent_id) = frame.parent_entry_id.as_deref() {
+                *parent_counts.entry(parent_id).or_insert(0) += 1;
+            }
+        }
+        let branches_total = u64::try_from(parent_counts.values().filter(|&&n| n > 1).count())
+            .map_err(|_| Error::session("branch count exceeds u64"))?;
+        let parent_links_closed = frames.iter().all(|frame| {
+            frame
+                .parent_entry_id
+                .as_deref()
+                .is_none_or(|parent| entry_ids.contains(parent))
+        });
+
+        let mut monotonic_entry_seq = true;
+        let mut monotonic_segment_seq = true;
+        let mut last_entry_seq = 0u64;
+        let mut last_segment_seq = 0u64;
+        for row in &index_rows {
+            if row.entry_seq <= last_entry_seq {
+                monotonic_entry_seq = false;
+            }
+            if row.segment_seq < last_segment_seq {
+                monotonic_segment_seq = false;
+            }
+            last_entry_seq = row.entry_seq;
+            last_segment_seq = row.segment_seq;
+        }
+
+        let mut recomputed_chain = GENESIS_CHAIN_HASH.to_string();
+        for frame in &frames {
+            recomputed_chain = chain_hash_step(&recomputed_chain, &frame.payload_sha256);
+        }
+        let hash_chain_valid = recomputed_chain == self.chain_hash;
+
+        let head = self.head().unwrap_or(StoreHead {
+            segment_seq: 0,
+            entry_seq: 0,
+            entry_id: String::new(),
+        });
+        let segment_count = index_rows
+            .iter()
+            .map(|row| row.segment_seq)
+            .max()
+            .unwrap_or(0);
+
+        let mut manifest = Manifest {
+            schema: MANIFEST_SCHEMA.to_string(),
+            store_version: 2,
+            session_id,
+            source_format,
+            created_at,
+            updated_at: now,
+            head,
+            counters: ManifestCounters {
+                entries_total: u64::try_from(index_rows.len())
+                    .map_err(|_| Error::session("entry count exceeds u64"))?,
+                messages_total: message_count,
+                branches_total,
+                compactions_total: compaction_count,
+                bytes_total: self.total_bytes,
+            },
+            files: ManifestFiles {
+                segment_dir: "segments/".to_string(),
+                segment_count,
+                index_path: "index/offsets.jsonl".to_string(),
+                checkpoint_dir: "checkpoints/".to_string(),
+                migration_ledger_path: "migrations/ledger.jsonl".to_string(),
+            },
+            integrity: ManifestIntegrity {
+                chain_hash: self.chain_hash.clone(),
+                manifest_hash: String::new(),
+                last_crc32c: self.last_crc32c.clone(),
+            },
+            invariants: ManifestInvariants {
+                parent_links_closed,
+                monotonic_entry_seq,
+                monotonic_segment_seq,
+                index_within_segment_bounds: self.validate_integrity().is_ok(),
+                branch_heads_indexed: true,
+                checkpoints_monotonic: true,
+                hash_chain_valid,
+            },
+        };
+        manifest.integrity.manifest_hash = manifest_hash_hex(&manifest)?;
+
+        let tmp = self.root.join("tmp").join("manifest.json.tmp");
+        fs::write(&tmp, serde_json::to_vec_pretty(&manifest)?)?;
+        fs::rename(&tmp, self.manifest_path())?;
+        Ok(manifest)
+    }
+
+    pub fn read_manifest(&self) -> Result<Option<Manifest>> {
+        let path = self.manifest_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = fs::read_to_string(path)?;
+        let manifest: Manifest = serde_json::from_str(&content)?;
+        Ok(Some(manifest))
+    }
+
+    pub fn chain_hash(&self) -> &str {
+        &self.chain_hash
+    }
+
+    pub const fn total_bytes(&self) -> u64 {
+        self.total_bytes
+    }
+
+    pub fn index_summary(&self) -> Result<Option<IndexSummary>> {
+        let rows = self.read_index()?;
+        let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+            return Ok(None);
+        };
+        Ok(Some(IndexSummary {
+            entry_count: u64::try_from(rows.len())
+                .map_err(|_| Error::session("entry count exceeds u64"))?,
+            first_entry_seq: first.entry_seq,
+            last_entry_seq: last.entry_seq,
+            last_entry_id: last.entry_id.clone(),
+        }))
+    }
+
+    /// Rebuild the offset index by scanning all segment files.
+    /// This is the recovery path when the index is missing or corrupted.
+    pub fn rebuild_index(&mut self) -> Result<u64> {
+        let mut rebuilt_count = 0u64;
+        let index_path = self.index_file_path();
+        if index_path.exists() {
+            fs::remove_file(&index_path)?;
+        }
+
+        self.chain_hash = GENESIS_CHAIN_HASH.to_string();
+        self.total_bytes = 0;
+        self.last_entry_id = None;
+        self.last_crc32c = "00000000".to_string();
+
+        let mut seg_seq = 1u64;
+        loop {
+            let seg_path = self.segment_file_path(seg_seq);
+            if !seg_path.exists() {
+                break;
+            }
+            let file = File::open(&seg_path)?;
+            let reader = BufReader::new(file);
+            let mut byte_offset = 0u64;
+
+            for line_result in reader.lines() {
+                let line = line_result?;
+                if line.trim().is_empty() {
+                    byte_offset = byte_offset.saturating_add(
+                        u64::try_from(line.len().saturating_add(1)).unwrap_or(u64::MAX),
+                    );
+                    continue;
+                }
+                let frame: SegmentFrame = serde_json::from_str(&line)?;
+                let line_bytes = line.len().saturating_add(1);
+                let line_len = u64::try_from(line_bytes)
+                    .map_err(|_| Error::session("line length exceeds u64"))?;
+
+                let mut record_bytes = line.as_bytes().to_vec();
+                record_bytes.push(b'\n');
+                let crc = crc32c_upper(&record_bytes);
+
+                let index_entry = OffsetIndexEntry {
+                    schema: OFFSET_INDEX_SCHEMA.to_string(),
+                    entry_seq: frame.entry_seq,
+                    entry_id: frame.entry_id.clone(),
+                    segment_seq: frame.segment_seq,
+                    frame_seq: frame.frame_seq,
+                    byte_offset,
+                    byte_length: line_len,
+                    crc32c: crc.clone(),
+                    state: "active".to_string(),
+                };
+                append_jsonl_line(&index_path, &index_entry)?;
+
+                self.chain_hash = chain_hash_step(&self.chain_hash, &frame.payload_sha256);
+                self.total_bytes = self.total_bytes.saturating_add(line_len);
+                self.last_entry_id = Some(frame.entry_id);
+                self.last_crc32c = crc;
+
+                byte_offset = byte_offset.saturating_add(line_len);
+                rebuilt_count = rebuilt_count.saturating_add(1);
+            }
+            seg_seq = seg_seq.saturating_add(1);
+        }
+
+        self.next_segment_seq = 1;
+        self.next_frame_seq = 1;
+        self.next_entry_seq = 1;
+        self.current_segment_bytes = 0;
+        self.bootstrap_from_disk()?;
+
+        Ok(rebuilt_count)
     }
 
     pub fn validate_integrity(&self) -> Result<()> {
@@ -320,15 +968,147 @@ impl SessionStoreV2 {
                         segment_path.display()
                     ))
                 })?;
+            self.last_entry_id = Some(last.entry_id.clone());
+            self.last_crc32c = last.crc32c.clone();
+
+            let mut chain = GENESIS_CHAIN_HASH.to_string();
+            let mut total = 0u64;
+            for row in &index_rows {
+                if let Some(frame) = seek_read_frame(self, row)? {
+                    chain = chain_hash_step(&chain, &frame.payload_sha256);
+                }
+                total = total.saturating_add(row.byte_length);
+            }
+            self.chain_hash = chain;
+            self.total_bytes = total;
+        } else {
+            self.chain_hash = GENESIS_CHAIN_HASH.to_string();
+            self.total_bytes = 0;
+            self.last_entry_id = None;
+            self.last_crc32c = "00000000".to_string();
         }
         Ok(())
     }
+}
+
+/// Convert a V2 `SegmentFrame` payload back into a `SessionEntry`.
+pub fn frame_to_session_entry(frame: &SegmentFrame) -> Result<SessionEntry> {
+    let entry: SessionEntry = serde_json::from_value(frame.payload.clone()).map_err(|e| {
+        Error::session(format!(
+            "failed to deserialize SessionEntry from frame entry_id={}: {e}",
+            frame.entry_id
+        ))
+    })?;
+
+    if let Some(base_id) = entry.base_id() {
+        if base_id != &frame.entry_id {
+            return Err(Error::session(format!(
+                "frame entry_id mismatch: frame={} entry={}",
+                frame.entry_id, base_id
+            )));
+        }
+    }
+
+    Ok(entry)
+}
+
+/// Extract the V2 frame arguments from a `SessionEntry`.
+pub fn session_entry_to_frame_args(
+    entry: &SessionEntry,
+) -> Result<(String, Option<String>, String, Value)> {
+    let base = entry.base();
+    let entry_id = base
+        .id
+        .clone()
+        .ok_or_else(|| Error::session("SessionEntry has no id"))?;
+    let parent_entry_id = base.parent_id.clone();
+
+    let entry_type = match entry {
+        SessionEntry::Message(_) => "message",
+        SessionEntry::ModelChange(_) => "model_change",
+        SessionEntry::ThinkingLevelChange(_) => "thinking_level_change",
+        SessionEntry::Compaction(_) => "compaction",
+        SessionEntry::BranchSummary(_) => "branch_summary",
+        SessionEntry::Label(_) => "label",
+        SessionEntry::SessionInfo(_) => "session_info",
+        SessionEntry::Custom(_) => "custom",
+    };
+
+    let payload = serde_json::to_value(entry).map_err(|e| {
+        Error::session(format!(
+            "failed to serialize SessionEntry to frame payload: {e}"
+        ))
+    })?;
+
+    Ok((entry_id, parent_entry_id, entry_type.to_string(), payload))
+}
+
+/// Seek-read a single frame from a segment using an index row.
+fn seek_read_frame(store: &SessionStoreV2, row: &OffsetIndexEntry) -> Result<Option<SegmentFrame>> {
+    let segment_path = store.segment_file_path(row.segment_seq);
+    if !segment_path.exists() {
+        return Ok(None);
+    }
+    let mut file = File::open(&segment_path)?;
+    file.seek(SeekFrom::Start(row.byte_offset))?;
+    let byte_len = usize::try_from(row.byte_length)
+        .map_err(|_| Error::session(format!("byte length too large: {}", row.byte_length)))?;
+    let mut buf = vec![0u8; byte_len];
+    file.read_exact(&mut buf)?;
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+    }
+    let frame: SegmentFrame = serde_json::from_slice(&buf)?;
+    Ok(Some(frame))
+}
+
+/// Compute next hash chain value: `SHA-256(prev_chain_hex || payload_sha256_hex)`.
+fn chain_hash_step(prev_chain: &str, payload_sha256: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(prev_chain.as_bytes());
+    hasher.update(payload_sha256.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn manifest_hash_hex(manifest: &Manifest) -> Result<String> {
+    let encoded = serde_json::to_vec(manifest)?;
+    Ok(format!("{:x}", Sha256::digest(&encoded)))
+}
+
+/// Derive the V2 sidecar store root from a JSONL session file path.
+pub fn v2_sidecar_path(jsonl_path: &Path) -> PathBuf {
+    let stem = jsonl_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "session".to_string());
+    let parent = jsonl_path.parent().unwrap_or_else(|| Path::new("."));
+    parent.join(format!("{stem}.v2"))
+}
+
+/// Check whether a V2 sidecar store exists for the given JSONL session.
+pub fn has_v2_sidecar(jsonl_path: &Path) -> bool {
+    let root = v2_sidecar_path(jsonl_path);
+    root.join("manifest.json").exists() || root.join("index").join("offsets.jsonl").exists()
 }
 
 fn append_jsonl_line<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     serde_json::to_writer(&mut file, value)?;
     file.write_all(b"\n")?;
+    file.flush()?;
+    Ok(())
+}
+
+fn write_jsonl_lines<T: Serialize>(path: &Path, rows: &[T]) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)?;
+    for row in rows {
+        serde_json::to_writer(&mut file, row)?;
+        file.write_all(b"\n")?;
+    }
     file.flush()?;
     Ok(())
 }

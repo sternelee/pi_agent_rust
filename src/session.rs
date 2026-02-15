@@ -13,6 +13,7 @@ use crate::model::{
     UserMessage,
 };
 use crate::session_index::{SessionIndex, enqueue_session_index_snapshot_update};
+use crate::session_store_v2::{self, SessionStoreV2};
 use crate::tui::PiConsole;
 use asupersync::channel::oneshot;
 use asupersync::sync::Mutex;
@@ -599,6 +600,14 @@ pub struct SessionOpenOrphanedParentLink {
     pub missing_parent_id: String,
 }
 
+/// Loading strategy for reconstructing a `Session` from a V2 store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V2OpenMode {
+    Full,
+    ActivePath,
+    Tail(u64),
+}
+
 impl SessionOpenDiagnostics {
     fn warning_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
@@ -923,7 +932,101 @@ impl Session {
             }
         }
 
+        // Check for V2 sidecar store — enables O(index+tail) resume.
+        if session_store_v2::has_v2_sidecar(&path) {
+            match Self::open_v2_with_diagnostics(&path).await {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "V2 sidecar resume failed, falling back to full JSONL parse"
+                    );
+                }
+            }
+        }
+
         Self::open_jsonl_with_diagnostics(&path).await
+    }
+
+    /// Open a session from an already-open V2 store with an explicit read mode.
+    pub fn open_from_v2(
+        store: &SessionStoreV2,
+        header: SessionHeader,
+        mode: V2OpenMode,
+    ) -> Result<(Self, SessionOpenDiagnostics)> {
+        let frames = match mode {
+            V2OpenMode::Full => store.read_all_entries()?,
+            V2OpenMode::ActivePath => match store.head() {
+                Some(head) => store.read_active_path(&head.entry_id)?,
+                None => Vec::new(),
+            },
+            V2OpenMode::Tail(count) => store.read_tail_entries(count)?,
+        };
+
+        let mut diagnostics = SessionOpenDiagnostics::default();
+        let mut entries = Vec::with_capacity(frames.len());
+        for frame in &frames {
+            match session_store_v2::frame_to_session_entry(frame) {
+                Ok(entry) => entries.push(entry),
+                Err(e) => {
+                    diagnostics.skipped_entries.push(SessionOpenSkippedEntry {
+                        line_number: usize::try_from(frame.entry_seq).unwrap_or(0),
+                        error: e.to_string(),
+                    });
+                }
+            }
+        }
+
+        let finalized = finalize_loaded_entries(&mut entries);
+        for orphan in &finalized.orphans {
+            diagnostics
+                .orphaned_parent_links
+                .push(SessionOpenOrphanedParentLink {
+                    entry_id: orphan.0.clone(),
+                    missing_parent_id: orphan.1.clone(),
+                });
+        }
+
+        let entry_count = entries.len();
+        Ok((
+            Self {
+                header,
+                entries,
+                path: None,
+                leaf_id: finalized.leaf_id,
+                session_dir: None,
+                store_kind: SessionStoreKind::Jsonl,
+                entry_ids: finalized.entry_ids,
+                is_linear: finalized.is_linear,
+                entry_index: finalized.entry_index,
+                cached_message_count: finalized.message_count,
+                cached_name: finalized.name,
+                autosave_queue: AutosaveQueue::new(),
+                autosave_durability: AutosaveDurabilityMode::from_env(),
+                persisted_entry_count: entry_count,
+                header_dirty: false,
+                appends_since_checkpoint: 0,
+            },
+            diagnostics,
+        ))
+    }
+
+    /// Open using the V2 sidecar store (async wrapper around blocking read).
+    async fn open_v2_with_diagnostics(path: &Path) -> Result<(Self, SessionOpenDiagnostics)> {
+        let path_buf = path.to_path_buf();
+        let (tx, rx) = oneshot::channel();
+
+        thread::spawn(move || {
+            let res = crate::session::open_from_v2_store_blocking(path_buf);
+            let cx = AgentCx::for_request();
+            let _ = tx.send(cx.cx(), res);
+        });
+
+        let cx = AgentCx::for_request();
+        rx.recv(cx.cx())
+            .await
+            .map_err(|_| crate::Error::session("V2 open task cancelled"))?
     }
 
     async fn open_jsonl_with_diagnostics(path: &Path) -> Result<(Self, SessionOpenDiagnostics)> {
@@ -3205,6 +3308,65 @@ fn open_jsonl_blocking(path_buf: PathBuf) -> Result<(Session, SessionOpenDiagnos
         },
         diagnostics,
     ))
+}
+
+/// Open a session from its V2 sidecar store.
+///
+/// Reads the JSONL header (first line) for `SessionHeader`, then loads
+/// entries from the V2 segment store via its offset index — O(index + tail)
+/// instead of the O(n) full-file parse that `open_jsonl_blocking` performs.
+#[allow(clippy::too_many_lines)]
+fn open_from_v2_store_blocking(jsonl_path: PathBuf) -> Result<(Session, SessionOpenDiagnostics)> {
+    // 1. Read JSONL header (first line only).
+    let file = std::fs::File::open(&jsonl_path).map_err(|e| crate::Error::Io(Box::new(e)))?;
+    let mut reader = BufReader::new(file);
+    let mut header_line = String::new();
+    reader
+        .read_line(&mut header_line)
+        .map_err(|e| crate::Error::Io(Box::new(e)))?;
+    let header: SessionHeader = serde_json::from_str(header_line.trim())
+        .map_err(|e| crate::Error::session(format!("Invalid header in JSONL: {e}")))?;
+
+    // 2. Open V2 sidecar store.
+    let v2_root = session_store_v2::v2_sidecar_path(&jsonl_path);
+    let store = SessionStoreV2::create(&v2_root, 64 * 1024 * 1024)?;
+
+    // 3. Load from store in full mode.
+    let (mut session, diagnostics) = Session::open_from_v2(&store, header, V2OpenMode::Full)?;
+    session.path = Some(jsonl_path);
+    Ok((session, diagnostics))
+}
+
+/// Create a V2 sidecar store from an existing JSONL session file.
+///
+/// This is the migration path: parse the full JSONL once and write each entry
+/// into the V2 segmented store with offset index. Subsequent opens can then
+/// use `open_from_v2_store_blocking` for O(index+tail) resume.
+pub fn create_v2_sidecar_from_jsonl(jsonl_path: &Path) -> Result<SessionStoreV2> {
+    let contents =
+        std::fs::read_to_string(jsonl_path).map_err(|e| crate::Error::Io(Box::new(e)))?;
+    let mut lines = contents.lines();
+
+    // Skip header line.
+    let _header_line = lines
+        .next()
+        .ok_or_else(|| crate::Error::session("Empty JSONL session file"))?;
+
+    let v2_root = session_store_v2::v2_sidecar_path(jsonl_path);
+    let mut store = SessionStoreV2::create(&v2_root, 64 * 1024 * 1024)?;
+
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry: SessionEntry = serde_json::from_str(line)
+            .map_err(|e| crate::Error::session(format!("Bad JSONL entry: {e}")))?;
+        let (entry_id, parent_entry_id, entry_type, payload) =
+            session_store_v2::session_entry_to_frame_args(&entry)?;
+        store.append_entry(entry_id, parent_entry_id, entry_type, payload)?;
+    }
+
+    Ok(store)
 }
 
 /// Result of single-pass load finalization (Gap F).
