@@ -885,17 +885,6 @@ jobs:
             tests/ext_conformance/reports/gate/must_pass_gate_report.md
           if-no-files-found: warn
 
-      - name: Release gate (evidence bundle) [linux]
-        if: runner.os == 'Linux'
-        run: |
-          set -euxo pipefail
-          ./scripts/release_gate.sh --report | tee release_gate_report.json
-          VERDICT=$(python3 -c "import json; print(json.load(open('release_gate_report.json')).get('verdict','unknown'))")
-          echo "Release gate verdict: $VERDICT"
-          if [ "$VERDICT" = "fail" ]; then
-            echo "::warning::Release gate failed — conformance evidence bundle does not meet thresholds"
-          fi
-
       - name: Cross-platform matrix validation
         if: always()
         run: |
@@ -938,6 +927,131 @@ jobs:
             -- full_suite_gate --nocapture --exact
         continue-on-error: true
 
+      - name: Build drop-in certification verdict artifact [linux]
+        if: always() && runner.os == 'Linux'
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          source_path = Path("tests/full_suite_gate/certification_verdict.json")
+          target_path = Path("docs/dropin-certification-verdict.json")
+          generated_at = (
+              datetime.now(timezone.utc)
+              .replace(microsecond=0)
+              .isoformat()
+              .replace("+00:00", "Z")
+          )
+
+          def write_payload(payload):
+              target_path.parent.mkdir(parents=True, exist_ok=True)
+              target_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+              print(
+                  f"Wrote {target_path} with overall_verdict={payload.get('overall_verdict')}"
+              )
+
+          if not source_path.exists():
+              write_payload(
+                  {
+                      "schema": "pi.dropin.certification_verdict.v1",
+                      "git_commit": os.environ.get("GITHUB_SHA", "unknown"),
+                      "generated_at_utc": generated_at,
+                      "overall_verdict": "NOT_CERTIFIED",
+                      "hard_gate_results": [],
+                      "blocking_reasons": [
+                          f"missing source artifact: {source_path.as_posix()}"
+                      ],
+                      "evidence_index": [
+                          {
+                              "path": source_path.as_posix(),
+                              "exists": False,
+                          }
+                      ],
+                      "source": {
+                          "certification_lane_artifact": source_path.as_posix(),
+                          "lane_verdict": "missing",
+                      },
+                  }
+              )
+              raise SystemExit(0)
+
+          source = json.loads(source_path.read_text(encoding="utf-8"))
+          gates = source.get("gates", [])
+          hard_gate_results = []
+          blocking_reasons = []
+          evidence_index = []
+
+          for gate in gates:
+              gate_id = str(gate.get("id", "unknown"))
+              status = str(gate.get("status", "unknown")).lower()
+              blocking = bool(gate.get("blocking", False))
+              detail = gate.get("detail")
+              artifact_path = gate.get("artifact_path")
+
+              hard_gate_results.append(
+                  {
+                      "gate_id": gate_id,
+                      "status": status,
+                      "blocking": blocking,
+                      "detail": detail,
+                      "artifact_path": artifact_path,
+                      "bead": gate.get("bead"),
+                  }
+              )
+
+              if blocking and status != "pass":
+                  reason = f"{gate_id}:{status}"
+                  if detail:
+                      reason = f"{reason} ({detail})"
+                  blocking_reasons.append(reason)
+
+              if isinstance(artifact_path, str) and artifact_path:
+                  evidence_index.append(
+                      {
+                          "path": artifact_path,
+                          "exists": Path(artifact_path).exists(),
+                      }
+                  )
+
+          overall_verdict = "CERTIFIED" if not blocking_reasons else "NOT_CERTIFIED"
+          write_payload(
+              {
+                  "schema": "pi.dropin.certification_verdict.v1",
+                  "git_commit": os.environ.get("GITHUB_SHA", "unknown"),
+                  "generated_at_utc": generated_at,
+                  "overall_verdict": overall_verdict,
+                  "hard_gate_results": hard_gate_results,
+                  "blocking_reasons": blocking_reasons,
+                  "evidence_index": evidence_index,
+                  "source": {
+                      "certification_lane_artifact": source_path.as_posix(),
+                      "lane_verdict": source.get("verdict", "unknown"),
+                      "lane_generated_at": source.get("generated_at"),
+                  },
+              }
+          )
+          PY
+
+      - name: Release gate (evidence bundle) [linux]
+        if: always() && runner.os == 'Linux'
+        env:
+          RELEASE_GATE_REQUIRE_DROPIN_CERTIFIED: ${{ vars.RELEASE_GATE_REQUIRE_DROPIN_CERTIFIED || '0' }}
+        run: |
+          set -euxo pipefail
+          ./scripts/release_gate.sh --report | tee release_gate_report.json
+          VERDICT=$(python3 -c "import json; print(json.load(open('release_gate_report.json')).get('verdict','unknown'))")
+          echo "Release gate verdict: $VERDICT"
+          if [ "$VERDICT" = "fail" ]; then
+            if [ "${RELEASE_GATE_REQUIRE_DROPIN_CERTIFIED:-0}" = "1" ]; then
+              echo "::error::Release gate failed under strict mode (RELEASE_GATE_REQUIRE_DROPIN_CERTIFIED=1)"
+              exit 1
+            fi
+            echo "::warning::Release gate failed — conformance evidence bundle does not meet thresholds"
+          fi
+
       - name: Upload unified evidence bundle [linux]
         if: always() && runner.os == 'Linux'
         uses: actions/upload-artifact@v4
@@ -960,6 +1074,8 @@ jobs:
             tests/full_suite_gate/full_suite_report.md
             tests/security_compat/security_compat_dashboard.json
             tests/security_compat/security_compat_events.jsonl
+            docs/dropin-certification-verdict.json
+            release_gate_report.json
           if-no-files-found: warn
 
       - name: Reclaim disk space before coverage [linux]
