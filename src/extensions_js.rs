@@ -11800,7 +11800,7 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
 
         // Clear hostcall state.
         self.hostcall_queue.borrow_mut().clear();
-        self.hostcall_tracker.borrow_mut().clear();
+        *self.hostcall_tracker.borrow_mut() = HostcallTracker::default();
         // Drain repair events.
         if let Ok(mut events) = self.repair_events.lock() {
             events.clear();
@@ -14621,21 +14621,15 @@ function __pi_make_extension_ctx(ctx_payload) {
     };
 }
 
-	async function __pi_dispatch_extension_event(event_name, event_payload, ctx_payload) {
-	    const eventName = String(event_name || '').trim();
-	    if (!eventName) {
-	        throw new Error('dispatch_event: event name is required');
+	async function __pi_dispatch_event_inner(eventName, event_payload, ctx) {
+	    const handlers = [
+	        ...(__pi_hook_index.get(eventName) || []),
+	        ...(__pi_event_bus_index.get(eventName) || []),
+	    ];
+	    if (handlers.length === 0) {
+	        return undefined;
 	    }
 
-    const handlers = [
-        ...(__pi_hook_index.get(eventName) || []),
-        ...(__pi_event_bus_index.get(eventName) || []),
-    ];
-    if (handlers.length === 0) {
-        return undefined;
-    }
-
-    const ctx = __pi_make_extension_ctx(ctx_payload);
 	    if (eventName === 'input') {
 	        const base = event_payload && typeof event_payload === 'object' ? event_payload : {};
 	        const originalText = typeof base.text === 'string' ? base.text : String(base.text ?? '');
@@ -14735,6 +14729,31 @@ function __pi_make_extension_ctx(ctx_payload) {
     }
     return last;
 }
+
+	async function __pi_dispatch_extension_event(event_name, event_payload, ctx_payload) {
+	    const eventName = String(event_name || '').trim();
+	    if (!eventName) {
+	        throw new Error('dispatch_event: event name is required');
+	    }
+	    const ctx = __pi_make_extension_ctx(ctx_payload);
+	    return __pi_dispatch_event_inner(eventName, event_payload, ctx);
+	}
+
+	async function __pi_dispatch_extension_events_batch(events_json, ctx_payload) {
+	    const ctx = __pi_make_extension_ctx(ctx_payload);
+	    const results = [];
+	    for (const entry of events_json) {
+	        const eventName = String(entry.event_name || '').trim();
+	        if (!eventName) continue;
+	        try {
+	            const value = await __pi_dispatch_event_inner(eventName, entry.event_payload, ctx);
+	            results.push({ event: eventName, ok: true, value: value });
+	        } catch (e) {
+	            results.push({ event: eventName, ok: false, error: String(e) });
+	        }
+	    }
+	    return results;
+	}
 
 async function __pi_execute_tool(tool_name, tool_call_id, input, ctx_payload) {
     const name = String(tool_name || '').trim();
@@ -16894,6 +16913,151 @@ mod tests {
     }
 
     #[test]
+    fn reset_transient_state_preserves_compiled_cache_and_clears_transient_state() {
+        futures::executor::block_on(async {
+            let runtime = PiJsRuntime::with_clock(DeterministicClock::new(0))
+                .await
+                .expect("create runtime");
+
+            let cache_key = "pijs://virtual".to_string();
+            {
+                let mut state = runtime.module_state.borrow_mut();
+                let extension_root = PathBuf::from("/tmp/ext-root");
+                state.extension_roots.push(extension_root.clone());
+                state
+                    .extension_root_tiers
+                    .insert(extension_root.clone(), ProxyStubSourceTier::Community);
+                state
+                    .extension_root_scopes
+                    .insert(extension_root, "@scope".to_string());
+                state
+                    .dynamic_virtual_modules
+                    .insert(cache_key.clone(), "export const v = 1;".to_string());
+                let mut exports = BTreeSet::new();
+                exports.insert("v".to_string());
+                state
+                    .dynamic_virtual_named_exports
+                    .insert(cache_key.clone(), exports);
+                state.compiled_sources.insert(
+                    cache_key.clone(),
+                    CompiledModuleCacheEntry {
+                        cache_key: Some("cache-v1".to_string()),
+                        source: b"compiled-source".to_vec(),
+                    },
+                );
+                state.module_cache_counters = ModuleCacheCounters {
+                    hits: 3,
+                    misses: 4,
+                    invalidations: 5,
+                    disk_hits: 6,
+                };
+            }
+
+            runtime
+                .hostcall_queue
+                .borrow_mut()
+                .push_back(HostcallRequest {
+                    call_id: "call-1".to_string(),
+                    kind: HostcallKind::Tool {
+                        name: "read".to_string(),
+                    },
+                    payload: serde_json::json!({}),
+                    trace_id: 1,
+                    extension_id: Some("ext.reset".to_string()),
+                });
+            runtime
+                .hostcall_tracker
+                .borrow_mut()
+                .register("call-1".to_string(), Some(42));
+            runtime
+                .hostcalls_total
+                .store(11, std::sync::atomic::Ordering::SeqCst);
+            runtime
+                .hostcalls_timed_out
+                .store(2, std::sync::atomic::Ordering::SeqCst);
+            runtime
+                .tick_counter
+                .store(7, std::sync::atomic::Ordering::SeqCst);
+
+            runtime.reset_transient_state();
+
+            {
+                let state = runtime.module_state.borrow();
+                assert!(state.extension_roots.is_empty());
+                assert!(state.extension_root_tiers.is_empty());
+                assert!(state.extension_root_scopes.is_empty());
+                assert!(state.dynamic_virtual_modules.is_empty());
+                assert!(state.dynamic_virtual_named_exports.is_empty());
+
+                let cached = state
+                    .compiled_sources
+                    .get(&cache_key)
+                    .expect("compiled source should persist across reset");
+                assert_eq!(cached.cache_key.as_deref(), Some("cache-v1"));
+                assert_eq!(cached.source, b"compiled-source");
+
+                assert_eq!(state.module_cache_counters.hits, 0);
+                assert_eq!(state.module_cache_counters.misses, 0);
+                assert_eq!(state.module_cache_counters.invalidations, 0);
+                assert_eq!(state.module_cache_counters.disk_hits, 0);
+            }
+
+            assert!(runtime.hostcall_queue.borrow().is_empty());
+            assert_eq!(runtime.hostcall_tracker.borrow().pending_count(), 0);
+            assert_eq!(
+                runtime
+                    .hostcalls_total
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                0
+            );
+            assert_eq!(
+                runtime
+                    .hostcalls_timed_out
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                0
+            );
+            assert_eq!(
+                runtime
+                    .tick_counter
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                0
+            );
+        });
+    }
+
+    #[test]
+    fn warm_isolate_pool_tracks_created_and_reset_counts() {
+        let cache_dir = tempfile::tempdir().expect("tempdir");
+        let template = PiJsRuntimeConfig {
+            cwd: "/tmp/warm-pool".to_string(),
+            args: vec!["--flag".to_string()],
+            env: HashMap::from([("PI_POOL".to_string(), "yes".to_string())]),
+            deny_env: false,
+            disk_cache_dir: Some(cache_dir.path().join("module-cache")),
+            ..PiJsRuntimeConfig::default()
+        };
+        let expected_disk_cache_dir = template.disk_cache_dir.clone();
+
+        let pool = WarmIsolatePool::new(template.clone());
+        assert_eq!(pool.created_count(), 0);
+        assert_eq!(pool.reset_count(), 0);
+
+        let cfg_a = pool.make_config();
+        let cfg_b = pool.make_config();
+        assert_eq!(pool.created_count(), 2);
+        assert_eq!(cfg_a.cwd, template.cwd);
+        assert_eq!(cfg_b.cwd, template.cwd);
+        assert_eq!(cfg_a.args, template.args);
+        assert_eq!(cfg_a.env.get("PI_POOL"), Some(&"yes".to_string()));
+        assert_eq!(cfg_a.deny_env, template.deny_env);
+        assert_eq!(cfg_a.disk_cache_dir, expected_disk_cache_dir);
+
+        pool.record_reset();
+        pool.record_reset();
+        assert_eq!(pool.reset_count(), 2);
+    }
+
+    #[test]
     fn resolver_error_messages_are_classified_deterministically() {
         assert_eq!(
             unsupported_module_specifier_message("left-pad"),
@@ -17999,6 +18163,7 @@ export default ConfigLoader;
                 repair_mode: RepairMode::default(),
                 allow_unsafe_sync_exec: false,
                 deny_env: false,
+                disk_cache_dir: None,
             };
             let runtime = PiJsRuntime::with_clock_and_config(Arc::clone(&clock), config)
                 .await
@@ -18057,6 +18222,7 @@ export default ConfigLoader;
                 repair_mode: RepairMode::default(),
                 allow_unsafe_sync_exec: false,
                 deny_env: false,
+                disk_cache_dir: None,
             };
             let runtime = PiJsRuntime::with_clock_and_config(Arc::clone(&clock), config)
                 .await
@@ -20011,6 +20177,7 @@ export default ConfigLoader;
                 repair_mode: RepairMode::default(),
                 allow_unsafe_sync_exec: false,
                 deny_env: false,
+                disk_cache_dir: None,
             };
             let runtime = PiJsRuntime::with_clock_and_config(Arc::clone(&clock), config)
                 .await
@@ -20086,6 +20253,7 @@ export default ConfigLoader;
                 repair_mode: RepairMode::default(),
                 allow_unsafe_sync_exec: false,
                 deny_env: false,
+                disk_cache_dir: None,
             };
             let runtime = PiJsRuntime::with_clock_and_config(Arc::clone(&clock), config)
                 .await

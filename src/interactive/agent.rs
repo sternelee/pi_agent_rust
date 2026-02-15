@@ -833,7 +833,6 @@ impl PiApp {
                 .map(|m| crate::extensions::EventCoalescer::new(m.clone()));
             let result = agent_guard
                 .run_with_content_with_abort(content_for_agent, Some(abort_signal), move |event| {
-                    let extension_event = extension_event_from_agent(&event);
                     let mapped = match &event {
                         AgentEvent::AgentStart { .. } => Some(PiMsg::AgentStart),
                         AgentEvent::MessageUpdate {
@@ -903,17 +902,7 @@ impl PiApp {
                     }
 
                     if let Some(coal) = &coalescer {
-                        if let Some((event_name, data)) = extension_event {
-                            if !matches!(
-                                event_name,
-                                ExtensionEventName::AgentStart
-                                    | ExtensionEventName::AgentEnd
-                                    | ExtensionEventName::TurnStart
-                                    | ExtensionEventName::TurnEnd
-                            ) {
-                                coal.dispatch_fire_and_forget(event_name, data, &runtime_handle);
-                            }
-                        }
+                        coal.dispatch_agent_event_lazy(&event, &runtime_handle);
                     }
                 })
                 .await;
@@ -1126,7 +1115,6 @@ impl PiApp {
             let result = if input_images.is_empty() {
                 agent_guard
                     .run_with_abort(message_for_agent, Some(abort_signal), move |event| {
-                        let extension_event = extension_event_from_agent(&event);
                         let mapped = match &event {
                             AgentEvent::AgentStart { .. } => Some(PiMsg::AgentStart),
                             AgentEvent::MessageUpdate {
@@ -1196,21 +1184,7 @@ impl PiApp {
                         }
 
                         if let Some(coal) = &coalescer {
-                            if let Some((event_name, data)) = extension_event {
-                                if !matches!(
-                                    event_name,
-                                    ExtensionEventName::AgentStart
-                                        | ExtensionEventName::AgentEnd
-                                        | ExtensionEventName::TurnStart
-                                        | ExtensionEventName::TurnEnd
-                                ) {
-                                    coal.dispatch_fire_and_forget(
-                                        event_name,
-                                        data,
-                                        &runtime_handle_for_agent,
-                                    );
-                                }
-                            }
+                            coal.dispatch_agent_event_lazy(&event, &runtime_handle_for_agent);
                         }
                     })
                     .await
@@ -1222,7 +1196,6 @@ impl PiApp {
                         content_for_agent,
                         Some(abort_signal),
                         move |event| {
-                            let extension_event = extension_event_from_agent(&event);
                             let mapped = match &event {
                                 AgentEvent::AgentStart { .. } => Some(PiMsg::AgentStart),
                                 AgentEvent::MessageUpdate {
@@ -1292,21 +1265,7 @@ impl PiApp {
                             }
 
                             if let Some(coal) = &coalescer {
-                                if let Some((event_name, data)) = extension_event {
-                                    if !matches!(
-                                        event_name,
-                                        ExtensionEventName::AgentStart
-                                            | ExtensionEventName::AgentEnd
-                                            | ExtensionEventName::TurnStart
-                                            | ExtensionEventName::TurnEnd
-                                    ) {
-                                        coal.dispatch_fire_and_forget(
-                                            event_name,
-                                            data,
-                                            &runtime_handle_for_agent,
-                                        );
-                                    }
-                                }
+                                coal.dispatch_agent_event_lazy(&event, &runtime_handle_for_agent);
                             }
                         },
                     )

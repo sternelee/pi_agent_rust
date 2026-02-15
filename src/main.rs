@@ -2963,36 +2963,10 @@ async fn run_print_mode(
                     println!("{serialized}");
                 }
             }
-            if let Some((event_name, data)) = extension_event_from_agent(&event) {
-                // Use the coalescer for high-frequency fire-and-forget events.
-                if pi::extensions::is_coalescable_event(&event_name) {
-                    if let Some(coal) = &coalescer {
-                        coal.dispatch_fire_and_forget(event_name, data, &runtime_for_events);
-                    }
-                } else if let Some(manager) = &extensions {
-                    let manager = manager.clone();
-                    let runtime_handle = runtime_for_events.clone();
-                    let emit_json = emit_json_events;
-                    let ext_event_name = event_name.to_string();
-                    runtime_handle.spawn(async move {
-                        if let Err(err) = manager.dispatch_event(event_name, data).await {
-                            if emit_json {
-                                let ext_err = AgentEvent::ExtensionError {
-                                    extension_id: None,
-                                    event: ext_event_name,
-                                    error: err.to_string(),
-                                };
-                                if let Ok(serialized) = serde_json::to_string(&ext_err) {
-                                    println!("{serialized}");
-                                }
-                            } else {
-                                eprintln!(
-                                    "Warning: extension event '{ext_event_name}' failed: {err}"
-                                );
-                            }
-                        }
-                    });
-                }
+            // Route non-lifecycle events through the coalescer for
+            // batched/coalesced dispatch with lazy serialization.
+            if let Some(coal) = &coalescer {
+                coal.dispatch_agent_event_lazy(&event, &runtime_for_events);
             }
         }
     };

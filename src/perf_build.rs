@@ -74,8 +74,7 @@ pub fn resolve_bench_allocator_from(raw_value: Option<&str>) -> AllocatorSelecti
     let requested_raw = raw_value
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_else(|| "auto".to_string());
+        .map_or_else(|| "auto".to_string(), str::to_ascii_lowercase);
     let requested_source = if raw_value
         .map(str::trim)
         .is_some_and(|value| !value.is_empty())
@@ -94,7 +93,6 @@ pub fn resolve_bench_allocator_from(raw_value: Option<&str>) -> AllocatorSelecti
 
     let effective = compiled_allocator();
     let fallback_reason = match requested_kind {
-        RequestedAllocator::Auto => None,
         RequestedAllocator::System if effective == AllocatorKind::Jemalloc => {
             Some("system requested but binary was built with --features jemalloc".to_string())
         }
@@ -105,7 +103,9 @@ pub fn resolve_bench_allocator_from(raw_value: Option<&str>) -> AllocatorSelecti
             "unknown allocator '{requested_raw}'; using compiled allocator '{}'",
             effective.as_str()
         )),
-        _ => None,
+        RequestedAllocator::Auto | RequestedAllocator::System | RequestedAllocator::Jemalloc => {
+            None
+        }
     };
 
     let requested = match requested_kind {

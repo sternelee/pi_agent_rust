@@ -1575,10 +1575,9 @@ async fn run_prompt_with_retry(
                 }
             };
             let extensions = guard.extensions.as_ref().map(|r| r.manager().clone());
-            let event_extensions = extensions.clone();
             let runtime_for_events_handler = runtime_for_events.clone();
             let event_tx = out_tx.clone();
-            let coalescer = event_extensions
+            let coalescer = extensions
                 .as_ref()
                 .map(|m| crate::extensions::EventCoalescer::new(m.clone()));
             let event_handler = move |event: AgentEvent| {
@@ -1602,33 +1601,10 @@ async fn run_prompt_with_retry(
                     })
                 };
                 let _ = event_tx.send(serialized);
-                if let Some((event_name, data)) = extension_event_from_agent(&event) {
-                    if crate::extensions::is_coalescable_event(&event_name) {
-                        if let Some(coal) = &coalescer {
-                            coal.dispatch_fire_and_forget(
-                                event_name,
-                                data,
-                                &runtime_for_events_handler,
-                            );
-                        }
-                    } else if let Some(manager) = &event_extensions {
-                        let manager = manager.clone();
-                        let runtime_handle = runtime_for_events_handler.clone();
-                        let error_tx = event_tx.clone();
-                        let ext_event_name = event_name.to_string();
-                        runtime_handle.spawn(async move {
-                            if let Err(err) = manager.dispatch_event(event_name, data).await {
-                                let ext_err = AgentEvent::ExtensionError {
-                                    extension_id: None,
-                                    event: ext_event_name,
-                                    error: err.to_string(),
-                                };
-                                if let Ok(serialized) = serde_json::to_string(&ext_err) {
-                                    let _ = error_tx.send(serialized);
-                                }
-                            }
-                        });
-                    }
+                // Route non-lifecycle events through the coalescer for
+                // batched/coalesced dispatch with lazy serialization.
+                if let Some(coal) = &coalescer {
+                    coal.dispatch_agent_event_lazy(&event, &runtime_for_events_handler);
                 }
             };
 
