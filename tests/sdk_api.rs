@@ -58,7 +58,7 @@ fn sdk_rpc_state_round_trips_via_serde() {
             "baseUrl": "https://api.anthropic.com",
             "reasoning": true,
             "input": ["text", "image"],
-            "contextWindow": 200000,
+            "contextWindow": 200_000,
             "maxTokens": 8192,
             "cost": {
                 "input": 3.0,

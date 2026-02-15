@@ -4,7 +4,7 @@
 mod common;
 
 use base64::Engine as _;
-use clap::Parser;
+use clap::{Parser, error::ErrorKind};
 use common::TestHarness;
 use pi::app::{
     apply_piped_stdin, build_initial_content, build_system_prompt, normalize_cli,
@@ -846,4 +846,170 @@ fn cli_enabled_tools_default() {
 fn cli_no_tools_returns_empty() {
     let cli = cli::Cli::parse_from(["pi", "--no-tools"]);
     assert!(cli.enabled_tools().is_empty());
+}
+
+fn cli_flag_parity_result(flag_args: &[&str]) -> Result<(), String> {
+    let args = std::iter::once("pi")
+        .chain(flag_args.iter().copied())
+        .collect::<Vec<_>>();
+    match cli::Cli::try_parse_from(args) {
+        Ok(_) => Ok(()),
+        Err(err) => match err.kind() {
+            ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => Ok(()),
+            _ => Err(err.to_string()),
+        },
+    }
+}
+
+#[test]
+fn cli_ts_flag_parity_matrix_reports_full_coverage() {
+    let harness = TestHarness::new("cli_ts_flag_parity_matrix_reports_full_coverage");
+
+    let cases: &[(&str, &[&str])] = &[
+        ("--provider", &["--provider", "anthropic"]),
+        ("--model", &["--model", "claude-sonnet-4-5"]),
+        ("--api-key", &["--api-key", "sk-test"]),
+        ("--system-prompt", &["--system-prompt", "You are helpful."]),
+        (
+            "--append-system-prompt",
+            &["--append-system-prompt", "Extra context."],
+        ),
+        ("--thinking", &["--thinking", "high"]),
+        ("--continue", &["--continue"]),
+        ("-c", &["-c"]),
+        ("--resume", &["--resume"]),
+        ("-r", &["-r"]),
+        ("--mode", &["--mode", "json"]),
+        ("--print", &["--print", "hello"]),
+        ("-p", &["-p", "hello"]),
+        ("--no-session", &["--no-session"]),
+        ("--session", &["--session", "/tmp/sess.jsonl"]),
+        ("--session-dir", &["--session-dir", "/tmp/sessions"]),
+        ("--models", &["--models", "claude*,gpt*"]),
+        ("--list-models", &["--list-models"]),
+        ("--list-models=<pattern>", &["--list-models", "sonnet"]),
+        ("--no-tools", &["--no-tools"]),
+        ("--tools", &["--tools", "read,bash"]),
+        ("--extension", &["--extension", "ext.ts"]),
+        ("-e", &["-e", "ext.ts"]),
+        ("--no-extensions", &["--no-extensions"]),
+        ("--skill", &["--skill", "skill.md"]),
+        ("--no-skills", &["--no-skills"]),
+        ("--prompt-template", &["--prompt-template", "prompt.md"]),
+        ("--no-prompt-templates", &["--no-prompt-templates"]),
+        ("--theme", &["--theme", "dark"]),
+        ("--no-themes", &["--no-themes"]),
+        ("--export", &["--export", "/tmp/session.html"]),
+        ("--verbose", &["--verbose"]),
+        ("--help", &["--help"]),
+        ("-h", &["-h"]),
+        ("--version", &["--version"]),
+        ("-v", &["-v"]),
+    ];
+
+    let mut rows: Vec<(String, String, String, String)> = Vec::with_capacity(cases.len());
+    for (flag, args) in cases {
+        let (rust_status, notes) = match cli_flag_parity_result(args) {
+            Ok(()) => ("accepted".to_string(), "ok".to_string()),
+            Err(err) => ("rejected".to_string(), err),
+        };
+        rows.push((
+            (*flag).to_string(),
+            "supported".to_string(),
+            rust_status,
+            notes,
+        ));
+    }
+
+    let accepted = rows
+        .iter()
+        .filter(|(_, _, rust_status, _)| rust_status == "accepted")
+        .count();
+    let total = rows.len();
+    let coverage_percent = (accepted * 100) / total.max(1);
+
+    harness.log().info_ctx(
+        "parity_report",
+        "CLI flag parity matrix (pi-mono vs rust)",
+        |ctx| {
+            ctx.push(("total_flags".into(), total.to_string()));
+            ctx.push(("accepted_flags".into(), accepted.to_string()));
+            ctx.push(("coverage_percent".into(), coverage_percent.to_string()));
+        },
+    );
+
+    let mut report = String::from("flag | pi_mono_status | rust_status | notes\n");
+    for (flag, pi_mono_status, rust_status, notes) in &rows {
+        report.push_str(flag);
+        report.push_str(" | ");
+        report.push_str(pi_mono_status);
+        report.push_str(" | ");
+        report.push_str(rust_status);
+        report.push_str(" | ");
+        report.push_str(notes);
+        report.push('\n');
+    }
+
+    let report_path = harness.temp_path("cli_flag_parity_report.txt");
+    std::fs::write(&report_path, &report).expect("write parity report");
+    harness.record_artifact("cli_flag_parity_report.txt", &report_path);
+
+    assert_eq!(
+        accepted, total,
+        "CLI flag parity report has gaps:\n{report}"
+    );
+}
+
+#[test]
+fn extension_registered_flags_can_be_passed_through_cli_parser() {
+    let manager = pi::extensions::ExtensionManager::new();
+    manager.register_flag(serde_json::json!({
+        "name": "plan",
+        "type": "string",
+        "extension_id": "plan_mode",
+    }));
+    manager.register_flag(serde_json::json!({
+        "name": "dry-run",
+        "type": "bool",
+        "extension_id": "plan_mode",
+    }));
+
+    let parsed = cli::parse_with_extension_flags(vec![
+        "pi".to_string(),
+        "--model".to_string(),
+        "gpt-4o".to_string(),
+        "--plan".to_string(),
+        "ship-it".to_string(),
+        "--dry-run".to_string(),
+        "--print".to_string(),
+        "show plan".to_string(),
+    ])
+    .expect("parse with extension flags");
+
+    assert_eq!(parsed.cli.model.as_deref(), Some("gpt-4o"));
+    assert!(parsed.cli.print);
+    assert_eq!(parsed.cli.message_args(), vec!["show plan"]);
+
+    let registered_names = manager
+        .list_flags()
+        .into_iter()
+        .filter_map(|flag| {
+            flag.get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .collect::<std::collections::HashSet<_>>();
+
+    assert_eq!(parsed.extension_flags.len(), 2);
+    for ext_flag in &parsed.extension_flags {
+        assert!(
+            registered_names.contains(&ext_flag.name),
+            "extension flag was not registered: {}",
+            ext_flag.display_name()
+        );
+    }
+    assert_eq!(parsed.extension_flags[0].name, "plan");
+    assert_eq!(parsed.extension_flags[0].value.as_deref(), Some("ship-it"));
+    assert_eq!(parsed.extension_flags[1].name, "dry-run");
+    assert!(parsed.extension_flags[1].value.is_none());
 }

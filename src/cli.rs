@@ -1205,7 +1205,7 @@ mod tests {
         assert!(matches!(cli.command, Some(Commands::Update { .. })));
 
         let cli = Cli::parse_from(["pi", "list"]);
-        assert!(matches!(cli.command, Some(Commands::List { .. })));
+        assert!(matches!(cli.command, Some(Commands::List)));
 
         let cli = Cli::parse_from(["pi", "config"]);
         assert!(matches!(cli.command, Some(Commands::Config { .. })));

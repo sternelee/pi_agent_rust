@@ -12,17 +12,17 @@
 mod common;
 
 use async_trait::async_trait;
-use common::{run_async, TestHarness};
+use common::{TestHarness, run_async};
 use futures::Stream;
 use pi::agent::{AgentConfig, AgentEvent, AgentSession};
 use pi::compaction::ResolvedCompactionSettings;
 use pi::error::{Error, Result};
 use pi::model::{
-    AssistantMessage, ContentBlock, Message, StopReason, StreamEvent, TextContent, ToolCall, Usage,
+    AssistantMessage, ContentBlock, StopReason, StreamEvent, TextContent, ToolCall, Usage,
 };
 use pi::provider::{Context, Provider, StreamOptions};
 use pi::sdk::{
-    create_agent_session, AgentSessionHandle, AgentSessionState, SessionOptions, SubscriptionId,
+    AgentSessionHandle, AgentSessionState, SessionOptions, SubscriptionId, create_agent_session,
 };
 use pi::session::Session;
 use pi::tools::ToolRegistry;
@@ -40,7 +40,11 @@ enum Script {
     /// Return a single text response and stop.
     SingleText(String),
     /// First call: emit a tool call; second call: text response.
-    ToolRoundTrip { tool_name: String, tool_args: serde_json::Value, final_text: String },
+    ToolRoundTrip {
+        tool_name: String,
+        tool_args: serde_json::Value,
+        final_text: String,
+    },
 }
 
 #[derive(Debug)]
@@ -51,16 +55,23 @@ struct ScriptedProvider {
 
 impl ScriptedProvider {
     const fn new(script: Script) -> Self {
-        Self { script, call_count: AtomicUsize::new(0) }
+        Self {
+            script,
+            call_count: AtomicUsize::new(0),
+        }
     }
 
-    fn assistant_msg(&self, stop: StopReason, content: Vec<ContentBlock>) -> AssistantMessage {
+    fn assistant_msg(stop: StopReason, content: Vec<ContentBlock>) -> AssistantMessage {
         AssistantMessage {
             content,
             api: "scripted".to_string(),
             provider: "scripted".to_string(),
             model: "scripted-model".to_string(),
-            usage: Usage { total_tokens: 10, output: 10, ..Usage::default() },
+            usage: Usage {
+                total_tokens: 10,
+                output: 10,
+                ..Usage::default()
+            },
             stop_reason: stop,
             error_message: None,
             timestamp: 0,
@@ -68,13 +79,15 @@ impl ScriptedProvider {
     }
 
     fn done_stream(
-        &self,
         msg: AssistantMessage,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>> {
-        let partial = self.assistant_msg(StopReason::Stop, Vec::new());
+        let partial = Self::assistant_msg(StopReason::Stop, Vec::new());
         Box::pin(futures::stream::iter(vec![
             Ok(StreamEvent::Start { partial }),
-            Ok(StreamEvent::Done { reason: msg.stop_reason, message: msg }),
+            Ok(StreamEvent::Done {
+                reason: msg.stop_reason,
+                message: msg,
+            }),
         ]))
     }
 }
@@ -103,14 +116,18 @@ impl Provider for ScriptedProvider {
                 if idx > 0 {
                     return Err(Error::api("SingleText expects exactly one call"));
                 }
-                Ok(self.done_stream(self.assistant_msg(
+                Ok(Self::done_stream(Self::assistant_msg(
                     StopReason::Stop,
                     vec![ContentBlock::Text(TextContent::new(text.clone()))],
                 )))
             }
-            Script::ToolRoundTrip { tool_name, tool_args, final_text } => {
+            Script::ToolRoundTrip {
+                tool_name,
+                tool_args,
+                final_text,
+            } => {
                 if idx == 0 {
-                    Ok(self.done_stream(self.assistant_msg(
+                    Ok(Self::done_stream(Self::assistant_msg(
                         StopReason::ToolUse,
                         vec![ContentBlock::ToolCall(ToolCall {
                             id: "tc-1".to_string(),
@@ -120,7 +137,7 @@ impl Provider for ScriptedProvider {
                         })],
                     )))
                 } else if idx == 1 {
-                    Ok(self.done_stream(self.assistant_msg(
+                    Ok(Self::done_stream(Self::assistant_msg(
                         StopReason::Stop,
                         vec![ContentBlock::Text(TextContent::new(final_text.clone()))],
                     )))
@@ -153,7 +170,7 @@ fn run_scripted(
     let prompt = user_prompt.to_string();
     run_async(async move {
         let provider: Arc<dyn Provider> = Arc::new(ScriptedProvider::new(script));
-        let tools = ToolRegistry::new(&["read".to_string()], &cwd, None);
+        let tools = ToolRegistry::new(&["read"], &cwd, None);
         let config = AgentConfig {
             system_prompt: None,
             max_tool_iterations: 10,
@@ -161,11 +178,12 @@ fn run_scripted(
                 api_key: Some("test-key".to_string()),
                 ..StreamOptions::default()
             },
+            block_images: false,
         };
         let agent = pi::agent::Agent::new(provider, tools, config);
-        let session = Arc::new(asupersync::sync::Mutex::new(Session::create_with_dir(Some(
-            cwd,
-        ))));
+        let session = Arc::new(asupersync::sync::Mutex::new(Session::create_with_dir(
+            Some(cwd),
+        )));
         let mut agent_session =
             AgentSession::new(agent, session, true, ResolvedCompactionSettings::default());
 
@@ -194,9 +212,16 @@ fn sdk_basic_session_creation() {
     let handle = run_async(create_agent_session(options)).expect("create session");
 
     let provider = handle.session().agent.provider();
-    assert_eq!(provider.name(), "anthropic", "default provider should be anthropic");
+    assert_eq!(
+        provider.name(),
+        "anthropic",
+        "default provider should be anthropic"
+    );
     // Model can vary; just verify it's non-empty.
-    assert!(!provider.model_id().is_empty(), "model_id should be non-empty");
+    assert!(
+        !provider.model_id().is_empty(),
+        "model_id should be non-empty"
+    );
 
     harness.log().info_ctx("sdk", "basic creation ok", |ctx| {
         ctx.push(("provider".to_string(), provider.name().to_string()));
@@ -252,15 +277,30 @@ fn sdk_event_streaming() {
             _ => None,
         })
         .collect::<String>();
-    assert!(text.contains("hello from sdk test"), "response text mismatch: {text}");
+    assert!(
+        text.contains("hello from sdk test"),
+        "response text mismatch: {text}"
+    );
 
     // Verify core lifecycle events were emitted.
-    let has_agent_start = events.iter().any(|e| matches!(e, AgentEvent::AgentStart { .. }));
-    let has_agent_end = events.iter().any(|e| matches!(e, AgentEvent::AgentEnd { .. }));
-    let has_turn_start = events.iter().any(|e| matches!(e, AgentEvent::TurnStart { .. }));
-    let has_turn_end = events.iter().any(|e| matches!(e, AgentEvent::TurnEnd { .. }));
-    let has_message_start = events.iter().any(|e| matches!(e, AgentEvent::MessageStart { .. }));
-    let has_message_end = events.iter().any(|e| matches!(e, AgentEvent::MessageEnd { .. }));
+    let has_agent_start = events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::AgentStart { .. }));
+    let has_agent_end = events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::AgentEnd { .. }));
+    let has_turn_start = events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::TurnStart { .. }));
+    let has_turn_end = events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::TurnEnd { .. }));
+    let has_message_start = events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::MessageStart { .. }));
+    let has_message_end = events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::MessageEnd { .. }));
 
     assert!(has_agent_start, "missing AgentStart event");
     assert!(has_agent_end, "missing AgentEnd event");
@@ -306,26 +346,32 @@ fn sdk_tool_execution() {
             _ => None,
         })
         .collect::<String>();
-    assert!(text.contains("file contents confirmed"), "final text mismatch: {text}");
+    assert!(
+        text.contains("file contents confirmed"),
+        "final text mismatch: {text}"
+    );
 
     // Should have tool execution events.
     let tool_starts: Vec<_> = events
         .iter()
         .filter(|e| matches!(e, AgentEvent::ToolExecutionStart { .. }))
         .collect();
-    let tool_ends: Vec<_> = events
+    let has_tool_end = events
         .iter()
-        .filter(|e| matches!(e, AgentEvent::ToolExecutionEnd { .. }))
-        .collect();
+        .any(|e| matches!(e, AgentEvent::ToolExecutionEnd { .. }));
     assert!(!tool_starts.is_empty(), "missing ToolExecutionStart");
-    assert!(!tool_ends.is_empty(), "missing ToolExecutionEnd");
+    assert!(has_tool_end, "missing ToolExecutionEnd");
 
     // At least 2 turns (tool call turn + final response turn).
     let turn_starts: Vec<_> = events
         .iter()
         .filter(|e| matches!(e, AgentEvent::TurnStart { .. }))
         .collect();
-    assert!(turn_starts.len() >= 2, "expected >=2 turns, got {}", turn_starts.len());
+    assert!(
+        turn_starts.len() >= 2,
+        "expected >=2 turns, got {}",
+        turn_starts.len()
+    );
 
     harness.log().info_ctx("sdk", "tool execution ok", |ctx| {
         ctx.push(("tool_starts".to_string(), tool_starts.len().to_string()));
@@ -353,10 +399,12 @@ fn sdk_session_persistence() {
     let handle = run_async(create_agent_session(options)).expect("create session");
     assert!(handle.session().save_enabled(), "save should be enabled");
 
-    harness.log().info_ctx("sdk", "session persistence ok", |ctx| {
-        ctx.push(("save_enabled".to_string(), "true".to_string()));
-        ctx.push(("session_dir".to_string(), session_dir.display().to_string()));
-    });
+    harness
+        .log()
+        .info_ctx("sdk", "session persistence ok", |ctx| {
+            ctx.push(("save_enabled".to_string(), "true".to_string()));
+            ctx.push(("session_dir".to_string(), session_dir.display().to_string()));
+        });
 }
 
 // ============================================================================
@@ -391,20 +439,31 @@ fn sdk_compact_empty_session() {
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let events_ref = Arc::clone(&events);
-    run_async(handle.compact(move |event| {
-        events_ref.lock().expect("lock").push(event);
-    }))
+    run_async(async move {
+        handle
+            .compact(move |event| {
+                events_ref.lock().expect("lock").push(event);
+            })
+            .await
+    })
     .expect("compact");
 
-    let captured = events.lock().expect("lock");
-    assert!(
-        captured.is_empty(),
-        "compact on empty session should emit no events, got {}",
+    let captured_len = {
+        let captured = events.lock().expect("lock");
+        assert!(
+            captured.is_empty(),
+            "compact on empty session should emit no events, got {}",
+            captured.len()
+        );
         captured.len()
+    };
+    assert!(
+        captured_len == 0,
+        "compact on empty session should emit no events, got {captured_len}"
     );
 
     harness.log().info_ctx("sdk", "compact noop ok", |ctx| {
-        ctx.push(("event_count".to_string(), captured.len().to_string()));
+        ctx.push(("event_count".to_string(), captured_len.to_string()));
     });
 }
 
@@ -422,7 +481,10 @@ fn sdk_no_session_mode() {
     };
 
     let handle = run_async(create_agent_session(options)).expect("create session");
-    assert!(!handle.session().save_enabled(), "save should be disabled in no-session mode");
+    assert!(
+        !handle.session().save_enabled(),
+        "save should be disabled in no-session mode"
+    );
 
     harness.log().info_ctx("sdk", "no session mode ok", |ctx| {
         ctx.push(("save_enabled".to_string(), "false".to_string()));
@@ -449,7 +511,10 @@ fn sdk_error_invalid_provider() {
         result.is_err(),
         "creating session with invalid provider should fail"
     );
-    let err_msg = result.unwrap_err().to_string();
+    let err_msg = match result {
+        Ok(_) => panic!("expected invalid provider to fail"),
+        Err(err) => err.to_string(),
+    };
 
     harness.log().info_ctx("sdk", "error handling ok", |ctx| {
         ctx.push(("error".to_string(), err_msg.clone()));
@@ -479,11 +544,16 @@ fn sdk_subscribe_unsubscribe_lifecycle() {
     // Unsubscribe should succeed.
     assert!(handle.unsubscribe(id), "unsubscribe should return true");
     // Double-unsubscribe should return false.
-    assert!(!handle.unsubscribe(id), "double unsubscribe should return false");
+    assert!(
+        !handle.unsubscribe(id),
+        "double unsubscribe should return false"
+    );
 
-    harness.log().info_ctx("sdk", "subscribe lifecycle ok", |ctx| {
-        ctx.push(("unsubscribed".to_string(), "true".to_string()));
-    });
+    harness
+        .log()
+        .info_ctx("sdk", "subscribe lifecycle ok", |ctx| {
+            ctx.push(("unsubscribed".to_string(), "true".to_string()));
+        });
 }
 
 // ============================================================================
@@ -496,13 +566,20 @@ fn sdk_state_snapshot() {
     let options = default_session_options(&harness);
 
     let handle = run_async(create_agent_session(options)).expect("create session");
-    let state: AgentSessionState = run_async(handle.state()).expect("get state");
+    let state: AgentSessionState =
+        run_async(async move { handle.state().await }).expect("get state");
 
     assert!(state.session_id.is_some(), "session_id should be set");
     assert_eq!(state.provider, "anthropic");
     assert!(!state.model_id.is_empty(), "model_id should be non-empty");
-    assert!(!state.save_enabled, "no-session mode should have save disabled");
-    assert_eq!(state.message_count, 0, "fresh session should have 0 messages");
+    assert!(
+        !state.save_enabled,
+        "no-session mode should have save disabled"
+    );
+    assert_eq!(
+        state.message_count, 0,
+        "fresh session should have 0 messages"
+    );
 
     harness.log().info_ctx("sdk", "state snapshot ok", |ctx| {
         ctx.push(("provider".to_string(), state.provider.clone()));
@@ -523,8 +600,11 @@ fn sdk_model_switching() {
     let mut handle = run_async(create_agent_session(options)).expect("create session");
 
     // Switch to openai/gpt-4o
-    run_async(handle.set_model("openai", "gpt-4o")).expect("set model");
-    let (prov, model) = handle.model();
+    let (prov, model) = run_async(async move {
+        handle.set_model("openai", "gpt-4o").await?;
+        Ok::<(String, String), Error>(handle.model())
+    })
+    .expect("set model");
     assert_eq!(prov, "openai");
     assert_eq!(model, "gpt-4o");
 
