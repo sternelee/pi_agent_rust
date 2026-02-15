@@ -9,9 +9,11 @@ use serde::Deserialize;
 use sqlmodel_core::Value;
 use sqlmodel_sqlite::{OpenFlags, SqliteConfig, SqliteConnection};
 use std::borrow::Borrow;
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::{OnceLock, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
@@ -30,6 +32,225 @@ pub struct SessionMeta {
 pub struct SessionIndex {
     db_path: PathBuf,
     lock_path: PathBuf,
+}
+
+const INDEX_UPDATE_FLUSH_INTERVAL: Duration = Duration::from_millis(25);
+const INDEX_UPDATE_BASE_RETRY_DELAY_MS: u64 = 50;
+const INDEX_UPDATE_MAX_RETRIES: u8 = 3;
+const INDEX_UPDATE_FLUSH_TIMEOUT: Duration = Duration::from_millis(250);
+
+#[derive(Debug, Clone)]
+struct PendingIndexUpdate {
+    sessions_root: PathBuf,
+    path: PathBuf,
+    header: SessionHeader,
+    message_count: u64,
+    name: Option<String>,
+    attempts: u8,
+    next_attempt_at: Instant,
+    enqueued_at: Instant,
+}
+
+impl PendingIndexUpdate {
+    fn new(
+        sessions_root: PathBuf,
+        path: PathBuf,
+        header: SessionHeader,
+        message_count: u64,
+        name: Option<String>,
+    ) -> Self {
+        let now = Instant::now();
+        Self {
+            sessions_root,
+            path,
+            header,
+            message_count,
+            name,
+            attempts: 0,
+            next_attempt_at: now,
+            enqueued_at: now,
+        }
+    }
+
+    fn key(&self) -> (PathBuf, PathBuf) {
+        (self.sessions_root.clone(), self.path.clone())
+    }
+}
+
+#[derive(Debug)]
+enum IndexUpdateCommand {
+    Enqueue(PendingIndexUpdate),
+    FlushRoot {
+        sessions_root: PathBuf,
+        ack: mpsc::Sender<()>,
+    },
+}
+
+#[derive(Debug)]
+struct IndexUpdateDispatcher {
+    tx: mpsc::Sender<IndexUpdateCommand>,
+}
+
+static INDEX_UPDATE_DISPATCHER: OnceLock<IndexUpdateDispatcher> = OnceLock::new();
+
+fn index_update_dispatcher() -> &'static IndexUpdateDispatcher {
+    INDEX_UPDATE_DISPATCHER.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<IndexUpdateCommand>();
+        std::thread::Builder::new()
+            .name("pi-session-index-updater".to_string())
+            .spawn(move || run_index_update_dispatcher(rx))
+            .expect("failed to spawn session index update dispatcher");
+        IndexUpdateDispatcher { tx }
+    })
+}
+
+fn retry_delay(attempt: u8) -> Duration {
+    let exponent = u32::from(attempt.saturating_sub(1).min(5));
+    let multiplier = 1u64 << exponent;
+    Duration::from_millis(INDEX_UPDATE_BASE_RETRY_DELAY_MS.saturating_mul(multiplier))
+}
+
+fn process_pending_index_updates(
+    pending: &mut HashMap<(PathBuf, PathBuf), PendingIndexUpdate>,
+    only_root: Option<&Path>,
+    force: bool,
+) {
+    let now = Instant::now();
+    let keys: Vec<(PathBuf, PathBuf)> = pending
+        .iter()
+        .filter_map(|(key, update)| {
+            let root_matches = only_root.is_none_or(|root| update.sessions_root.as_path() == root);
+            if !root_matches {
+                return None;
+            }
+
+            if force || update.next_attempt_at <= now {
+                Some(key.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for key in keys {
+        let Some(mut update) = pending.remove(&key) else {
+            continue;
+        };
+
+        let result = SessionIndex::for_sessions_root(&update.sessions_root).index_session_snapshot(
+            &update.path,
+            &update.header,
+            update.message_count,
+            update.name.clone(),
+        );
+
+        match result {
+            Ok(()) => {
+                if update.attempts > 0 {
+                    tracing::info!(
+                        sessions_root = %update.sessions_root.display(),
+                        path = %update.path.display(),
+                        attempts = update.attempts,
+                        queued_for_ms = update.enqueued_at.elapsed().as_millis(),
+                        "Session index update retry succeeded"
+                    );
+                }
+            }
+            Err(err) => {
+                if update.attempts < INDEX_UPDATE_MAX_RETRIES {
+                    update.attempts = update.attempts.saturating_add(1);
+                    let delay = retry_delay(update.attempts);
+                    update.next_attempt_at = Instant::now() + delay;
+                    tracing::warn!(
+                        sessions_root = %update.sessions_root.display(),
+                        path = %update.path.display(),
+                        attempt = update.attempts,
+                        retry_delay_ms = delay.as_millis(),
+                        error = %err,
+                        "Session index update delayed; scheduling retry"
+                    );
+                    pending.insert(key, update);
+                } else {
+                    tracing::error!(
+                        sessions_root = %update.sessions_root.display(),
+                        path = %update.path.display(),
+                        attempts = update.attempts,
+                        queued_for_ms = update.enqueued_at.elapsed().as_millis(),
+                        error = %err,
+                        "Session index update dropped after retries"
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn run_index_update_dispatcher(rx: mpsc::Receiver<IndexUpdateCommand>) {
+    let mut pending: HashMap<(PathBuf, PathBuf), PendingIndexUpdate> = HashMap::new();
+
+    loop {
+        match rx.recv_timeout(INDEX_UPDATE_FLUSH_INTERVAL) {
+            Ok(IndexUpdateCommand::Enqueue(update)) => {
+                let key = update.key();
+                if pending.insert(key, update).is_some() {
+                    tracing::debug!("Coalesced pending session index update");
+                }
+            }
+            Ok(IndexUpdateCommand::FlushRoot { sessions_root, ack }) => {
+                process_pending_index_updates(&mut pending, Some(&sessions_root), true);
+                let _ = ack.send(());
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                process_pending_index_updates(&mut pending, None, true);
+                break;
+            }
+        }
+
+        process_pending_index_updates(&mut pending, None, false);
+    }
+}
+
+pub(crate) fn enqueue_session_index_snapshot_update(
+    sessions_root: PathBuf,
+    path: PathBuf,
+    header: SessionHeader,
+    message_count: u64,
+    name: Option<String>,
+) {
+    let update = PendingIndexUpdate::new(
+        sessions_root.clone(),
+        path.clone(),
+        header.clone(),
+        message_count,
+        name.clone(),
+    );
+
+    let send_result = index_update_dispatcher()
+        .tx
+        .send(IndexUpdateCommand::Enqueue(update));
+    if send_result.is_ok() {
+        return;
+    }
+
+    tracing::warn!(
+        sessions_root = %sessions_root.display(),
+        path = %path.display(),
+        "Session index dispatcher unavailable; falling back to synchronous update"
+    );
+    if let Err(err) = SessionIndex::for_sessions_root(&sessions_root).index_session_snapshot(
+        &path,
+        &header,
+        message_count,
+        name,
+    ) {
+        tracing::warn!(
+            sessions_root = %sessions_root.display(),
+            path = %path.display(),
+            error = %err,
+            "Failed synchronous fallback session index update"
+        );
+    }
 }
 
 impl SessionIndex {
@@ -121,6 +342,7 @@ impl SessionIndex {
     pub fn list_sessions(&self, cwd: Option<&str>) -> Result<Vec<SessionMeta>> {
         let metrics = session_metrics::global();
         let _timer = metrics.start_timer(&metrics.index_list);
+        self.flush_pending_updates(INDEX_UPDATE_FLUSH_TIMEOUT);
         self.with_lock(|conn| {
             init_schema(conn)?;
 
@@ -166,6 +388,7 @@ impl SessionIndex {
     pub fn reindex_all(&self) -> Result<()> {
         let metrics = session_metrics::global();
         let _timer = metrics.start_timer(&metrics.index_reindex);
+        self.flush_pending_updates(INDEX_UPDATE_FLUSH_TIMEOUT);
         let sessions_root = self.sessions_root();
         if !sessions_root.exists() {
             return Ok(());
@@ -275,6 +498,17 @@ impl SessionIndex {
 
     fn sessions_root(&self) -> &Path {
         self.db_path.parent().unwrap_or_else(|| Path::new("."))
+    }
+
+    fn flush_pending_updates(&self, timeout: Duration) {
+        let (ack_tx, ack_rx) = mpsc::channel::<()>();
+        let command = IndexUpdateCommand::FlushRoot {
+            sessions_root: self.sessions_root().to_path_buf(),
+            ack: ack_tx,
+        };
+        if index_update_dispatcher().tx.send(command).is_ok() {
+            let _ = ack_rx.recv_timeout(timeout);
+        }
     }
 }
 
@@ -1486,6 +1720,80 @@ mod tests {
             matches!(err, Error::Session(ref msg) if msg.contains("message_count exceeds SQLite INTEGER range")),
             "expected out-of-range message_count error, got {err:?}"
         );
+    }
+
+    #[test]
+    fn async_index_updates_coalesce_latest_snapshot() {
+        let harness = TestHarness::new("async_index_updates_coalesce_latest_snapshot");
+        let root = harness.temp_path("sessions");
+        fs::create_dir_all(root.join("project")).expect("create project dir");
+        let index = SessionIndex::for_sessions_root(&root);
+
+        let path = root.join("project").join("coalesce.jsonl");
+        fs::write(&path, "coalesce").expect("write session payload");
+
+        let header = make_header("id-coalesce", "cwd-coalesce");
+        enqueue_session_index_snapshot_update(
+            root.clone(),
+            path.clone(),
+            header.clone(),
+            1,
+            Some("first".to_string()),
+        );
+        enqueue_session_index_snapshot_update(
+            root.clone(),
+            path.clone(),
+            header,
+            3,
+            Some("latest".to_string()),
+        );
+
+        index.flush_pending_updates(Duration::from_secs(1));
+        let listed = index
+            .list_sessions(Some("cwd-coalesce"))
+            .expect("list coalesced sessions");
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].message_count, 3);
+        assert_eq!(listed[0].name.as_deref(), Some("latest"));
+    }
+
+    #[test]
+    fn async_index_updates_retry_after_transient_failure() {
+        let harness = TestHarness::new("async_index_updates_retry_after_transient_failure");
+        let root = harness.temp_path("sessions");
+        fs::create_dir_all(&root).expect("create sessions root");
+        let index = SessionIndex::for_sessions_root(&root);
+
+        let path = root.join("project").join("retry.jsonl");
+        let header = make_header("id-retry", "cwd-retry");
+        enqueue_session_index_snapshot_update(root.clone(), path.clone(), header.clone(), 2, None);
+
+        // First flush should fail because payload file doesn't exist yet.
+        index.flush_pending_updates(Duration::from_secs(1));
+        let rows_after_fail = index
+            .with_lock(|conn| {
+                init_schema(conn)?;
+                conn.query_sync("SELECT path FROM sessions", &[])
+                    .map_err(|err| Error::session(format!("query sessions after fail: {err}")))
+            })
+            .expect("query sessions table after failed flush");
+        assert!(
+            rows_after_fail.is_empty(),
+            "unexpected indexed rows before retry"
+        );
+
+        fs::create_dir_all(path.parent().expect("parent dir")).expect("create parent directory");
+        fs::write(&path, "retry").expect("write session payload");
+
+        // Force-drain pending retries; now the update should succeed.
+        index.flush_pending_updates(Duration::from_secs(1));
+        let listed = index
+            .list_sessions(Some("cwd-retry"))
+            .expect("list retried sessions");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "id-retry");
+        assert_eq!(listed[0].message_count, 2);
     }
 
     proptest! {

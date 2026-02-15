@@ -12,7 +12,7 @@ use crate::model::{
     AssistantMessage, ContentBlock, Message, TextContent, ToolResultMessage, UserContent,
     UserMessage,
 };
-use crate::session_index::SessionIndex;
+use crate::session_index::{SessionIndex, enqueue_session_index_snapshot_update};
 use crate::tui::PiConsole;
 use asupersync::channel::oneshot;
 use asupersync::sync::Mutex;
@@ -1120,6 +1120,10 @@ impl Session {
         if self.appends_since_checkpoint >= compaction_checkpoint_interval() {
             return true;
         }
+        // Defensive: if persisted count somehow exceeds entries, force full rewrite.
+        if self.persisted_entry_count > self.entries.len() {
+            return true;
+        }
         // Any new entry is a Compaction (dead entries before marker need rewriting).
         self.entries[self.persisted_entry_count..]
             .iter()
@@ -1232,16 +1236,13 @@ impl Session {
                                 .persist(&path_for_thread)
                                 .map_err(|e| crate::Error::Io(Box::new(e.error)))?;
 
-                            if let Err(err) = SessionIndex::for_sessions_root(&sessions_root)
-                                .index_session_snapshot(
-                                    &path_for_thread,
-                                    &header_snapshot,
-                                    message_count,
-                                    session_name,
-                                )
-                            {
-                                tracing::warn!("Failed to update session index: {err}");
-                            }
+                            enqueue_session_index_snapshot_update(
+                                sessions_root.clone(),
+                                path_for_thread.clone(),
+                                header_snapshot.clone(),
+                                message_count,
+                                session_name.clone(),
+                            );
                             Ok(())
                         }();
                         let cx = AgentCx::for_request();
@@ -1304,16 +1305,13 @@ impl Session {
                                 }
                                 writer.flush()?;
 
-                                if let Err(err) = SessionIndex::for_sessions_root(&sessions_root)
-                                    .index_session_snapshot(
-                                        &path_for_thread,
-                                        &header_snapshot,
-                                        message_count,
-                                        session_name,
-                                    )
-                                {
-                                    tracing::warn!("Failed to update session index: {err}");
-                                }
+                                enqueue_session_index_snapshot_update(
+                                    sessions_root.clone(),
+                                    path_for_thread.clone(),
+                                    header_snapshot.clone(),
+                                    message_count,
+                                    session_name.clone(),
+                                );
                                 Ok(())
                             }();
                             let cx = AgentCx::for_request();
@@ -1365,23 +1363,14 @@ impl Session {
                     // No new entries → no-op, nothing to write.
                 }
 
-                // Offload blocking index update to a thread.
-                let session_dir = session_dir_clone;
-                let header_snapshot = self.header.clone();
-                let path_snapshot = path_clone.clone();
-                thread::spawn(move || {
-                    let sessions_root = session_dir.unwrap_or_else(Config::sessions_dir);
-                    if let Err(err) = SessionIndex::for_sessions_root(&sessions_root)
-                        .index_session_snapshot(
-                            &path_snapshot,
-                            &header_snapshot,
-                            message_count,
-                            session_name,
-                        )
-                    {
-                        tracing::warn!("Failed to update session index: {err}");
-                    }
-                });
+                let sessions_root = session_dir_clone.unwrap_or_else(Config::sessions_dir);
+                enqueue_session_index_snapshot_update(
+                    sessions_root,
+                    path_clone.clone(),
+                    self.header.clone(),
+                    message_count,
+                    session_name,
+                );
             }
         }
         Ok(())
