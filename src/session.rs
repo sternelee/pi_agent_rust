@@ -592,6 +592,30 @@ pub struct ForkPlan {
     pub selected_text: String,
 }
 
+/// Lightweight snapshot of session data for non-blocking export.
+///
+/// Captures only the header and entries needed for HTML rendering,
+/// avoiding a full `Session` clone (which includes caches, autosave
+/// queue, and other internal state).
+#[derive(Debug, Clone)]
+pub struct ExportSnapshot {
+    /// Session header (id, timestamp, cwd).
+    pub header: SessionHeader,
+    /// Session entries to render.
+    pub entries: Vec<SessionEntry>,
+    /// Session file path (for default output filename).
+    pub path: Option<PathBuf>,
+}
+
+impl ExportSnapshot {
+    /// Render this snapshot as a standalone HTML document.
+    ///
+    /// Delegates to the shared rendering logic used by `Session::to_html()`.
+    pub fn to_html(&self) -> String {
+        render_session_html(&self.header, &self.entries)
+    }
+}
+
 /// Diagnostics captured while opening a session file.
 #[derive(Debug, Clone, Default)]
 pub struct SessionOpenDiagnostics {
@@ -1304,7 +1328,7 @@ impl Session {
 
         let store = SessionStoreV2::create(&v2_root, 64 * 1024 * 1024)?;
         let (fully_hydrated, diagnostics) =
-            Session::open_from_v2(&store, self.header.clone(), V2OpenMode::Full)?;
+            Self::open_from_v2(&store, self.header.clone(), V2OpenMode::Full)?;
         if !diagnostics.skipped_entries.is_empty() || !diagnostics.orphaned_parent_links.is_empty()
         {
             tracing::warn!(
@@ -1830,93 +1854,12 @@ impl Session {
     }
 
     /// Render the session as a standalone HTML document.
+    ///
+    /// Delegates to `render_session_html()` for the actual rendering. For
+    /// non-blocking export, prefer `export_snapshot().to_html()` which avoids
+    /// cloning internal caches.
     pub fn to_html(&self) -> String {
-        let mut html = String::new();
-        html.push_str("<!doctype html><html><head><meta charset=\"utf-8\">");
-        html.push_str("<title>Pi Session</title>");
-        html.push_str("<style>");
-        html.push_str(
-            "body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:24px;background:#0b0c10;color:#e6e6e6;}
-            h1{margin:0 0 8px 0;}
-            .meta{color:#9aa0a6;margin-bottom:24px;font-size:14px;}
-            .msg{padding:16px 18px;margin:12px 0;border-radius:8px;background:#14161b;}
-            .msg.user{border-left:4px solid #4fc3f7;}
-            .msg.assistant{border-left:4px solid #81c784;}
-            .msg.tool{border-left:4px solid #ffb74d;}
-            .msg.system{border-left:4px solid #ef9a9a;}
-            .role{font-weight:600;margin-bottom:8px;}
-            pre{white-space:pre-wrap;background:#0f1115;padding:12px;border-radius:6px;overflow:auto;}
-            .thinking summary{cursor:pointer;}
-            img{max-width:100%;height:auto;border-radius:6px;margin-top:8px;}
-            .note{color:#9aa0a6;font-size:13px;margin:6px 0;}
-            ",
-        );
-        html.push_str("</style></head><body>");
-
-        let _ = write!(
-            html,
-            "<h1>Pi Session</h1><div class=\"meta\">Session {} • {} • cwd: {}</div>",
-            escape_html(&self.header.id),
-            escape_html(&self.header.timestamp),
-            escape_html(&self.header.cwd)
-        );
-
-        for entry in &self.entries {
-            match entry {
-                SessionEntry::Message(message) => {
-                    html.push_str(&render_session_message(&message.message));
-                }
-                SessionEntry::ModelChange(change) => {
-                    let _ = write!(
-                        html,
-                        "<div class=\"msg system\"><div class=\"role\">Model</div><div class=\"note\">{} / {}</div></div>",
-                        escape_html(&change.provider),
-                        escape_html(&change.model_id)
-                    );
-                }
-                SessionEntry::ThinkingLevelChange(change) => {
-                    let _ = write!(
-                        html,
-                        "<div class=\"msg system\"><div class=\"role\">Thinking</div><div class=\"note\">{}</div></div>",
-                        escape_html(&change.thinking_level)
-                    );
-                }
-                SessionEntry::Compaction(compaction) => {
-                    let _ = write!(
-                        html,
-                        "<div class=\"msg system\"><div class=\"role\">Compaction</div><pre>{}</pre></div>",
-                        escape_html(&compaction.summary)
-                    );
-                }
-                SessionEntry::BranchSummary(summary) => {
-                    let _ = write!(
-                        html,
-                        "<div class=\"msg system\"><div class=\"role\">Branch Summary</div><pre>{}</pre></div>",
-                        escape_html(&summary.summary)
-                    );
-                }
-                SessionEntry::SessionInfo(info) => {
-                    if let Some(name) = &info.name {
-                        let _ = write!(
-                            html,
-                            "<div class=\"msg system\"><div class=\"role\">Session Name</div><div class=\"note\">{}</div></div>",
-                            escape_html(name)
-                        );
-                    }
-                }
-                SessionEntry::Custom(custom) => {
-                    let _ = write!(
-                        html,
-                        "<div class=\"msg system\"><div class=\"role\">{}</div></div>",
-                        escape_html(&custom.custom_type)
-                    );
-                }
-                SessionEntry::Label(_) => {}
-            }
-        }
-
-        html.push_str("</body></html>");
-        html
+        render_session_html(&self.header, &self.entries)
     }
 
     /// Update header model info.
@@ -1946,6 +1889,19 @@ impl Session {
         self.header.parent_session = path;
         self.header_dirty = true;
         self.enqueue_autosave_mutation(AutosaveMutationKind::Metadata);
+    }
+
+    /// Create a lightweight snapshot for non-blocking HTML export.
+    ///
+    /// Captures only the fields needed by `to_html()` (header, entries, path),
+    /// avoiding a full `Session::clone()` which includes caches, autosave queues,
+    /// persistence state, and other internal bookkeeping.
+    pub fn export_snapshot(&self) -> ExportSnapshot {
+        ExportSnapshot {
+            header: self.header.clone(),
+            entries: self.entries.clone(),
+            path: self.path.clone(),
+        }
     }
 
     /// Plan a `/fork` from a user message entry ID.
@@ -3119,6 +3075,100 @@ pub(crate) fn bash_execution_to_text(
     text
 }
 
+/// Render session header and entries as a standalone HTML document.
+///
+/// Shared implementation used by both `Session::to_html()` and
+/// `ExportSnapshot::to_html()`.
+#[allow(clippy::too_many_lines)]
+fn render_session_html(header: &SessionHeader, entries: &[SessionEntry]) -> String {
+    let mut html = String::new();
+    html.push_str("<!doctype html><html><head><meta charset=\"utf-8\">");
+    html.push_str("<title>Pi Session</title>");
+    html.push_str("<style>");
+    html.push_str(
+        "body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:24px;background:#0b0c10;color:#e6e6e6;}
+            h1{margin:0 0 8px 0;}
+            .meta{color:#9aa0a6;margin-bottom:24px;font-size:14px;}
+            .msg{padding:16px 18px;margin:12px 0;border-radius:8px;background:#14161b;}
+            .msg.user{border-left:4px solid #4fc3f7;}
+            .msg.assistant{border-left:4px solid #81c784;}
+            .msg.tool{border-left:4px solid #ffb74d;}
+            .msg.system{border-left:4px solid #ef9a9a;}
+            .role{font-weight:600;margin-bottom:8px;}
+            pre{white-space:pre-wrap;background:#0f1115;padding:12px;border-radius:6px;overflow:auto;}
+            .thinking summary{cursor:pointer;}
+            img{max-width:100%;height:auto;border-radius:6px;margin-top:8px;}
+            .note{color:#9aa0a6;font-size:13px;margin:6px 0;}
+            ",
+    );
+    html.push_str("</style></head><body>");
+
+    let _ = write!(
+        html,
+        "<h1>Pi Session</h1><div class=\"meta\">Session {} • {} • cwd: {}</div>",
+        escape_html(&header.id),
+        escape_html(&header.timestamp),
+        escape_html(&header.cwd)
+    );
+
+    for entry in entries {
+        match entry {
+            SessionEntry::Message(message) => {
+                html.push_str(&render_session_message(&message.message));
+            }
+            SessionEntry::ModelChange(change) => {
+                let _ = write!(
+                    html,
+                    "<div class=\"msg system\"><div class=\"role\">Model</div><div class=\"note\">{} / {}</div></div>",
+                    escape_html(&change.provider),
+                    escape_html(&change.model_id)
+                );
+            }
+            SessionEntry::ThinkingLevelChange(change) => {
+                let _ = write!(
+                    html,
+                    "<div class=\"msg system\"><div class=\"role\">Thinking</div><div class=\"note\">{}</div></div>",
+                    escape_html(&change.thinking_level)
+                );
+            }
+            SessionEntry::Compaction(compaction) => {
+                let _ = write!(
+                    html,
+                    "<div class=\"msg system\"><div class=\"role\">Compaction</div><pre>{}</pre></div>",
+                    escape_html(&compaction.summary)
+                );
+            }
+            SessionEntry::BranchSummary(summary) => {
+                let _ = write!(
+                    html,
+                    "<div class=\"msg system\"><div class=\"role\">Branch Summary</div><pre>{}</pre></div>",
+                    escape_html(&summary.summary)
+                );
+            }
+            SessionEntry::SessionInfo(info) => {
+                if let Some(name) = &info.name {
+                    let _ = write!(
+                        html,
+                        "<div class=\"msg system\"><div class=\"role\">Session Name</div><div class=\"note\">{}</div></div>",
+                        escape_html(name)
+                    );
+                }
+            }
+            SessionEntry::Custom(custom) => {
+                let _ = write!(
+                    html,
+                    "<div class=\"msg system\"><div class=\"role\">{}</div></div>",
+                    escape_html(&custom.custom_type)
+                );
+            }
+            SessionEntry::Label(_) => {}
+        }
+    }
+
+    html.push_str("</body></html>");
+    html
+}
+
 fn render_session_message(message: &SessionMessage) -> String {
     match message {
         SessionMessage::User { content, .. } => {
@@ -4090,6 +4140,52 @@ mod tests {
         );
         assert!(reopened_ids.contains(&id_c));
         assert_eq!(reopened_ids.len(), 4);
+    }
+
+    #[test]
+    fn v2_partial_hydration_save_keeps_pending_entries_after_rehydrate() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("lazy_hydration_pending_merge.jsonl");
+
+        let mut seed = Session::create();
+        seed.path = Some(path.clone());
+        let _id_root = seed.append_message(make_test_message("root"));
+        let id_a = seed.append_message(make_test_message("a"));
+        let id_b = seed.append_message(make_test_message("main-branch"));
+        assert!(seed.create_branch_from(&id_a));
+        let _id_c = seed.append_message(make_test_message("side-branch"));
+        run_async(async { seed.save().await }).unwrap();
+
+        create_v2_sidecar_from_jsonl(&path).unwrap();
+        let v2_root = crate::session_store_v2::v2_sidecar_path(&path);
+        let store = SessionStoreV2::create(&v2_root, 64 * 1024 * 1024).unwrap();
+        let (mut loaded, _) =
+            Session::open_from_v2(&store, seed.header.clone(), V2OpenMode::ActivePath).unwrap();
+        loaded.path = Some(path.clone());
+        loaded.v2_sidecar_root = Some(v2_root);
+        loaded.v2_partial_hydration = true;
+        loaded.v2_resume_mode = Some(V2OpenMode::ActivePath);
+
+        let new_id = loaded.append_message(make_test_message("new-on-active-leaf"));
+        loaded.set_model_header(Some("provider-updated".to_string()), None, None);
+        run_async(async { loaded.save().await }).unwrap();
+
+        let (reopened, _) =
+            run_async(async { Session::open_jsonl_with_diagnostics(&path).await }).unwrap();
+        let reopened_ids: Vec<String> = reopened
+            .entries
+            .iter()
+            .filter_map(|entry| entry.base().id.clone())
+            .collect();
+        assert!(
+            reopened_ids.contains(&id_b),
+            "non-active branch entry must survive rehydration+save"
+        );
+        assert!(
+            reopened_ids.contains(&new_id),
+            "pending entry appended on partial session must be preserved"
+        );
+        assert_eq!(reopened_ids.len(), 5);
     }
 
     #[test]

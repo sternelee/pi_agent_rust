@@ -35,7 +35,7 @@ use asupersync::sync::Mutex;
 use asupersync::time::{sleep, wall_now};
 use memchr::memchr_iter;
 use serde_json::{Value, json};
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1074,20 +1074,21 @@ pub async fn run(
                     .get("outputPath")
                     .and_then(Value::as_str)
                     .map(str::to_string);
-                let inner_session = {
+                // Capture a lightweight snapshot under lock, then release immediately.
+                // This avoids cloning the full Session (caches, autosave queue, etc.)
+                // and allows the HTML rendering + file I/O to proceed without holding
+                // any session lock.
+                let snapshot = {
                     let guard = session
                         .lock(&cx)
                         .await
                         .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
-                    Arc::clone(&guard.session)
-                };
-                let session_snapshot = {
-                    let inner_session = inner_session.lock(&cx).await.map_err(|err| {
+                    let inner = guard.session.lock(&cx).await.map_err(|err| {
                         Error::session(format!("inner session lock failed: {err}"))
                     })?;
-                    inner_session.clone()
+                    inner.export_snapshot()
                 };
-                let path = export_html(&session_snapshot, output_path.as_deref()).await?;
+                let path = export_html_snapshot(&snapshot, output_path.as_deref()).await?;
                 let _ = out_tx.send(response_ok(
                     id,
                     "export_html",
@@ -1376,13 +1377,60 @@ pub async fn run(
                     continue;
                 };
 
-                let (selected_text, cancelled) = {
+                // Phase 1: Snapshot — brief lock to compute ForkPlan + extract metadata.
+                let (fork_plan, parent_path, session_dir, save_enabled, header_snapshot) = {
+                    let guard = session
+                        .lock(&cx)
+                        .await
+                        .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
+                    let inner = guard.session.lock(&cx).await.map_err(|err| {
+                        Error::session(format!("inner session lock failed: {err}"))
+                    })?;
+                    let plan = inner.plan_fork_from_user_message(entry_id)?;
+                    let parent_path = inner.path.as_ref().map(|p| p.display().to_string());
+                    let session_dir = inner.session_dir.clone();
+                    let header = inner.header.clone();
+                    (plan, parent_path, session_dir, guard.save_enabled(), header)
+                    // Both locks released here.
+                };
+
+                // Phase 2: Build new session without holding any lock.
+                let crate::session::ForkPlan {
+                    entries,
+                    leaf_id,
+                    selected_text,
+                } = fork_plan;
+
+                let mut new_session = if save_enabled {
+                    crate::session::Session::create_with_dir(session_dir)
+                } else {
+                    crate::session::Session::in_memory()
+                };
+                new_session.header.parent_session = parent_path;
+                new_session.header.provider.clone_from(&header_snapshot.provider);
+                new_session.header.model_id.clone_from(&header_snapshot.model_id);
+                new_session.header.thinking_level.clone_from(&header_snapshot.thinking_level);
+                new_session.entries = entries;
+                new_session.leaf_id = leaf_id;
+                new_session.ensure_entry_ids();
+
+                let messages = new_session.to_messages_for_current_path();
+                let session_id = new_session.header.id.clone();
+
+                // Phase 3: Swap — brief lock to install the new session.
+                {
                     let mut guard = session
                         .lock(&cx)
                         .await
                         .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
-                    fork_session(&mut guard, entry_id, &cx).await?
-                };
+                    let mut inner = guard.session.lock(&cx).await.map_err(|err| {
+                        Error::session(format!("inner session lock failed: {err}"))
+                    })?;
+                    *inner = new_session;
+                    drop(inner);
+                    guard.agent.replace_messages(messages);
+                    guard.agent.stream_options_mut().session_id = Some(session_id);
+                }
 
                 {
                     let mut state = shared_state
@@ -1396,12 +1444,13 @@ pub async fn run(
                 let _ = out_tx.send(response_ok(
                     id,
                     "fork",
-                    Some(json!({ "text": selected_text, "cancelled": cancelled })),
+                    Some(json!({ "text": selected_text, "cancelled": false })),
                 ));
             }
 
             "get_fork_messages" => {
-                let messages = {
+                // Snapshot entries under brief lock, compute messages outside.
+                let path_entries = {
                     let guard = session
                         .lock(&cx)
                         .await
@@ -1409,8 +1458,9 @@ pub async fn run(
                     let inner_session = guard.session.lock(&cx).await.map_err(|err| {
                         Error::session(format!("inner session lock failed: {err}"))
                     })?;
-                    fork_messages(&inner_session)
+                    inner_session.entries_for_current_path().into_iter().cloned().collect::<Vec<_>>()
                 };
+                let messages = fork_messages_from_entries(&path_entries);
                 let _ = out_tx.send(response_ok(
                     id,
                     "get_fork_messages",
@@ -3019,15 +3069,19 @@ fn last_assistant_text(session: &crate::session::Session) -> Option<String> {
     None
 }
 
-async fn export_html(
-    session: &crate::session::Session,
+/// Export HTML from a lightweight `ExportSnapshot` (non-blocking path).
+///
+/// The snapshot is captured under a brief lock, so the HTML rendering and
+/// file I/O happen entirely outside any session lock.
+async fn export_html_snapshot(
+    snapshot: &crate::session::ExportSnapshot,
     output_path: Option<&str>,
 ) -> Result<String> {
-    let html = session.to_html();
+    let html = snapshot.to_html();
 
     let path = output_path.map_or_else(
         || {
-            session.path.as_ref().map_or_else(
+            snapshot.path.as_ref().map_or_else(
                 || {
                     let ts = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S%.3fZ");
                     PathBuf::from(format!("pi-session-{ts}.html"))
@@ -3309,82 +3363,12 @@ async fn apply_model_change(guard: &mut AgentSession, entry: &ModelEntry) -> Res
     guard.persist_session().await
 }
 
-async fn fork_session(
-    guard: &mut AgentSession,
-    entry_id: &str,
-    cx: &AgentCx,
-) -> Result<(Option<String>, bool)> {
-    let mut inner_session = guard
-        .session
-        .lock(cx)
-        .await
-        .map_err(|err| Error::session(format!("inner session lock failed: {err}")))?;
 
-    let entry = inner_session
-        .get_entry(entry_id)
-        .ok_or_else(|| Error::session("Entry not found"))?;
-
-    let crate::session::SessionEntry::Message(message_entry) = entry else {
-        return Err(Error::session("Entry is not a message"));
-    };
-
-    let SessionMessage::User { content, .. } = &message_entry.message else {
-        return Err(Error::session("Entry is not a user message"));
-    };
-
-    let selected_text = extract_user_text(content);
-    let parent_id = message_entry.base.parent_id.clone();
-
-    let session_dir = inner_session.session_dir.clone();
-    let mut new_session = if guard.save_enabled() {
-        crate::session::Session::create_with_dir(session_dir)
-    } else {
-        crate::session::Session::in_memory()
-    };
-    new_session.header.parent_session =
-        inner_session.path.as_ref().map(|p| p.display().to_string());
-    new_session
-        .header
-        .provider
-        .clone_from(&inner_session.header.provider);
-    new_session
-        .header
-        .model_id
-        .clone_from(&inner_session.header.model_id);
-    new_session
-        .header
-        .thinking_level
-        .clone_from(&inner_session.header.thinking_level);
-
-    if let Some(parent_id) = parent_id {
-        let path_ids = inner_session.get_path_to_entry(&parent_id);
-        let path_set: HashSet<&str> = path_ids.iter().map(String::as_str).collect();
-        new_session.entries = inner_session
-            .entries
-            .iter()
-            .filter(|entry| {
-                entry
-                    .base_id()
-                    .is_some_and(|id| path_set.contains(id.as_str()))
-            })
-            .cloned()
-            .collect();
-        new_session.leaf_id = Some(parent_id);
-    }
-
-    *inner_session = new_session;
-    let messages = inner_session.to_messages_for_current_path();
-    let session_id = inner_session.header.id.clone();
-    drop(inner_session);
-
-    guard.agent.replace_messages(messages);
-    guard.agent.stream_options_mut().session_id = Some(session_id);
-
-    Ok((selected_text, false))
-}
-
-fn fork_messages(session: &crate::session::Session) -> Vec<Value> {
-    let entries = session.entries_for_current_path();
+/// Extract user messages from a pre-captured list of session entries.
+///
+/// Used by the non-blocking `get_fork_messages` path where entries are
+/// captured under a brief lock and messages are computed outside the lock.
+fn fork_messages_from_entries(entries: &[crate::session::SessionEntry]) -> Vec<Value> {
     let mut result = Vec::new();
 
     for entry in entries {
