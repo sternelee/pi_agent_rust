@@ -452,19 +452,23 @@ impl TraceJitCompiler {
         // Check guards.
         for (idx, guard) in compiled.guards.iter().enumerate() {
             if !guard.check(trace, ctx) {
-                self.record_guard_failure(plan_id);
+                let invalidated_after_failures = self.record_guard_failure(plan_id);
                 let description = match guard {
                     TraceGuard::OpcodePrefix(_) => "opcode_prefix_mismatch",
                     TraceGuard::SafetyEnvelopeNotVetoing => "safety_envelope_vetoing",
                     TraceGuard::MinSupportCount(_) => "support_count_below_threshold",
                 };
+                let deopt_reason = invalidated_after_failures.map_or_else(
+                    || DeoptReason::GuardFailure {
+                        guard_index: idx,
+                        description: description.to_string(),
+                    },
+                    |total_failures| DeoptReason::TraceInvalidated { total_failures },
+                );
                 return JitExecutionResult {
                     jit_hit: false,
                     plan_id: Some(plan_id.to_string()),
-                    deopt_reason: Some(DeoptReason::GuardFailure {
-                        guard_index: idx,
-                        description: description.to_string(),
-                    }),
+                    deopt_reason: Some(deopt_reason),
                     cost_delta: 0,
                 };
             }
@@ -485,19 +489,23 @@ impl TraceJitCompiler {
     }
 
     /// Record a guard failure for a plan, possibly invalidating the trace.
-    fn record_guard_failure(&mut self, plan_id: &str) {
+    fn record_guard_failure(&mut self, plan_id: &str) -> Option<u64> {
         self.telemetry.deopts += 1;
         self.telemetry.jit_misses += 1;
 
         if let Some(profile) = self.profiles.get_mut(plan_id) {
             profile.consecutive_guard_failures += 1;
-            if profile.consecutive_guard_failures >= self.config.max_guard_failures {
+            if !profile.invalidated
+                && profile.consecutive_guard_failures >= self.config.max_guard_failures
+            {
                 profile.invalidated = true;
                 self.cache.remove(plan_id);
                 self.telemetry.invalidations += 1;
                 self.telemetry.cache_size = u64::try_from(self.cache.len()).unwrap_or(u64::MAX);
+                return Some(profile.consecutive_guard_failures);
             }
         }
+        None
     }
 
     /// Look up a compiled trace by plan ID (read-only).
@@ -836,6 +844,28 @@ mod tests {
     }
 
     #[test]
+    fn jit_dispatch_deopt_on_support_count_guard() {
+        let config = TraceJitConfig::new(true, 1, 64, 4);
+        let mut jit = TraceJitCompiler::new(config);
+        let plan = make_plan("p1", &["a", "b"], 20);
+        jit.record_plan_execution(&plan);
+
+        let ctx = GuardContext {
+            safety_envelope_vetoing: false,
+            current_support_count: 9, // plan guard requires at least support_count / 2 = 10
+        };
+        let result = jit.try_jit_dispatch("p1", &trace(&["a", "b"]), &ctx);
+        assert!(!result.jit_hit);
+        assert_eq!(
+            result.deopt_reason,
+            Some(DeoptReason::GuardFailure {
+                guard_index: 2,
+                description: "support_count_below_threshold".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn jit_dispatch_disabled_returns_jit_disabled() {
         let config = TraceJitConfig::new(false, 1, 64, 4);
         let mut jit = TraceJitCompiler::new(config);
@@ -866,6 +896,43 @@ mod tests {
 
         // Further executions don't re-promote.
         assert!(!jit.record_plan_execution(&plan));
+    }
+
+    #[test]
+    fn threshold_crossing_failure_reports_trace_invalidated() {
+        let config = TraceJitConfig::new(true, 1, 64, 2);
+        let mut jit = TraceJitCompiler::new(config);
+        let plan = make_plan("p1", &["a", "b"], 10);
+        jit.record_plan_execution(&plan);
+
+        let first = jit.try_jit_dispatch("p1", &trace(&["x"]), &default_ctx());
+        assert_eq!(
+            first.deopt_reason,
+            Some(DeoptReason::GuardFailure {
+                guard_index: 0,
+                description: "opcode_prefix_mismatch".to_string(),
+            })
+        );
+
+        let second = jit.try_jit_dispatch("p1", &trace(&["x"]), &default_ctx());
+        assert_eq!(
+            second.deopt_reason,
+            Some(DeoptReason::TraceInvalidated { total_failures: 2 })
+        );
+
+        assert!(jit.is_invalidated("p1"));
+        assert_eq!(jit.cache_size(), 0);
+
+        let after_invalidation = jit.try_jit_dispatch("p1", &trace(&["x"]), &default_ctx());
+        assert_eq!(
+            after_invalidation.deopt_reason,
+            Some(DeoptReason::NotCompiled)
+        );
+
+        let telemetry = jit.telemetry();
+        assert_eq!(telemetry.deopts, 2);
+        assert_eq!(telemetry.jit_misses, 2);
+        assert_eq!(telemetry.invalidations, 1);
     }
 
     #[test]
@@ -1110,11 +1177,9 @@ mod tests {
         }
 
         fn arb_config() -> impl Strategy<Value = TraceJitConfig> {
-            (1..16u64, 2..32usize, 1..8u64).prop_map(
-                |(min_exec, max_traces, max_failures)| {
-                    TraceJitConfig::new(true, min_exec, max_traces, max_failures)
-                },
-            )
+            (1..16u64, 2..32usize, 1..8u64).prop_map(|(min_exec, max_traces, max_failures)| {
+                TraceJitConfig::new(true, min_exec, max_traces, max_failures)
+            })
         }
 
         proptest! {
@@ -1256,6 +1321,35 @@ mod tests {
                         result.cost_delta >= 0,
                         "JIT hit must have non-negative cost delta"
                     );
+                }
+            }
+
+            #[test]
+            fn deopts_stop_growing_after_invalidation(
+                max_guard_failures in 1..8u64,
+                attempts in 1..40u64,
+            ) {
+                let config = TraceJitConfig::new(true, 1, 8, max_guard_failures);
+                let mut jit = TraceJitCompiler::new(config);
+                let plan = make_plan("prop_invalidation", &["a", "b"], 10);
+                jit.record_plan_execution(&plan);
+
+                for _ in 0..attempts {
+                    let _ = jit.try_jit_dispatch("prop_invalidation", &trace(&["x"]), &default_ctx());
+                }
+
+                let telemetry = jit.telemetry();
+                let expected_deopts = attempts.min(max_guard_failures);
+                prop_assert_eq!(telemetry.deopts, expected_deopts);
+                prop_assert_eq!(telemetry.jit_misses, expected_deopts);
+                prop_assert!(telemetry.invalidations <= 1);
+
+                if attempts >= max_guard_failures {
+                    prop_assert!(jit.is_invalidated("prop_invalidation"));
+                    prop_assert_eq!(telemetry.invalidations, 1);
+                } else {
+                    prop_assert!(!jit.is_invalidated("prop_invalidation"));
+                    prop_assert_eq!(telemetry.invalidations, 0);
                 }
             }
         }
