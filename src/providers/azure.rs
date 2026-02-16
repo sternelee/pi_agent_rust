@@ -511,6 +511,10 @@ where
 
             // Handle finish reason (MUST come after delta processing so TextEnd/ToolCallEnd
             // events contain the complete accumulated content).
+            // Ensure Start is emitted even when finish arrives in an empty-delta chunk.
+            if choice.finish_reason.is_some() {
+                self.ensure_started();
+            }
             if let Some(reason) = choice.finish_reason {
                 self.partial.stop_reason = match reason.as_str() {
                     "length" => StopReason::Length,
