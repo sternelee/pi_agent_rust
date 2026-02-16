@@ -1406,4 +1406,304 @@ mod tests {
         let store = ExtensionIndexStore::new(std::path::PathBuf::from("/custom/path.json"));
         assert_eq!(store.path().to_str().unwrap(), "/custom/path.json");
     }
+
+    mod proptest_extension_index {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn make_entry(id: &str, name: &str) -> ExtensionIndexEntry {
+            ExtensionIndexEntry {
+                id: id.to_string(),
+                name: name.to_string(),
+                description: None,
+                tags: Vec::new(),
+                license: None,
+                source: None,
+                install_source: None,
+            }
+        }
+
+        proptest! {
+            /// `non_empty` returns None for whitespace-only strings.
+            #[test]
+            fn non_empty_whitespace(ws in "[ \\t\\n]{0,10}") {
+                assert!(non_empty(&ws).is_none());
+            }
+
+            /// `non_empty` returns trimmed value for non-empty strings.
+            #[test]
+            fn non_empty_trims(s in "[a-z]{1,10}", ws in "[ \\t]{0,3}") {
+                let padded = format!("{ws}{s}{ws}");
+                let result = non_empty(&padded).unwrap();
+                assert_eq!(result, s);
+            }
+
+            /// `normalize_license` filters "unknown" (case-insensitive).
+            #[test]
+            fn normalize_license_filters_unknown(
+                case_idx in 0..3usize
+            ) {
+                let variants = ["unknown", "UNKNOWN", "Unknown"];
+                assert!(normalize_license(Some(variants[case_idx])).is_none());
+            }
+
+            /// `normalize_license(None)` returns None.
+            #[test]
+            fn normalize_license_none(_dummy in 0..1u8) {
+                assert!(normalize_license(None).is_none());
+            }
+
+            /// `normalize_license` passes through valid licenses.
+            #[test]
+            fn normalize_license_passthrough(s in "[A-Z]{3,10}") {
+                if !s.eq_ignore_ascii_case("unknown") {
+                    assert!(normalize_license(Some(&s)).is_some());
+                }
+            }
+
+            /// `score_entry` is zero for empty token list.
+            #[test]
+            fn score_empty_tokens(name in "[a-z]{1,10}") {
+                let entry = make_entry("id", &name);
+                assert_eq!(score_entry(&entry, &[]), 0);
+            }
+
+            /// `score_entry` is non-negative.
+            #[test]
+            fn score_non_negative(
+                name in "[a-z]{1,10}",
+                token in "[a-z]{1,5}"
+            ) {
+                let entry = make_entry("id", &name);
+                assert!(score_entry(&entry, &[token]) >= 0);
+            }
+
+            /// `score_entry` is case-insensitive.
+            #[test]
+            fn score_case_insensitive(name in "[a-z]{1,10}") {
+                // score_entry expects pre-lowered tokens (search() lowercases them).
+                // The case-insensitivity is on the *entry* fields, not tokens.
+                let lower_entry = make_entry("id", &name);
+                let upper_entry = make_entry("id", &name.to_uppercase());
+                let token = vec![name.clone()];
+                assert_eq!(score_entry(&lower_entry, &token), score_entry(&upper_entry, &token));
+            }
+
+            /// Name match gives 300 points per token.
+            #[test]
+            fn score_name_match(name in "[a-z]{3,8}") {
+                let entry = make_entry("different-id", &name);
+                let score = score_entry(&entry, &[name]);
+                // At minimum 300 for name match (might also match id/description/tags)
+                assert!(score >= 300);
+            }
+
+            /// `merge_tags` deduplicates.
+            #[test]
+            fn merge_tags_dedup(tag in "[a-z]{1,10}") {
+                let result = merge_tags(
+                    vec![tag.clone(), tag.clone()],
+                    vec![tag.clone()],
+                );
+                assert_eq!(result.len(), 1);
+                assert_eq!(result[0], tag);
+            }
+
+            /// `merge_tags` filters empty/whitespace.
+            #[test]
+            fn merge_tags_filters_empty(tag in "[a-z]{1,10}") {
+                let result = merge_tags(
+                    vec![tag, String::new(), "  ".to_string()],
+                    vec![],
+                );
+                assert_eq!(result.len(), 1);
+            }
+
+            /// `merge_tags` result is sorted (BTreeSet).
+            #[test]
+            fn merge_tags_sorted(
+                a in "[a-z]{1,5}",
+                b in "[a-z]{1,5}",
+                c in "[a-z]{1,5}"
+            ) {
+                let result = merge_tags(vec![c, a], vec![b]);
+                for w in result.windows(2) {
+                    assert!(w[0] <= w[1]);
+                }
+            }
+
+            /// `merge_tags` preserves all unique tags from both sides.
+            #[test]
+            fn merge_tags_preserves(
+                left in prop::collection::vec("[a-z]{1,5}", 0..5),
+                right in prop::collection::vec("[a-z]{1,5}", 0..5)
+            ) {
+                let result = merge_tags(left.clone(), right.clone());
+                // Every non-empty tag from either side should be in result
+                for tag in left.iter().chain(right.iter()) {
+                    let trimmed = tag.trim();
+                    if !trimmed.is_empty() {
+                        assert!(
+                            result.contains(&trimmed.to_string()),
+                            "missing tag: {trimmed}"
+                        );
+                    }
+                }
+            }
+
+            /// `merge_entries` keeps casefolded ids unique and sorted.
+            #[test]
+            fn merge_entries_unique_sorted_casefold_ids(
+                existing in prop::collection::vec(("[A-Za-z]{1,8}", "[a-z]{1,8}"), 0..10),
+                npm in prop::collection::vec(("[A-Za-z]{1,8}", "[a-z]{1,8}"), 0..10),
+                git in prop::collection::vec(("[A-Za-z]{1,8}", "[a-z]{1,8}"), 0..10)
+            ) {
+                let to_entries = |rows: Vec<(String, String)>, prefix: &str| {
+                    rows.into_iter()
+                        .map(|(id, name)| make_entry(&format!("{prefix}/{id}"), &name))
+                        .collect::<Vec<_>>()
+                };
+                let merged = merge_entries(
+                    to_entries(existing, "npm"),
+                    to_entries(npm, "npm"),
+                    to_entries(git, "git"),
+                );
+
+                let lower_ids = merged
+                    .iter()
+                    .map(|entry| entry.id.to_ascii_lowercase())
+                    .collect::<Vec<_>>();
+                let mut sorted = lower_ids.clone();
+                sorted.sort();
+                assert_eq!(lower_ids, sorted);
+
+                let unique = lower_ids.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+                assert_eq!(unique.len(), lower_ids.len());
+            }
+
+            /// `search` output is bounded by limit and sorted by non-increasing score.
+            #[test]
+            fn search_bounded_and_score_sorted(
+                rows in prop::collection::vec(("[a-z]{1,8}", "[a-z]{1,8}", prop::option::of("[a-z ]{1,20}")), 0..16),
+                query in "[a-z]{1,6}",
+                limit in 0usize..16usize
+            ) {
+                let entries = rows
+                    .into_iter()
+                    .map(|(id, name, description)| ExtensionIndexEntry {
+                        id: format!("npm/{id}"),
+                        name,
+                        description: description.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+                        tags: vec!["tag".to_string()],
+                        license: None,
+                        source: None,
+                        install_source: Some(format!("npm:{id}")),
+                    })
+                    .collect::<Vec<_>>();
+                let index = ExtensionIndex {
+                    schema: EXTENSION_INDEX_SCHEMA.to_string(),
+                    version: EXTENSION_INDEX_VERSION,
+                    generated_at: None,
+                    last_refreshed_at: None,
+                    entries,
+                };
+
+                let hits = index.search(&query, limit);
+                assert!(hits.len() <= limit);
+                assert!(hits.windows(2).all(|pair| pair[0].score >= pair[1].score));
+                assert!(hits.iter().all(|hit| hit.score > 0));
+            }
+
+            /// Name ambiguity must fail-open to `None`; exact id remains resolvable.
+            #[test]
+            fn resolve_install_source_ambiguous_name_none_exact_id_some(
+                name in "[a-z]{1,10}",
+                left in "[a-z]{1,8}",
+                right in "[a-z]{1,8}"
+            ) {
+                prop_assume!(!left.eq_ignore_ascii_case(&right));
+
+                let left_id = format!("npm/{left}");
+                let right_id = format!("npm/{right}");
+                let left_install = format!("npm:{left}@1.0.0");
+                let right_install = format!("npm:{right}@2.0.0");
+
+                let index = ExtensionIndex {
+                    schema: EXTENSION_INDEX_SCHEMA.to_string(),
+                    version: EXTENSION_INDEX_VERSION,
+                    generated_at: None,
+                    last_refreshed_at: None,
+                    entries: vec![
+                        ExtensionIndexEntry {
+                            id: left_id.clone(),
+                            name: name.clone(),
+                            description: None,
+                            tags: Vec::new(),
+                            license: None,
+                            source: Some(ExtensionIndexSource::Npm {
+                                package: left,
+                                version: Some("1.0.0".to_string()),
+                                url: None,
+                            }),
+                            install_source: Some(left_install.clone()),
+                        },
+                        ExtensionIndexEntry {
+                            id: right_id.clone(),
+                            name: name.clone(),
+                            description: None,
+                            tags: Vec::new(),
+                            license: None,
+                            source: Some(ExtensionIndexSource::Npm {
+                                package: right,
+                                version: Some("2.0.0".to_string()),
+                                url: None,
+                            }),
+                            install_source: Some(right_install.clone()),
+                        },
+                    ],
+                };
+
+                assert_eq!(index.resolve_install_source(&name), None);
+                assert_eq!(index.resolve_install_source(&left_id), Some(left_install));
+                assert_eq!(index.resolve_install_source(&right_id), Some(right_install));
+            }
+
+            /// `ExtensionIndexSource` serde roundtrip for Npm variant.
+            #[test]
+            fn source_npm_serde(pkg in "[a-z]{1,10}", ver in "[0-9]\\.[0-9]\\.[0-9]") {
+                let source = ExtensionIndexSource::Npm {
+                    package: pkg,
+                    version: Some(ver),
+                    url: None,
+                };
+                let json = serde_json::to_string(&source).unwrap();
+                let _: ExtensionIndexSource = serde_json::from_str(&json).unwrap();
+            }
+
+            /// `ExtensionIndexSource` serde roundtrip for Git variant.
+            #[test]
+            fn source_git_serde(repo in "[a-z]{1,10}/[a-z]{1,10}") {
+                let source = ExtensionIndexSource::Git {
+                    repo,
+                    path: None,
+                    r#ref: None,
+                };
+                let json = serde_json::to_string(&source).unwrap();
+                let _: ExtensionIndexSource = serde_json::from_str(&json).unwrap();
+            }
+
+            /// `ExtensionIndexEntry` serde roundtrip.
+            #[test]
+            fn entry_serde_roundtrip(
+                id in "[a-z]{1,10}",
+                name in "[a-z]{1,10}"
+            ) {
+                let entry = make_entry(&id, &name);
+                let json = serde_json::to_string(&entry).unwrap();
+                let back: ExtensionIndexEntry = serde_json::from_str(&json).unwrap();
+                assert_eq!(back.id, id);
+                assert_eq!(back.name, name);
+            }
+        }
+    }
 }

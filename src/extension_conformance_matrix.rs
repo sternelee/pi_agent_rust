@@ -918,4 +918,385 @@ mod tests {
         assert_eq!(back.category, ExtensionCategory::Tool);
         assert!(back.required);
     }
+
+    mod proptest_conformance_matrix {
+        use super::*;
+        use proptest::prelude::*;
+
+        const ALL_CAP_NAMES: &[&str] = &[
+            "read", "write", "exec", "http", "session", "ui", "log", "env", "tool",
+        ];
+
+        const fn category_from_index(index: usize) -> ExtensionCategory {
+            match index {
+                0 => ExtensionCategory::Tool,
+                1 => ExtensionCategory::Command,
+                2 => ExtensionCategory::Provider,
+                3 => ExtensionCategory::EventHook,
+                4 => ExtensionCategory::UiComponent,
+                5 => ExtensionCategory::Configuration,
+                6 => ExtensionCategory::Multi,
+                _ => ExtensionCategory::General,
+            }
+        }
+
+        fn mask_case(input: &str, upper_mask: &[bool]) -> String {
+            input
+                .chars()
+                .zip(upper_mask.iter().copied())
+                .map(
+                    |(ch, upper)| {
+                        if upper { ch.to_ascii_uppercase() } else { ch }
+                    },
+                )
+                .collect()
+        }
+
+        fn make_inclusion_entry(id: String, category: ExtensionCategory) -> InclusionEntry {
+            InclusionEntry {
+                id,
+                name: None,
+                tier: None,
+                score: None,
+                category,
+                registrations: Vec::new(),
+                version_pin: None,
+                sha256: None,
+                artifact_path: None,
+                license: None,
+                source_tier: None,
+                rationale: None,
+                directory: None,
+                provenance: None,
+                capabilities: None,
+                risk_level: None,
+                inclusion_rationale: None,
+            }
+        }
+
+        fn build_synthetic_plan(
+            specs: &[(usize, Vec<usize>)],
+            reverse_tier_order: bool,
+        ) -> ConformanceTestPlan {
+            let mut tier0 = specs
+                .iter()
+                .enumerate()
+                .map(|(idx, (cat_idx, _))| {
+                    make_inclusion_entry(format!("ext-{idx}"), category_from_index(*cat_idx))
+                })
+                .collect::<Vec<_>>();
+
+            if reverse_tier_order {
+                tier0.reverse();
+            }
+
+            let inclusion = InclusionList {
+                schema: "pi.ext.inclusion.v1".to_string(),
+                generated_at: "2026-01-01T00:00:00Z".to_string(),
+                task: Some("prop-generated".to_string()),
+                stats: None,
+                tier0,
+                tier1: Vec::new(),
+                tier2: Vec::new(),
+                exclusions: Vec::new(),
+                category_coverage: std::collections::HashMap::new(),
+                summary: None,
+                tier1_review: Vec::new(),
+                coverage: None,
+                exclusion_notes: Vec::new(),
+            };
+
+            let extensions = specs
+                .iter()
+                .enumerate()
+                .map(|(idx, (_, cap_indices))| {
+                    let id = format!("ext-{idx}");
+                    let entry = ApiMatrixEntry {
+                        registration_types: Vec::new(),
+                        hostcalls: Vec::new(),
+                        capabilities_required: cap_indices
+                            .iter()
+                            .map(|cap_idx| ALL_CAP_NAMES[*cap_idx].to_string())
+                            .collect(),
+                        events_listened: Vec::new(),
+                        node_apis: Vec::new(),
+                        third_party_deps: Vec::new(),
+                    };
+                    (id, entry)
+                })
+                .collect::<std::collections::HashMap<_, _>>();
+
+            let api_matrix = ApiMatrix {
+                schema: "pi.ext.api-matrix.v1".to_string(),
+                extensions,
+            };
+
+            build_test_plan(&inclusion, Some(&api_matrix), "prop-generated")
+        }
+
+        proptest! {
+            /// `from_str_loose` is case-insensitive for valid names.
+            #[test]
+            fn from_str_loose_case_insensitive(idx in 0..ALL_CAP_NAMES.len()) {
+                let name = ALL_CAP_NAMES[idx];
+                let lower = HostCapability::from_str_loose(name);
+                let upper = HostCapability::from_str_loose(&name.to_uppercase());
+                let mixed = HostCapability::from_str_loose(&capitalize_first(name));
+                assert_eq!(lower, upper);
+                assert_eq!(lower, mixed);
+                assert!(lower.is_some());
+            }
+
+            /// Arbitrary mixed-case variants still parse identically.
+            #[test]
+            fn from_str_loose_arbitrary_case_masks(
+                idx in 0..ALL_CAP_NAMES.len(),
+                upper_mask in prop::collection::vec(any::<bool>(), 0..64usize),
+            ) {
+                let canonical = ALL_CAP_NAMES[idx];
+                let mut effective_mask = upper_mask;
+                effective_mask.resize(canonical.len(), false);
+                effective_mask.truncate(canonical.len());
+                let variant = mask_case(canonical, &effective_mask);
+
+                assert_eq!(
+                    HostCapability::from_str_loose(canonical),
+                    HostCapability::from_str_loose(&variant)
+                );
+            }
+
+            /// `from_str_loose` returns None for unknown strings.
+            #[test]
+            fn from_str_loose_unknown(s in "[a-z]{10,20}") {
+                if !ALL_CAP_NAMES.contains(&s.as_str()) {
+                    assert!(HostCapability::from_str_loose(&s).is_none());
+                }
+            }
+
+            /// `all()` always returns exactly 9 capabilities.
+            #[test]
+            fn all_count(_dummy in 0..1u8) {
+                assert_eq!(HostCapability::all().len(), 9);
+            }
+
+            /// `HostCapability` serde roundtrip for all variants.
+            #[test]
+            fn capability_serde_roundtrip(idx in 0..9usize) {
+                let cap = HostCapability::all()[idx];
+                let json = serde_json::to_string(&cap).unwrap();
+                let back: HostCapability = serde_json::from_str(&json).unwrap();
+                assert_eq!(cap, back);
+            }
+
+            /// `is_required_cell` — Multi category requires all capabilities.
+            #[test]
+            fn multi_requires_all(idx in 0..9usize) {
+                let cap = HostCapability::all()[idx];
+                assert!(is_required_cell(&ExtensionCategory::Multi, cap));
+            }
+
+            /// `is_required_cell` is deterministic.
+            #[test]
+            fn required_cell_deterministic(cat_idx in 0..8usize, cap_idx in 0..9usize) {
+                let cats = [
+                    ExtensionCategory::Tool,
+                    ExtensionCategory::Command,
+                    ExtensionCategory::Provider,
+                    ExtensionCategory::EventHook,
+                    ExtensionCategory::UiComponent,
+                    ExtensionCategory::Configuration,
+                    ExtensionCategory::Multi,
+                    ExtensionCategory::General,
+                ];
+                let cap = HostCapability::all()[cap_idx];
+                let first = is_required_cell(&cats[cat_idx], cap);
+                let second = is_required_cell(&cats[cat_idx], cap);
+                assert_eq!(first, second);
+            }
+
+            /// `capitalize_first` on empty string returns empty.
+            #[test]
+            fn capitalize_first_empty(_dummy in 0..1u8) {
+                assert_eq!(capitalize_first(""), "");
+            }
+
+            /// `capitalize_first` capitalizes first char.
+            #[test]
+            fn capitalize_first_works(s in "[a-z]{1,20}") {
+                let result = capitalize_first(&s);
+                let first = result.chars().next().unwrap();
+                assert!(first.is_uppercase());
+                assert_eq!(&result[first.len_utf8()..], &s[1..]);
+            }
+
+            /// `capitalize_first` is idempotent on already-capitalized.
+            #[test]
+            fn capitalize_first_idempotent(s in "[A-Z][a-z]{0,15}") {
+                assert_eq!(capitalize_first(&s), s);
+            }
+
+            /// `build_behaviors` never panics for any category/capability combo.
+            #[test]
+            fn build_behaviors_never_panics(cat_idx in 0..8usize, cap_idx in 0..9usize) {
+                let cats = [
+                    ExtensionCategory::Tool,
+                    ExtensionCategory::Command,
+                    ExtensionCategory::Provider,
+                    ExtensionCategory::EventHook,
+                    ExtensionCategory::UiComponent,
+                    ExtensionCategory::Configuration,
+                    ExtensionCategory::Multi,
+                    ExtensionCategory::General,
+                ];
+                let cap = HostCapability::all()[cap_idx];
+                let behaviors = build_behaviors(&cats[cat_idx], cap);
+                // All behaviors should have non-empty fields
+                for b in &behaviors {
+                    assert!(!b.description.is_empty());
+                    assert!(!b.protocol_surface.is_empty());
+                    assert!(!b.pass_criteria.is_empty());
+                    assert!(!b.fail_criteria.is_empty());
+                }
+            }
+
+            /// `build_test_plan` maintains internal matrix/coverage consistency.
+            #[test]
+            fn build_test_plan_coverage_invariants(task_id in "[a-z0-9_-]{1,32}") {
+                let inclusion = InclusionList {
+                    schema: "pi.ext.inclusion.v1".to_string(),
+                    generated_at: "2026-01-01T00:00:00Z".to_string(),
+                    task: Some(task_id.clone()),
+                    stats: None,
+                    tier0: Vec::new(),
+                    tier1: Vec::new(),
+                    tier2: Vec::new(),
+                    exclusions: Vec::new(),
+                    category_coverage: std::collections::HashMap::new(),
+                    summary: None,
+                    tier1_review: Vec::new(),
+                    coverage: None,
+                    exclusion_notes: Vec::new(),
+                };
+
+                let plan = build_test_plan(&inclusion, None, &task_id);
+                assert_eq!(plan.task, task_id);
+                assert_eq!(plan.coverage.total_cells, plan.matrix.len());
+                assert_eq!(plan.fixture_assignments.len(), plan.matrix.len());
+                assert!(plan.coverage.required_cells <= plan.coverage.total_cells);
+                assert!(plan.coverage.covered_cells <= plan.coverage.total_cells);
+                assert!(plan.coverage.uncovered_required_cells <= plan.coverage.required_cells);
+
+                for assignment in &plan.fixture_assignments {
+                    let matches = plan
+                        .matrix
+                        .iter()
+                        .filter(|cell| format!("{:?}:{:?}", cell.category, cell.capability) == assignment.cell_key)
+                        .count();
+                    assert_eq!(matches, 1);
+                }
+            }
+
+            /// Fixture assignment coverage thresholds always match required-ness.
+            #[test]
+            fn build_test_plan_fixture_thresholds_align_with_required_cells(
+                specs in prop::collection::vec(
+                    (
+                        0usize..8usize,
+                        prop::collection::vec(0usize..ALL_CAP_NAMES.len(), 0..12usize),
+                    ),
+                    0..24usize
+                )
+            ) {
+                let plan = build_synthetic_plan(&specs, false);
+                let required_by_key = plan
+                    .matrix
+                    .iter()
+                    .map(|cell| {
+                        (
+                            format!("{:?}:{:?}", cell.category, cell.capability),
+                            cell.required,
+                        )
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>();
+
+                for assignment in &plan.fixture_assignments {
+                    let required = required_by_key.get(&assignment.cell_key);
+                    prop_assert!(required.is_some());
+                    let min_expected = if *required.expect("present") { 2 } else { 1 };
+                    prop_assert_eq!(assignment.min_fixtures, min_expected);
+                    prop_assert_eq!(
+                        assignment.coverage_met,
+                        assignment.fixture_extensions.len() >= assignment.min_fixtures
+                    );
+                }
+
+                let uncovered_required = plan
+                    .fixture_assignments
+                    .iter()
+                    .filter(|assignment| {
+                        !assignment.coverage_met
+                            && required_by_key
+                                .get(&assignment.cell_key)
+                                .is_some_and(|required| *required)
+                    })
+                    .count();
+                prop_assert_eq!(plan.coverage.uncovered_required_cells, uncovered_required);
+            }
+
+            /// Matrix and fixture shape should be deterministic regardless of tier ordering.
+            #[test]
+            fn build_test_plan_shape_is_stable_under_tier_reordering(
+                specs in prop::collection::vec(
+                    (
+                        0usize..8usize,
+                        prop::collection::vec(0usize..ALL_CAP_NAMES.len(), 0..12usize),
+                    ),
+                    0..24usize
+                )
+            ) {
+                let forward = build_synthetic_plan(&specs, false);
+                let reversed = build_synthetic_plan(&specs, true);
+
+                let forward_matrix = serde_json::to_string(&forward.matrix).expect("serialize matrix");
+                let reversed_matrix = serde_json::to_string(&reversed.matrix).expect("serialize matrix");
+                prop_assert_eq!(forward_matrix, reversed_matrix);
+
+                let forward_assignments =
+                    serde_json::to_string(&forward.fixture_assignments).expect("serialize assignments");
+                let reversed_assignments =
+                    serde_json::to_string(&reversed.fixture_assignments).expect("serialize assignments");
+                prop_assert_eq!(forward_assignments, reversed_assignments);
+
+                let forward_coverage =
+                    serde_json::to_string(&forward.coverage).expect("serialize coverage");
+                let reversed_coverage =
+                    serde_json::to_string(&reversed.coverage).expect("serialize coverage");
+                prop_assert_eq!(forward_coverage, reversed_coverage);
+            }
+
+            /// Declared capability names always map into the computed capability set.
+            #[test]
+            fn capabilities_from_api_entry_includes_declared_valid_capabilities(
+                cap_indices in proptest::collection::vec(0usize..ALL_CAP_NAMES.len(), 0..24usize)
+            ) {
+                let declared = cap_indices
+                    .iter()
+                    .map(|idx| ALL_CAP_NAMES[*idx].to_string())
+                    .collect::<Vec<_>>();
+                let entry = ApiMatrixEntry {
+                    registration_types: vec!["tool".to_string()],
+                    hostcalls: Vec::new(),
+                    capabilities_required: declared.clone(),
+                    events_listened: Vec::new(),
+                    node_apis: Vec::new(),
+                    third_party_deps: Vec::new(),
+                };
+                let computed = capabilities_from_api_entry(&entry);
+                for cap in declared {
+                    let parsed = HostCapability::from_str_loose(&cap).expect("declared capability must parse");
+                    assert!(computed.contains(&parsed));
+                }
+            }
+        }
+    }
 }

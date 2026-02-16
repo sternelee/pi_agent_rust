@@ -1104,6 +1104,72 @@ mod tests {
                 let resolved = resolve_theme_path(&name, cwd);
                 assert_eq!(resolved, cwd.join(&name));
             }
+
+            /// `Theme::validate` accepts arbitrary valid 6-digit hex palettes.
+            #[test]
+            fn theme_validate_accepts_generated_valid_palette(
+                name in "[a-z][a-z0-9_-]{0,15}",
+                version in "[0-9]{1,2}\\.[0-9]{1,2}",
+                palette in proptest::collection::vec((0u8..=255, 0u8..=255, 0u8..=255), 15)
+            ) {
+                let mut colors = palette.into_iter();
+                let next_hex = |colors: &mut std::vec::IntoIter<(u8, u8, u8)>| -> String {
+                    let (r, g, b) = colors.next().expect("palette length is fixed to 15");
+                    format!("#{r:02x}{g:02x}{b:02x}")
+                };
+
+                let mut theme = Theme::dark();
+                theme.name = name;
+                theme.version = version;
+
+                theme.colors.foreground = next_hex(&mut colors);
+                theme.colors.background = next_hex(&mut colors);
+                theme.colors.accent = next_hex(&mut colors);
+                theme.colors.success = next_hex(&mut colors);
+                theme.colors.warning = next_hex(&mut colors);
+                theme.colors.error = next_hex(&mut colors);
+                theme.colors.muted = next_hex(&mut colors);
+
+                theme.syntax.keyword = next_hex(&mut colors);
+                theme.syntax.string = next_hex(&mut colors);
+                theme.syntax.number = next_hex(&mut colors);
+                theme.syntax.comment = next_hex(&mut colors);
+                theme.syntax.function = next_hex(&mut colors);
+
+                theme.ui.border = next_hex(&mut colors);
+                theme.ui.selection = next_hex(&mut colors);
+                theme.ui.cursor = next_hex(&mut colors);
+
+                assert!(theme.validate().is_ok());
+            }
+
+            /// `Theme::validate` fails closed when any color field is invalid.
+            #[test]
+            fn theme_validate_rejects_invalid_color_fields(field_idx in 0usize..15usize) {
+                let mut theme = Theme::dark();
+                let invalid = "not-a-color".to_string();
+
+                match field_idx {
+                    0 => theme.colors.foreground = invalid,
+                    1 => theme.colors.background = invalid,
+                    2 => theme.colors.accent = invalid,
+                    3 => theme.colors.success = invalid,
+                    4 => theme.colors.warning = invalid,
+                    5 => theme.colors.error = invalid,
+                    6 => theme.colors.muted = invalid,
+                    7 => theme.syntax.keyword = invalid,
+                    8 => theme.syntax.string = invalid,
+                    9 => theme.syntax.number = invalid,
+                    10 => theme.syntax.comment = invalid,
+                    11 => theme.syntax.function = invalid,
+                    12 => theme.ui.border = invalid,
+                    13 => theme.ui.selection = invalid,
+                    14 => theme.ui.cursor = invalid,
+                    _ => unreachable!("field_idx range is 0..15"),
+                }
+
+                assert!(theme.validate().is_err());
+            }
         }
     }
 }

@@ -1233,6 +1233,37 @@ export default (api: ExtensionAPI) => { api.registerCommand({ name: "/test" }); 
                 }
             }
 
+            /// `canonical_id_from_repo_url` matches normalized owner/repo slugs
+            /// for standard GitHub URLs, including optional `.git` suffix.
+            #[test]
+            fn repo_url_canonical_matches_normalized_slug(
+                owner in "[a-zA-Z0-9][a-zA-Z0-9-]{0,10}",
+                repo in "[a-zA-Z0-9][a-zA-Z0-9._-]{0,14}",
+                with_git in proptest::bool::ANY
+            ) {
+                let mut url = format!("https://github.com/{owner}/{repo}");
+                if with_git {
+                    url.push_str(".git");
+                }
+                let expected = normalize_github_repo(&format!("{owner}/{repo}"));
+                assert_eq!(canonical_id_from_repo_url(&url), Some(expected));
+            }
+
+            /// `canonical_id_from_repo_url` rejects non-GitHub hosts.
+            #[test]
+            fn repo_url_non_github_hosts_return_none(
+                owner in "[a-zA-Z0-9]{1,10}",
+                repo in "[a-zA-Z0-9]{1,10}",
+                host in prop_oneof![
+                    Just("gitlab.com"),
+                    Just("bitbucket.org"),
+                    Just("example.com"),
+                ]
+            ) {
+                let url = format!("https://{host}/{owner}/{repo}");
+                assert_eq!(canonical_id_from_repo_url(&url), None);
+            }
+
             /// `classify_from_evidence` — full signals → `TrueExtension`.
             #[test]
             fn classify_true_extension(
