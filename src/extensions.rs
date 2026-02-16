@@ -1390,32 +1390,29 @@ fn strip_js_comments(line: &str, state: &mut ScannerState) -> String {
                 }
 
                 // Disambiguate regex start vs division.
-                let is_regex_start = state.last_significant_char.map_or(
-                    true, // Start of line
-                    |c| {
-                        matches!(
-                            c,
-                            '=' | '('
-                                | ','
-                                | ':'
-                                | ';'
-                                | '!'
-                                | '&'
-                                | '|'
-                                | '?'
-                                | '['
-                                | '{'
-                                | '}'
-                                | '^'
-                                | '~'
-                                | '*'
-                                | '+'
-                                | '-'
-                                | '<'
-                                | '>'
-                        )
-                    },
-                );
+                let is_regex_start = state.last_significant_char.is_none_or(|c| {
+                    matches!(
+                        c,
+                        '=' | '('
+                            | ','
+                            | ':'
+                            | ';'
+                            | '!'
+                            | '&'
+                            | '|'
+                            | '?'
+                            | '['
+                            | '{'
+                            | '}'
+                            | '^'
+                            | '~'
+                            | '*'
+                            | '+'
+                            | '-'
+                            | '<'
+                            | '>'
+                    )
+                });
 
                 if is_regex_start {
                     in_regex = true;
@@ -3989,7 +3986,7 @@ pub fn evaluate_exec_mediation(
 
     // 1. Check explicit allow patterns (highest precedence override).
     for pattern in &policy.allow_patterns {
-        if lower.contains(&pattern.to_ascii_lowercase()) {
+        if lower.starts_with(&pattern.to_ascii_lowercase()) {
             return ExecMediationResult::Allow;
         }
     }
@@ -33810,6 +33807,409 @@ mod tests {
                 },
             }))
         );
+    }
+
+    // ========================================================================
+    // bd-3ar8v.4.8.23: Typed opcode round-trip serialization tests for all
+    //                   hostcall fast-lane matrix entries
+    // ========================================================================
+
+    /// Tool.write round-trip: verifies method, capability, typed opcode context.
+    #[test]
+    fn hostcall_request_to_payload_tool_write_roundtrip() {
+        let request = HostcallRequest {
+            call_id: "rt-tool-write".to_string(),
+            kind: HostcallKind::Tool {
+                name: "write".to_string(),
+            },
+            payload: json!({ "path": "/tmp/out.txt", "content": "hello" }),
+            trace_id: 10,
+            extension_id: None,
+        };
+
+        let payload = hostcall_request_to_payload(&request);
+        assert_eq!(payload.method, "tool");
+        assert_eq!(payload.capability, "write");
+        assert_eq!(
+            payload.params.get("name").and_then(Value::as_str),
+            Some("write")
+        );
+        let ctx = payload.context.as_ref().expect("context for tool.write");
+        assert_eq!(ctx["typed_opcode"]["code"], "tool.write");
+        assert_eq!(
+            ctx["typed_opcode"]["schema"],
+            HOSTCALL_OPCODE_SCHEMA_VERSION
+        );
+        assert_eq!(ctx["typed_opcode"]["version"], HOSTCALL_OPCODE_VERSION);
+    }
+
+    /// Tool.edit round-trip: verifies typed opcode context and filesystem class.
+    #[test]
+    fn hostcall_request_to_payload_tool_edit_roundtrip() {
+        let request = HostcallRequest {
+            call_id: "rt-tool-edit".to_string(),
+            kind: HostcallKind::Tool {
+                name: "edit".to_string(),
+            },
+            payload: json!({ "path": "/tmp/f.txt", "old": "a", "new": "b" }),
+            trace_id: 11,
+            extension_id: None,
+        };
+
+        let payload = hostcall_request_to_payload(&request);
+        assert_eq!(payload.method, "tool");
+        assert_eq!(payload.capability, "write");
+        let ctx = payload.context.as_ref().expect("context for tool.edit");
+        assert_eq!(ctx["typed_opcode"]["code"], "tool.edit");
+        assert_eq!(ctx["io_uring_lane_input"]["capability_class"], "filesystem");
+    }
+
+    /// Tool.bash round-trip: verifies execution capability class.
+    #[test]
+    fn hostcall_request_to_payload_tool_bash_roundtrip() {
+        let request = HostcallRequest {
+            call_id: "rt-tool-bash".to_string(),
+            kind: HostcallKind::Tool {
+                name: "bash".to_string(),
+            },
+            payload: json!({ "command": "echo hello" }),
+            trace_id: 12,
+            extension_id: None,
+        };
+
+        let payload = hostcall_request_to_payload(&request);
+        assert_eq!(payload.method, "tool");
+        assert_eq!(payload.capability, "exec");
+        let ctx = payload.context.as_ref().expect("context for tool.bash");
+        assert_eq!(ctx["typed_opcode"]["code"], "tool.bash");
+        assert_eq!(ctx["io_uring_lane_input"]["capability_class"], "execution");
+    }
+
+    /// Exec kind round-trip: verifies cmd is placed in params.
+    #[test]
+    fn hostcall_request_to_payload_exec_roundtrip() {
+        let request = HostcallRequest {
+            call_id: "rt-exec".to_string(),
+            kind: HostcallKind::Exec {
+                cmd: "ls".to_string(),
+            },
+            payload: json!({ "args": ["-la"], "timeout": 5000 }),
+            trace_id: 13,
+            extension_id: None,
+        };
+
+        let payload = hostcall_request_to_payload(&request);
+        assert_eq!(payload.method, "exec");
+        assert_eq!(payload.capability, "exec");
+        assert_eq!(
+            payload.params.get("cmd").and_then(Value::as_str),
+            Some("ls")
+        );
+        assert_eq!(payload.params["args"], json!(["-la"]));
+    }
+
+    /// HTTP kind round-trip: passes payload through.
+    #[test]
+    fn hostcall_request_to_payload_http_roundtrip() {
+        let request = HostcallRequest {
+            call_id: "rt-http".to_string(),
+            kind: HostcallKind::Http,
+            payload: json!({ "url": "https://example.com", "method": "GET" }),
+            trace_id: 14,
+            extension_id: None,
+        };
+
+        let payload = hostcall_request_to_payload(&request);
+        assert_eq!(payload.method, "http");
+        assert_eq!(payload.capability, "http");
+        assert_eq!(
+            payload.params.get("url").and_then(Value::as_str),
+            Some("https://example.com")
+        );
+    }
+
+    /// Session set_model round-trip: verifies typed opcode.
+    #[test]
+    fn hostcall_request_to_payload_session_set_model_roundtrip() {
+        let request = HostcallRequest {
+            call_id: "rt-session-set-model".to_string(),
+            kind: HostcallKind::Session {
+                op: "set_model".to_string(),
+            },
+            payload: json!({ "provider": "anthropic", "model": "claude-sonnet-4-5" }),
+            trace_id: 15,
+            extension_id: None,
+        };
+
+        let payload = hostcall_request_to_payload(&request);
+        assert_eq!(payload.method, "session");
+        assert_eq!(payload.capability, "session");
+        assert_eq!(
+            payload.params.get("op").and_then(Value::as_str),
+            Some("set_model")
+        );
+        let ctx = payload.context.as_ref().expect("context");
+        assert_eq!(ctx["typed_opcode"]["code"], "session.set_model");
+    }
+
+    /// Session get_model round-trip: verifies typed opcode.
+    #[test]
+    fn hostcall_request_to_payload_session_get_model_roundtrip() {
+        let request = HostcallRequest {
+            call_id: "rt-session-get-model".to_string(),
+            kind: HostcallKind::Session {
+                op: "get_model".to_string(),
+            },
+            payload: json!({}),
+            trace_id: 16,
+            extension_id: None,
+        };
+
+        let payload = hostcall_request_to_payload(&request);
+        let ctx = payload.context.as_ref().expect("context");
+        assert_eq!(ctx["typed_opcode"]["code"], "session.get_model");
+        assert_eq!(ctx["io_uring_lane_input"]["capability_class"], "session");
+    }
+
+    /// Session get_thinking_level and set_thinking_level round-trip.
+    #[test]
+    fn hostcall_request_to_payload_session_thinking_level_roundtrip() {
+        for op in &["get_thinking_level", "set_thinking_level"] {
+            let request = HostcallRequest {
+                call_id: format!("rt-session-{op}"),
+                kind: HostcallKind::Session {
+                    op: op.to_string(),
+                },
+                payload: json!({}),
+                trace_id: 17,
+                extension_id: None,
+            };
+
+            let payload = hostcall_request_to_payload(&request);
+            let ctx = payload.context.as_ref().unwrap_or_else(|| {
+                panic!("context expected for session.{op}");
+            });
+            assert_eq!(
+                ctx["typed_opcode"]["code"],
+                format!("session.{op}"),
+                "opcode mismatch for {op}"
+            );
+        }
+    }
+
+    /// Session set_label round-trip.
+    #[test]
+    fn hostcall_request_to_payload_session_set_label_roundtrip() {
+        let request = HostcallRequest {
+            call_id: "rt-session-set-label".to_string(),
+            kind: HostcallKind::Session {
+                op: "set_label".to_string(),
+            },
+            payload: json!({ "target_id": "msg-1", "label": "important" }),
+            trace_id: 18,
+            extension_id: None,
+        };
+
+        let payload = hostcall_request_to_payload(&request);
+        let ctx = payload.context.as_ref().expect("context");
+        assert_eq!(ctx["typed_opcode"]["code"], "session.set_label");
+    }
+
+    /// Session new getters (get_state, get_messages, get_entries, get_branch,
+    /// `get_file`) round-trip with typed opcodes.
+    #[test]
+    fn hostcall_request_to_payload_session_new_getters_roundtrip() {
+        let ops = [
+            "get_state",
+            "get_messages",
+            "get_entries",
+            "get_branch",
+            "get_file",
+        ];
+
+        for op in ops {
+            let request = HostcallRequest {
+                call_id: format!("rt-session-{op}"),
+                kind: HostcallKind::Session {
+                    op: op.to_string(),
+                },
+                payload: json!({}),
+                trace_id: 19,
+                extension_id: None,
+            };
+
+            let payload = hostcall_request_to_payload(&request);
+            assert_eq!(payload.method, "session", "method mismatch for {op}");
+            assert_eq!(payload.capability, "session", "capability mismatch for {op}");
+            let ctx = payload.context.as_ref().unwrap_or_else(|| {
+                panic!("context expected for session.{op}");
+            });
+            assert_eq!(
+                ctx["typed_opcode"]["code"],
+                format!("session.{op}"),
+                "opcode code mismatch for {op}"
+            );
+            assert_eq!(
+                ctx["io_uring_lane_input"]["capability_class"],
+                "session",
+                "capability_class mismatch for {op}"
+            );
+        }
+    }
+
+    /// Events round-trip for all declared event operations.
+    #[test]
+    fn hostcall_request_to_payload_events_all_ops_roundtrip() {
+        let event_ops = [
+            "get_active_tools",
+            "get_all_tools",
+            "set_active_tools",
+            "emit",
+            "list",
+            "get_model",
+            "set_model",
+            "get_thinking_level",
+            "set_thinking_level",
+            "get_flag",
+            "list_flags",
+            "append_entry",
+            "register_command",
+        ];
+
+        for op in event_ops {
+            let request = HostcallRequest {
+                call_id: format!("rt-events-{op}"),
+                kind: HostcallKind::Events {
+                    op: op.to_string(),
+                },
+                payload: json!({}),
+                trace_id: 20,
+                extension_id: None,
+            };
+
+            let payload = hostcall_request_to_payload(&request);
+            assert_eq!(payload.method, "events", "method mismatch for events.{op}");
+            assert_eq!(
+                payload.capability, "events",
+                "capability mismatch for events.{op}"
+            );
+            assert_eq!(
+                payload.params.get("op").and_then(Value::as_str),
+                Some(op),
+                "op not injected for events.{op}"
+            );
+
+            let ctx = payload.context.as_ref().unwrap_or_else(|| {
+                panic!("context expected for events.{op}");
+            });
+            assert_eq!(
+                ctx["typed_opcode"]["code"],
+                format!("events.{op}"),
+                "opcode code mismatch for events.{op}"
+            );
+            assert_eq!(
+                ctx["io_uring_lane_input"]["capability_class"],
+                "events",
+                "capability_class mismatch for events.{op}"
+            );
+        }
+    }
+
+    /// UI round-trip: verifies op injection.
+    #[test]
+    fn hostcall_request_to_payload_ui_roundtrip() {
+        let request = HostcallRequest {
+            call_id: "rt-ui-confirm".to_string(),
+            kind: HostcallKind::Ui {
+                op: "confirm".to_string(),
+            },
+            payload: json!({ "message": "Are you sure?" }),
+            trace_id: 21,
+            extension_id: None,
+        };
+
+        let payload = hostcall_request_to_payload(&request);
+        assert_eq!(payload.method, "ui");
+        assert_eq!(payload.capability, "ui");
+        assert_eq!(
+            payload.params.get("op").and_then(Value::as_str),
+            Some("confirm")
+        );
+    }
+
+    /// Log kind round-trip: passes through payload.
+    #[test]
+    fn hostcall_request_to_payload_log_roundtrip() {
+        let request = HostcallRequest {
+            call_id: "rt-log".to_string(),
+            kind: HostcallKind::Log,
+            payload: json!({ "level": "info", "message": "test" }),
+            trace_id: 22,
+            extension_id: None,
+        };
+
+        let payload = hostcall_request_to_payload(&request);
+        assert_eq!(payload.method, "log");
+        assert_eq!(payload.capability, "log");
+    }
+
+    /// Outcome round-trip: `HostResultPayload` -> `HostcallOutcome` -> `HostResultPayload`
+    /// for success, error, and stream chunk.
+    #[test]
+    fn host_result_to_outcome_and_back_roundtrip() {
+        // Success
+        let success = HostResultPayload {
+            call_id: "rt-s".to_string(),
+            output: json!({"data": 42}),
+            is_error: false,
+            error: None,
+            chunk: None,
+        };
+        let outcome = host_result_to_outcome(success);
+        assert!(matches!(outcome, HostcallOutcome::Success(_)));
+        let back = outcome_to_host_result("rt-s", &outcome);
+        assert!(!back.is_error);
+        assert_eq!(back.output, json!({"data": 42}));
+
+        // Error
+        let error_result = HostResultPayload {
+            call_id: "rt-e".to_string(),
+            output: json!({}),
+            is_error: true,
+            error: Some(HostCallError {
+                code: HostCallErrorCode::Denied,
+                message: "nope".to_string(),
+                details: None,
+                retryable: None,
+            }),
+            chunk: None,
+        };
+        let outcome = host_result_to_outcome(error_result);
+        assert!(matches!(outcome, HostcallOutcome::Error { .. }));
+        let back = outcome_to_host_result("rt-e", &outcome);
+        assert!(back.is_error);
+        let err = back.error.as_ref().expect("error");
+        assert_eq!(err.code, HostCallErrorCode::Denied);
+
+        // Stream chunk
+        let chunk_result = HostResultPayload {
+            call_id: "rt-c".to_string(),
+            output: json!({"chunk_data": "piece"}),
+            is_error: false,
+            error: None,
+            chunk: Some(HostStreamChunk {
+                index: 3,
+                is_last: false,
+                backpressure: None,
+            }),
+        };
+        let outcome = host_result_to_outcome(chunk_result);
+        assert!(matches!(outcome, HostcallOutcome::StreamChunk { .. }));
+        let back = outcome_to_host_result("rt-c", &outcome);
+        assert!(!back.is_error);
+        let chunk = back.chunk.as_ref().expect("chunk");
+        assert_eq!(chunk.index, 3);
+        assert!(!chunk.is_last);
     }
 
     #[test]

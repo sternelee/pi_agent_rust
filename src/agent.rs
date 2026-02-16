@@ -1515,22 +1515,18 @@ impl Agent {
         // Phase 3: Process results sequentially and handle skips.
         for (index, tool_call) in tool_calls.iter().enumerate() {
             // Check if we have a result. If not, it means we aborted or skipped.
-            let (output, is_error) = if let Some(res) = tool_outputs[index].take() {
-                res
-            } else {
+            let (output, is_error) = tool_outputs[index].take().unwrap_or_else(|| {
                 // If we don't have a result, it was skipped/aborted.
                 // We must return a placeholder.
                 (
                     ToolOutput {
-                        content: vec![ContentBlock::Text(TextContent::new(
-                            "Tool execution aborted",
-                        ))],
+                        content: vec![ContentBlock::Text(TextContent::new("Tool execution aborted"))],
                         details: None,
                         is_error: true,
                     },
                     true,
                 )
-            };
+            });
 
             let tool_result = Arc::new(ToolResultMessage {
                 tool_call_id: tool_call.id.clone(),
@@ -1587,8 +1583,10 @@ impl Agent {
                 )
             };
 
-            if !was_executed {
-                 // Emit missing events for aborted tools
+            if was_executed {
+                // Events already emitted by execute_tool
+            } else {
+                // Emit missing events for aborted tools
                 let event_output = ToolOutput {
                     content: output.content.clone(),
                     details: output.details.clone(),
@@ -1606,8 +1604,6 @@ impl Agent {
                     result: event_output,
                     is_error,
                 });
-            } else {
-                // Events already emitted by execute_tool
             }
 
             // ... Message updates ...

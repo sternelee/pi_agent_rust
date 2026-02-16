@@ -719,7 +719,9 @@ async fn run(
     // QuickJS init (~50-500ms) overlaps with auth refresh, model selection,
     // and session creation.  The spawned task runs concurrently until awaited
     // just before `enable_extensions_with_policy`.
-    let js_prewarm_handle = if !resources.extensions().is_empty() {
+    let js_prewarm_handle = if resources.extensions().is_empty() {
+        None
+    } else {
         let pre_enabled_tools = cli.enabled_tools();
         let pre_mgr = pi::extensions::ExtensionManager::new();
         pre_mgr.set_cwd(cwd.display().to_string());
@@ -767,8 +769,6 @@ async fn run(
                 .await
             }),
         ))
-    } else {
-        None
     };
 
     let mut auth = auth_result?;
