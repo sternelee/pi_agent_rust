@@ -587,12 +587,31 @@ fn convert_user_message(message: &crate::model::UserMessage) -> Option<BedrockMe
         }
         UserContent::Blocks(blocks) => {
             for block in blocks {
-                if let ContentBlock::Text(text) = block
-                    && !text.text.trim().is_empty()
-                {
-                    content.push(BedrockContent::Text {
-                        text: text.text.clone(),
-                    });
+                match block {
+                    ContentBlock::Text(text) => {
+                        if !text.text.trim().is_empty() {
+                            content.push(BedrockContent::Text {
+                                text: text.text.clone(),
+                            });
+                        }
+                    }
+                    ContentBlock::Image(img) => {
+                        let format = img
+                            .mime_type
+                            .split('/')
+                            .last()
+                            .unwrap_or("png")
+                            .to_string();
+                        content.push(BedrockContent::Image {
+                            image: BedrockImageBlock {
+                                format,
+                                source: BedrockImageSource {
+                                    bytes: img.data.clone(),
+                                },
+                            },
+                        });
+                    }
+                    _ => {}
                 }
             }
         }
