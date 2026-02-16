@@ -113,10 +113,10 @@ impl AmacGroupKey {
     #[must_use]
     pub const fn memory_weight(&self) -> u32 {
         match self {
-            Self::Http => 90,                  // Network IO = high stall
-            Self::Tool | Self::Exec => 70,     // File IO or subprocess
-            Self::SessionRead => 50,           // In-memory but large working set
-            Self::EventRead => 40,             // Small working set, fast
+            Self::Http => 90,              // Network IO = high stall
+            Self::Tool | Self::Exec => 70, // File IO or subprocess
+            Self::SessionRead => 50,       // In-memory but large working set
+            Self::EventRead => 40,         // Small working set, fast
             Self::SessionWrite => 30,
             Self::EventWrite => 20,
             Self::Ui => 10,
@@ -313,6 +313,7 @@ impl AmacStallTelemetry {
             recent_variance: self.recent_variance(),
             total_calls: self.total_calls,
             total_stalls: self.total_stalls,
+            stall_threshold_ns: self.stall_threshold_ns,
             toggle_decisions: self.toggle_decisions,
             interleave_selections: self.interleave_selections,
             recent_window_size: self.recent_samples.len(),
@@ -328,6 +329,7 @@ pub struct AmacStallTelemetrySnapshot {
     pub recent_variance: u64,
     pub total_calls: u64,
     pub total_stalls: u64,
+    pub stall_threshold_ns: u64,
     pub toggle_decisions: u64,
     pub interleave_selections: u64,
     pub recent_window_size: usize,
@@ -381,6 +383,10 @@ pub struct AmacBatchExecutorConfig {
     pub max_interleave_width: usize,
     /// Enable/disable AMAC globally.
     pub enabled: bool,
+    /// Stall classification threshold in nanoseconds.
+    pub stall_threshold_ns: u64,
+    /// Stall-ratio threshold (0..1000) required before AMAC interleaving.
+    pub stall_ratio_threshold: u64,
 }
 
 impl Default for AmacBatchExecutorConfig {
@@ -411,10 +417,22 @@ impl AmacBatchExecutorConfig {
             .and_then(|raw| raw.trim().parse::<usize>().ok())
             .unwrap_or(AMAC_MAX_INTERLEAVE_WIDTH)
             .max(2);
+        let stall_threshold_ns = std::env::var("PI_HOSTCALL_AMAC_STALL_THRESHOLD_NS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .unwrap_or(AMAC_STALL_THRESHOLD_NS)
+            .max(1);
+        let stall_ratio_threshold = std::env::var("PI_HOSTCALL_AMAC_STALL_RATIO_THRESHOLD")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .unwrap_or(AMAC_STALL_RATIO_THRESHOLD)
+            .clamp(1, 1_000);
         Self {
             min_batch_size,
             max_interleave_width,
             enabled,
+            stall_threshold_ns,
+            stall_ratio_threshold,
         }
     }
 
@@ -424,7 +442,16 @@ impl AmacBatchExecutorConfig {
             min_batch_size,
             max_interleave_width,
             enabled,
+            stall_threshold_ns: AMAC_STALL_THRESHOLD_NS,
+            stall_ratio_threshold: AMAC_STALL_RATIO_THRESHOLD,
         }
+    }
+
+    #[must_use]
+    pub fn with_thresholds(mut self, stall_threshold_ns: u64, stall_ratio_threshold: u64) -> Self {
+        self.stall_threshold_ns = stall_threshold_ns.max(1);
+        self.stall_ratio_threshold = stall_ratio_threshold.clamp(1, 1_000);
+        self
     }
 }
 
@@ -443,8 +470,8 @@ impl AmacBatchExecutor {
     #[must_use]
     pub fn new(config: AmacBatchExecutorConfig) -> Self {
         Self {
+            telemetry: AmacStallTelemetry::new(config.stall_threshold_ns),
             config,
-            telemetry: AmacStallTelemetry::default(),
         }
     }
 
@@ -560,7 +587,7 @@ impl AmacBatchExecutor {
 
         // Rule 4: Stall ratio below threshold → sequential is fine.
         let stall_ratio = self.telemetry.stall_ratio();
-        if stall_ratio < AMAC_STALL_RATIO_THRESHOLD {
+        if stall_ratio < self.config.stall_ratio_threshold {
             return AmacToggleDecision::Sequential {
                 reason: "low_stall_ratio",
             };
@@ -1193,6 +1220,8 @@ mod tests {
         assert!(!config.enabled);
         assert_eq!(config.min_batch_size, 8);
         assert_eq!(config.max_interleave_width, 32);
+        assert_eq!(config.stall_threshold_ns, AMAC_STALL_THRESHOLD_NS);
+        assert_eq!(config.stall_ratio_threshold, AMAC_STALL_RATIO_THRESHOLD);
     }
 
     #[test]
@@ -1200,6 +1229,13 @@ mod tests {
         // Default from_env with no env vars set → enabled.
         let executor = AmacBatchExecutor::default();
         assert!(executor.enabled());
+    }
+
+    #[test]
+    fn config_with_thresholds_applies_clamps() {
+        let config = AmacBatchExecutorConfig::new(true, 4, 16).with_thresholds(0, 9_999);
+        assert_eq!(config.stall_threshold_ns, 1);
+        assert_eq!(config.stall_ratio_threshold, 1_000);
     }
 
     // ── Batch result types ──────────────────────────────────────────

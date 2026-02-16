@@ -23,7 +23,7 @@ use pi::error::{Error, Result};
 use pi::extensions::JsExtensionLoadSpec;
 use pi::extensions_js::{HostcallKind, PiJsRuntime, PiJsRuntimeConfig};
 use pi::scheduler::{HostcallOutcome, WallClock};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
@@ -44,6 +44,9 @@ const DEFAULT_DOWNSTREAM_BEADS: &[&str] = &[
     "bd-3ar8v.4.23",
     "bd-3ar8v.4.29",
 ];
+const DEFAULT_PMU_LLC_MISS_BUDGET_PCT: f64 = 18.0;
+const DEFAULT_PMU_BRANCH_MISS_BUDGET_PCT: f64 = 6.0;
+const DEFAULT_PMU_STALL_TOTAL_BUDGET_PCT: f64 = 65.0;
 
 #[derive(Parser, Debug)]
 #[command(name = "ext_workloads")]
@@ -123,6 +126,63 @@ struct StageTotals {
     policy: f64,
     execute: f64,
     io: f64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct PmuBudgetSpec {
+    llc_miss_budget_pct: f64,
+    branch_miss_budget_pct: f64,
+    stall_total_budget_pct: f64,
+}
+
+impl Default for PmuBudgetSpec {
+    fn default() -> Self {
+        Self {
+            llc_miss_budget_pct: DEFAULT_PMU_LLC_MISS_BUDGET_PCT,
+            branch_miss_budget_pct: DEFAULT_PMU_BRANCH_MISS_BUDGET_PCT,
+            stall_total_budget_pct: DEFAULT_PMU_STALL_TOTAL_BUDGET_PCT,
+        }
+    }
+}
+
+impl PmuBudgetSpec {
+    fn from_env() -> Self {
+        fn parse_env_f64(key: &str) -> Option<f64> {
+            std::env::var(key)
+                .ok()
+                .and_then(|raw| raw.trim().parse::<f64>().ok())
+                .filter(|value| value.is_finite())
+        }
+
+        let mut budget = Self::default();
+        if let Some(value) = parse_env_f64("PI_EXT_PMU_LLC_MISS_BUDGET_PCT") {
+            budget.llc_miss_budget_pct = value.clamp(0.1, 100.0);
+        }
+        if let Some(value) = parse_env_f64("PI_EXT_PMU_BRANCH_MISS_BUDGET_PCT") {
+            budget.branch_miss_budget_pct = value.clamp(0.1, 100.0);
+        }
+        if let Some(value) = parse_env_f64("PI_EXT_PMU_STALL_TOTAL_BUDGET_PCT") {
+            budget.stall_total_budget_pct = value.clamp(0.1, 200.0);
+        }
+        budget
+    }
+
+    fn as_json(self) -> Value {
+        json!({
+            "llc_miss_budget_pct": self.llc_miss_budget_pct,
+            "branch_miss_budget_pct": self.branch_miss_budget_pct,
+            "stall_total_budget_pct": self.stall_total_budget_pct,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PmuCountersNormalized {
+    frontend_stall_pct: Option<f64>,
+    backend_stall_pct: Option<f64>,
+    llc_miss_pct: Option<f64>,
+    branch_miss_pct: Option<f64>,
+    cycles_per_call: Option<f64>,
 }
 
 impl StageTotals {
@@ -369,7 +429,169 @@ fn write_jsonl(path: &Path, records: &[Value]) -> Result<()> {
     Ok(())
 }
 
+fn normalize_pct(value: Option<f64>) -> Option<f64> {
+    value.map(|raw| {
+        if raw <= 1.0 {
+            (raw * 100.0).clamp(0.0, 100.0)
+        } else {
+            raw.clamp(0.0, 100.0)
+        }
+    })
+}
+
+fn value_as_f64(value: Option<&Value>) -> Option<f64> {
+    value
+        .and_then(Value::as_f64)
+        .or_else(|| value.and_then(Value::as_u64).map(|v| v as f64))
+        .or_else(|| value.and_then(Value::as_i64).map(|v| v as f64))
+}
+
+fn object_counter_value(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|key| value_as_f64(object.get(*key)))
+}
+
+fn parse_pmu_counters(raw: &Value) -> Option<PmuCountersNormalized> {
+    let root = raw.as_object()?;
+    let source_object = root
+        .get("counters")
+        .and_then(Value::as_object)
+        .unwrap_or(root);
+
+    let counters = PmuCountersNormalized {
+        frontend_stall_pct: normalize_pct(object_counter_value(
+            source_object,
+            &[
+                "frontend_stall_pct",
+                "frontend_stall_ratio",
+                "frontend_bound_pct",
+                "frontend_bound",
+            ],
+        )),
+        backend_stall_pct: normalize_pct(object_counter_value(
+            source_object,
+            &[
+                "backend_stall_pct",
+                "backend_stall_ratio",
+                "backend_bound_pct",
+                "backend_bound",
+            ],
+        )),
+        llc_miss_pct: normalize_pct(object_counter_value(
+            source_object,
+            &[
+                "llc_miss_pct",
+                "llc_miss_rate_pct",
+                "llc_miss_ratio",
+                "llc_miss_rate",
+            ],
+        )),
+        branch_miss_pct: normalize_pct(object_counter_value(
+            source_object,
+            &[
+                "branch_miss_pct",
+                "branch_miss_rate_pct",
+                "branch_miss_ratio",
+                "branch_miss_rate",
+            ],
+        )),
+        cycles_per_call: object_counter_value(
+            source_object,
+            &["cycles_per_call", "cycles_per_hostcall", "cycles_per_op"],
+        )
+        .map(|value| value.max(0.0)),
+    };
+
+    if counters.frontend_stall_pct.is_none()
+        && counters.backend_stall_pct.is_none()
+        && counters.llc_miss_pct.is_none()
+        && counters.branch_miss_pct.is_none()
+        && counters.cycles_per_call.is_none()
+    {
+        None
+    } else {
+        Some(counters)
+    }
+}
+
+fn pmu_pressure_score(counters: &PmuCountersNormalized, budget: PmuBudgetSpec) -> f64 {
+    let frontend = counters.frontend_stall_pct.unwrap_or(0.0);
+    let backend = counters.backend_stall_pct.unwrap_or(0.0);
+    let stall_total = frontend + backend;
+    let llc = counters.llc_miss_pct.unwrap_or(0.0);
+    let branch = counters.branch_miss_pct.unwrap_or(0.0);
+
+    let stall_pressure = (stall_total / budget.stall_total_budget_pct.max(0.1)).clamp(0.0, 2.0);
+    let llc_pressure = (llc / budget.llc_miss_budget_pct.max(0.1)).clamp(0.0, 2.0);
+    let branch_pressure = (branch / budget.branch_miss_budget_pct.max(0.1)).clamp(0.0, 2.0);
+    (stall_pressure * 0.5) + (llc_pressure * 0.35) + (branch_pressure * 0.15)
+}
+
+fn evaluate_pmu_budget(counters: &PmuCountersNormalized, budget: PmuBudgetSpec) -> Value {
+    let frontend = counters.frontend_stall_pct.unwrap_or(0.0);
+    let backend = counters.backend_stall_pct.unwrap_or(0.0);
+    let stall_total = frontend + backend;
+    let llc = counters.llc_miss_pct.unwrap_or(0.0);
+    let branch = counters.branch_miss_pct.unwrap_or(0.0);
+
+    let llc_ok = llc <= budget.llc_miss_budget_pct;
+    let branch_ok = branch <= budget.branch_miss_budget_pct;
+    let stall_ok = stall_total <= budget.stall_total_budget_pct;
+    let status = if llc_ok && branch_ok && stall_ok {
+        "pass"
+    } else {
+        "fail"
+    };
+
+    json!({
+        "status": status,
+        "checks": {
+            "llc_miss_pct": { "value": llc, "budget": budget.llc_miss_budget_pct, "ok": llc_ok },
+            "branch_miss_pct": { "value": branch, "budget": budget.branch_miss_budget_pct, "ok": branch_ok },
+            "stall_total_pct": { "value": stall_total, "budget": budget.stall_total_budget_pct, "ok": stall_ok },
+        },
+        "pmu_pressure_score": pmu_pressure_score(counters, budget),
+    })
+}
+
+fn annotate_pmu_payload(
+    raw: Value,
+    source: &str,
+    path: Option<&str>,
+    budget: PmuBudgetSpec,
+) -> Value {
+    let normalized = parse_pmu_counters(&raw);
+    let budget_eval = normalized.as_ref().map_or_else(
+        || {
+            json!({
+                "status": "not_evaluated",
+                "reason": "recognized PMU counter fields were not found",
+            })
+        },
+        |counters| evaluate_pmu_budget(counters, budget),
+    );
+
+    let mut base = json!({
+        "status": "collected",
+        "source": source,
+        "counters": raw,
+        "budget": budget.as_json(),
+        "budget_evaluation": budget_eval,
+    });
+    if let Some(path) = path {
+        base["path"] = Value::String(path.to_string());
+    }
+    if let Some(counters) = normalized {
+        base["normalized_counters"] =
+            serde_json::to_value(counters).unwrap_or_else(|_| Value::Null);
+    } else {
+        base["normalized_counters"] = Value::Null;
+    }
+    base
+}
+
 fn collect_pmu_metadata() -> Value {
+    let budget = PmuBudgetSpec::from_env();
+
     if let Ok(raw) = std::env::var("PI_EXT_PMU_COUNTERS_JSON") {
         return serde_json::from_str::<Value>(&raw).map_or_else(
             |_| {
@@ -377,15 +599,10 @@ fn collect_pmu_metadata() -> Value {
                     "status": "invalid",
                     "source": "env:PI_EXT_PMU_COUNTERS_JSON",
                     "reason": "failed_to_parse_json",
+                    "budget": budget.as_json(),
                 })
             },
-            |parsed| {
-                json!({
-                    "status": "collected",
-                    "source": "env:PI_EXT_PMU_COUNTERS_JSON",
-                    "counters": parsed,
-                })
-            },
+            |parsed| annotate_pmu_payload(parsed, "env:PI_EXT_PMU_COUNTERS_JSON", None, budget),
         );
     }
 
@@ -396,6 +613,7 @@ fn collect_pmu_metadata() -> Value {
                     "status": "missing",
                     "source": "env:PI_EXT_PMU_COUNTERS_PATH",
                     "path": path,
+                    "budget": budget.as_json(),
                 })
             },
             |raw| {
@@ -406,15 +624,16 @@ fn collect_pmu_metadata() -> Value {
                             "source": "env:PI_EXT_PMU_COUNTERS_PATH",
                             "path": path,
                             "reason": "failed_to_parse_json",
+                            "budget": budget.as_json(),
                         })
                     },
                     |parsed| {
-                        json!({
-                            "status": "collected",
-                            "source": "env:PI_EXT_PMU_COUNTERS_PATH",
-                            "path": path,
-                            "counters": parsed,
-                        })
+                        annotate_pmu_payload(
+                            parsed,
+                            "env:PI_EXT_PMU_COUNTERS_PATH",
+                            Some(&path),
+                            budget,
+                        )
                     },
                 )
             },
@@ -424,6 +643,7 @@ fn collect_pmu_metadata() -> Value {
     json!({
         "status": "not_collected",
         "reason": "set PI_EXT_PMU_COUNTERS_JSON or PI_EXT_PMU_COUNTERS_PATH to attach PMU counters",
+        "budget": budget.as_json(),
     })
 }
 
@@ -1040,6 +1260,48 @@ fn stage_user_impact(stage_total_us: f64, total_samples: u64, potential: f64) ->
     })
 }
 
+fn pmu_budget_from_meta(pmu_meta: &Value) -> PmuBudgetSpec {
+    let mut budget = PmuBudgetSpec::default();
+    let Some(object) = pmu_meta.get("budget").and_then(Value::as_object) else {
+        return budget;
+    };
+    if let Some(value) = value_as_f64(object.get("llc_miss_budget_pct")) {
+        budget.llc_miss_budget_pct = value.clamp(0.1, 100.0);
+    }
+    if let Some(value) = value_as_f64(object.get("branch_miss_budget_pct")) {
+        budget.branch_miss_budget_pct = value.clamp(0.1, 100.0);
+    }
+    if let Some(value) = value_as_f64(object.get("stall_total_budget_pct")) {
+        budget.stall_total_budget_pct = value.clamp(0.1, 200.0);
+    }
+    budget
+}
+
+fn pmu_stage_multiplier(stage: &str, pmu_meta: &Value) -> f64 {
+    let budget = pmu_budget_from_meta(pmu_meta);
+    let counters = pmu_meta
+        .get("normalized_counters")
+        .and_then(parse_pmu_counters)
+        .or_else(|| parse_pmu_counters(pmu_meta));
+
+    let Some(counters) = counters else {
+        return 1.0;
+    };
+
+    let pressure = pmu_pressure_score(&counters, budget);
+    let stage_sensitivity = match stage {
+        "queue" => 1.0,
+        "schedule" => 0.95,
+        "execute" => 0.8,
+        "policy" => 0.65,
+        "io" => 0.55,
+        "marshal" => 0.35,
+        _ => 0.5,
+    };
+    let adjustment = (pressure - 1.0) * 0.35 * stage_sensitivity;
+    (1.0 + adjustment).clamp(0.7, 1.8)
+}
+
 fn build_hotspot_matrix(
     records: &[Value],
     run_metadata: &Value,
@@ -1078,6 +1340,20 @@ fn build_hotspot_matrix(
 
     let grand_total = totals.total_us().max(1.0);
     let confidence = ((total_samples as f64).ln_1p() / 8.0).clamp(0.35, 0.99);
+    let pmu_budget = pmu_budget_from_meta(pmu_meta);
+    let pmu_counters = pmu_meta
+        .get("normalized_counters")
+        .and_then(parse_pmu_counters)
+        .or_else(|| parse_pmu_counters(pmu_meta));
+    let pmu_budget_eval = pmu_counters.as_ref().map_or_else(
+        || {
+            json!({
+                "status": "not_evaluated",
+                "reason": "PMU counters unavailable",
+            })
+        },
+        |counters| evaluate_pmu_budget(counters, pmu_budget),
+    );
     let stage_values = [
         ("marshal", totals.marshal),
         ("queue", totals.queue),
@@ -1092,7 +1368,8 @@ fn build_hotspot_matrix(
         .map(|(stage, stage_total_us)| {
             let share_pct = (*stage_total_us / grand_total) * 100.0;
             let potential = stage_optimization_potential(stage);
-            let ev_score = share_pct * potential * confidence;
+            let pmu_multiplier = pmu_stage_multiplier(stage, pmu_meta);
+            let ev_score = share_pct * potential * confidence * pmu_multiplier;
             json!({
                 "stage": stage,
                 "total_us": stage_total_us,
@@ -1100,8 +1377,10 @@ fn build_hotspot_matrix(
                 "avg_us_per_sample": stage_total_us / (total_samples.max(1) as f64),
                 "optimization_potential_pct": potential * 100.0,
                 "confidence": confidence,
+                "pmu_multiplier": pmu_multiplier,
                 "ev_score": ev_score,
                 "projected_user_impact": stage_user_impact(*stage_total_us, total_samples, potential),
+                "pmu_budget_evaluation": pmu_budget_eval.clone(),
                 "recommended_action": stage_recommendation(stage),
                 "downstream_beads": DEFAULT_DOWNSTREAM_BEADS,
             })
@@ -1125,6 +1404,8 @@ fn build_hotspot_matrix(
         "artifacts": {
             "trace_log": trace_meta,
             "pmu_counters": pmu_meta,
+            "pmu_budget": pmu_budget.as_json(),
+            "pmu_budget_evaluation": pmu_budget_eval,
             "flame_data": flame_meta,
         },
         "stage_totals_us": {
@@ -1141,9 +1422,9 @@ fn build_hotspot_matrix(
         "downstream_consumers": DEFAULT_DOWNSTREAM_BEADS,
         "methodology": {
             "stage_decomposition": ["marshal", "queue", "schedule", "policy", "execute", "io"],
-            "ev_formula": "share_pct * optimization_potential * confidence",
+            "ev_formula": "share_pct * optimization_potential * confidence * pmu_multiplier",
             "confidence_formula": "clamp(log(sample_count+1)/8, 0.35, 0.99)",
-            "notes": "Queue/schedule attribution is inferred from scenario-specific stage weights; PMU/flame artifacts are attached when provided."
+            "notes": "Queue/schedule attribution is inferred from scenario-specific stage weights; PMU counters shape ev_score via stage multipliers when available."
         },
     })
 }
@@ -1184,6 +1465,8 @@ fn validate_hotspot_matrix_schema(matrix: &Value) -> Result<()> {
             "stage",
             "ev_score",
             "confidence",
+            "pmu_multiplier",
+            "pmu_budget_evaluation",
             "projected_user_impact",
             "recommended_action",
             "downstream_beads",
@@ -1201,6 +1484,49 @@ fn validate_hotspot_matrix_schema(matrix: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_pmu_counters_normalizes_ratio_inputs() {
+        let raw = json!({
+            "counters": {
+                "frontend_stall_ratio": 0.22,
+                "backend_stall_ratio": 0.31,
+                "llc_miss_rate": 0.18,
+                "branch_miss_rate_pct": 4.5,
+                "cycles_per_call": 12345.0
+            }
+        });
+        let parsed = parse_pmu_counters(&raw).expect("pmu counters should parse");
+        assert_eq!(parsed.frontend_stall_pct, Some(22.0));
+        assert_eq!(parsed.backend_stall_pct, Some(31.0));
+        assert_eq!(parsed.llc_miss_pct, Some(18.0));
+        assert_eq!(parsed.branch_miss_pct, Some(4.5));
+        assert_eq!(parsed.cycles_per_call, Some(12_345.0));
+    }
+
+    #[test]
+    fn pmu_budget_evaluation_fails_when_thresholds_exceeded() {
+        let counters = PmuCountersNormalized {
+            frontend_stall_pct: Some(40.0),
+            backend_stall_pct: Some(35.0),
+            llc_miss_pct: Some(25.0),
+            branch_miss_pct: Some(8.0),
+            cycles_per_call: Some(20_000.0),
+        };
+        let budget_eval = evaluate_pmu_budget(&counters, PmuBudgetSpec::default());
+        assert_eq!(
+            budget_eval.get("status").and_then(Value::as_str),
+            Some("fail")
+        );
+        assert_eq!(
+            budget_eval
+                .get("checks")
+                .and_then(|v| v.get("llc_miss_pct"))
+                .and_then(|v| v.get("ok"))
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+    }
 
     #[test]
     fn stage_weights_are_normalized() {
@@ -1274,7 +1600,21 @@ mod tests {
             &records,
             &json!({ "run_id": "test-run" }),
             &json!({ "schema": TRACE_EVENT_SCHEMA }),
-            &json!({ "status": "not_collected" }),
+            &json!({
+                "status": "collected",
+                "normalized_counters": {
+                    "frontend_stall_pct": 38.0,
+                    "backend_stall_pct": 34.0,
+                    "llc_miss_pct": 21.0,
+                    "branch_miss_pct": 7.0,
+                    "cycles_per_call": 18000.0
+                },
+                "budget": {
+                    "llc_miss_budget_pct": 18.0,
+                    "branch_miss_budget_pct": 6.0,
+                    "stall_total_budget_pct": 65.0
+                }
+            }),
             &json!({ "status": "not_collected" }),
         );
         validate_hotspot_matrix_schema(&matrix).expect("schema should validate");
@@ -1285,6 +1625,12 @@ mod tests {
         let top = &hotspots[0];
         assert!(top.get("ev_score").is_some(), "missing ev_score");
         assert!(top.get("confidence").is_some(), "missing confidence");
+        assert!(
+            top.get("pmu_multiplier")
+                .and_then(Value::as_f64)
+                .is_some_and(|mult| mult > 1.0),
+            "expected PMU multiplier to increase under high pressure"
+        );
         assert!(
             top.get("projected_user_impact").is_some(),
             "missing projected_user_impact"

@@ -2610,6 +2610,380 @@ impl RegimeShiftDetectorState {
     }
 }
 
+/// Configuration for conformal + PAC-Bayes safety envelopes that wrap
+/// adaptive optimization decisions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SafetyEnvelopeConfig {
+    /// Master switch — when false, no safety veto is applied.
+    pub enabled: bool,
+    /// Confidence level for conformal prediction intervals (0, 1).
+    /// Higher → wider intervals → fewer false anomalies.
+    pub conformal_confidence: f64,
+    /// Maximum calibration set size for conformal prediction.
+    pub conformal_calibration_size: usize,
+    /// PAC-Bayes delta parameter (probability of bound violation).
+    /// Smaller → tighter bound → more conservative.
+    pub pac_bayes_delta: f64,
+    /// PAC-Bayes KL prior weight.  Larger → more regularization
+    /// toward the prior policy (conservative fallback).
+    pub pac_bayes_prior_weight: f64,
+    /// Maximum tolerable error rate before forcing conservative mode.
+    pub safety_error_threshold: f64,
+    /// Minimum observations before the safety envelope activates.
+    pub min_observations: u32,
+}
+
+impl Default for SafetyEnvelopeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            conformal_confidence: 0.95,
+            conformal_calibration_size: 200,
+            pac_bayes_delta: 0.05,
+            pac_bayes_prior_weight: 1.0,
+            safety_error_threshold: 0.15,
+            min_observations: 20,
+        }
+    }
+}
+
+impl SafetyEnvelopeConfig {
+    /// Tier-specific defaults.
+    #[must_use]
+    pub const fn for_tier(tier: ExtensionBudgetTier) -> Self {
+        match tier {
+            ExtensionBudgetTier::Strict => Self {
+                enabled: true,
+                conformal_confidence: 0.99,
+                conformal_calibration_size: 100,
+                pac_bayes_delta: 0.01,
+                pac_bayes_prior_weight: 2.0,
+                safety_error_threshold: 0.05,
+                min_observations: 10,
+            },
+            ExtensionBudgetTier::Balanced => Self {
+                enabled: true,
+                conformal_confidence: 0.95,
+                conformal_calibration_size: 200,
+                pac_bayes_delta: 0.05,
+                pac_bayes_prior_weight: 1.0,
+                safety_error_threshold: 0.15,
+                min_observations: 20,
+            },
+            ExtensionBudgetTier::Throughput => Self {
+                enabled: true,
+                conformal_confidence: 0.90,
+                conformal_calibration_size: 300,
+                pac_bayes_delta: 0.10,
+                pac_bayes_prior_weight: 0.5,
+                safety_error_threshold: 0.25,
+                min_observations: 30,
+            },
+        }
+    }
+}
+
+/// Conformal prediction state for one extension.  Maintains a calibration
+/// set of recent nonconformity scores and computes prediction intervals.
+#[derive(Debug, Clone)]
+struct ConformalState {
+    /// Recent nonconformity scores (absolute residuals from running mean).
+    calibration_scores: VecDeque<f64>,
+    /// Online running mean of observations.
+    running_mean: f64,
+    /// Online running M2 (for variance computation).
+    running_m2: f64,
+    /// Total observation count (for Welford update).
+    observation_count: u64,
+    /// Number of observations that fell outside the prediction interval.
+    anomaly_count: u64,
+}
+
+impl Default for ConformalState {
+    fn default() -> Self {
+        Self {
+            calibration_scores: VecDeque::new(),
+            running_mean: 0.0,
+            running_m2: 0.0,
+            observation_count: 0,
+            anomaly_count: 0,
+        }
+    }
+}
+
+impl ConformalState {
+    /// Feed a new observation and return `true` if it is anomalous (outside
+    /// the conformal prediction interval at the configured confidence level).
+    fn observe(&mut self, value: f64, confidence: f64, max_calibration: usize) -> bool {
+        // Welford online mean/variance update.
+        self.observation_count += 1;
+        let n = self.observation_count as f64;
+        let delta = value - self.running_mean;
+        self.running_mean += delta / n;
+        let delta2 = value - self.running_mean;
+        self.running_m2 += delta * delta2;
+
+        // Nonconformity score = absolute residual from running mean.
+        let score = delta.abs();
+
+        // Check against current prediction interval before adding to calibration.
+        let is_anomaly = if self.calibration_scores.len() >= 2 {
+            let quantile_idx = self.conformal_quantile_index(confidence);
+            let threshold = self.sorted_score_at(quantile_idx);
+            score > threshold
+        } else {
+            false
+        };
+
+        if is_anomaly {
+            self.anomaly_count += 1;
+        }
+
+        // Add to calibration set (bounded).
+        self.calibration_scores.push_back(score);
+        while self.calibration_scores.len() > max_calibration {
+            let _ = self.calibration_scores.pop_front();
+        }
+
+        is_anomaly
+    }
+
+    /// Compute the quantile index for the given confidence level.
+    fn conformal_quantile_index(&self, confidence: f64) -> usize {
+        let n = self.calibration_scores.len();
+        if n == 0 {
+            return 0;
+        }
+        // Quantile index: ceil((n+1) * confidence) - 1, clamped to [0, n-1].
+        let idx = ((n as f64 + 1.0) * confidence).ceil() as usize;
+        idx.saturating_sub(1).min(n - 1)
+    }
+
+    /// Get the score at a given quantile index by partial sort.
+    fn sorted_score_at(&self, idx: usize) -> f64 {
+        let mut scores: Vec<f64> = self.calibration_scores.iter().copied().collect();
+        scores.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        scores.get(idx).copied().unwrap_or(f64::INFINITY)
+    }
+
+    /// Current empirical anomaly rate.
+    fn anomaly_rate(&self) -> f64 {
+        if self.observation_count == 0 {
+            return 0.0;
+        }
+        self.anomaly_count as f64 / self.observation_count as f64
+    }
+
+    /// Current prediction interval half-width (the conformal threshold).
+    fn interval_width(&self, confidence: f64) -> f64 {
+        if self.calibration_scores.len() < 2 {
+            return f64::INFINITY;
+        }
+        let idx = self.conformal_quantile_index(confidence);
+        self.sorted_score_at(idx)
+    }
+}
+
+/// PAC-Bayes bound state for one extension.  Tracks empirical error rates
+/// and computes the PAC-Bayes-kl bound on the true error rate.
+#[derive(Debug, Clone, Default)]
+struct PacBayesState {
+    /// Number of successful outcomes.
+    successes: u64,
+    /// Number of failure outcomes.
+    failures: u64,
+    /// Prior error rate (before seeing data).
+    prior_error_rate: f64,
+}
+
+impl PacBayesState {
+    /// Record an outcome.
+    fn record(&mut self, success: bool) {
+        if success {
+            self.successes += 1;
+        } else {
+            self.failures += 1;
+        }
+    }
+
+    /// Total observations.
+    fn total(&self) -> u64 {
+        self.successes + self.failures
+    }
+
+    /// Empirical error rate.
+    fn empirical_error_rate(&self) -> f64 {
+        let t = self.total();
+        if t == 0 {
+            return self.prior_error_rate;
+        }
+        self.failures as f64 / t as f64
+    }
+
+    /// Compute the PAC-Bayes-kl upper bound on the true error rate.
+    ///
+    /// Uses the PAC-Bayes-kl inequality:
+    ///   kl(q_hat || q_bound) <= (KL(Q||P) + ln(2*sqrt(n)/delta)) / n
+    ///
+    /// where q_hat is the empirical error rate and q_bound is the upper bound
+    /// we solve for.  We use binary search to find the tightest bound.
+    fn pac_bayes_bound(&self, delta: f64, prior_weight: f64) -> f64 {
+        let n = self.total();
+        if n == 0 {
+            return 1.0;
+        }
+        let n_f = n as f64;
+        let q_hat = self.empirical_error_rate();
+
+        // KL(Q||P) ≈ prior_weight * kl(q_hat || prior_error_rate).
+        let kl_qp = prior_weight * kl_divergence(q_hat, self.prior_error_rate.clamp(0.01, 0.99));
+
+        // RHS of PAC-Bayes-kl inequality.
+        let rhs = (kl_qp + (2.0 * n_f.sqrt() / delta.max(1e-10)).ln()) / n_f;
+
+        // Binary search for q_bound such that kl(q_hat || q_bound) <= rhs.
+        let mut lo = q_hat;
+        let mut hi = 1.0;
+        for _ in 0..64 {
+            let mid = (lo + hi) / 2.0;
+            if kl_divergence(q_hat, mid) <= rhs {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        lo.min(1.0)
+    }
+
+    /// Reset state.
+    fn reset(&mut self) {
+        self.successes = 0;
+        self.failures = 0;
+    }
+}
+
+/// KL divergence between two Bernoulli distributions: kl(p || q).
+fn kl_divergence(p: f64, q: f64) -> f64 {
+    let p = p.clamp(1e-10, 1.0 - 1e-10);
+    let q = q.clamp(1e-10, 1.0 - 1e-10);
+    p * (p / q).ln() + (1.0 - p) * ((1.0 - p) / (1.0 - q)).ln()
+}
+
+/// Combined safety envelope state for one extension.
+#[derive(Debug, Clone, Default)]
+struct SafetyEnvelopeState {
+    conformal: ConformalState,
+    pac_bayes: PacBayesState,
+    /// Whether the safety envelope is currently vetoing aggressive optimization.
+    vetoing: bool,
+    /// Total number of veto activations.
+    veto_count: u64,
+    /// Reason for the current veto, if active.
+    veto_reason: Option<&'static str>,
+}
+
+/// Telemetry snapshot of the safety envelope for one extension.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SafetyEnvelopeSnapshot {
+    /// Whether the safety envelope is currently vetoing.
+    pub vetoing: bool,
+    /// Total veto activations.
+    pub veto_count: u64,
+    /// Current veto reason, if active.
+    pub veto_reason: Option<String>,
+    /// Conformal prediction anomaly rate.
+    pub conformal_anomaly_rate: f64,
+    /// Conformal prediction interval half-width.
+    pub conformal_interval_width: f64,
+    /// Total observations in the conformal calibration set.
+    pub conformal_calibration_size: usize,
+    /// PAC-Bayes empirical error rate.
+    pub pac_bayes_empirical_error: f64,
+    /// PAC-Bayes upper bound on true error rate.
+    pub pac_bayes_bound: f64,
+    /// Total PAC-Bayes observations.
+    pub pac_bayes_total: u64,
+}
+
+impl SafetyEnvelopeState {
+    fn snapshot(&self, config: &SafetyEnvelopeConfig) -> SafetyEnvelopeSnapshot {
+        SafetyEnvelopeSnapshot {
+            vetoing: self.vetoing,
+            veto_count: self.veto_count,
+            veto_reason: self.veto_reason.map(String::from),
+            conformal_anomaly_rate: self.conformal.anomaly_rate(),
+            conformal_interval_width: self.conformal.interval_width(config.conformal_confidence),
+            conformal_calibration_size: self.conformal.calibration_scores.len(),
+            pac_bayes_empirical_error: self.pac_bayes.empirical_error_rate(),
+            pac_bayes_bound: self
+                .pac_bayes
+                .pac_bayes_bound(config.pac_bayes_delta, config.pac_bayes_prior_weight),
+            pac_bayes_total: self.pac_bayes.total(),
+        }
+    }
+
+    /// Evaluate the safety envelope: update conformal + PAC-Bayes state
+    /// and return `true` if aggressive optimization should be vetoed.
+    fn evaluate(&mut self, latency_ms: f64, success: bool, config: &SafetyEnvelopeConfig) -> bool {
+        if !config.enabled {
+            return false;
+        }
+
+        // Update conformal state with the latency observation.
+        let conformal_anomaly = self.conformal.observe(
+            latency_ms,
+            config.conformal_confidence,
+            config.conformal_calibration_size,
+        );
+
+        // Update PAC-Bayes state with outcome.
+        self.pac_bayes.record(success);
+
+        // Not enough data yet — don't veto.
+        let total = self.pac_bayes.total();
+        if total < u64::from(config.min_observations) {
+            self.vetoing = false;
+            self.veto_reason = None;
+            return false;
+        }
+
+        // Check PAC-Bayes bound.
+        let bound = self
+            .pac_bayes
+            .pac_bayes_bound(config.pac_bayes_delta, config.pac_bayes_prior_weight);
+        if bound > config.safety_error_threshold {
+            self.vetoing = true;
+            self.veto_reason = Some("pac_bayes_bound_exceeded");
+            self.veto_count += 1;
+            return true;
+        }
+
+        // Check conformal anomaly rate.
+        let anomaly_rate = self.conformal.anomaly_rate();
+        let expected_anomaly = 1.0 - config.conformal_confidence;
+        if anomaly_rate > expected_anomaly * 3.0 && conformal_anomaly {
+            self.vetoing = true;
+            self.veto_reason = Some("conformal_anomaly_excess");
+            self.veto_count += 1;
+            return true;
+        }
+
+        // All clear — release veto if previously active.
+        self.vetoing = false;
+        self.veto_reason = None;
+        false
+    }
+
+    /// Reset state (e.g. on recovery).
+    fn reset(&mut self) {
+        self.conformal = ConformalState::default();
+        self.pac_bayes.reset();
+        self.vetoing = false;
+        self.veto_reason = None;
+    }
+}
+
 /// Runtime budget-controller state for one extension.
 #[derive(Debug, Clone, Default)]
 struct ExtensionBudgetFallbackState {
@@ -2619,6 +2993,8 @@ struct ExtensionBudgetFallbackState {
     last_trigger_reason: Option<String>,
     /// Regime-shift detector state (CUSUM + BOCPD).
     regime_shift: RegimeShiftDetectorState,
+    /// Conformal + PAC-Bayes safety envelope state.
+    safety_envelope: SafetyEnvelopeState,
 }
 
 /// Telemetry event emitted when a quota limit is breached.
@@ -6462,7 +6838,7 @@ fn markov_stationary_distribution(prob: &[[f64; 3]; 3]) -> [f64; 3] {
 /// Compute KL divergence D_KL(p || q) for two discrete distributions.
 /// Returns 0.0 if distributions are identical. Uses floor of 1e-12 for q to
 /// avoid log(0).
-fn kl_divergence(p: &[f64; 3], q: &[f64; 3]) -> f64 {
+fn kl_divergence_discrete3(p: &[f64; 3], q: &[f64; 3]) -> f64 {
     let mut kl = 0.0f64;
     for (i, &p_i) in p.iter().enumerate() {
         if p_i > 0.0 {
@@ -6710,7 +7086,7 @@ pub fn detect_baseline_drift(
         // Build observed transition matrix from recent states
         let observed_matrix = build_markov_transition_matrix(recent_states, 0.5);
         // Compare stationary distributions via KL divergence
-        transition_divergence = kl_divergence(
+        transition_divergence = kl_divergence_discrete3(
             &observed_matrix.stationary_distribution,
             &baseline.transition_matrix.stationary_distribution,
         );
@@ -35879,14 +36255,14 @@ mod tests {
     #[test]
     fn kl_divergence_identical_is_zero() {
         let p = [0.5, 0.3, 0.2];
-        assert!((kl_divergence(&p, &p) - 0.0).abs() < 1e-12);
+        assert!((kl_divergence_discrete3(&p, &p) - 0.0).abs() < 1e-12);
     }
 
     #[test]
     fn kl_divergence_different_is_positive() {
         let p = [0.9, 0.05, 0.05];
         let q = [0.33, 0.34, 0.33];
-        assert!(kl_divergence(&p, &q) > 0.0);
+        assert!(kl_divergence_discrete3(&p, &q) > 0.0);
     }
 
     #[test]
@@ -37426,14 +37802,14 @@ mod tests {
     #[test]
     fn baseline_kl_divergence_zero_for_identical() {
         let p = [0.6, 0.3, 0.1];
-        assert!(kl_divergence(&p, &p).abs() < 1e-12);
+        assert!(kl_divergence_discrete3(&p, &p).abs() < 1e-12);
     }
 
     #[test]
     fn baseline_kl_divergence_positive_for_different() {
         let p = [0.8, 0.1, 0.1];
         let q = [0.1, 0.1, 0.8];
-        let kl = kl_divergence(&p, &q);
+        let kl = kl_divergence_discrete3(&p, &q);
         assert!(
             kl > 0.0,
             "KL divergence should be positive for different distributions"

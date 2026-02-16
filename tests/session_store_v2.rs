@@ -293,6 +293,36 @@ fn create_recovers_when_segment_has_truncated_trailing_frame() -> PiResult<()> {
     Ok(())
 }
 
+#[test]
+fn create_recovers_when_final_frame_has_no_trailing_newline() -> PiResult<()> {
+    let dir = tempdir()?;
+    let mut store = SessionStoreV2::create(dir.path(), 4 * 1024)?;
+    let expected_ids = append_linear_entries(&mut store, 4)?;
+
+    let seg_path = store.segment_file_path(1);
+    let original_len = fs::metadata(&seg_path)?.len();
+    assert!(original_len > 0, "segment file must be non-empty");
+    let bytes = fs::read(&seg_path)?;
+    assert!(
+        bytes.last() == Some(&b'\n'),
+        "expected segment file to end with newline"
+    );
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&seg_path)?
+        .set_len(original_len.saturating_sub(1))?;
+
+    // Force index rebuild path.
+    fs::remove_file(store.index_file_path())?;
+    drop(store);
+
+    let recovered = SessionStoreV2::create(dir.path(), 4 * 1024)?;
+    recovered.validate_integrity()?;
+    assert_eq!(recovered.entry_count(), 4);
+    assert_eq!(frame_ids(&recovered.read_all_entries()?), expected_ids);
+    Ok(())
+}
+
 // ── O(index+tail) resume path tests ──────────────────────────────────
 
 /// Helper: build a `SessionEntry::Custom` with the given id and parent.
