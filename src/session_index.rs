@@ -79,7 +79,7 @@ impl PendingIndexUpdate {
 
 #[derive(Debug)]
 enum IndexUpdateCommand {
-    Enqueue(PendingIndexUpdate),
+    Enqueue(Box<PendingIndexUpdate>),
     FlushRoot {
         sessions_root: PathBuf,
         ack: mpsc::Sender<()>,
@@ -185,12 +185,14 @@ fn process_pending_index_updates(
     }
 }
 
+#[allow(clippy::needless_pass_by_value)] // rx must be moved into this thread-spawned function
 fn run_index_update_dispatcher(rx: mpsc::Receiver<IndexUpdateCommand>) {
     let mut pending: HashMap<(PathBuf, PathBuf), PendingIndexUpdate> = HashMap::new();
 
     loop {
         match rx.recv_timeout(INDEX_UPDATE_FLUSH_INTERVAL) {
-            Ok(IndexUpdateCommand::Enqueue(update)) => {
+            Ok(IndexUpdateCommand::Enqueue(boxed_update)) => {
+                let update = *boxed_update;
                 let key = update.key();
                 if pending.insert(key, update).is_some() {
                     tracing::debug!("Coalesced pending session index update");
@@ -218,35 +220,32 @@ pub(crate) fn enqueue_session_index_snapshot_update(
     message_count: u64,
     name: Option<String>,
 ) {
-    let update = PendingIndexUpdate::new(
-        sessions_root.clone(),
-        path.clone(),
-        header.clone(),
-        message_count,
-        name.clone(),
-    );
+    let update = PendingIndexUpdate::new(sessions_root, path, header, message_count, name);
 
     let send_result = index_update_dispatcher()
         .tx
-        .send(IndexUpdateCommand::Enqueue(update));
-    if send_result.is_ok() {
+        .send(IndexUpdateCommand::Enqueue(Box::new(update)));
+
+    let Err(mpsc::SendError(IndexUpdateCommand::Enqueue(update))) = send_result else {
         return;
-    }
+    };
 
     tracing::warn!(
-        sessions_root = %sessions_root.display(),
-        path = %path.display(),
+        sessions_root = %update.sessions_root.display(),
+        path = %update.path.display(),
         "Session index dispatcher unavailable; falling back to synchronous update"
     );
-    if let Err(err) = SessionIndex::for_sessions_root(&sessions_root).index_session_snapshot(
-        &path,
-        &header,
-        message_count,
-        name,
-    ) {
+    if let Err(err) =
+        SessionIndex::for_sessions_root(&update.sessions_root).index_session_snapshot(
+            &update.path,
+            &update.header,
+            update.message_count,
+            update.name,
+        )
+    {
         tracing::warn!(
-            sessions_root = %sessions_root.display(),
-            path = %path.display(),
+            sessions_root = %update.sessions_root.display(),
+            path = %update.path.display(),
             error = %err,
             "Failed synchronous fallback session index update"
         );
@@ -1740,13 +1739,7 @@ mod tests {
             1,
             Some("first".to_string()),
         );
-        enqueue_session_index_snapshot_update(
-            root.clone(),
-            path.clone(),
-            header,
-            3,
-            Some("latest".to_string()),
-        );
+        enqueue_session_index_snapshot_update(root, path, header, 3, Some("latest".to_string()));
 
         index.flush_pending_updates(Duration::from_secs(1));
         let listed = index
@@ -1767,7 +1760,7 @@ mod tests {
 
         let path = root.join("project").join("retry.jsonl");
         let header = make_header("id-retry", "cwd-retry");
-        enqueue_session_index_snapshot_update(root.clone(), path.clone(), header.clone(), 2, None);
+        enqueue_session_index_snapshot_update(root, path.clone(), header, 2, None);
 
         // First flush should fail because payload file doesn't exist yet.
         index.flush_pending_updates(Duration::from_secs(1));

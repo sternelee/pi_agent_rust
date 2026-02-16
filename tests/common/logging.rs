@@ -1477,25 +1477,18 @@ pub fn filter_log_records(
         }
 
         let category_matches = category
-            .map(|needle| obj.get("category").and_then(|v| v.as_str()) == Some(needle))
-            .unwrap_or(true);
-        let context = obj.get("context").and_then(|v| v.as_object());
-        let scenario_matches = scenario_id
-            .map(|needle| {
-                context
-                    .and_then(|ctx| ctx.get("scenario_id"))
-                    .and_then(|v| v.as_str())
-                    == Some(needle)
-            })
-            .unwrap_or(true);
-        let component_matches = component
-            .map(|needle| {
-                context
-                    .and_then(|ctx| ctx.get("component"))
-                    .and_then(|v| v.as_str())
-                    == Some(needle)
-            })
-            .unwrap_or(true);
+            .is_none_or(|needle| obj.get("category").and_then(|v| v.as_str()) == Some(needle));
+        let ctx = obj.get("context").and_then(|v| v.as_object());
+        let scenario_matches = scenario_id.is_none_or(|needle| {
+            ctx.and_then(|c| c.get("scenario_id"))
+                .and_then(|v| v.as_str())
+                == Some(needle)
+        });
+        let component_matches = component.is_none_or(|needle| {
+            ctx.and_then(|c| c.get("component"))
+                .and_then(|v| v.as_str())
+                == Some(needle)
+        });
 
         if category_matches && scenario_matches && component_matches {
             filtered.push(value);

@@ -139,6 +139,31 @@ impl CompactionWorkerState {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
+fn run_compaction_thread(
+    preparation: CompactionPreparation,
+    provider: Arc<dyn Provider>,
+    api_key: String,
+    custom_instructions: Option<String>,
+    tx: mpsc::Sender<CompactionOutcome>,
+) {
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("build runtime for background compaction");
+
+    let result = runtime.block_on(async {
+        compaction::compact(
+            preparation,
+            provider,
+            &api_key,
+            custom_instructions.as_deref(),
+        )
+        .await
+    });
+
+    let _ = tx.send(result);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,7 +216,7 @@ mod tests {
             cooldown: Duration::from_millis(0),
             ..CompactionQuota::default()
         });
-        w.last_start = Some(Instant::now() - Duration::from_secs(1));
+        w.last_start = Some(Instant::now().checked_sub(Duration::from_secs(1)).unwrap());
         w.attempt_count = 1;
         assert!(w.can_start());
     }
@@ -244,7 +269,7 @@ mod tests {
         let (_tx, rx) = mpsc::channel::<CompactionOutcome>();
         w.pending = Some(PendingCompaction {
             rx: StdMutex::new(rx),
-            started_at: Instant::now() - Duration::from_secs(1),
+            started_at: Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
         });
         let outcome = w.try_recv().expect("should return timeout error");
         assert!(outcome.is_err());
@@ -275,29 +300,4 @@ mod tests {
         assert_eq!(result.summary, "test summary");
         assert!(w.pending.is_none());
     }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn run_compaction_thread(
-    preparation: CompactionPreparation,
-    provider: Arc<dyn Provider>,
-    api_key: String,
-    custom_instructions: Option<String>,
-    tx: mpsc::Sender<CompactionOutcome>,
-) {
-    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
-        .build()
-        .expect("build runtime for background compaction");
-
-    let result = runtime.block_on(async {
-        compaction::compact(
-            preparation,
-            provider,
-            &api_key,
-            custom_instructions.as_deref(),
-        )
-        .await
-    });
-
-    let _ = tx.send(result);
 }

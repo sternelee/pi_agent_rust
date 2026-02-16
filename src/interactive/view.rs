@@ -491,17 +491,15 @@ impl PiApp {
 
         let input = self.total_usage.input;
         let output_tokens = self.total_usage.output;
-        let persistence_str = self
-            .session
-            .try_lock()
-            .ok()
-            .map(|session| {
+        let persistence_str = self.session.try_lock().ok().map_or_else(
+            || "Persist: unavailable".to_string(),
+            |session| {
                 format_persistence_footer_segment(
                     session.autosave_durability_mode(),
                     session.autosave_metrics(),
                 )
-            })
-            .unwrap_or_else(|| "Persist: unavailable".to_string());
+            },
+        );
         let branch_str = self
             .git_branch
             .as_ref()
