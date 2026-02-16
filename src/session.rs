@@ -614,6 +614,57 @@ pub enum V2OpenMode {
     Tail(u64),
 }
 
+const DEFAULT_V2_LAZY_HYDRATION_THRESHOLD: u64 = 10_000;
+const DEFAULT_V2_TAIL_HYDRATION_COUNT: u64 = 256;
+
+fn parse_v2_open_mode(raw: &str) -> Option<V2OpenMode> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    match normalized.as_str() {
+        "full" => Some(V2OpenMode::Full),
+        "active" | "active_path" | "active-path" => Some(V2OpenMode::ActivePath),
+        "tail" => Some(V2OpenMode::Tail(DEFAULT_V2_TAIL_HYDRATION_COUNT)),
+        _ => {
+            if let Some(value) = normalized.strip_prefix("tail:") {
+                value.parse::<u64>().ok().map(V2OpenMode::Tail)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn resolve_v2_lazy_hydration_threshold(env_raw: Option<&str>) -> u64 {
+    env_raw
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_V2_LAZY_HYDRATION_THRESHOLD)
+}
+
+fn select_v2_open_mode_for_resume(
+    entry_count: u64,
+    mode_override_raw: Option<&str>,
+    threshold_override_raw: Option<&str>,
+) -> (V2OpenMode, &'static str, u64) {
+    let lazy_threshold = resolve_v2_lazy_hydration_threshold(threshold_override_raw);
+    if let Some(raw) = mode_override_raw {
+        if let Some(mode) = parse_v2_open_mode(raw) {
+            return (mode, "env_override", lazy_threshold);
+        }
+    }
+
+    if lazy_threshold > 0 && entry_count > lazy_threshold {
+        return (
+            V2OpenMode::ActivePath,
+            "entry_count_above_lazy_threshold",
+            lazy_threshold,
+        );
+    }
+
+    (V2OpenMode::Full, "default_full", lazy_threshold)
+}
+
 impl SessionOpenDiagnostics {
     fn warning_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
@@ -3337,8 +3388,56 @@ fn open_from_v2_store_blocking(jsonl_path: PathBuf) -> Result<(Session, SessionO
     let v2_root = session_store_v2::v2_sidecar_path(&jsonl_path);
     let store = SessionStoreV2::create(&v2_root, 64 * 1024 * 1024)?;
 
-    // 3. Load from store in full mode.
-    let (mut session, diagnostics) = Session::open_from_v2(&store, header, V2OpenMode::Full)?;
+    // 3. Choose an explicit hydration strategy for resume:
+    // - env override (PI_SESSION_V2_OPEN_MODE)
+    // - auto lazy mode for large sessions
+    let mode_override_raw = std::env::var("PI_SESSION_V2_OPEN_MODE").ok();
+    let threshold_override_raw = std::env::var("PI_SESSION_V2_LAZY_THRESHOLD").ok();
+    if let Some(raw) = mode_override_raw.as_deref() {
+        if parse_v2_open_mode(raw).is_none() {
+            tracing::warn!(
+                value = %raw,
+                "invalid PI_SESSION_V2_OPEN_MODE; using automatic hydration mode selection"
+            );
+        }
+    }
+    if let Some(raw) = threshold_override_raw.as_deref() {
+        if raw.trim().parse::<u64>().is_err() {
+            tracing::warn!(
+                value = %raw,
+                "invalid PI_SESSION_V2_LAZY_THRESHOLD; using default lazy hydration threshold"
+            );
+        }
+    }
+
+    let entry_count = store.entry_count();
+    let (selected_mode, selection_reason, lazy_threshold) = select_v2_open_mode_for_resume(
+        entry_count,
+        mode_override_raw.as_deref(),
+        threshold_override_raw.as_deref(),
+    );
+    let mode = if matches!(selected_mode, V2OpenMode::ActivePath)
+        && entry_count > 0
+        && store.head().is_none()
+    {
+        tracing::warn!(
+            entry_count,
+            "active-path hydration selected but store has no head; falling back to full hydration"
+        );
+        V2OpenMode::Full
+    } else {
+        selected_mode
+    };
+    tracing::debug!(
+        entry_count,
+        lazy_threshold,
+        selection_reason,
+        ?mode,
+        "selected V2 resume hydration mode"
+    );
+
+    // 4. Load entries using the selected mode.
+    let (mut session, diagnostics) = Session::open_from_v2(&store, header, mode)?;
     session.path = Some(jsonl_path);
     Ok((session, diagnostics))
 }
@@ -3796,6 +3895,52 @@ mod tests {
             .build()
             .expect("build runtime");
         runtime.block_on(future)
+    }
+
+    #[test]
+    fn v2_open_mode_parser_supports_expected_values() {
+        assert_eq!(parse_v2_open_mode("full"), Some(V2OpenMode::Full));
+        assert_eq!(parse_v2_open_mode("active"), Some(V2OpenMode::ActivePath));
+        assert_eq!(
+            parse_v2_open_mode("active_path"),
+            Some(V2OpenMode::ActivePath)
+        );
+        assert_eq!(
+            parse_v2_open_mode("active-path"),
+            Some(V2OpenMode::ActivePath)
+        );
+        assert_eq!(
+            parse_v2_open_mode("tail"),
+            Some(V2OpenMode::Tail(DEFAULT_V2_TAIL_HYDRATION_COUNT))
+        );
+        assert_eq!(parse_v2_open_mode("tail:42"), Some(V2OpenMode::Tail(42)));
+        assert_eq!(parse_v2_open_mode("tail:0"), Some(V2OpenMode::Tail(0)));
+        assert_eq!(parse_v2_open_mode("bad-mode"), None);
+        assert_eq!(parse_v2_open_mode("tail:not-a-number"), None);
+    }
+
+    #[test]
+    fn v2_open_mode_selection_prefers_env_override_then_threshold() {
+        let (mode, reason, threshold) = select_v2_open_mode_for_resume(50_000, Some("full"), None);
+        assert_eq!(mode, V2OpenMode::Full);
+        assert_eq!(reason, "env_override");
+        assert_eq!(threshold, DEFAULT_V2_LAZY_HYDRATION_THRESHOLD);
+
+        let (mode, reason, threshold) =
+            select_v2_open_mode_for_resume(50_000, None, Some("10_000"));
+        assert_eq!(mode, V2OpenMode::Full, "invalid threshold should fall back");
+        assert_eq!(reason, "default_full");
+        assert_eq!(threshold, DEFAULT_V2_LAZY_HYDRATION_THRESHOLD);
+
+        let (mode, reason, threshold) = select_v2_open_mode_for_resume(50_000, None, Some("500"));
+        assert_eq!(mode, V2OpenMode::ActivePath);
+        assert_eq!(reason, "entry_count_above_lazy_threshold");
+        assert_eq!(threshold, 500);
+
+        let (mode, reason, threshold) = select_v2_open_mode_for_resume(100, None, Some("500"));
+        assert_eq!(mode, V2OpenMode::Full);
+        assert_eq!(reason, "default_full");
+        assert_eq!(threshold, 500);
     }
 
     #[test]
