@@ -4231,24 +4231,6 @@ const c = arguments.callee;
             }
 
             #[test]
-            fn eval_call_no_false_positive_on_underscore_identifiers() {
-                let text = "my_eval('code')";
-                assert!(
-                    !contains_eval_call(text),
-                    "underscore identifier prefix should not trigger eval detection: {text}"
-                );
-            }
-
-            #[test]
-            fn eval_call_no_false_positive_on_dollar_identifiers() {
-                let text = "$eval('code')";
-                assert!(
-                    !contains_eval_call(text),
-                    "dollar identifier prefix should not trigger eval detection: {text}"
-                );
-            }
-
-            #[test]
             fn dynamic_import_never_triggers_on_static_imports(
                 module in "[a-z@/.-]{1,30}",
             ) {
@@ -4355,6 +4337,28 @@ const c = arguments.callee;
                 assert!(
                     !contains_hardcoded_secret(&text),
                     "env lookup should not be flagged: {text}"
+                );
+            }
+
+            #[test]
+            fn eval_call_no_false_positive_on_underscore_identifiers(
+                _dummy in Just(()),
+            ) {
+                let text = "my_eval('code')";
+                assert!(
+                    !contains_eval_call(text),
+                    "underscore identifier prefix should not trigger eval detection: {text}"
+                );
+            }
+
+            #[test]
+            fn eval_call_no_false_positive_on_dollar_identifiers(
+                _dummy in Just(()),
+            ) {
+                let text = "$eval('code')";
+                assert!(
+                    !contains_eval_call(text),
+                    "dollar identifier prefix should not trigger eval detection: {text}"
                 );
             }
         }
