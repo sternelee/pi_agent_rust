@@ -806,12 +806,81 @@ fn validate_phase1_matrix_validation_record(record: &Value) -> Result<(), String
             return Err(format!("matrix_requirements missing {field}"));
         }
     }
+    let required_partition_tags = matrix_requirements
+        .get("required_partition_tags")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            "matrix_requirements.required_partition_tags must be an array".to_string()
+        })?;
+    if required_partition_tags.is_empty() {
+        return Err("matrix_requirements.required_partition_tags must not be empty".to_string());
+    }
+    let mut required_partitions = HashSet::new();
+    for partition in required_partition_tags {
+        let partition = partition.as_str().ok_or_else(|| {
+            "matrix_requirements.required_partition_tags entries must be strings".to_string()
+        })?;
+        if partition.trim().is_empty() {
+            return Err(
+                "matrix_requirements.required_partition_tags entries must be non-empty strings"
+                    .to_string(),
+            );
+        }
+        required_partitions.insert(partition.to_string());
+    }
+    if required_partitions.len() != required_partition_tags.len() {
+        return Err(
+            "matrix_requirements.required_partition_tags must not contain duplicates".to_string(),
+        );
+    }
+
+    let required_session_message_sizes = matrix_requirements
+        .get("required_session_message_sizes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            "matrix_requirements.required_session_message_sizes must be an array".to_string()
+        })?;
+    if required_session_message_sizes.is_empty() {
+        return Err(
+            "matrix_requirements.required_session_message_sizes must not be empty".to_string(),
+        );
+    }
+    let mut required_sizes = HashSet::new();
+    for size in required_session_message_sizes {
+        let size = size.as_u64().ok_or_else(|| {
+            "matrix_requirements.required_session_message_sizes entries must be integers"
+                .to_string()
+        })?;
+        if size == 0 {
+            return Err(
+                "matrix_requirements.required_session_message_sizes entries must be > 0"
+                    .to_string(),
+            );
+        }
+        required_sizes.insert(size);
+    }
+    if required_sizes.len() != required_session_message_sizes.len() {
+        return Err(
+            "matrix_requirements.required_session_message_sizes must not contain duplicates"
+                .to_string(),
+        );
+    }
+
     let required_cell_count = matrix_requirements
         .get("required_cell_count")
         .and_then(Value::as_u64)
         .ok_or_else(|| {
             "matrix_requirements.required_cell_count must be a positive integer".to_string()
         })?;
+    if required_cell_count == 0 {
+        return Err("matrix_requirements.required_cell_count must be > 0".to_string());
+    }
+    let max_unique_cells = required_partitions.len() as u64 * required_sizes.len() as u64;
+    if required_cell_count > max_unique_cells {
+        return Err(format!(
+            "matrix_requirements.required_cell_count ({required_cell_count}) exceeds unique partition-size combinations ({max_unique_cells})"
+        ));
+    }
 
     let matrix_cells = record
         .get("matrix_cells")
@@ -826,6 +895,7 @@ fn validate_phase1_matrix_validation_record(record: &Value) -> Result<(), String
             matrix_cells.len()
         ));
     }
+    let mut seen_partition_size_cells = HashSet::new();
     for cell in matrix_cells {
         let cell_obj = cell
             .as_object()
@@ -842,6 +912,30 @@ fn validate_phase1_matrix_validation_record(record: &Value) -> Result<(), String
             if !cell_obj.contains_key(*field) {
                 return Err(format!("matrix cell missing {field}"));
             }
+        }
+        let workload_partition = cell_obj
+            .get("workload_partition")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "matrix cell workload_partition must be a string".to_string())?;
+        if !required_partitions.contains(workload_partition) {
+            return Err(format!(
+                "matrix cell workload_partition '{workload_partition}' not listed in matrix_requirements.required_partition_tags"
+            ));
+        }
+        let session_messages = cell_obj
+            .get("session_messages")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "matrix cell session_messages must be an integer".to_string())?;
+        if !required_sizes.contains(&session_messages) {
+            return Err(format!(
+                "matrix cell session_messages ({session_messages}) not listed in matrix_requirements.required_session_message_sizes"
+            ));
+        }
+        let partition_size_key = (workload_partition.to_string(), session_messages);
+        if !seen_partition_size_cells.insert(partition_size_key) {
+            return Err(format!(
+                "matrix cell duplicates partition-size key ({workload_partition}, {session_messages})"
+            ));
         }
 
         let status = cell_obj
@@ -876,7 +970,11 @@ fn validate_phase1_matrix_validation_record(record: &Value) -> Result<(), String
             if !primary.contains_key(*field) {
                 return Err(format!("matrix cell primary_e2e missing {field}"));
             }
-            let _ = require_positive_metric(primary, "matrix cell primary_e2e", field)?;
+            // Only require positive values for passing cells; "fail" cells
+            // may have null metrics when the underlying data is missing.
+            if status == "pass" {
+                let _ = require_positive_metric(primary, "matrix cell primary_e2e", field)?;
+            }
         }
     }
 
@@ -958,8 +1056,10 @@ fn validate_phase1_matrix_validation_record(record: &Value) -> Result<(), String
             "primary_outcomes.status has invalid value: {primary_status}"
         ));
     }
-    for field in &["wall_clock_ms", "rust_vs_node_ratio", "rust_vs_bun_ratio"] {
-        let _ = require_positive_metric(primary_outcomes, "primary_outcomes", field)?;
+    if primary_status == "pass" {
+        for field in &["wall_clock_ms", "rust_vs_node_ratio", "rust_vs_bun_ratio"] {
+            let _ = require_positive_metric(primary_outcomes, "primary_outcomes", field)?;
+        }
     }
     let ordering_policy = primary_outcomes
         .get("ordering_policy")
@@ -1980,6 +2080,53 @@ fn phase1_matrix_validator_rejects_non_primary_ordering_policy() {
     assert!(
         err.contains("ordering_policy"),
         "expected ordering policy failure, got: {err}"
+    );
+}
+
+#[test]
+fn phase1_matrix_validator_rejects_required_cell_count_exceeding_partition_size_space() {
+    let mut malformed = phase1_matrix_validation_golden_fixture();
+    malformed["matrix_requirements"]["required_partition_tags"] = json!(["matched-state"]);
+    malformed["matrix_requirements"]["required_session_message_sizes"] = json!([100_000]);
+    malformed["matrix_requirements"]["required_cell_count"] = json!(2);
+
+    let err = validate_phase1_matrix_validation_record(&malformed).expect_err("fixture must fail");
+    assert!(
+        err.contains("exceeds unique partition-size combinations"),
+        "expected partition/size cardinality failure, got: {err}"
+    );
+}
+
+#[test]
+fn phase1_matrix_validator_rejects_duplicate_partition_size_cells() {
+    let mut malformed = phase1_matrix_validation_golden_fixture();
+    malformed["matrix_requirements"]["required_partition_tags"] =
+        json!(["matched-state", "realistic"]);
+    malformed["matrix_requirements"]["required_session_message_sizes"] = json!([100_000]);
+    malformed["matrix_requirements"]["required_cell_count"] = json!(2);
+    malformed["matrix_cells"][1]["workload_partition"] = json!("matched-state");
+    malformed["matrix_cells"][1]["scenario_id"] = json!("matched-state/session_100000_dup");
+
+    let err = validate_phase1_matrix_validation_record(&malformed).expect_err("fixture must fail");
+    assert!(
+        err.contains("duplicates partition-size key"),
+        "expected duplicate partition-size cell failure, got: {err}"
+    );
+}
+
+#[test]
+fn phase1_matrix_validator_rejects_cell_partition_not_in_requirements() {
+    let mut malformed = phase1_matrix_validation_golden_fixture();
+    malformed["matrix_requirements"]["required_partition_tags"] =
+        json!(["matched-state", "realistic"]);
+    malformed["matrix_requirements"]["required_session_message_sizes"] = json!([100_000]);
+    malformed["matrix_requirements"]["required_cell_count"] = json!(2);
+    malformed["matrix_cells"][0]["workload_partition"] = json!("experimental");
+
+    let err = validate_phase1_matrix_validation_record(&malformed).expect_err("fixture must fail");
+    assert!(
+        err.contains("workload_partition 'experimental'"),
+        "expected unknown partition failure, got: {err}"
     );
 }
 

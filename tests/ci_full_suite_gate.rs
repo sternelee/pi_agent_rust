@@ -349,6 +349,17 @@ struct Perf3xBeadCoverageRow {
     log_evidence: Vec<String>,
 }
 
+/// Critical implementation beads that must appear in the PERF-3X coverage matrix.
+const PERF3X_CRITICAL_BEADS: &[&str] = &[
+    "bd-3ar8v.2.8",
+    "bd-3ar8v.3.8",
+    "bd-3ar8v.4.7",
+    "bd-3ar8v.4.8",
+    "bd-3ar8v.4.9",
+    "bd-3ar8v.4.10",
+    "bd-3ar8v.6.11",
+];
+
 /// Machine-readable coverage contract consumed by the Phase-5 gate.
 fn perf3x_bead_coverage_contract() -> Value {
     serde_json::json!({
@@ -476,6 +487,19 @@ fn validate_perf3x_bead_coverage_contract(
             e2e_evidence: parse_required_evidence_paths(row, row_idx, "e2e_evidence")?,
             log_evidence: parse_required_evidence_paths(row, row_idx, "log_evidence")?,
         });
+    }
+
+    let mut missing_critical = Vec::new();
+    for bead_id in PERF3X_CRITICAL_BEADS {
+        if !seen_beads.contains(*bead_id) {
+            missing_critical.push(*bead_id);
+        }
+    }
+    if !missing_critical.is_empty() {
+        return Err(format!(
+            "coverage_rows missing critical PERF-3X bead(s): {}",
+            missing_critical.join(", ")
+        ));
     }
 
     Ok(parsed)
@@ -2053,10 +2077,13 @@ fn perf3x_bead_coverage_contract_is_well_formed() {
         "expected at least 6 PERF-3X rows, got {}",
         rows.len()
     );
-    assert!(
-        rows.iter().any(|row| row.bead == "bd-3ar8v.6.11"),
-        "contract should include phase-5 audit bead"
-    );
+    let bead_ids: HashSet<&str> = rows.iter().map(|row| row.bead.as_str()).collect();
+    for bead_id in PERF3X_CRITICAL_BEADS {
+        assert!(
+            bead_ids.contains(*bead_id),
+            "contract should include critical PERF-3X bead: {bead_id}"
+        );
+    }
     for row in rows {
         assert!(
             !row.unit_evidence.is_empty(),
@@ -2096,6 +2123,27 @@ fn perf3x_bead_coverage_contract_fails_closed_on_empty_log_array() {
     assert!(
         err.contains("log_evidence"),
         "error should mention log_evidence, got: {err}"
+    );
+}
+
+#[test]
+fn perf3x_bead_coverage_contract_fails_closed_on_missing_critical_bead() {
+    let mut contract = perf3x_bead_coverage_contract();
+    let rows = contract
+        .get_mut("coverage_rows")
+        .and_then(Value::as_array_mut)
+        .expect("coverage_rows must exist");
+    rows.retain(|row| row.get("bead").and_then(Value::as_str) != Some("bd-3ar8v.3.8"));
+
+    let err = validate_perf3x_bead_coverage_contract(&contract)
+        .expect_err("missing critical PERF-3X bead must fail closed");
+    assert!(
+        err.contains("missing critical PERF-3X bead"),
+        "error should mention missing critical bead set, got: {err}"
+    );
+    assert!(
+        err.contains("bd-3ar8v.3.8"),
+        "error should identify missing bead id, got: {err}"
     );
 }
 
@@ -2182,8 +2230,10 @@ fn run_all_wires_scenario_cell_status_artifacts_into_evidence_contract() {
         "claim_integrity.phase1_matrix_correlation_matches_run",
         "claim_integrity.phase1_matrix_primary_outcomes_object",
         "claim_integrity.phase1_matrix_primary_outcomes_required_fields",
+        "claim_integrity.phase1_matrix_primary_outcomes_status_valid",
         "claim_integrity.phase1_matrix_primary_outcomes_metrics_present",
         "claim_integrity.phase1_matrix_primary_outcomes_ordering_policy",
+        "claim_integrity.phase1_matrix_cells_primary_e2e_metrics_present",
         "primary_e2e_before_microbench",
         "claim_integrity.realistic_session_shape_coverage",
         "\"source\"",

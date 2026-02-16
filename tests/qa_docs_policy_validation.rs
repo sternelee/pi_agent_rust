@@ -2017,6 +2017,15 @@ fn all_doc_files_referenced_in_runbook_exist() {
 
 const EVIDENCE_LOGGING_CONTRACT_PATH: &str = "docs/schema/test_evidence_logging_contract.json";
 const EVIDENCE_LOGGING_INSTANCE_PATH: &str = "docs/schema/test_evidence_logging_instance.json";
+const EVIDENCE_LOGGING_CRITICAL_PERF3X_BEADS: &[&str] = &[
+    "bd-3ar8v.2.8",
+    "bd-3ar8v.3.8",
+    "bd-3ar8v.4.7",
+    "bd-3ar8v.4.8",
+    "bd-3ar8v.4.9",
+    "bd-3ar8v.4.10",
+    "bd-3ar8v.6.11",
+];
 
 #[test]
 fn evidence_logging_contract_schema_exists_and_is_valid_json() {
@@ -2050,6 +2059,36 @@ fn evidence_logging_contract_defines_all_required_sections() {
             "contract must require section: {section}"
         );
     }
+}
+
+#[test]
+fn evidence_logging_contract_bead_coverage_policy_requires_critical_perf3x_beads() {
+    let schema = load_json(EVIDENCE_LOGGING_CONTRACT_PATH);
+    let required_fields = schema["definitions"]["bead_coverage_contract"]["properties"]
+        ["coverage_policy"]["required"]
+        .as_array()
+        .expect("coverage_policy.required must be an array");
+
+    let required_names: HashSet<&str> = required_fields.iter().filter_map(Value::as_str).collect();
+    assert!(
+        required_names.contains("critical_perf3x_beads"),
+        "coverage_policy.required must include critical_perf3x_beads"
+    );
+
+    let critical = &schema["definitions"]["bead_coverage_contract"]["properties"]["coverage_policy"]
+        ["properties"]["critical_perf3x_beads"];
+    assert_eq!(
+        critical["type"], "array",
+        "critical_perf3x_beads must be declared as an array"
+    );
+    assert_eq!(
+        critical["uniqueItems"], true,
+        "critical_perf3x_beads must enforce unique members"
+    );
+    assert_eq!(
+        critical["items"]["pattern"], "^bd-3ar8v\\.",
+        "critical_perf3x_beads item pattern must enforce PERF-3X bead ids"
+    );
 }
 
 #[test]
@@ -2268,6 +2307,37 @@ fn evidence_logging_instance_bead_coverage_contract_is_complete() {
         .as_array()
         .expect("must have allowed_evidence_types");
     assert!(types.len() >= 4, "must allow at least 4 evidence types");
+}
+
+#[test]
+fn evidence_logging_instance_bead_coverage_policy_declares_critical_perf3x_beads() {
+    let instance = load_json(EVIDENCE_LOGGING_INSTANCE_PATH);
+    let critical = instance["bead_coverage_contract"]["coverage_policy"]["critical_perf3x_beads"]
+        .as_array()
+        .expect("must have critical_perf3x_beads array");
+
+    let mut declared = HashSet::new();
+    for (index, entry) in critical.iter().enumerate() {
+        let bead_id = entry
+            .as_str()
+            .unwrap_or_else(|| panic!("critical_perf3x_beads[{index}] must be a string"))
+            .trim();
+        assert!(
+            bead_id.starts_with("bd-3ar8v."),
+            "critical_perf3x_beads[{index}] must be a PERF-3X bead id, got: {bead_id}"
+        );
+        assert!(
+            declared.insert(bead_id.to_string()),
+            "critical_perf3x_beads must not contain duplicates, saw: {bead_id}"
+        );
+    }
+
+    for required in EVIDENCE_LOGGING_CRITICAL_PERF3X_BEADS {
+        assert!(
+            declared.contains(*required),
+            "critical_perf3x_beads must include required bead: {required}"
+        );
+    }
 }
 
 #[test]
