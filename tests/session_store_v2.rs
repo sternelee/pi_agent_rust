@@ -12,7 +12,7 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 use tempfile::tempdir;
 
-fn lcg_next(state: &mut u64) -> u64 {
+const fn lcg_next(state: &mut u64) -> u64 {
     *state = state
         .wrapping_mul(6_364_136_223_846_793_005)
         .wrapping_add(1_442_695_040_888_963_407);
@@ -203,7 +203,7 @@ fn append_session_entry(
     entry: &SessionEntry,
 ) -> PiResult<pi::session_store_v2::OffsetIndexEntry> {
     let (entry_id, parent_id, entry_type, payload) = session_entry_to_frame_args(entry)?;
-    Ok(store.append_entry(entry_id, parent_id, entry_type, payload)?)
+    store.append_entry(entry_id, parent_id, entry_type, payload)
 }
 
 #[test]
@@ -625,6 +625,92 @@ fn rollback_to_checkpoint_truncates_tail_and_records_event() -> PiResult<()> {
     Ok(())
 }
 
+#[test]
+fn rollback_missing_checkpoint_records_classified_failure_event() -> PiResult<()> {
+    let dir = tempdir()?;
+    let mut store = SessionStoreV2::create(dir.path(), 4 * 1024)?;
+    append_linear_entries(&mut store, 3)?;
+
+    let err = store
+        .rollback_to_checkpoint(
+            42,
+            "00000000-0000-0000-0000-000000000042",
+            "rollback_missing_checkpoint",
+        )
+        .expect_err("missing checkpoint should fail");
+    let err_text = err.to_string();
+    assert!(
+        err_text.contains("checkpoint 42 not found"),
+        "unexpected error: {err_text}"
+    );
+
+    let ledger = store.read_migration_events()?;
+    assert_eq!(ledger.len(), 1);
+    let event = &ledger[0];
+    assert_eq!(event.phase, "rollback");
+    assert_eq!(event.outcome, "fatal_error");
+    assert_eq!(event.error_class.as_deref(), Some("checkpoint_not_found"));
+    assert_eq!(event.correlation_id, "rollback_missing_checkpoint");
+    assert_eq!(event.migration_id, "00000000-0000-0000-0000-000000000042");
+    assert!(!event.verification.entry_count_match);
+    assert!(!event.verification.hash_chain_match);
+    assert!(!event.verification.index_consistent);
+    Ok(())
+}
+
+#[test]
+fn rollback_with_tampered_checkpoint_classifies_integrity_mismatch() -> PiResult<()> {
+    let dir = tempdir()?;
+    let mut store = SessionStoreV2::create(dir.path(), 260)?;
+    append_linear_entries(&mut store, 6)?;
+    store.create_checkpoint(1, "pre_tamper")?;
+
+    let mut parent = Some("entry_00000006".to_string());
+    for ordinal in 7..=9 {
+        let id = format!("entry_{ordinal:08}");
+        store.append_entry(
+            id.clone(),
+            parent.clone(),
+            "message",
+            json!({"kind":"message","ordinal":ordinal}),
+        )?;
+        parent = Some(id);
+    }
+
+    let checkpoint_path = dir.path().join("checkpoints").join("0000000000000001.json");
+    let mut checkpoint_json: Value = serde_json::from_str(&fs::read_to_string(&checkpoint_path)?)?;
+    checkpoint_json["chainHash"] = Value::String(
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_string(),
+    );
+    fs::write(
+        &checkpoint_path,
+        serde_json::to_vec_pretty(&checkpoint_json)?,
+    )?;
+
+    let err = store
+        .rollback_to_checkpoint(
+            1,
+            "00000000-0000-0000-0000-000000000111",
+            "rollback_tampered_checkpoint",
+        )
+        .expect_err("tampered checkpoint should fail verification");
+    assert!(
+        err.to_string().contains("rollback verification failed"),
+        "unexpected error: {err}"
+    );
+
+    let ledger = store.read_migration_events()?;
+    assert_eq!(ledger.len(), 1);
+    let event = &ledger[0];
+    assert_eq!(event.phase, "rollback");
+    assert_eq!(event.outcome, "recoverable_error");
+    assert_eq!(event.error_class.as_deref(), Some("integrity_mismatch"));
+    assert!(!event.verification.hash_chain_match);
+    assert!(event.verification.index_consistent);
+    assert_eq!(event.correlation_id, "rollback_tampered_checkpoint");
+    Ok(())
+}
+
 // ── Manifest tests ──────────────────────────────────────────────────────
 
 #[test]
@@ -854,9 +940,7 @@ fn v2_append_has_no_rewrite_amplification() -> PiResult<()> {
                 fs::metadata(&p).ok().map(|m| m.len())
             })
             .sum();
-        let idx_bytes = fs::metadata(store.index_file_path())
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let idx_bytes = fs::metadata(store.index_file_path()).map_or(0, |m| m.len());
         cumulative_disk_bytes.push(seg_bytes + idx_bytes);
     }
 
@@ -1144,7 +1228,10 @@ fn rollback_v2_sidecar_is_idempotent() -> PiResult<()> {
 fn migration_status_unmigrated_when_no_sidecar() {
     let dir = tempdir().unwrap();
     let jsonl = build_test_jsonl(dir.path(), &[make_message_entry("s1", None, "data")]);
-    assert_eq!(pi::session::migration_status(&jsonl), MigrationState::Unmigrated);
+    assert_eq!(
+        pi::session::migration_status(&jsonl),
+        MigrationState::Unmigrated
+    );
 }
 
 #[test]
@@ -1153,7 +1240,10 @@ fn migration_status_migrated_after_successful_migration() -> PiResult<()> {
     let jsonl = build_test_jsonl(dir.path(), &[make_message_entry("s1", None, "data")]);
     pi::session::migrate_jsonl_to_v2(&jsonl, "status-test")?;
 
-    assert_eq!(pi::session::migration_status(&jsonl), MigrationState::Migrated);
+    assert_eq!(
+        pi::session::migration_status(&jsonl),
+        MigrationState::Migrated
+    );
 
     Ok(())
 }
@@ -1167,7 +1257,10 @@ fn migration_status_partial_when_sidecar_incomplete() {
     let v2_root = pi::session_store_v2::v2_sidecar_path(&jsonl);
     fs::create_dir_all(&v2_root).unwrap();
 
-    assert_eq!(pi::session::migration_status(&jsonl), MigrationState::Partial);
+    assert_eq!(
+        pi::session::migration_status(&jsonl),
+        MigrationState::Partial
+    );
 }
 
 #[test]
@@ -1211,7 +1304,10 @@ fn migrate_dry_run_validates_without_persisting() -> PiResult<()> {
 
     // No sidecar should have been created.
     assert!(!pi::session_store_v2::has_v2_sidecar(&jsonl));
-    assert_eq!(pi::session::migration_status(&jsonl), MigrationState::Unmigrated);
+    assert_eq!(
+        pi::session::migration_status(&jsonl),
+        MigrationState::Unmigrated
+    );
 
     Ok(())
 }
@@ -1255,12 +1351,18 @@ fn migrate_then_rollback_then_re_migrate_round_trip() -> PiResult<()> {
 
     // Step 2: Rollback.
     pi::session::rollback_v2_sidecar(&jsonl, "round-trip")?;
-    assert_eq!(pi::session::migration_status(&jsonl), MigrationState::Unmigrated);
+    assert_eq!(
+        pi::session::migration_status(&jsonl),
+        MigrationState::Unmigrated
+    );
 
     // Step 3: Re-migrate.
     let event2 = pi::session::migrate_jsonl_to_v2(&jsonl, "round-trip-2")?;
     assert_eq!(event2.outcome, "ok");
-    assert_eq!(pi::session::migration_status(&jsonl), MigrationState::Migrated);
+    assert_eq!(
+        pi::session::migration_status(&jsonl),
+        MigrationState::Migrated
+    );
 
     // Verify the re-migrated store has correct entry count.
     let v2_root = pi::session_store_v2::v2_sidecar_path(&jsonl);
@@ -1279,7 +1381,10 @@ fn migrate_empty_session_succeeds() -> PiResult<()> {
     let event = pi::session::migrate_jsonl_to_v2(&jsonl, "empty-test")?;
     assert_eq!(event.outcome, "ok");
     assert!(event.verification.entry_count_match);
-    assert_eq!(pi::session::migration_status(&jsonl), MigrationState::Migrated);
+    assert_eq!(
+        pi::session::migration_status(&jsonl),
+        MigrationState::Migrated
+    );
 
     Ok(())
 }

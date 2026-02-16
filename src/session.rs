@@ -506,7 +506,13 @@ impl AutosaveQueue {
         }
 
         self.flush_failed = self.flush_failed.saturating_add(1);
-        let restored = ticket.batch_size.min(self.max_pending_mutations);
+        // New mutations may have arrived while the flush was in flight.
+        // Restore only into remaining capacity so pending count never exceeds
+        // `max_pending_mutations`.
+        let available_capacity = self
+            .max_pending_mutations
+            .saturating_sub(self.pending_mutations);
+        let restored = ticket.batch_size.min(available_capacity);
         self.pending_mutations = self.pending_mutations.saturating_add(restored);
         let dropped = ticket.batch_size.saturating_sub(restored);
         if dropped > 0 {
@@ -3393,8 +3399,7 @@ pub fn migrate_jsonl_to_v2(
         // Verification failed — remove the sidecar.
         let v2_root = session_store_v2::v2_sidecar_path(jsonl_path);
         if v2_root.exists() {
-            std::fs::remove_dir_all(&v2_root)
-                .map_err(|e| crate::Error::Io(Box::new(e)))?;
+            std::fs::remove_dir_all(&v2_root).map_err(|e| crate::Error::Io(Box::new(e)))?;
         }
         return Err(crate::Error::session(format!(
             "V2 migration verification failed: count={} hash={} index={}",
@@ -3614,8 +3619,7 @@ pub fn recover_partial_migration(
             // Remove the broken sidecar.
             let v2_root = session_store_v2::v2_sidecar_path(jsonl_path);
             if v2_root.exists() {
-                std::fs::remove_dir_all(&v2_root)
-                    .map_err(|e| crate::Error::Io(Box::new(e)))?;
+                std::fs::remove_dir_all(&v2_root).map_err(|e| crate::Error::Io(Box::new(e)))?;
             }
 
             if re_migrate {
@@ -7034,6 +7038,8 @@ mod tests {
 
     #[test]
     fn crash_incremental_append_survives_partial_write() {
+        use std::io::Write;
+
         let temp_dir = tempfile::tempdir().unwrap();
         let mut session = Session::create();
         session.session_dir = Some(temp_dir.path().to_path_buf());
@@ -7044,7 +7050,6 @@ mod tests {
         let path = session.path.clone().unwrap();
 
         // Simulate crash during append: write truncated entry.
-        use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
             .append(true)
             .open(&path)
@@ -7638,5 +7643,670 @@ mod tests {
             resolve_autosave_durability_mode(None, None, None),
             AutosaveDurabilityMode::Balanced
         );
+    }
+
+    // =========================================================================
+    // bd-3ar8v.2.9: Comprehensive autosave queue and durability state machine
+    // =========================================================================
+
+    // --- Queue boundary: minimum capacity (limit=1) ---
+
+    #[test]
+    fn autosave_queue_limit_one_accepts_single_mutation() {
+        let mut queue = AutosaveQueue::with_limit(1);
+        queue.enqueue_mutation(AutosaveMutationKind::Message);
+        assert_eq!(queue.pending_mutations, 1);
+        assert_eq!(queue.coalesced_mutations, 0);
+        assert_eq!(queue.backpressure_events, 0);
+    }
+
+    #[test]
+    fn autosave_queue_limit_one_backpressures_second_mutation() {
+        let mut queue = AutosaveQueue::with_limit(1);
+        queue.enqueue_mutation(AutosaveMutationKind::Message);
+        queue.enqueue_mutation(AutosaveMutationKind::Metadata);
+        assert_eq!(queue.pending_mutations, 1, "capped at 1");
+        assert_eq!(queue.backpressure_events, 1);
+        assert_eq!(queue.coalesced_mutations, 1);
+    }
+
+    #[test]
+    fn autosave_queue_limit_one_flush_and_refill() {
+        let mut queue = AutosaveQueue::with_limit(1);
+        queue.enqueue_mutation(AutosaveMutationKind::Message);
+
+        let ticket = queue.begin_flush(AutosaveFlushTrigger::Manual).unwrap();
+        assert_eq!(queue.pending_mutations, 0);
+        assert_eq!(ticket.batch_size, 1);
+        queue.finish_flush(ticket, true);
+
+        // Refill works after flush.
+        queue.enqueue_mutation(AutosaveMutationKind::Metadata);
+        assert_eq!(queue.pending_mutations, 1);
+        assert_eq!(queue.flush_succeeded, 1);
+    }
+
+    // --- Queue boundary: with_limit enforces minimum of 1 ---
+
+    #[test]
+    fn autosave_queue_with_limit_zero_clamps_to_one() {
+        let queue = AutosaveQueue::with_limit(0);
+        assert_eq!(queue.max_pending_mutations, 1);
+    }
+
+    // --- Empty queue operations ---
+
+    #[test]
+    fn autosave_queue_begin_flush_on_empty_returns_none() {
+        let mut queue = AutosaveQueue::with_limit(10);
+        assert!(queue.begin_flush(AutosaveFlushTrigger::Manual).is_none());
+        assert_eq!(queue.flush_started, 0, "no flush attempt recorded");
+    }
+
+    #[test]
+    fn autosave_queue_metrics_on_fresh_queue() {
+        let queue = AutosaveQueue::with_limit(256);
+        let m = queue.metrics();
+        assert_eq!(m.pending_mutations, 0);
+        assert_eq!(m.max_pending_mutations, 256);
+        assert_eq!(m.coalesced_mutations, 0);
+        assert_eq!(m.backpressure_events, 0);
+        assert_eq!(m.flush_started, 0);
+        assert_eq!(m.flush_succeeded, 0);
+        assert_eq!(m.flush_failed, 0);
+        assert_eq!(m.last_flush_batch_size, 0);
+        assert!(m.last_flush_duration_ms.is_none());
+        assert!(m.last_flush_trigger.is_none());
+    }
+
+    // --- All three mutation kinds ---
+
+    #[test]
+    fn autosave_queue_all_mutation_kinds() {
+        let mut queue = AutosaveQueue::with_limit(10);
+        queue.enqueue_mutation(AutosaveMutationKind::Message);
+        queue.enqueue_mutation(AutosaveMutationKind::Metadata);
+        queue.enqueue_mutation(AutosaveMutationKind::Label);
+        assert_eq!(queue.pending_mutations, 3);
+        // First mutation has no coalescing; subsequent two do.
+        assert_eq!(queue.coalesced_mutations, 2);
+    }
+
+    // --- Multiple consecutive flushes with mixed outcomes ---
+
+    #[test]
+    fn autosave_queue_consecutive_success_flushes() {
+        let mut queue = AutosaveQueue::with_limit(5);
+
+        for round in 1..=3_u64 {
+            queue.enqueue_mutation(AutosaveMutationKind::Message);
+            queue.enqueue_mutation(AutosaveMutationKind::Metadata);
+            let ticket = queue.begin_flush(AutosaveFlushTrigger::Periodic).unwrap();
+            queue.finish_flush(ticket, true);
+            assert_eq!(queue.pending_mutations, 0);
+            assert_eq!(queue.flush_succeeded, round);
+            assert_eq!(queue.flush_started, round);
+            assert_eq!(queue.last_flush_batch_size, 2);
+        }
+        assert_eq!(queue.flush_failed, 0);
+    }
+
+    #[test]
+    fn autosave_queue_alternating_success_failure() {
+        let mut queue = AutosaveQueue::with_limit(10);
+
+        // Round 1: success
+        queue.enqueue_mutation(AutosaveMutationKind::Message);
+        let t1 = queue.begin_flush(AutosaveFlushTrigger::Periodic).unwrap();
+        queue.finish_flush(t1, true);
+        assert_eq!(queue.flush_succeeded, 1);
+        assert_eq!(queue.flush_failed, 0);
+        assert_eq!(queue.pending_mutations, 0);
+
+        // Round 2: failure (mutations restored)
+        queue.enqueue_mutation(AutosaveMutationKind::Metadata);
+        queue.enqueue_mutation(AutosaveMutationKind::Label);
+        let t2 = queue.begin_flush(AutosaveFlushTrigger::Manual).unwrap();
+        queue.finish_flush(t2, false);
+        assert_eq!(queue.flush_succeeded, 1);
+        assert_eq!(queue.flush_failed, 1);
+        assert_eq!(queue.pending_mutations, 2, "restored from failure");
+
+        // Round 3: success (clears the restored mutations)
+        let t3 = queue.begin_flush(AutosaveFlushTrigger::Shutdown).unwrap();
+        assert_eq!(t3.batch_size, 2);
+        queue.finish_flush(t3, true);
+        assert_eq!(queue.flush_succeeded, 2);
+        assert_eq!(queue.flush_failed, 1);
+        assert_eq!(queue.pending_mutations, 0);
+        assert_eq!(queue.flush_started, 3);
+    }
+
+    // --- Failure when queue is completely full (zero capacity to restore) ---
+
+    #[test]
+    fn autosave_queue_failure_drops_all_when_full() {
+        let mut queue = AutosaveQueue::with_limit(3);
+
+        // Fill to capacity and flush.
+        for _ in 0..3 {
+            queue.enqueue_mutation(AutosaveMutationKind::Message);
+        }
+        let ticket = queue.begin_flush(AutosaveFlushTrigger::Periodic).unwrap();
+        assert_eq!(ticket.batch_size, 3);
+        assert_eq!(queue.pending_mutations, 0);
+
+        // Fill queue completely while flush is in flight.
+        for _ in 0..3 {
+            queue.enqueue_mutation(AutosaveMutationKind::Metadata);
+        }
+        assert_eq!(queue.pending_mutations, 3);
+
+        // Flush fails — no capacity to restore, all 3 batch mutations are dropped.
+        let bp_before = queue.backpressure_events;
+        queue.finish_flush(ticket, false);
+        assert_eq!(queue.pending_mutations, 3, "capped at max");
+        assert_eq!(queue.flush_failed, 1);
+        assert_eq!(
+            queue.backpressure_events,
+            bp_before + 3,
+            "dropped mutations counted as backpressure"
+        );
+    }
+
+    // --- Flush trigger tracking ---
+
+    #[test]
+    fn autosave_queue_tracks_trigger_across_flushes() {
+        let mut queue = AutosaveQueue::with_limit(10);
+
+        // Manual trigger.
+        queue.enqueue_mutation(AutosaveMutationKind::Message);
+        let t1 = queue.begin_flush(AutosaveFlushTrigger::Manual).unwrap();
+        assert_eq!(t1.trigger, AutosaveFlushTrigger::Manual);
+        queue.finish_flush(t1, true);
+        assert_eq!(
+            queue.metrics().last_flush_trigger,
+            Some(AutosaveFlushTrigger::Manual)
+        );
+
+        // Periodic trigger.
+        queue.enqueue_mutation(AutosaveMutationKind::Metadata);
+        let t2 = queue.begin_flush(AutosaveFlushTrigger::Periodic).unwrap();
+        queue.finish_flush(t2, true);
+        assert_eq!(
+            queue.metrics().last_flush_trigger,
+            Some(AutosaveFlushTrigger::Periodic)
+        );
+
+        // Shutdown trigger.
+        queue.enqueue_mutation(AutosaveMutationKind::Label);
+        let t3 = queue.begin_flush(AutosaveFlushTrigger::Shutdown).unwrap();
+        queue.finish_flush(t3, true);
+        assert_eq!(
+            queue.metrics().last_flush_trigger,
+            Some(AutosaveFlushTrigger::Shutdown)
+        );
+    }
+
+    // --- Flush records duration ---
+
+    #[test]
+    fn autosave_queue_flush_records_duration() {
+        let mut queue = AutosaveQueue::with_limit(10);
+        queue.enqueue_mutation(AutosaveMutationKind::Message);
+        let ticket = queue.begin_flush(AutosaveFlushTrigger::Manual).unwrap();
+        queue.finish_flush(ticket, true);
+        // Duration should be recorded (>= 0ms).
+        assert!(queue.metrics().last_flush_duration_ms.is_some());
+    }
+
+    // --- Rapid enqueue-flush cycles ---
+
+    #[test]
+    fn autosave_queue_rapid_single_mutation_flushes() {
+        let mut queue = AutosaveQueue::with_limit(10);
+        let rounds = 20;
+
+        for _ in 0..rounds {
+            queue.enqueue_mutation(AutosaveMutationKind::Message);
+            let ticket = queue.begin_flush(AutosaveFlushTrigger::Periodic).unwrap();
+            queue.finish_flush(ticket, true);
+        }
+
+        let m = queue.metrics();
+        assert_eq!(m.flush_started, rounds);
+        assert_eq!(m.flush_succeeded, rounds);
+        assert_eq!(m.flush_failed, 0);
+        assert_eq!(m.pending_mutations, 0);
+        assert_eq!(m.last_flush_batch_size, 1);
+    }
+
+    // --- Saturating counter behavior under heavy load ---
+
+    #[test]
+    fn autosave_queue_many_backpressure_events_accumulate() {
+        let mut queue = AutosaveQueue::with_limit(1);
+        let excess: u64 = 100;
+
+        // First enqueue goes into the queue; rest are backpressure.
+        for _ in 0..=excess {
+            queue.enqueue_mutation(AutosaveMutationKind::Message);
+        }
+        assert_eq!(queue.pending_mutations, 1);
+        assert_eq!(queue.backpressure_events, excess);
+    }
+
+    // --- Durability mode: as_str roundtrip ---
+
+    #[test]
+    fn autosave_durability_mode_as_str_roundtrip() {
+        for mode in [
+            AutosaveDurabilityMode::Strict,
+            AutosaveDurabilityMode::Balanced,
+            AutosaveDurabilityMode::Throughput,
+        ] {
+            let s = mode.as_str();
+            let parsed = AutosaveDurabilityMode::parse(s);
+            assert_eq!(parsed, Some(mode), "roundtrip failed for {s}");
+        }
+    }
+
+    // --- Durability mode: should_flush/best_effort truth table ---
+
+    #[test]
+    fn autosave_durability_mode_shutdown_behavior_truth_table() {
+        assert!(AutosaveDurabilityMode::Strict.should_flush_on_shutdown());
+        assert!(!AutosaveDurabilityMode::Strict.best_effort_on_shutdown());
+
+        assert!(AutosaveDurabilityMode::Balanced.should_flush_on_shutdown());
+        assert!(AutosaveDurabilityMode::Balanced.best_effort_on_shutdown());
+
+        assert!(!AutosaveDurabilityMode::Throughput.should_flush_on_shutdown());
+        assert!(!AutosaveDurabilityMode::Throughput.best_effort_on_shutdown());
+    }
+
+    // --- Durability mode: case-insensitive parsing ---
+
+    #[test]
+    fn autosave_durability_mode_parse_case_insensitive() {
+        assert_eq!(
+            AutosaveDurabilityMode::parse("STRICT"),
+            Some(AutosaveDurabilityMode::Strict)
+        );
+        assert_eq!(
+            AutosaveDurabilityMode::parse("Balanced"),
+            Some(AutosaveDurabilityMode::Balanced)
+        );
+        assert_eq!(
+            AutosaveDurabilityMode::parse("tHrOuGhPuT"),
+            Some(AutosaveDurabilityMode::Throughput)
+        );
+    }
+
+    // --- Durability mode: whitespace trimming ---
+
+    #[test]
+    fn autosave_durability_mode_parse_trims_whitespace() {
+        assert_eq!(
+            AutosaveDurabilityMode::parse("  strict  "),
+            Some(AutosaveDurabilityMode::Strict)
+        );
+        assert_eq!(
+            AutosaveDurabilityMode::parse("\tbalanced\n"),
+            Some(AutosaveDurabilityMode::Balanced)
+        );
+    }
+
+    // --- Session-level: save on empty queue is no-op ---
+
+    #[test]
+    fn autosave_session_save_on_empty_queue_is_noop() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut session = Session::create();
+        session.session_dir = Some(temp_dir.path().to_path_buf());
+
+        // Save without any mutations — should succeed and not change metrics.
+        let m_before = session.autosave_metrics();
+        run_async(async { session.flush_autosave(AutosaveFlushTrigger::Manual).await }).unwrap();
+        let m_after = session.autosave_metrics();
+
+        assert_eq!(m_before.flush_started, m_after.flush_started);
+        assert_eq!(m_after.pending_mutations, 0);
+    }
+
+    // --- Session-level: mode change mid-session ---
+
+    #[test]
+    fn autosave_session_mode_change_mid_session() {
+        let mut session = Session::create();
+        assert_eq!(
+            session.autosave_durability_mode(),
+            AutosaveDurabilityMode::Balanced,
+            "default is balanced"
+        );
+
+        session.set_autosave_durability_mode(AutosaveDurabilityMode::Strict);
+        assert_eq!(
+            session.autosave_durability_mode(),
+            AutosaveDurabilityMode::Strict
+        );
+
+        session.set_autosave_durability_mode(AutosaveDurabilityMode::Throughput);
+        assert_eq!(
+            session.autosave_durability_mode(),
+            AutosaveDurabilityMode::Throughput
+        );
+    }
+
+    // --- Session-level: all mutation types enqueue correctly ---
+
+    #[test]
+    fn autosave_session_all_mutation_types_enqueue() {
+        let mut session = Session::create();
+
+        let first_entry_id = session.append_message(make_test_message("msg"));
+        assert_eq!(session.autosave_metrics().pending_mutations, 1);
+
+        session.append_model_change("prov".to_string(), "model".to_string());
+        assert_eq!(session.autosave_metrics().pending_mutations, 2);
+
+        session.append_thinking_level_change("high".to_string());
+        assert_eq!(session.autosave_metrics().pending_mutations, 3);
+
+        session.append_session_info(Some("test-session".to_string()));
+        assert_eq!(session.autosave_metrics().pending_mutations, 4);
+
+        session.append_custom_entry("custom".to_string(), None);
+        assert_eq!(session.autosave_metrics().pending_mutations, 5);
+
+        // Label mutation (needs existing entry to target).
+        session.add_label(&first_entry_id, Some("test-label".to_string()));
+        assert_eq!(session.autosave_metrics().pending_mutations, 6);
+    }
+
+    // --- Session-level: flush then verify metrics ---
+
+    #[test]
+    fn autosave_session_manual_save_resets_pending() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut session = Session::create();
+        session.session_dir = Some(temp_dir.path().to_path_buf());
+
+        session.append_message(make_test_message("a"));
+        session.append_message(make_test_message("b"));
+        session.append_message(make_test_message("c"));
+        assert_eq!(session.autosave_metrics().pending_mutations, 3);
+
+        run_async(async { session.save().await }).unwrap();
+
+        let m = session.autosave_metrics();
+        assert_eq!(m.pending_mutations, 0);
+        assert_eq!(m.flush_succeeded, 1);
+        assert_eq!(m.last_flush_batch_size, 3);
+        assert_eq!(m.last_flush_trigger, Some(AutosaveFlushTrigger::Manual));
+    }
+
+    // --- Session-level: periodic flush trigger tracking ---
+
+    #[test]
+    fn autosave_session_periodic_flush_tracks_trigger() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut session = Session::create();
+        session.session_dir = Some(temp_dir.path().to_path_buf());
+
+        session.append_message(make_test_message("periodic msg"));
+        run_async(async { session.flush_autosave(AutosaveFlushTrigger::Periodic).await }).unwrap();
+
+        let m = session.autosave_metrics();
+        assert_eq!(m.last_flush_trigger, Some(AutosaveFlushTrigger::Periodic));
+        assert_eq!(m.flush_succeeded, 1);
+    }
+
+    // --- Session-level: shutdown flush with balanced mode success ---
+
+    #[test]
+    fn autosave_session_balanced_shutdown_succeeds_on_valid_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut session = Session::create();
+        session.session_dir = Some(temp_dir.path().to_path_buf());
+        session.set_autosave_durability_for_test(AutosaveDurabilityMode::Balanced);
+
+        session.append_message(make_test_message("balanced ok"));
+        run_async(async { session.flush_autosave_on_shutdown().await }).unwrap();
+
+        let m = session.autosave_metrics();
+        assert_eq!(m.flush_succeeded, 1);
+        assert_eq!(m.pending_mutations, 0);
+        assert_eq!(m.last_flush_trigger, Some(AutosaveFlushTrigger::Shutdown));
+    }
+
+    // --- Queue: partial restoration on failure with various fill levels ---
+
+    #[test]
+    fn autosave_queue_failure_partial_restoration() {
+        let mut queue = AutosaveQueue::with_limit(5);
+
+        // Fill to 4 and flush (batch=4).
+        for _ in 0..4 {
+            queue.enqueue_mutation(AutosaveMutationKind::Message);
+        }
+        let ticket = queue.begin_flush(AutosaveFlushTrigger::Periodic).unwrap();
+        assert_eq!(ticket.batch_size, 4);
+
+        // Add 2 while flush is in flight.
+        queue.enqueue_mutation(AutosaveMutationKind::Metadata);
+        queue.enqueue_mutation(AutosaveMutationKind::Label);
+        assert_eq!(queue.pending_mutations, 2);
+
+        // Fail: available_capacity = 5 - 2 = 3, restored = min(4,3) = 3, dropped = 1.
+        let bp_before = queue.backpressure_events;
+        let coal_before = queue.coalesced_mutations;
+        queue.finish_flush(ticket, false);
+        assert_eq!(queue.pending_mutations, 5, "2 new + 3 restored = 5");
+        assert_eq!(queue.backpressure_events, bp_before + 1, "1 dropped");
+        assert_eq!(
+            queue.coalesced_mutations,
+            coal_before + 1,
+            "1 dropped coalesced"
+        );
+    }
+
+    // --- Queue: success flush does not restore ---
+
+    #[test]
+    fn autosave_queue_success_does_not_restore_pending() {
+        let mut queue = AutosaveQueue::with_limit(10);
+
+        queue.enqueue_mutation(AutosaveMutationKind::Message);
+        queue.enqueue_mutation(AutosaveMutationKind::Message);
+        let ticket = queue.begin_flush(AutosaveFlushTrigger::Manual).unwrap();
+
+        // Add 1 mutation while flush is in flight.
+        queue.enqueue_mutation(AutosaveMutationKind::Label);
+        assert_eq!(queue.pending_mutations, 1);
+
+        // Success: only the in-flight mutation remains.
+        queue.finish_flush(ticket, true);
+        assert_eq!(queue.pending_mutations, 1, "only new mutation remains");
+        assert_eq!(queue.flush_succeeded, 1);
+    }
+
+    // --- Queue: large batch size tracking ---
+
+    #[test]
+    fn autosave_queue_large_batch_tracking() {
+        let mut queue = AutosaveQueue::with_limit(500);
+
+        for _ in 0..200 {
+            queue.enqueue_mutation(AutosaveMutationKind::Message);
+        }
+
+        let ticket = queue.begin_flush(AutosaveFlushTrigger::Periodic).unwrap();
+        assert_eq!(ticket.batch_size, 200);
+        queue.finish_flush(ticket, true);
+
+        let m = queue.metrics();
+        assert_eq!(m.last_flush_batch_size, 200);
+        assert_eq!(m.flush_succeeded, 1);
+        assert_eq!(m.pending_mutations, 0);
+    }
+
+    // --- Durability resolve: all invalid falls through to default ---
+
+    #[test]
+    fn autosave_resolve_all_invalid_returns_balanced() {
+        assert_eq!(
+            resolve_autosave_durability_mode(Some("bad"), Some("worse"), Some("nope")),
+            AutosaveDurabilityMode::Balanced
+        );
+    }
+
+    // --- Session-level: metrics accumulate across many save/flush cycles ---
+
+    #[test]
+    fn autosave_session_metrics_accumulate_over_many_cycles() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut session = Session::create();
+        session.session_dir = Some(temp_dir.path().to_path_buf());
+
+        let cycles: u64 = 10;
+        for i in 0..cycles {
+            session.append_message(make_test_message(&format!("cycle-{i}")));
+            run_async(async { session.save().await }).unwrap();
+        }
+
+        let m = session.autosave_metrics();
+        assert_eq!(m.flush_started, cycles);
+        assert_eq!(m.flush_succeeded, cycles);
+        assert_eq!(m.flush_failed, 0);
+        assert_eq!(m.pending_mutations, 0);
+        assert_eq!(m.last_flush_batch_size, 1);
+    }
+
+    // --- Queue: coalesced count is cumulative (not per-flush) ---
+
+    #[test]
+    fn autosave_queue_coalesced_is_cumulative() {
+        let mut queue = AutosaveQueue::with_limit(10);
+
+        // Batch 1: 3 mutations => 2 coalesced.
+        queue.enqueue_mutation(AutosaveMutationKind::Message);
+        queue.enqueue_mutation(AutosaveMutationKind::Message);
+        queue.enqueue_mutation(AutosaveMutationKind::Message);
+        assert_eq!(queue.coalesced_mutations, 2);
+
+        let t1 = queue.begin_flush(AutosaveFlushTrigger::Manual).unwrap();
+        queue.finish_flush(t1, true);
+
+        // Batch 2: 2 mutations => 1 more coalesced (total 3).
+        queue.enqueue_mutation(AutosaveMutationKind::Label);
+        queue.enqueue_mutation(AutosaveMutationKind::Label);
+        assert_eq!(queue.coalesced_mutations, 3);
+    }
+
+    // --- Session-level: autosave_queue_limit changes batch size behavior ---
+
+    #[test]
+    fn autosave_session_respects_queue_limit() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut session = Session::create();
+        session.session_dir = Some(temp_dir.path().to_path_buf());
+        session.set_autosave_queue_limit_for_test(3);
+
+        for i in 0..10 {
+            session.append_message(make_test_message(&format!("lim-{i}")));
+        }
+
+        let m = session.autosave_metrics();
+        assert_eq!(m.pending_mutations, 3);
+        assert_eq!(m.max_pending_mutations, 3);
+        assert_eq!(m.backpressure_events, 7);
+
+        // Flush should only capture 3 (the capped count).
+        run_async(async { session.save().await }).unwrap();
+        let m = session.autosave_metrics();
+        assert_eq!(m.last_flush_batch_size, 3);
+        assert_eq!(m.pending_mutations, 0);
+    }
+
+    // --- Session-level: throughput mode shutdown with successful prior manual save ---
+
+    #[test]
+    fn autosave_session_throughput_shutdown_skips_after_manual_save() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut session = Session::create();
+        session.session_dir = Some(temp_dir.path().to_path_buf());
+        session.set_autosave_durability_for_test(AutosaveDurabilityMode::Throughput);
+
+        session.append_message(make_test_message("saved"));
+        run_async(async { session.save().await }).unwrap();
+        assert_eq!(session.autosave_metrics().flush_succeeded, 1);
+
+        // Add more mutations but don't save.
+        session.append_message(make_test_message("unsaved"));
+        assert_eq!(session.autosave_metrics().pending_mutations, 1);
+
+        // Shutdown skips flush in throughput mode.
+        run_async(async { session.flush_autosave_on_shutdown().await }).unwrap();
+        assert_eq!(
+            session.autosave_metrics().pending_mutations,
+            1,
+            "unsaved mutation remains"
+        );
+        assert_eq!(
+            session.autosave_metrics().flush_succeeded,
+            1,
+            "no new flush"
+        );
+    }
+
+    // --- Queue: begin_flush atomically clears pending ---
+
+    #[test]
+    fn autosave_queue_begin_flush_is_atomic_clear() {
+        let mut queue = AutosaveQueue::with_limit(10);
+
+        queue.enqueue_mutation(AutosaveMutationKind::Message);
+        queue.enqueue_mutation(AutosaveMutationKind::Message);
+        queue.enqueue_mutation(AutosaveMutationKind::Message);
+        assert_eq!(queue.pending_mutations, 3);
+
+        let ticket = queue.begin_flush(AutosaveFlushTrigger::Periodic).unwrap();
+
+        // Pending is immediately 0, even before finish_flush.
+        assert_eq!(queue.pending_mutations, 0);
+        assert_eq!(ticket.batch_size, 3);
+
+        // New mutations start fresh.
+        queue.enqueue_mutation(AutosaveMutationKind::Label);
+        assert_eq!(queue.pending_mutations, 1);
+
+        queue.finish_flush(ticket, true);
+        assert_eq!(queue.pending_mutations, 1, "new mutation preserved");
+    }
+
+    // --- Queue: multiple failures accumulate flush_failed ---
+
+    #[test]
+    fn autosave_queue_multiple_failures_accumulate() {
+        let mut queue = AutosaveQueue::with_limit(10);
+
+        // Each round: enqueue 1 new + restored from prior failure.
+        // Round 1: enqueue → pending=1, flush fails → restore 1 → pending=1
+        // Round 2: enqueue → pending=2, flush fails → restore 2 → pending=2
+        // Round N: pending grows by 1 each round because failures restore.
+        for round in 1..=5_u64 {
+            queue.enqueue_mutation(AutosaveMutationKind::Message);
+            #[allow(clippy::cast_possible_truncation)]
+            let expected_batch = round as usize;
+            let ticket = queue.begin_flush(AutosaveFlushTrigger::Periodic).unwrap();
+            assert_eq!(ticket.batch_size, expected_batch);
+            queue.finish_flush(ticket, false);
+            assert_eq!(queue.flush_failed, round);
+            assert_eq!(queue.pending_mutations, expected_batch, "restored batch");
+        }
+        assert_eq!(queue.flush_succeeded, 0);
+        assert_eq!(queue.flush_started, 5);
     }
 }

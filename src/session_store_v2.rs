@@ -153,6 +153,7 @@ pub struct ManifestIntegrity {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(clippy::struct_excessive_bools)] // invariants are naturally boolean checks
 pub struct ManifestInvariants {
     pub parent_links_closed: bool,
     pub monotonic_entry_seq: bool,
@@ -527,117 +528,150 @@ impl SessionStoreV2 {
         migration_id: impl Into<String>,
         correlation_id: impl Into<String>,
     ) -> Result<MigrationEvent> {
-        let checkpoint = self
-            .read_checkpoint(checkpoint_seq)?
-            .ok_or_else(|| Error::session(format!("checkpoint {checkpoint_seq} not found")))?;
+        let migration_id = migration_id.into();
+        let correlation_id = correlation_id.into();
 
-        let mut index_rows = self.read_index()?;
-        index_rows.retain(|row| row.entry_seq <= checkpoint.head_entry_seq);
+        let rollback_result: Result<MigrationEvent> = (|| {
+            let checkpoint = self
+                .read_checkpoint(checkpoint_seq)?
+                .ok_or_else(|| Error::session(format!("checkpoint {checkpoint_seq} not found")))?;
 
-        let mut keep_len_by_segment: std::collections::HashMap<u64, u64> =
-            std::collections::HashMap::new();
-        for row in &index_rows {
-            let end = row
-                .byte_offset
-                .checked_add(row.byte_length)
-                .ok_or_else(|| Error::session("index byte range overflow during rollback"))?;
-            keep_len_by_segment
-                .entry(row.segment_seq)
-                .and_modify(|current| *current = (*current).max(end))
-                .or_insert(end);
-        }
+            let mut index_rows = self.read_index()?;
+            index_rows.retain(|row| row.entry_seq <= checkpoint.head_entry_seq);
 
-        let segments_dir = self.root.join("segments");
-        if segments_dir.exists() {
-            let mut segment_files: Vec<(u64, PathBuf)> = Vec::new();
-            for entry in fs::read_dir(&segments_dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.extension().and_then(|ext| ext.to_str()) != Some("seg") {
-                    continue;
-                }
-                let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                    continue;
-                };
-                let Ok(segment_seq) = stem.parse::<u64>() else {
-                    continue;
-                };
-                segment_files.push((segment_seq, path));
+            let mut keep_len_by_segment: std::collections::HashMap<u64, u64> =
+                std::collections::HashMap::new();
+            for row in &index_rows {
+                let end = row
+                    .byte_offset
+                    .checked_add(row.byte_length)
+                    .ok_or_else(|| Error::session("index byte range overflow during rollback"))?;
+                keep_len_by_segment
+                    .entry(row.segment_seq)
+                    .and_modify(|current| *current = (*current).max(end))
+                    .or_insert(end);
             }
-            segment_files.sort_by_key(|(segment_seq, _)| *segment_seq);
 
-            for (segment_seq, path) in segment_files {
-                match keep_len_by_segment.get(&segment_seq).copied() {
-                    Some(keep_len) if keep_len > 0 => {
-                        let current_len = fs::metadata(&path)?.len();
-                        if keep_len < current_len {
-                            let file = OpenOptions::new().write(true).open(&path)?;
-                            file.set_len(keep_len)?;
+            let segments_dir = self.root.join("segments");
+            if segments_dir.exists() {
+                let mut segment_files: Vec<(u64, PathBuf)> = Vec::new();
+                for entry in fs::read_dir(&segments_dir)? {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if path.extension().and_then(|ext| ext.to_str()) != Some("seg") {
+                        continue;
+                    }
+                    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                        continue;
+                    };
+                    let Ok(segment_seq) = stem.parse::<u64>() else {
+                        continue;
+                    };
+                    segment_files.push((segment_seq, path));
+                }
+                segment_files.sort_by_key(|(segment_seq, _)| *segment_seq);
+
+                for (segment_seq, path) in segment_files {
+                    match keep_len_by_segment.get(&segment_seq).copied() {
+                        Some(keep_len) if keep_len > 0 => {
+                            let current_len = fs::metadata(&path)?.len();
+                            if keep_len < current_len {
+                                let file = OpenOptions::new().write(true).open(&path)?;
+                                file.set_len(keep_len)?;
+                            }
+                        }
+                        _ => {
+                            fs::remove_file(&path)?;
                         }
                     }
-                    _ => {
-                        fs::remove_file(&path)?;
-                    }
                 }
             }
-        }
 
-        let index_path = self.index_file_path();
-        let index_tmp = self.root.join("tmp").join("offsets.rollback.tmp");
-        write_jsonl_lines(&index_tmp, &index_rows)?;
-        fs::rename(index_tmp, index_path)?;
+            let index_path = self.index_file_path();
+            let index_tmp = self.root.join("tmp").join("offsets.rollback.tmp");
+            write_jsonl_lines(&index_tmp, &index_rows)?;
+            fs::rename(index_tmp, index_path)?;
 
-        self.next_segment_seq = 1;
-        self.next_frame_seq = 1;
-        self.next_entry_seq = 1;
-        self.current_segment_bytes = 0;
-        self.bootstrap_from_disk()?;
+            self.next_segment_seq = 1;
+            self.next_frame_seq = 1;
+            self.next_entry_seq = 1;
+            self.current_segment_bytes = 0;
+            self.bootstrap_from_disk()?;
 
-        let verification = MigrationVerification {
-            entry_count_match: self.entry_count() == checkpoint.head_entry_seq,
-            hash_chain_match: self.chain_hash == checkpoint.chain_hash,
-            index_consistent: self.validate_integrity().is_ok(),
-        };
+            let verification = MigrationVerification {
+                entry_count_match: self.entry_count() == checkpoint.head_entry_seq,
+                hash_chain_match: self.chain_hash == checkpoint.chain_hash,
+                index_consistent: self.validate_integrity().is_ok(),
+            };
 
-        let (outcome, error_class) = if verification.entry_count_match
-            && verification.hash_chain_match
-            && verification.index_consistent
-        {
-            ("ok".to_string(), None)
-        } else if verification.index_consistent {
-            (
-                "recoverable_error".to_string(),
-                Some("integrity_mismatch".to_string()),
-            )
-        } else {
-            (
-                "fatal_error".to_string(),
-                Some("index_corruption".to_string()),
-            )
-        };
+            let (outcome, error_class) = if verification.entry_count_match
+                && verification.hash_chain_match
+                && verification.index_consistent
+            {
+                ("ok".to_string(), None)
+            } else if verification.index_consistent {
+                (
+                    "recoverable_error".to_string(),
+                    Some("integrity_mismatch".to_string()),
+                )
+            } else {
+                (
+                    "fatal_error".to_string(),
+                    Some("index_corruption".to_string()),
+                )
+            };
 
-        let event = MigrationEvent {
-            schema: MIGRATION_EVENT_SCHEMA.to_string(),
-            migration_id: migration_id.into(),
-            phase: "rollback".to_string(),
-            at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            source_path: checkpoint.snapshot_ref,
-            target_path: self.root.display().to_string(),
-            source_format: "native_v2".to_string(),
-            target_format: "native_v2".to_string(),
-            verification,
-            outcome: outcome.clone(),
-            error_class,
-            correlation_id: correlation_id.into(),
-        };
-        self.append_migration_event(event.clone())?;
+            let event = MigrationEvent {
+                schema: MIGRATION_EVENT_SCHEMA.to_string(),
+                migration_id: migration_id.clone(),
+                phase: "rollback".to_string(),
+                at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                source_path: checkpoint.snapshot_ref,
+                target_path: self.root.display().to_string(),
+                source_format: "native_v2".to_string(),
+                target_format: "native_v2".to_string(),
+                verification,
+                outcome: outcome.clone(),
+                error_class,
+                correlation_id: correlation_id.clone(),
+            };
+            self.append_migration_event(event.clone())?;
 
-        if outcome == "ok" {
-            Ok(event)
-        } else {
-            Err(Error::session(format!(
-                "rollback verification failed for checkpoint {checkpoint_seq}"
-            )))
+            if outcome == "ok" {
+                Ok(event)
+            } else {
+                Err(Error::session(format!(
+                    "rollback verification failed for checkpoint {checkpoint_seq}"
+                )))
+            }
+        })();
+
+        match rollback_result {
+            Ok(event) => Ok(event),
+            Err(error) => {
+                if !rollback_failure_event_already_recorded(&error) {
+                    let failure_event = MigrationEvent {
+                        schema: MIGRATION_EVENT_SCHEMA.to_string(),
+                        migration_id,
+                        phase: "rollback".to_string(),
+                        at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                        source_path: self.checkpoint_path(checkpoint_seq).display().to_string(),
+                        target_path: self.root.display().to_string(),
+                        source_format: "native_v2".to_string(),
+                        target_format: "native_v2".to_string(),
+                        verification: MigrationVerification {
+                            entry_count_match: false,
+                            hash_chain_match: false,
+                            index_consistent: false,
+                        },
+                        outcome: "fatal_error".to_string(),
+                        error_class: Some(classify_rollback_error(&error).to_string()),
+                        correlation_id,
+                    };
+                    let _ = self.append_migration_event(failure_event);
+                }
+                Err(error)
+            }
         }
     }
 
@@ -991,6 +1025,27 @@ impl SessionStoreV2 {
     }
 }
 
+fn rollback_failure_event_already_recorded(error: &Error) -> bool {
+    matches!(error, Error::Session(message) if message.contains("rollback verification failed"))
+}
+
+fn classify_rollback_error(error: &Error) -> &'static str {
+    match error {
+        Error::Session(message) => {
+            if message.contains("checkpoint") && message.contains("not found") {
+                "checkpoint_not_found"
+            } else if message.contains("index byte range overflow") {
+                "index_range_overflow"
+            } else if message.contains("rollback verification failed") {
+                "rollback_verification_failed"
+            } else {
+                "session_error"
+            }
+        }
+        _ => error.category_code(),
+    }
+}
+
 /// Convert a V2 `SegmentFrame` payload back into a `SessionEntry`.
 pub fn frame_to_session_entry(frame: &SegmentFrame) -> Result<SessionEntry> {
     let entry: SessionEntry = serde_json::from_value(frame.payload.clone()).map_err(|e| {
@@ -1077,9 +1132,10 @@ fn manifest_hash_hex(manifest: &Manifest) -> Result<String> {
 
 /// Derive the V2 sidecar store root from a JSONL session file path.
 pub fn v2_sidecar_path(jsonl_path: &Path) -> PathBuf {
-    let stem = jsonl_path
-        .file_stem()
-        .map_or_else(|| "session".to_string(), |s| s.to_string_lossy().into_owned());
+    let stem = jsonl_path.file_stem().map_or_else(
+        || "session".to_string(),
+        |s| s.to_string_lossy().into_owned(),
+    );
     let parent = jsonl_path.parent().unwrap_or_else(|| Path::new("."));
     parent.join(format!("{stem}.v2"))
 }
