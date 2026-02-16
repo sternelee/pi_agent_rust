@@ -1620,6 +1620,22 @@ fn full_suite_gate_contains_normalized_duplicate_path_fail_closed_guards() {
 }
 
 #[test]
+fn full_suite_gate_contains_path_hygiene_fail_closed_guards() {
+    let gate = load_text(FULL_SUITE_GATE_PATH);
+    for token in [
+        "perf3x_bead_coverage_contract_fails_closed_on_parent_traversal_path",
+        "perf3x_bead_coverage_contract_fails_closed_on_absolute_path",
+        "perf3x_bead_coverage_contract_fails_closed_on_windows_absolute_path",
+        "perf3x_bead_coverage_contract_fails_closed_on_unc_path",
+    ] {
+        assert!(
+            gate.contains(token),
+            "full suite gate must include path-hygiene guard token: {token}"
+        );
+    }
+}
+
+#[test]
 fn ci_workflow_has_failure_output_guidance() {
     let ci = load_text(CI_WORKFLOW_PATH);
     // CI should produce structured output on failure
