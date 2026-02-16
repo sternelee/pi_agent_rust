@@ -9984,6 +9984,13 @@ mod tests {
                 serde_json::json!({ "path": "README.md" }),
             ),
             test_hostcall_request(
+                "tool-non-object-case",
+                HostcallKind::Tool {
+                    name: "read".to_string(),
+                },
+                serde_json::json!(["README.md", "Cargo.toml"]),
+            ),
+            test_hostcall_request(
                 "exec-object-case",
                 HostcallKind::Exec {
                     cmd: "echo from kind".to_string(),
@@ -10008,6 +10015,11 @@ mod tests {
                     "url": "https://example.com",
                     "method": "GET",
                 }),
+            ),
+            test_hostcall_request(
+                "http-non-object-case",
+                HostcallKind::Http,
+                serde_json::json!("https://example.com/raw"),
             ),
             test_hostcall_request(
                 "session-case",
@@ -10042,6 +10054,7 @@ mod tests {
                     "message": "hello",
                 }),
             ),
+            test_hostcall_request("log-null-case", HostcallKind::Log, Value::Null),
         ];
 
         for request in requests {
