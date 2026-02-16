@@ -2711,6 +2711,8 @@ fn run_all_wires_scenario_cell_status_artifacts_into_evidence_contract() {
         "claim_integrity.phase1_matrix_primary_outcomes_metrics_present",
         "claim_integrity.phase1_matrix_primary_outcomes_ordering_policy",
         "claim_integrity.phase1_matrix_cells_primary_e2e_metrics_present",
+        "claim_integrity.phase1_matrix_regression_guard_reason_set_exact",
+        "expected_regression_guard_reason_set",
         "claim_id=\"phase1_matrix_validation.matrix_cells.status\"",
         "metric_scope=\"matrix_cell_primary_e2e\"",
         "primary_e2e_before_microbench",

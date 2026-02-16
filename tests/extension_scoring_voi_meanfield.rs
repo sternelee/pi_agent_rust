@@ -90,7 +90,10 @@ fn voi_disabled_config_skips_all_candidates() {
 
     let plan = plan_voi_candidates(&candidates, fixed_now(), &config);
 
-    assert!(plan.selected.is_empty(), "disabled planner must select none");
+    assert!(
+        plan.selected.is_empty(),
+        "disabled planner must select none"
+    );
     assert_eq!(plan.skipped.len(), 2);
     for skipped in &plan.skipped {
         assert_eq!(skipped.reason, VoiSkipReason::Disabled);
@@ -129,7 +132,10 @@ fn voi_selects_candidates_within_budget() {
     // medium (25ms) fits, cheap (25ms) cumulative=50 fits, expensive (30ms) cumulative>50
     assert!(plan.used_overhead_ms <= 50);
     let selected_ids: Vec<&str> = plan.selected.iter().map(|s| s.id.as_str()).collect();
-    assert!(selected_ids.contains(&"medium"), "medium should be selected");
+    assert!(
+        selected_ids.contains(&"medium"),
+        "medium should be selected"
+    );
     assert!(selected_ids.contains(&"cheap"), "cheap should be selected");
 
     // Expensive should be budget-exceeded
@@ -161,7 +167,11 @@ fn voi_respects_max_candidates_limit() {
 
     let plan = plan_voi_candidates(&candidates, fixed_now(), &config);
 
-    assert_eq!(plan.selected.len(), 2, "max_candidates=2 should limit selection");
+    assert_eq!(
+        plan.selected.len(),
+        2,
+        "max_candidates=2 should limit selection"
+    );
     // The third candidate should be skipped as BudgetExceeded (the limit check).
     assert_eq!(plan.skipped.len(), 1);
     assert_eq!(plan.skipped[0].reason, VoiSkipReason::BudgetExceeded);
@@ -309,7 +319,9 @@ fn voi_remaining_overhead_equals_budget_minus_used() {
 
     assert_eq!(
         plan.remaining_overhead_ms,
-        config.overhead_budget_ms.saturating_sub(plan.used_overhead_ms),
+        config
+            .overhead_budget_ms
+            .saturating_sub(plan.used_overhead_ms),
         "remaining = budget - used"
     );
 }
@@ -344,7 +356,10 @@ fn meanfield_empty_observations_converged() {
     let config = MeanFieldControllerConfig::default();
     let report = compute_mean_field_controls(&[], &[], &config);
 
-    assert!(report.converged, "empty observation set should be converged");
+    assert!(
+        report.converged,
+        "empty observation set should be converged"
+    );
     assert!(report.controls.is_empty());
     assert_eq!(report.global_pressure, 0.0);
     assert_eq!(report.clipped_count, 0);
@@ -363,10 +378,7 @@ fn meanfield_single_calm_shard_converges() {
     let ctrl = &report.controls[0];
     assert_eq!(ctrl.shard_id, "shard-0");
     // Calm shard: routing weight should stay near 1.0
-    assert!(
-        ctrl.routing_weight > 0.0,
-        "routing weight must be positive"
-    );
+    assert!(ctrl.routing_weight > 0.0, "routing weight must be positive");
     assert!(
         ctrl.routing_weight <= config.max_routing_weight,
         "routing weight must not exceed max"
