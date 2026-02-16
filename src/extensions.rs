@@ -30384,6 +30384,158 @@ mod tests {
                     }
                 });
             }
+
+            #[test]
+            fn typed_opcode_context_routes_to_fast_lane(
+                case_idx in 0usize..4,
+                call_seed in "[a-z0-9]{1,12}",
+            ) {
+                let (capability, method, params, expected_opcode) = match case_idx {
+                    0 => (
+                        "read",
+                        "tool",
+                        json!({
+                            "name": "read",
+                            "input": { "path": "README.md", "offset": 0, "limit": 16 }
+                        }),
+                        CommonHostcallOpcode::ToolRead,
+                    ),
+                    1 => (
+                        "session",
+                        "session",
+                        json!({ "op": "get_name" }),
+                        CommonHostcallOpcode::SessionGetName,
+                    ),
+                    2 => (
+                        "session",
+                        "session",
+                        json!({ "op": "get_state" }),
+                        CommonHostcallOpcode::SessionGetState,
+                    ),
+                    _ => (
+                        "events",
+                        "events",
+                        json!({ "op": "list_flags" }),
+                        CommonHostcallOpcode::EventsListFlags,
+                    ),
+                };
+
+                let context = hostcall_opcode_context_for_params(method, &params);
+                prop_assert!(context.is_some(), "context must exist for supported opcode case");
+
+                let payload = HostCallPayload {
+                    call_id: format!("prop-fast-{call_seed}-{case_idx}"),
+                    capability: capability.to_string(),
+                    method: method.to_string(),
+                    params,
+                    timeout_ms: None,
+                    cancel_token: None,
+                    context,
+                };
+
+                prop_assert!(
+                    validate_host_call(&payload).is_ok(),
+                    "typed context payload must validate"
+                );
+                let lane = select_hostcall_lane(&payload)
+                    .expect("typed opcode payload should select lane successfully");
+                prop_assert_eq!(lane.lane, HostcallDispatchLane::Fast);
+                prop_assert_eq!(lane.reason, "typed_opcode_context_v1");
+                prop_assert_eq!(lane.opcode, Some(expected_opcode));
+            }
+
+            #[test]
+            fn tool_read_marshalling_hash_is_invariant_to_key_order(
+                path in "[a-zA-Z0-9_./-]{1,24}",
+                offset in 0u32..4096,
+                limit in 1u32..2048,
+            ) {
+                let mut input_a = serde_json::Map::new();
+                input_a.insert("path".to_string(), json!(path));
+                input_a.insert("offset".to_string(), json!(offset));
+                input_a.insert("limit".to_string(), json!(limit));
+
+                let mut input_b = serde_json::Map::new();
+                input_b.insert("limit".to_string(), json!(limit));
+                input_b.insert("path".to_string(), json!(path));
+                input_b.insert("offset".to_string(), json!(offset));
+
+                let mut params_a_obj = serde_json::Map::new();
+                params_a_obj.insert("name".to_string(), json!("read"));
+                params_a_obj.insert("input".to_string(), Value::Object(input_a));
+                let params_a = Value::Object(params_a_obj);
+
+                let mut params_b_obj = serde_json::Map::new();
+                params_b_obj.insert("name".to_string(), json!("read"));
+                params_b_obj.insert("input".to_string(), Value::Object(input_b));
+                let params_b = Value::Object(params_b_obj);
+
+                let generic_a = hostcall_params_hash("tool", &params_a);
+                let generic_b = hostcall_params_hash("tool", &params_b);
+                prop_assert_eq!(&generic_a, &generic_b);
+
+                let shape_a = hostcall_params_shape_hash("tool", &params_a);
+                let shape_b = hostcall_params_shape_hash("tool", &params_b);
+                prop_assert_eq!(shape_a, shape_b);
+
+                let artifacts_a =
+                    HostcallPayloadArena::new("tool", &params_a, Some(CommonHostcallOpcode::ToolRead))
+                        .marshal();
+                let artifacts_b =
+                    HostcallPayloadArena::new("tool", &params_b, Some(CommonHostcallOpcode::ToolRead))
+                        .marshal();
+
+                prop_assert_eq!(&artifacts_a.params_hash, &artifacts_b.params_hash);
+                prop_assert_eq!(&artifacts_a.params_hash, &generic_a);
+                prop_assert_eq!(&artifacts_a.args_shape_hash, &artifacts_b.args_shape_hash);
+                prop_assert_eq!(
+                    artifacts_a.telemetry.path,
+                    HOSTCALL_MARSHALLING_PATH_FAST_OPCODE
+                );
+                prop_assert_eq!(
+                    artifacts_b.telemetry.path,
+                    HOSTCALL_MARSHALLING_PATH_FAST_OPCODE
+                );
+                prop_assert!(artifacts_a.telemetry.fallback_reason.is_none());
+                prop_assert!(artifacts_b.telemetry.fallback_reason.is_none());
+            }
+
+            #[test]
+            fn mismatched_typed_opcode_context_is_rejected(
+                use_get_name_payload in proptest::bool::ANY,
+                call_seed in "[a-z0-9]{1,12}",
+            ) {
+                let (params, mismatched_code) = if use_get_name_payload {
+                    (json!({ "op": "get_name" }), "session.set_name")
+                } else {
+                    (json!({ "op": "set_name", "name": "x" }), "session.get_name")
+                };
+
+                let payload = HostCallPayload {
+                    call_id: format!("prop-mismatch-{call_seed}"),
+                    capability: "session".to_string(),
+                    method: "session".to_string(),
+                    params,
+                    timeout_ms: None,
+                    cancel_token: None,
+                    context: Some(json!({
+                        "typed_opcode": {
+                            "schema": HOSTCALL_OPCODE_SCHEMA_VERSION,
+                            "version": HOSTCALL_OPCODE_VERSION,
+                            "code": mismatched_code
+                        }
+                    })),
+                };
+
+                let err = validate_host_call(&payload)
+                    .expect_err("mismatched typed opcode context must fail validation");
+                prop_assert!(
+                    err.to_string()
+                        .contains("does not match payload-derived opcode"),
+                    "unexpected error: {err}"
+                );
+                prop_assert!(select_hostcall_lane(&payload).is_err());
+            }
         }
 
         // ------------------------------------------------------------------

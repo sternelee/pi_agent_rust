@@ -25,12 +25,13 @@
 //! 12. Provider gap test matrix (bd-3uqg.11.11.5)
 //! 13. Waiver lifecycle (bd-1f42.8.8.1)
 //! 14. SEC-6.4 security compatibility conformance (bd-1a2cu)
+//! 15. PERF-3X bead-to-artifact coverage audit (bd-3ar8v.6.11)
 //!
 //! Run:
 //!   cargo test --test `ci_full_suite_gate` -- --nocapture
 
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 const CI_WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
@@ -337,6 +338,204 @@ struct GateSummary {
     blocking_pass: usize,
     blocking_total: usize,
     all_blocking_pass: bool,
+}
+
+/// One row in the PERF-3X bead coverage contract.
+#[derive(Debug, Clone)]
+struct Perf3xBeadCoverageRow {
+    bead: String,
+    unit_evidence: Vec<String>,
+    e2e_evidence: Vec<String>,
+    log_evidence: Vec<String>,
+}
+
+/// Machine-readable coverage contract consumed by the Phase-5 gate.
+fn perf3x_bead_coverage_contract() -> Value {
+    serde_json::json!({
+        "schema": "pi.perf3x.bead_coverage.v1",
+        "coverage_rows": [
+            {
+                "bead": "bd-3ar8v.2.8",
+                "unit_evidence": ["tests/bench_schema.rs"],
+                "e2e_evidence": ["tests/e2e_results"],
+                "log_evidence": ["tests/full_suite_gate/full_suite_events.jsonl"]
+            },
+            {
+                "bead": "bd-3ar8v.3.8",
+                "unit_evidence": ["tests/compaction.rs"],
+                "e2e_evidence": ["tests/e2e_session_persistence.rs"],
+                "log_evidence": ["tests/full_suite_gate/certification_events.jsonl"]
+            },
+            {
+                "bead": "bd-3ar8v.4.7",
+                "unit_evidence": ["tests/ext_conformance.rs"],
+                "e2e_evidence": ["tests/e2e_extension_registration.rs"],
+                "log_evidence": ["tests/ext_conformance/reports/conformance_summary.json"]
+            },
+            {
+                "bead": "bd-3ar8v.4.8",
+                "unit_evidence": ["tests/ext_proptest.rs"],
+                "e2e_evidence": ["tests/e2e_extension_registration.rs"],
+                "log_evidence": ["tests/full_suite_gate/full_suite_events.jsonl"]
+            },
+            {
+                "bead": "bd-3ar8v.4.9",
+                "unit_evidence": ["tests/ext_bench_harness.rs"],
+                "e2e_evidence": ["tests/e2e_extension_registration.rs"],
+                "log_evidence": ["tests/full_suite_gate/certification_events.jsonl"]
+            },
+            {
+                "bead": "bd-3ar8v.4.10",
+                "unit_evidence": ["tests/phase3_security_invariants.rs"],
+                "e2e_evidence": ["tests/e2e_security_scenario_sec66.rs"],
+                "log_evidence": ["tests/full_suite_gate/certification_events.jsonl"]
+            },
+            {
+                "bead": "bd-3ar8v.6.11",
+                "unit_evidence": ["tests/ci_full_suite_gate.rs"],
+                "e2e_evidence": ["tests/full_suite_gate/certification_verdict.json"],
+                "log_evidence": ["tests/full_suite_gate/certification_events.jsonl"]
+            }
+        ]
+    })
+}
+
+fn parse_required_evidence_paths(
+    row: &Value,
+    row_idx: usize,
+    field_name: &str,
+) -> Result<Vec<String>, String> {
+    let values = row
+        .get(field_name)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("coverage_rows[{row_idx}] missing '{field_name}' array"))?;
+    if values.is_empty() {
+        return Err(format!(
+            "coverage_rows[{row_idx}] field '{field_name}' must be non-empty"
+        ));
+    }
+
+    let mut paths = Vec::with_capacity(values.len());
+    for (path_idx, value) in values.iter().enumerate() {
+        let path = value.as_str().ok_or_else(|| {
+            format!("coverage_rows[{row_idx}] field '{field_name}[{path_idx}]' must be a string")
+        })?;
+        let path = path.trim();
+        if path.is_empty() {
+            return Err(format!(
+                "coverage_rows[{row_idx}] field '{field_name}[{path_idx}]' must not be empty"
+            ));
+        }
+        paths.push(path.to_string());
+    }
+
+    Ok(paths)
+}
+
+/// Parse and validate the bead coverage contract.
+fn validate_perf3x_bead_coverage_contract(
+    contract: &Value,
+) -> Result<Vec<Perf3xBeadCoverageRow>, String> {
+    let schema = contract
+        .get("schema")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "coverage contract missing schema".to_string())?;
+    if schema != "pi.perf3x.bead_coverage.v1" {
+        return Err(format!("unexpected coverage contract schema: {schema}"));
+    }
+
+    let rows = contract
+        .get("coverage_rows")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "coverage contract missing coverage_rows array".to_string())?;
+    if rows.is_empty() {
+        return Err("coverage_rows must not be empty".to_string());
+    }
+
+    let mut seen_beads = HashSet::new();
+    let mut parsed = Vec::with_capacity(rows.len());
+    for (row_idx, row) in rows.iter().enumerate() {
+        let bead = row
+            .get("bead")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("coverage_rows[{row_idx}] missing 'bead' string"))?
+            .trim()
+            .to_string();
+        if !bead.starts_with("bd-3ar8v.") {
+            return Err(format!(
+                "coverage_rows[{row_idx}] has invalid PERF-3X bead id: {bead}"
+            ));
+        }
+        if !seen_beads.insert(bead.clone()) {
+            return Err(format!("duplicate bead in coverage_rows: {bead}"));
+        }
+
+        parsed.push(Perf3xBeadCoverageRow {
+            bead,
+            unit_evidence: parse_required_evidence_paths(row, row_idx, "unit_evidence")?,
+            e2e_evidence: parse_required_evidence_paths(row, row_idx, "e2e_evidence")?,
+            log_evidence: parse_required_evidence_paths(row, row_idx, "log_evidence")?,
+        });
+    }
+
+    Ok(parsed)
+}
+
+/// Evaluate contract coverage against files present in repository artifacts.
+fn evaluate_perf3x_bead_coverage(root: &Path, contract: &Value) -> (String, Option<String>) {
+    let rows = match validate_perf3x_bead_coverage_contract(contract) {
+        Ok(rows) => rows,
+        Err(err) => {
+            return (
+                "fail".to_string(),
+                Some(format!("Invalid PERF-3X coverage contract: {err}")),
+            );
+        }
+    };
+
+    let mut missing = Vec::new();
+    for row in &rows {
+        for (class_name, evidence_paths) in [
+            ("unit", &row.unit_evidence),
+            ("e2e", &row.e2e_evidence),
+            ("log", &row.log_evidence),
+        ] {
+            for path in evidence_paths {
+                if !root.join(path).exists() {
+                    missing.push(format!("{}:{}:{}", row.bead, class_name, path));
+                }
+            }
+        }
+    }
+    missing.sort();
+
+    if missing.is_empty() {
+        return (
+            "pass".to_string(),
+            Some(format!(
+                "Validated {} PERF-3X bead coverage row(s) with complete unit/e2e/log evidence paths",
+                rows.len()
+            )),
+        );
+    }
+
+    let preview = missing
+        .iter()
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let suffix = if missing.len() > 3 { " ..." } else { "" };
+    (
+        "warn".to_string(),
+        Some(format!(
+            "Coverage contract parsed ({} rows) but {} evidence path(s) are missing: {}{}",
+            rows.len(),
+            missing.len(),
+            preview,
+            suffix
+        )),
+    )
 }
 
 /// Check a JSON artifact for a specific status field.
@@ -746,6 +945,21 @@ fn collect_gates(root: &Path) -> Vec<SubGate> {
         detail,
         reproduce_command: Some(
             "cargo test --test sec_compatibility_conformance -- --nocapture".to_string(),
+        ),
+    });
+
+    // Gate 15: PERF-3X bead-to-evidence coverage audit (bd-3ar8v.6.11).
+    let (status, detail) = evaluate_perf3x_bead_coverage(root, &perf3x_bead_coverage_contract());
+    gates.push(SubGate {
+        id: "perf3x_bead_coverage".to_string(),
+        name: "PERF-3X bead-to-artifact coverage audit".to_string(),
+        bead: "bd-3ar8v.6.11".to_string(),
+        status,
+        blocking: false,
+        artifact_path: Some("tests/full_suite_gate/certification_events.jsonl".to_string()),
+        detail,
+        reproduce_command: Some(
+            "cargo test --test ci_full_suite_gate -- perf3x_bead_coverage_contract_is_well_formed --nocapture --exact".to_string(),
         ),
     });
 
@@ -1831,6 +2045,105 @@ fn parse_waivers_empty_is_ok() {
 }
 
 #[test]
+fn perf3x_bead_coverage_contract_is_well_formed() {
+    let contract = perf3x_bead_coverage_contract();
+    let rows = validate_perf3x_bead_coverage_contract(&contract).expect("contract should be valid");
+    assert!(
+        rows.len() >= 6,
+        "expected at least 6 PERF-3X rows, got {}",
+        rows.len()
+    );
+    assert!(
+        rows.iter().any(|row| row.bead == "bd-3ar8v.6.11"),
+        "contract should include phase-5 audit bead"
+    );
+    for row in rows {
+        assert!(
+            !row.unit_evidence.is_empty(),
+            "unit evidence must be present"
+        );
+        assert!(!row.e2e_evidence.is_empty(), "e2e evidence must be present");
+        assert!(!row.log_evidence.is_empty(), "log evidence must be present");
+    }
+}
+
+#[test]
+fn perf3x_bead_coverage_contract_fails_closed_on_missing_e2e_array() {
+    let mut contract = perf3x_bead_coverage_contract();
+    let first = contract
+        .get_mut("coverage_rows")
+        .and_then(Value::as_array_mut)
+        .and_then(|rows| rows.first_mut())
+        .and_then(Value::as_object_mut)
+        .expect("first coverage row should exist");
+    first.remove("e2e_evidence");
+
+    let err = validate_perf3x_bead_coverage_contract(&contract)
+        .expect_err("missing e2e_evidence must fail closed");
+    assert!(
+        err.contains("e2e_evidence"),
+        "error should mention missing e2e_evidence, got: {err}"
+    );
+}
+
+#[test]
+fn perf3x_bead_coverage_contract_fails_closed_on_empty_log_array() {
+    let mut contract = perf3x_bead_coverage_contract();
+    contract["coverage_rows"][0]["log_evidence"] = serde_json::json!([]);
+
+    let err = validate_perf3x_bead_coverage_contract(&contract)
+        .expect_err("empty log_evidence must fail closed");
+    assert!(
+        err.contains("log_evidence"),
+        "error should mention log_evidence, got: {err}"
+    );
+}
+
+#[test]
+fn perf3x_bead_coverage_evaluator_warns_when_evidence_paths_are_missing() {
+    let mut temp = std::env::temp_dir();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock before unix epoch")
+        .as_nanos();
+    temp.push(format!("pi_agent_rust_per3x_coverage_warn_{nonce}"));
+    std::fs::create_dir_all(&temp).expect("create temp root");
+
+    let (status, detail) = evaluate_perf3x_bead_coverage(&temp, &perf3x_bead_coverage_contract());
+    assert_eq!(status, "warn", "missing paths should warn");
+    let detail = detail.unwrap_or_default();
+    assert!(
+        detail.contains("missing"),
+        "warn detail should mention missing paths: {detail}"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn perf3x_bead_coverage_evaluator_fails_on_malformed_contract() {
+    let malformed = serde_json::json!({
+        "schema": "pi.perf3x.bead_coverage.v1",
+        "coverage_rows": [
+            {
+                "bead": "bd-3ar8v.2.8",
+                "unit_evidence": [],
+                "e2e_evidence": ["tests/e2e_results"],
+                "log_evidence": ["tests/full_suite_gate/full_suite_events.jsonl"]
+            }
+        ]
+    });
+
+    let (status, detail) = evaluate_perf3x_bead_coverage(&repo_root(), &malformed);
+    assert_eq!(status, "fail");
+    let detail = detail.unwrap_or_default();
+    assert!(
+        detail.contains("Invalid PERF-3X coverage contract"),
+        "expected malformed-contract failure, got: {detail}"
+    );
+}
+
+#[test]
 fn ci_workflow_publishes_scenario_cell_gate_artifacts() {
     let workflow = std::fs::read_to_string(CI_WORKFLOW_PATH)
         .unwrap_or_else(|err| panic!("failed to read {CI_WORKFLOW_PATH}: {err}"));
@@ -1867,6 +2180,11 @@ fn run_all_wires_scenario_cell_status_artifacts_into_evidence_contract() {
         "claim_integrity.phase1_matrix_validation_schema",
         "claim_integrity.phase1_matrix_validation_generated_at_fresh",
         "claim_integrity.phase1_matrix_correlation_matches_run",
+        "claim_integrity.phase1_matrix_primary_outcomes_object",
+        "claim_integrity.phase1_matrix_primary_outcomes_required_fields",
+        "claim_integrity.phase1_matrix_primary_outcomes_metrics_present",
+        "claim_integrity.phase1_matrix_primary_outcomes_ordering_policy",
+        "primary_e2e_before_microbench",
         "claim_integrity.realistic_session_shape_coverage",
         "\"source\"",
         "\"source_path\"",

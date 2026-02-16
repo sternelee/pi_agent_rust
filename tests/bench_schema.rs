@@ -806,6 +806,12 @@ fn validate_phase1_matrix_validation_record(record: &Value) -> Result<(), String
             return Err(format!("matrix_requirements missing {field}"));
         }
     }
+    let required_cell_count = matrix_requirements
+        .get("required_cell_count")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            "matrix_requirements.required_cell_count must be a positive integer".to_string()
+        })?;
 
     let matrix_cells = record
         .get("matrix_cells")
@@ -813,6 +819,12 @@ fn validate_phase1_matrix_validation_record(record: &Value) -> Result<(), String
         .ok_or_else(|| "matrix_cells must be an array".to_string())?;
     if matrix_cells.is_empty() {
         return Err("matrix_cells must not be empty".to_string());
+    }
+    if required_cell_count != matrix_cells.len() as u64 {
+        return Err(format!(
+            "matrix_requirements.required_cell_count ({required_cell_count}) does not match matrix_cells length ({})",
+            matrix_cells.len()
+        ));
     }
     for cell in matrix_cells {
         let cell_obj = cell
@@ -864,6 +876,7 @@ fn validate_phase1_matrix_validation_record(record: &Value) -> Result<(), String
             if !primary.contains_key(*field) {
                 return Err(format!("matrix cell primary_e2e missing {field}"));
             }
+            let _ = require_positive_metric(primary, "matrix cell primary_e2e", field)?;
         }
     }
 
@@ -883,6 +896,43 @@ fn validate_phase1_matrix_validation_record(record: &Value) -> Result<(), String
             return Err(format!("stage_summary missing {field}"));
         }
     }
+    let covered_cells = stage_summary
+        .get("covered_cells")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "stage_summary.covered_cells must be an integer".to_string())?;
+    let complete_cells = stage_summary
+        .get("cells_with_complete_stage_breakdown")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            "stage_summary.cells_with_complete_stage_breakdown must be an integer".to_string()
+        })?;
+    let missing_cells_count = stage_summary
+        .get("cells_missing_stage_breakdown")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            "stage_summary.cells_missing_stage_breakdown must be an integer".to_string()
+        })?;
+    let missing_cells = stage_summary
+        .get("missing_cells")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "stage_summary.missing_cells must be an array".to_string())?;
+    if complete_cells + missing_cells_count != matrix_cells.len() as u64 {
+        return Err(format!(
+            "stage_summary complete+missing ({complete_cells}+{missing_cells_count}) must equal matrix_cells length ({})",
+            matrix_cells.len()
+        ));
+    }
+    if covered_cells != complete_cells {
+        return Err(format!(
+            "stage_summary.covered_cells ({covered_cells}) must equal cells_with_complete_stage_breakdown ({complete_cells})"
+        ));
+    }
+    if missing_cells.len() as u64 != missing_cells_count {
+        return Err(format!(
+            "stage_summary.missing_cells length ({}) must equal cells_missing_stage_breakdown ({missing_cells_count})",
+            missing_cells.len()
+        ));
+    }
 
     let primary_outcomes = record
         .get("primary_outcomes")
@@ -898,6 +948,27 @@ fn validate_phase1_matrix_validation_record(record: &Value) -> Result<(), String
         if !primary_outcomes.contains_key(*field) {
             return Err(format!("primary_outcomes missing {field}"));
         }
+    }
+    let primary_status = primary_outcomes
+        .get("status")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "primary_outcomes.status must be a string".to_string())?;
+    if !matches!(primary_status, "pass" | "fail") {
+        return Err(format!(
+            "primary_outcomes.status has invalid value: {primary_status}"
+        ));
+    }
+    for field in &["wall_clock_ms", "rust_vs_node_ratio", "rust_vs_bun_ratio"] {
+        let _ = require_positive_metric(primary_outcomes, "primary_outcomes", field)?;
+    }
+    let ordering_policy = primary_outcomes
+        .get("ordering_policy")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "primary_outcomes.ordering_policy must be a string".to_string())?;
+    if ordering_policy != "primary_e2e_before_microbench" {
+        return Err(format!(
+            "primary_outcomes.ordering_policy must be 'primary_e2e_before_microbench', got: {ordering_policy}"
+        ));
     }
 
     let regression_guards = record
@@ -931,6 +1002,139 @@ fn validate_phase1_matrix_validation_record(record: &Value) -> Result<(), String
     }
 
     Ok(())
+}
+
+fn require_positive_metric(
+    obj: &serde_json::Map<String, Value>,
+    context: &str,
+    field: &str,
+) -> Result<f64, String> {
+    let value = obj
+        .get(field)
+        .and_then(Value::as_f64)
+        .ok_or_else(|| format!("{context}.{field} must be a positive finite number"))?;
+    if !value.is_finite() || value <= 0.0 {
+        return Err(format!(
+            "{context}.{field} must be a positive finite number, got: {value}"
+        ));
+    }
+    Ok(value)
+}
+
+fn phase1_matrix_validation_golden_fixture() -> Value {
+    json!({
+        "schema": PHASE1_MATRIX_SCHEMA,
+        "run_id": "20260216T010101Z",
+        "correlation_id": "abc123def456",
+        "matrix_requirements": {
+            "required_partition_tags": ["matched-state", "realistic"],
+            "required_session_message_sizes": [100_000, 200_000, 500_000, 1_000_000, 5_000_000],
+            "required_cell_count": 2
+        },
+        "matrix_cells": [
+            {
+                "workload_partition": "matched-state",
+                "session_messages": 100_000,
+                "scenario_id": "matched-state/session_100000",
+                "status": "pass",
+                "missing_reasons": [],
+                "stage_attribution": {
+                    "open_ms": 48.0,
+                    "append_ms": 36.0,
+                    "save_ms": 22.0,
+                    "index_ms": 11.0,
+                    "total_stage_ms": 117.0
+                },
+                "primary_e2e": {
+                    "wall_clock_ms": 1200.0,
+                    "rust_vs_node_ratio": 2.2,
+                    "rust_vs_bun_ratio": 2.2
+                },
+                "microbench_context": {
+                    "cold_load_ms": 18.0,
+                    "per_call_us": 33.0
+                },
+                "lineage": {
+                    "source_record_index": 2,
+                    "source_artifacts": ["target/perf/scenario_runner.jsonl"]
+                }
+            },
+            {
+                "workload_partition": "realistic",
+                "session_messages": 100_000,
+                "scenario_id": "realistic/session_100000",
+                "status": "pass",
+                "missing_reasons": [],
+                "stage_attribution": {
+                    "open_ms": 44.0,
+                    "append_ms": 32.0,
+                    "save_ms": 19.0,
+                    "index_ms": 10.0,
+                    "total_stage_ms": 105.0
+                },
+                "primary_e2e": {
+                    "wall_clock_ms": 1200.0,
+                    "rust_vs_node_ratio": 2.2,
+                    "rust_vs_bun_ratio": 2.2
+                },
+                "microbench_context": {
+                    "cold_load_ms": 18.0,
+                    "per_call_us": 33.0
+                },
+                "lineage": {
+                    "source_record_index": 7,
+                    "source_artifacts": ["target/perf/scenario_runner.jsonl"]
+                }
+            }
+        ],
+        "stage_summary": {
+            "required_stage_keys": ["open_ms", "append_ms", "save_ms", "index_ms"],
+            "operation_stage_coverage": {
+                "open_ms": 2,
+                "append_ms": 2,
+                "save_ms": 2,
+                "index_ms": 2
+            },
+            "cells_with_complete_stage_breakdown": 2,
+            "cells_missing_stage_breakdown": 0,
+            "covered_cells": 2,
+            "missing_cells": []
+        },
+        "primary_outcomes": {
+            "status": "pass",
+            "wall_clock_ms": 1200.0,
+            "rust_vs_node_ratio": 2.2,
+            "rust_vs_bun_ratio": 2.2,
+            "ordering_policy": "primary_e2e_before_microbench"
+        },
+        "regression_guards": {
+            "memory": "pass",
+            "correctness": "pass",
+            "security": "pass",
+            "failure_or_gap_reasons": []
+        },
+        "evidence_links": {
+            "phase1_unit_and_fault_injection": {
+                "suite_logs": {},
+                "fault_injection_script": "scripts/e2e/run_persistence_fault_injection.sh",
+                "fault_injection_summary_path": null
+            },
+            "required_artifacts": {
+                "scenario_runner": "target/perf/scenario_runner.jsonl",
+                "stratification": "target/perf/extension_benchmark_stratification.json",
+                "baseline_variance_confidence": "target/perf/baseline_variance_confidence.json"
+            }
+        },
+        "consumption_contract": {
+            "downstream_beads": ["bd-3ar8v.2.12"],
+            "artifact_ready_for_phase5": true,
+            "fail_closed_conditions": ["missing_stage_metrics"]
+        },
+        "lineage": {
+            "run_id_lineage": ["20260216T010101Z", "abc123def456"],
+            "source_manifest_path": "target/perf/runs/20260216T010101Z/manifest.json"
+        }
+    })
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -1458,123 +1662,35 @@ fn extension_stratification_validator_rejects_missing_claim_integrity() {
 
 #[test]
 fn phase1_matrix_validator_accepts_golden_fixture() {
-    let golden = json!({
-        "schema": PHASE1_MATRIX_SCHEMA,
-        "run_id": "20260216T010101Z",
-        "correlation_id": "abc123def456",
-        "matrix_requirements": {
-            "required_partition_tags": ["matched-state", "realistic"],
-            "required_session_message_sizes": [100_000, 200_000, 500_000, 1_000_000, 5_000_000],
-            "required_cell_count": 10
-        },
-        "matrix_cells": [
-            {
-                "workload_partition": "matched-state",
-                "session_messages": 100_000,
-                "scenario_id": "matched-state/session_100000",
-                "status": "pass",
-                "missing_reasons": [],
-                "stage_attribution": {
-                    "open_ms": 48.0,
-                    "append_ms": 36.0,
-                    "save_ms": 22.0,
-                    "index_ms": 11.0,
-                    "total_stage_ms": 117.0
-                },
-                "primary_e2e": {
-                    "wall_clock_ms": 1200.0,
-                    "rust_vs_node_ratio": 2.2,
-                    "rust_vs_bun_ratio": 2.2
-                },
-                "microbench_context": {
-                    "cold_load_ms": 18.0,
-                    "per_call_us": 33.0
-                },
-                "lineage": {
-                    "source_record_index": 2,
-                    "source_artifacts": ["target/perf/scenario_runner.jsonl"]
-                }
-            },
-            {
-                "workload_partition": "realistic",
-                "session_messages": 100_000,
-                "scenario_id": "realistic/session_100000",
-                "status": "pass",
-                "missing_reasons": [],
-                "stage_attribution": {
-                    "open_ms": 44.0,
-                    "append_ms": 32.0,
-                    "save_ms": 19.0,
-                    "index_ms": 10.0,
-                    "total_stage_ms": 105.0
-                },
-                "primary_e2e": {
-                    "wall_clock_ms": 1200.0,
-                    "rust_vs_node_ratio": 2.2,
-                    "rust_vs_bun_ratio": 2.2
-                },
-                "microbench_context": {
-                    "cold_load_ms": 18.0,
-                    "per_call_us": 33.0
-                },
-                "lineage": {
-                    "source_record_index": 7,
-                    "source_artifacts": ["target/perf/scenario_runner.jsonl"]
-                }
-            }
-        ],
-        "stage_summary": {
-            "required_stage_keys": ["open_ms", "append_ms", "save_ms", "index_ms"],
-            "operation_stage_coverage": {
-                "open_ms": 2,
-                "append_ms": 2,
-                "save_ms": 2,
-                "index_ms": 2
-            },
-            "cells_with_complete_stage_breakdown": 2,
-            "cells_missing_stage_breakdown": 0,
-            "covered_cells": 2,
-            "missing_cells": []
-        },
-        "primary_outcomes": {
-            "status": "pass",
-            "wall_clock_ms": 1200.0,
-            "rust_vs_node_ratio": 2.2,
-            "rust_vs_bun_ratio": 2.2,
-            "ordering_policy": "primary_e2e_before_microbench"
-        },
-        "regression_guards": {
-            "memory": "pass",
-            "correctness": "pass",
-            "security": "pass",
-            "failure_or_gap_reasons": []
-        },
-        "evidence_links": {
-            "phase1_unit_and_fault_injection": {
-                "suite_logs": {},
-                "fault_injection_script": "scripts/e2e/run_persistence_fault_injection.sh",
-                "fault_injection_summary_path": null
-            },
-            "required_artifacts": {
-                "scenario_runner": "target/perf/scenario_runner.jsonl",
-                "stratification": "target/perf/extension_benchmark_stratification.json",
-                "baseline_variance_confidence": "target/perf/baseline_variance_confidence.json"
-            }
-        },
-        "consumption_contract": {
-            "downstream_beads": ["bd-3ar8v.2.12"],
-            "artifact_ready_for_phase5": true,
-            "fail_closed_conditions": ["missing_stage_metrics"]
-        },
-        "lineage": {
-            "run_id_lineage": ["20260216T010101Z", "abc123def456"],
-            "source_manifest_path": "target/perf/runs/20260216T010101Z/manifest.json"
-        }
-    });
+    let golden = phase1_matrix_validation_golden_fixture();
 
     assert!(
         validate_phase1_matrix_validation_record(&golden).is_ok(),
         "golden phase1 matrix fixture should pass validation"
+    );
+}
+
+#[test]
+fn phase1_matrix_validator_rejects_non_numeric_primary_e2e_metric() {
+    let mut malformed = phase1_matrix_validation_golden_fixture();
+    malformed["matrix_cells"][0]["primary_e2e"]["wall_clock_ms"] = json!("1200ms");
+
+    let err = validate_phase1_matrix_validation_record(&malformed).expect_err("fixture must fail");
+    assert!(
+        err.contains("matrix cell primary_e2e.wall_clock_ms"),
+        "expected primary_e2e wall_clock type failure, got: {err}"
+    );
+}
+
+#[test]
+fn phase1_matrix_validator_rejects_non_positive_primary_outcomes_ratio() {
+    let mut malformed = phase1_matrix_validation_golden_fixture();
+    malformed["primary_outcomes"]["rust_vs_bun_ratio"] = json!(0.0);
+
+    let err = validate_phase1_matrix_validation_record(&malformed).expect_err("fixture must fail");
+    assert!(
+        err.contains("primary_outcomes.rust_vs_bun_ratio"),
+        "expected primary_outcomes ratio positivity failure, got: {err}"
     );
 }
 
@@ -1587,7 +1703,7 @@ fn phase1_matrix_validator_rejects_missing_stage_attribution() {
         "matrix_requirements": {
             "required_partition_tags": ["matched-state", "realistic"],
             "required_session_message_sizes": [100_000],
-            "required_cell_count": 2
+            "required_cell_count": 1
         },
         "matrix_cells": [
             {
@@ -1642,6 +1758,228 @@ fn phase1_matrix_validator_rejects_missing_stage_attribution() {
     assert!(
         err.contains("stage_attribution"),
         "expected stage_attribution validation failure, got: {err}"
+    );
+}
+
+#[test]
+fn phase1_matrix_validator_rejects_required_cell_count_mismatch() {
+    let malformed = json!({
+        "schema": PHASE1_MATRIX_SCHEMA,
+        "run_id": "20260216T010101Z",
+        "correlation_id": "abc123def456",
+        "matrix_requirements": {
+            "required_partition_tags": ["matched-state", "realistic"],
+            "required_session_message_sizes": [100_000],
+            "required_cell_count": 2
+        },
+        "matrix_cells": [
+            {
+                "workload_partition": "matched-state",
+                "session_messages": 100_000,
+                "scenario_id": "matched-state/session_100000",
+                "status": "pass",
+                "stage_attribution": {
+                    "open_ms": 48.0,
+                    "append_ms": 36.0,
+                    "save_ms": 22.0,
+                    "index_ms": 11.0,
+                    "total_stage_ms": 117.0
+                },
+                "primary_e2e": {
+                    "wall_clock_ms": 1200.0,
+                    "rust_vs_node_ratio": 2.2,
+                    "rust_vs_bun_ratio": 2.2
+                },
+                "lineage": {
+                    "source_record_index": 0,
+                    "source_artifacts": []
+                }
+            }
+        ],
+        "stage_summary": {
+            "required_stage_keys": ["open_ms", "append_ms", "save_ms", "index_ms"],
+            "operation_stage_coverage": {"open_ms": 1, "append_ms": 1, "save_ms": 1, "index_ms": 1},
+            "cells_with_complete_stage_breakdown": 1,
+            "cells_missing_stage_breakdown": 0,
+            "covered_cells": 1,
+            "missing_cells": []
+        },
+        "primary_outcomes": {
+            "status": "pass",
+            "wall_clock_ms": 1200.0,
+            "rust_vs_node_ratio": 2.2,
+            "rust_vs_bun_ratio": 2.2,
+            "ordering_policy": "primary_e2e_before_microbench"
+        },
+        "regression_guards": {
+            "memory": "pass",
+            "correctness": "pass",
+            "security": "pass"
+        },
+        "evidence_links": {
+            "phase1_unit_and_fault_injection": {},
+            "required_artifacts": {}
+        },
+        "consumption_contract": {
+            "artifact_ready_for_phase5": false
+        },
+        "lineage": {
+            "run_id_lineage": ["20260216T010101Z", "abc123def456"]
+        }
+    });
+
+    let err = validate_phase1_matrix_validation_record(&malformed).expect_err("fixture must fail");
+    assert!(
+        err.contains("required_cell_count"),
+        "expected required_cell_count mismatch failure, got: {err}"
+    );
+}
+
+#[test]
+fn phase1_matrix_validator_rejects_stage_summary_count_mismatch() {
+    let malformed = json!({
+        "schema": PHASE1_MATRIX_SCHEMA,
+        "run_id": "20260216T010101Z",
+        "correlation_id": "abc123def456",
+        "matrix_requirements": {
+            "required_partition_tags": ["matched-state", "realistic"],
+            "required_session_message_sizes": [100_000],
+            "required_cell_count": 1
+        },
+        "matrix_cells": [
+            {
+                "workload_partition": "matched-state",
+                "session_messages": 100_000,
+                "scenario_id": "matched-state/session_100000",
+                "status": "pass",
+                "stage_attribution": {
+                    "open_ms": 48.0,
+                    "append_ms": 36.0,
+                    "save_ms": 22.0,
+                    "index_ms": 11.0,
+                    "total_stage_ms": 117.0
+                },
+                "primary_e2e": {
+                    "wall_clock_ms": 1200.0,
+                    "rust_vs_node_ratio": 2.2,
+                    "rust_vs_bun_ratio": 2.2
+                },
+                "lineage": {
+                    "source_record_index": 0,
+                    "source_artifacts": []
+                }
+            }
+        ],
+        "stage_summary": {
+            "required_stage_keys": ["open_ms", "append_ms", "save_ms", "index_ms"],
+            "operation_stage_coverage": {"open_ms": 1, "append_ms": 1, "save_ms": 1, "index_ms": 1},
+            "cells_with_complete_stage_breakdown": 0,
+            "cells_missing_stage_breakdown": 0,
+            "covered_cells": 0,
+            "missing_cells": []
+        },
+        "primary_outcomes": {
+            "status": "pass",
+            "wall_clock_ms": 1200.0,
+            "rust_vs_node_ratio": 2.2,
+            "rust_vs_bun_ratio": 2.2,
+            "ordering_policy": "primary_e2e_before_microbench"
+        },
+        "regression_guards": {
+            "memory": "pass",
+            "correctness": "pass",
+            "security": "pass"
+        },
+        "evidence_links": {
+            "phase1_unit_and_fault_injection": {},
+            "required_artifacts": {}
+        },
+        "consumption_contract": {
+            "artifact_ready_for_phase5": false
+        },
+        "lineage": {
+            "run_id_lineage": ["20260216T010101Z", "abc123def456"]
+        }
+    });
+
+    let err = validate_phase1_matrix_validation_record(&malformed).expect_err("fixture must fail");
+    assert!(
+        err.contains("stage_summary complete+missing"),
+        "expected stage_summary mismatch failure, got: {err}"
+    );
+}
+
+#[test]
+fn phase1_matrix_validator_rejects_non_primary_ordering_policy() {
+    let malformed = json!({
+        "schema": PHASE1_MATRIX_SCHEMA,
+        "run_id": "20260216T010101Z",
+        "correlation_id": "abc123def456",
+        "matrix_requirements": {
+            "required_partition_tags": ["matched-state", "realistic"],
+            "required_session_message_sizes": [100_000],
+            "required_cell_count": 1
+        },
+        "matrix_cells": [
+            {
+                "workload_partition": "matched-state",
+                "session_messages": 100_000,
+                "scenario_id": "matched-state/session_100000",
+                "status": "pass",
+                "stage_attribution": {
+                    "open_ms": 48.0,
+                    "append_ms": 36.0,
+                    "save_ms": 22.0,
+                    "index_ms": 11.0,
+                    "total_stage_ms": 117.0
+                },
+                "primary_e2e": {
+                    "wall_clock_ms": 1200.0,
+                    "rust_vs_node_ratio": 2.2,
+                    "rust_vs_bun_ratio": 2.2
+                },
+                "lineage": {
+                    "source_record_index": 0,
+                    "source_artifacts": []
+                }
+            }
+        ],
+        "stage_summary": {
+            "required_stage_keys": ["open_ms", "append_ms", "save_ms", "index_ms"],
+            "operation_stage_coverage": {"open_ms": 1, "append_ms": 1, "save_ms": 1, "index_ms": 1},
+            "cells_with_complete_stage_breakdown": 1,
+            "cells_missing_stage_breakdown": 0,
+            "covered_cells": 1,
+            "missing_cells": []
+        },
+        "primary_outcomes": {
+            "status": "pass",
+            "wall_clock_ms": 1200.0,
+            "rust_vs_node_ratio": 2.2,
+            "rust_vs_bun_ratio": 2.2,
+            "ordering_policy": "microbench_before_primary_e2e"
+        },
+        "regression_guards": {
+            "memory": "pass",
+            "correctness": "pass",
+            "security": "pass"
+        },
+        "evidence_links": {
+            "phase1_unit_and_fault_injection": {},
+            "required_artifacts": {}
+        },
+        "consumption_contract": {
+            "artifact_ready_for_phase5": false
+        },
+        "lineage": {
+            "run_id_lineage": ["20260216T010101Z", "abc123def456"]
+        }
+    });
+
+    let err = validate_phase1_matrix_validation_record(&malformed).expect_err("fixture must fail");
+    assert!(
+        err.contains("ordering_policy"),
+        "expected ordering policy failure, got: {err}"
     );
 }
 

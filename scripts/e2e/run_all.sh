@@ -7110,6 +7110,22 @@ def parse_session_messages_value(raw: object) -> int | None:
     return magnitude if magnitude > 0 else None
 
 
+def parse_positive_metric_value(raw: object) -> float | None:
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        value = float(raw)
+    else:
+        text = str(raw or "").strip().replace(",", "")
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except ValueError:
+            return None
+    return value if value > 0 else None
+
+
 def parse_shape_to_session_messages(shape: str) -> int | None:
     text = str(shape or "").strip().lower()
     if not text:
@@ -7560,7 +7576,16 @@ if isinstance(phase1_matrix_validation, dict) and perf_phase1_matrix_validation_
         "claim_integrity.phase1_matrix_validation_json",
         phase1_matrix_validation,
         perf_phase1_matrix_validation_path,
-        ["schema", "generated_at", "run_id", "correlation_id", "matrix_requirements", "matrix_cells"],
+        [
+            "schema",
+            "generated_at",
+            "run_id",
+            "correlation_id",
+            "matrix_requirements",
+            "matrix_cells",
+            "stage_summary",
+            "primary_outcomes",
+        ],
         strict=claim_integrity_required,
     )
     require_condition(
@@ -7604,6 +7629,116 @@ if isinstance(phase1_matrix_validation, dict) and perf_phase1_matrix_validation_
     if not phase1_correlation_ok and claim_integrity_gate_active:
         evidence_missing_or_stale_reasons.append(
             "phase-1 matrix validation correlation_id mismatch with run artifacts"
+        )
+
+    primary_outcomes = phase1_matrix_validation.get("primary_outcomes")
+    primary_outcomes_obj = primary_outcomes if isinstance(primary_outcomes, dict) else None
+    require_condition(
+        "claim_integrity.phase1_matrix_primary_outcomes_object",
+        path=perf_phase1_matrix_validation_path,
+        ok=primary_outcomes_obj is not None,
+        ok_msg="phase-1 matrix validation primary_outcomes object present",
+        fail_msg="phase-1 matrix validation missing primary_outcomes object",
+        strict=claim_integrity_required,
+        remediation=(
+            "Update scripts/perf/orchestrate.sh to emit primary_outcomes with "
+            "wall_clock_ms, rust_vs_node_ratio, rust_vs_bun_ratio, and "
+            "ordering_policy."
+        ),
+    )
+
+    required_primary_outcome_fields = [
+        "wall_clock_ms",
+        "rust_vs_node_ratio",
+        "rust_vs_bun_ratio",
+        "ordering_policy",
+    ]
+    missing_primary_outcome_fields = [
+        field
+        for field in required_primary_outcome_fields
+        if not (
+            isinstance(primary_outcomes_obj, dict)
+            and field in primary_outcomes_obj
+        )
+    ]
+    require_condition(
+        "claim_integrity.phase1_matrix_primary_outcomes_required_fields",
+        path=perf_phase1_matrix_validation_path,
+        ok=not missing_primary_outcome_fields,
+        ok_msg="phase-1 matrix validation primary_outcomes required fields present",
+        fail_msg=(
+            "phase-1 matrix validation primary_outcomes missing fields: "
+            f"{missing_primary_outcome_fields}"
+        ),
+        strict=claim_integrity_required,
+        remediation=(
+            "Emit all primary_outcomes fields (wall_clock_ms, rust_vs_node_ratio, "
+            "rust_vs_bun_ratio, ordering_policy) in scripts/perf/orchestrate.sh."
+        ),
+    )
+    if missing_primary_outcome_fields and claim_integrity_gate_active:
+        evidence_missing_or_stale_reasons.append(
+            "phase-1 matrix validation primary_outcomes missing required fields: "
+            f"{missing_primary_outcome_fields}"
+        )
+
+    invalid_primary_metric_fields: list[str] = []
+    for field in ("wall_clock_ms", "rust_vs_node_ratio", "rust_vs_bun_ratio"):
+        metric_value = parse_positive_metric_value(
+            primary_outcomes_obj.get(field) if isinstance(primary_outcomes_obj, dict) else None
+        )
+        if metric_value is None:
+            invalid_primary_metric_fields.append(field)
+    require_condition(
+        "claim_integrity.phase1_matrix_primary_outcomes_metrics_present",
+        path=perf_phase1_matrix_validation_path,
+        ok=not invalid_primary_metric_fields,
+        ok_msg="phase-1 matrix validation primary outcomes include positive wall-clock and ratio metrics",
+        fail_msg=(
+            "phase-1 matrix validation primary outcomes missing/invalid metrics: "
+            f"{invalid_primary_metric_fields}"
+        ),
+        strict=claim_integrity_required,
+        remediation=(
+            "Ensure scripts/perf/orchestrate.sh populates positive primary outcomes "
+            "for wall_clock_ms, rust_vs_node_ratio, and rust_vs_bun_ratio."
+        ),
+    )
+    if invalid_primary_metric_fields and claim_integrity_gate_active:
+        evidence_missing_or_stale_reasons.append(
+            "phase-1 matrix validation primary outcomes missing/invalid metrics: "
+            f"{invalid_primary_metric_fields}"
+        )
+
+    ordering_policy = str(
+        (
+            primary_outcomes_obj.get("ordering_policy")
+            if isinstance(primary_outcomes_obj, dict)
+            else ""
+        )
+        or ""
+    ).strip()
+    ordering_policy_ok = ordering_policy == "primary_e2e_before_microbench"
+    require_condition(
+        "claim_integrity.phase1_matrix_primary_outcomes_ordering_policy",
+        path=perf_phase1_matrix_validation_path,
+        ok=ordering_policy_ok,
+        ok_msg="phase-1 matrix validation ordering policy prioritizes primary E2E outcomes",
+        fail_msg=(
+            "phase-1 matrix validation ordering_policy mismatch: expected "
+            "'primary_e2e_before_microbench', got "
+            f"{ordering_policy!r}"
+        ),
+        strict=claim_integrity_required,
+        remediation=(
+            "Set phase1_matrix_validation.primary_outcomes.ordering_policy to "
+            "'primary_e2e_before_microbench' in scripts/perf/orchestrate.sh."
+        ),
+    )
+    if not ordering_policy_ok and claim_integrity_gate_active:
+        evidence_missing_or_stale_reasons.append(
+            "phase-1 matrix validation ordering_policy must be "
+            "'primary_e2e_before_microbench'"
         )
 
     matrix_cells = phase1_matrix_validation.get("matrix_cells")
