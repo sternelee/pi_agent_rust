@@ -919,24 +919,55 @@ impl SessionStoreV2 {
         let segment_files = self.list_segment_files()?;
         for (_seg_seq, seg_path) in segment_files {
             let file = File::open(&seg_path)?;
-            let reader = BufReader::new(file);
+            let mut reader = BufReader::new(file);
             let mut byte_offset = 0u64;
+            let mut line_number = 0u64;
+            let mut line = String::new();
 
-            for line_result in reader.lines() {
-                let line = line_result?;
-                if line.trim().is_empty() {
-                    byte_offset = byte_offset.saturating_add(
-                        u64::try_from(line.len().saturating_add(1)).unwrap_or(u64::MAX),
-                    );
-                    continue;
+            loop {
+                line.clear();
+                let bytes_read = reader.read_line(&mut line)?;
+                if bytes_read == 0 {
+                    break;
                 }
-                let frame: SegmentFrame = serde_json::from_str(&line)?;
-                let line_bytes = line.len().saturating_add(1);
-                let line_len = u64::try_from(line_bytes)
+                line_number = line_number.saturating_add(1);
+                let line_len = u64::try_from(bytes_read)
                     .map_err(|_| Error::session("line length exceeds u64"))?;
 
-                let mut record_bytes = line.as_bytes().to_vec();
-                record_bytes.push(b'\n');
+                if line.trim().is_empty() {
+                    byte_offset = byte_offset.saturating_add(line_len);
+                    continue;
+                }
+
+                let json_line = line.trim_end_matches('\n').trim_end_matches('\r');
+                let frame: SegmentFrame = match serde_json::from_str(json_line) {
+                    Ok(frame) => frame,
+                    Err(err) => {
+                        let at_eof = reader.fill_buf()?.is_empty();
+                        let missing_newline = !line.ends_with('\n');
+                        if at_eof && missing_newline {
+                            tracing::warn!(
+                                segment = %seg_path.display(),
+                                line_number,
+                                error = %err,
+                                "SessionStoreV2 dropping truncated trailing segment frame during index rebuild"
+                            );
+                            // Trim the incomplete tail so subsequent reads and appends remain valid.
+                            OpenOptions::new()
+                                .write(true)
+                                .open(&seg_path)?
+                                .set_len(byte_offset)?;
+                            break;
+                        }
+                        return Err(Error::session(format!(
+                            "failed to parse segment frame while rebuilding index {}:{}: {err}",
+                            seg_path.display(),
+                            line_number
+                        )));
+                    }
+                };
+
+                let record_bytes = line.as_bytes().to_vec();
                 let crc = crc32c_upper(&record_bytes);
 
                 let index_entry = OffsetIndexEntry {
@@ -1120,6 +1151,10 @@ fn classify_rollback_error(error: &Error) -> &'static str {
 fn is_recoverable_index_error(error: &Error) -> bool {
     match error {
         Error::Json(_) => true,
+        Error::Io(err) => matches!(
+            err.kind(),
+            std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::InvalidData
+        ),
         Error::Session(message) => {
             let lower = message.to_ascii_lowercase();
             lower.contains("checksum mismatch")

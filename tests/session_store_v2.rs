@@ -218,6 +218,81 @@ fn create_recovers_when_index_json_is_corrupt() -> PiResult<()> {
     Ok(())
 }
 
+#[test]
+fn create_recovers_when_index_bounds_are_corrupt() -> PiResult<()> {
+    let dir = tempdir()?;
+    let mut store = SessionStoreV2::create(dir.path(), 4 * 1024)?;
+    let expected_ids = append_linear_entries(&mut store, 6)?;
+
+    let index_path = store.index_file_path();
+    let mut rows = read_index_json_rows(&index_path)?;
+    rows[0]["byteLength"] = json!(9_999_999_u64);
+    write_index_json_rows(&index_path, &rows)?;
+
+    let recovered = SessionStoreV2::create(dir.path(), 4 * 1024)?;
+    recovered.validate_integrity()?;
+    assert_eq!(recovered.entry_count(), 6);
+    assert_eq!(frame_ids(&recovered.read_all_entries()?), expected_ids);
+    Ok(())
+}
+
+#[test]
+fn create_recovers_when_index_frame_metadata_is_corrupt() -> PiResult<()> {
+    let dir = tempdir()?;
+    let mut store = SessionStoreV2::create(dir.path(), 4 * 1024)?;
+    let expected_ids = append_linear_entries(&mut store, 5)?;
+
+    let index_path = store.index_file_path();
+    let mut rows = read_index_json_rows(&index_path)?;
+    rows[0]["entryId"] = json!("entry_corrupted");
+    write_index_json_rows(&index_path, &rows)?;
+
+    let recovered = SessionStoreV2::create(dir.path(), 4 * 1024)?;
+    recovered.validate_integrity()?;
+    assert_eq!(recovered.entry_count(), 5);
+    assert_eq!(frame_ids(&recovered.read_all_entries()?), expected_ids);
+    Ok(())
+}
+
+#[test]
+fn create_recovers_when_segment_has_truncated_trailing_frame() -> PiResult<()> {
+    let dir = tempdir()?;
+    let mut store = SessionStoreV2::create(dir.path(), 4 * 1024)?;
+    let expected_ids = append_linear_entries(&mut store, 4)?;
+
+    let seg_path = store.segment_file_path(1);
+    let bytes = fs::read(&seg_path)?;
+    let newline_positions: Vec<usize> = bytes
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, byte)| (*byte == b'\n').then_some(idx))
+        .collect();
+    assert!(
+        newline_positions.len() >= 4,
+        "expected at least 4 lines in segment"
+    );
+    let start_of_last_line = newline_positions[newline_positions.len() - 2].saturating_add(1);
+    let truncate_to = start_of_last_line.saturating_add(8);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&seg_path)?
+        .set_len(u64::try_from(truncate_to).unwrap_or(u64::MAX))?;
+    drop(store);
+
+    let recovered = SessionStoreV2::create(dir.path(), 4 * 1024)?;
+    recovered.validate_integrity()?;
+    assert_eq!(recovered.entry_count(), 3);
+    assert_eq!(
+        frame_ids(&recovered.read_all_entries()?),
+        expected_ids[..3].to_vec()
+    );
+    assert_eq!(
+        fs::metadata(&seg_path)?.len(),
+        u64::try_from(start_of_last_line).unwrap_or(u64::MAX)
+    );
+    Ok(())
+}
+
 // ── O(index+tail) resume path tests ──────────────────────────────────
 
 /// Helper: build a `SessionEntry::Custom` with the given id and parent.
