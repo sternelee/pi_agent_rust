@@ -2092,6 +2092,93 @@ impl ExtensionQuotaConfig {
     }
 }
 
+/// Workload tier presets for the hostcall budget controller.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionBudgetTier {
+    Strict,
+    Balanced,
+    Throughput,
+}
+
+impl ExtensionBudgetTier {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::Balanced => "balanced",
+            Self::Throughput => "throughput",
+        }
+    }
+
+    pub const fn from_policy_mode(mode: ExtensionPolicyMode) -> Self {
+        match mode {
+            ExtensionPolicyMode::Strict => Self::Strict,
+            ExtensionPolicyMode::Prompt => Self::Balanced,
+            ExtensionPolicyMode::Permissive => Self::Throughput,
+        }
+    }
+}
+
+/// Budget controller settings for expected-loss fallback routing.
+///
+/// The controller promotes an extension to compatibility-lane fallback after
+/// repeated overload/anomaly signals within a bounded window and returns to
+/// fast lane after a recovery streak.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ExtensionBudgetControllerConfig {
+    /// Master switch for automatic compatibility-lane fallback.
+    pub enabled: bool,
+    /// Workload tier used to derive operational defaults.
+    pub tier: ExtensionBudgetTier,
+    /// Rolling window for overload signals.
+    pub overload_window_ms: u64,
+    /// Number of overload signals needed to enter fallback mode.
+    pub overload_signals_to_fallback: u32,
+    /// Consecutive successful calls required to exit fallback mode.
+    pub recovery_successes_to_exit: u32,
+}
+
+impl ExtensionBudgetControllerConfig {
+    #[must_use]
+    pub const fn for_tier(tier: ExtensionBudgetTier) -> Self {
+        match tier {
+            ExtensionBudgetTier::Strict => Self {
+                enabled: true,
+                tier,
+                overload_window_ms: 3_000,
+                overload_signals_to_fallback: 2,
+                recovery_successes_to_exit: 8,
+            },
+            ExtensionBudgetTier::Balanced => Self {
+                enabled: true,
+                tier,
+                overload_window_ms: 8_000,
+                overload_signals_to_fallback: 3,
+                recovery_successes_to_exit: 16,
+            },
+            ExtensionBudgetTier::Throughput => Self {
+                enabled: true,
+                tier,
+                overload_window_ms: 15_000,
+                overload_signals_to_fallback: 5,
+                recovery_successes_to_exit: 32,
+            },
+        }
+    }
+
+    #[must_use]
+    pub const fn for_policy_mode(mode: ExtensionPolicyMode) -> Self {
+        Self::for_tier(ExtensionBudgetTier::from_policy_mode(mode))
+    }
+}
+
+impl Default for ExtensionBudgetControllerConfig {
+    fn default() -> Self {
+        Self::for_tier(ExtensionBudgetTier::Balanced)
+    }
+}
+
 /// Mutable per-extension quota counters, reset semantics:
 /// - `hostcall_timestamps_ms` is a sliding window (entries expire by time).
 /// - `hostcalls_total` and cumulative counters are monotonic (session-lifetime).
@@ -2103,6 +2190,15 @@ struct ExtensionQuotaState {
     active_subprocesses: u32,
     write_bytes_total: u64,
     http_requests_total: u64,
+}
+
+/// Runtime budget-controller state for one extension.
+#[derive(Debug, Clone, Default)]
+struct ExtensionBudgetFallbackState {
+    overload_timestamps_ms: VecDeque<i64>,
+    in_fallback: bool,
+    healthy_success_streak: u32,
+    last_trigger_reason: Option<String>,
 }
 
 /// Telemetry event emitted when a quota limit is breached.
@@ -15407,6 +15503,12 @@ pub async fn dispatch_host_call_shared(
                     method = %method,
                     reason = %qr,
                 );
+                manager.record_budget_overload_signal(
+                    ctx.extension_id,
+                    "quota_exceeded",
+                    None,
+                    None,
+                );
                 // SEC-5.1: Alert for quota breach.
                 manager.record_security_alert(SecurityAlert {
                     schema: SECURITY_ALERT_SCHEMA_VERSION.to_string(),
@@ -15471,6 +15573,24 @@ pub async fn dispatch_host_call_shared(
                 },
                 &reason,
             );
+            if let Some(decision) = runtime_risk_decision.as_ref() {
+                if decision.feature_budget_exceeded {
+                    manager.record_budget_overload_signal(
+                        ctx.extension_id,
+                        "feature_extraction_budget_exceeded",
+                        None,
+                        None,
+                    );
+                }
+                if decision.fallback_reason.is_some() {
+                    manager.record_budget_overload_signal(
+                        ctx.extension_id,
+                        "runtime_risk_decision_timeout",
+                        None,
+                        None,
+                    );
+                }
+            }
         }
 
         // SEC-7.1: In shadow mode (enabled=true, enforce=false) the risk
@@ -15692,13 +15812,18 @@ pub async fn dispatch_host_call_shared(
         &outcome,
     );
 
+    let outcome_error_code = match &outcome {
+        HostcallOutcome::Error { code, .. } => Some(code.as_str()),
+        _ => None,
+    };
+
+    if let Some(manager) = ctx.manager.as_ref() {
+        manager.record_budget_recovery_sample(ctx.extension_id, outcome_error_code.is_none());
+    }
+
     if let (Some(manager), Some(risk_decision)) =
         (ctx.manager.as_ref(), runtime_risk_decision.as_ref())
     {
-        let outcome_error_code = match &outcome {
-            HostcallOutcome::Error { code, .. } => Some(code.as_str()),
-            _ => None,
-        };
         manager.record_runtime_risk_outcome(
             ctx.extension_id,
             &call_id,
@@ -15978,6 +16103,12 @@ async fn dispatch_shared_allowed(
                             opcode = opcode.code(),
                             stall_reason = "lane_overflow",
                             "Hostcall reactor lane saturated; dispatch continues on shared fast lane"
+                        );
+                        manager.record_budget_overload_signal(
+                            ctx.extension_id,
+                            "reactor_lane_overflow",
+                            Some(backpressure.depth),
+                            Some(backpressure.capacity),
                         );
                     }
                     None => {}
@@ -18154,6 +18285,10 @@ struct ExtensionManagerInner {
     hostcall_compat_kill_switch_global: bool,
     /// Emergency per-extension kill-switch forcing hostcalls into compatibility lane.
     hostcall_compat_kill_switch_extensions: HashSet<String>,
+    /// Automatic budget controller for overload/anomaly fallback routing.
+    budget_controller_config: ExtensionBudgetControllerConfig,
+    /// Per-extension fallback state tracked by the budget controller.
+    budget_fallback_states: HashMap<String, ExtensionBudgetFallbackState>,
     /// Kill-switch audit trail (SEC-5.2).
     kill_switch_audit: VecDeque<KillSwitchAuditEntry>,
     /// Trust onboarding decision log (SEC-5.2).
@@ -18754,6 +18889,161 @@ impl ExtensionManager {
                 s.active_subprocesses,
                 s.write_bytes_total,
                 s.http_requests_total,
+            )
+        })
+    }
+
+    /// Update the budget-controller configuration.
+    pub fn set_budget_controller_config(&self, config: ExtensionBudgetControllerConfig) {
+        if let Ok(mut guard) = self.inner.lock() {
+            let mut clamped = config;
+            clamped.overload_window_ms = clamped.overload_window_ms.max(100);
+            clamped.overload_signals_to_fallback = clamped.overload_signals_to_fallback.max(1);
+            clamped.recovery_successes_to_exit = clamped.recovery_successes_to_exit.max(1);
+            guard.budget_controller_config = clamped;
+        }
+    }
+
+    /// Snapshot the budget-controller configuration.
+    pub fn budget_controller_config(&self) -> ExtensionBudgetControllerConfig {
+        self.inner
+            .lock()
+            .map(|guard| guard.budget_controller_config.clone())
+            .unwrap_or_default()
+    }
+
+    fn record_budget_overload_signal(
+        &self,
+        extension_id: Option<&str>,
+        reason: &str,
+        queue_depth: Option<usize>,
+        queue_capacity: Option<usize>,
+    ) {
+        let Some(ext_id) = extension_id.map(str::trim).filter(|id| !id.is_empty()) else {
+            return;
+        };
+        let Ok(mut guard) = self.inner.lock() else {
+            return;
+        };
+        let config = guard.budget_controller_config.clone();
+        if !config.enabled {
+            return;
+        }
+
+        let state = guard
+            .budget_fallback_states
+            .entry(ext_id.to_string())
+            .or_default();
+        let now_ms = runtime_risk_now_ms();
+        let horizon = now_ms.saturating_sub(i64::try_from(config.overload_window_ms).unwrap_or(0));
+        while state
+            .overload_timestamps_ms
+            .front()
+            .is_some_and(|ts| *ts < horizon)
+        {
+            let _ = state.overload_timestamps_ms.pop_front();
+        }
+
+        state.overload_timestamps_ms.push_back(now_ms);
+        state.healthy_success_streak = 0;
+        state.last_trigger_reason = Some(reason.to_string());
+
+        let signal_count = u32::try_from(state.overload_timestamps_ms.len()).unwrap_or(u32::MAX);
+        let utilization_pct = if config.overload_signals_to_fallback == 0 {
+            0.0
+        } else {
+            (f64::from(signal_count) / f64::from(config.overload_signals_to_fallback)) * 100.0
+        };
+
+        if !state.in_fallback && signal_count >= config.overload_signals_to_fallback {
+            state.in_fallback = true;
+            tracing::warn!(
+                event = "host_call.budget_controller.fallback_entered",
+                extension_id = %ext_id,
+                budget_tier = config.tier.as_str(),
+                trigger_reason = %reason,
+                overload_signal_count = signal_count,
+                overload_signal_threshold = config.overload_signals_to_fallback,
+                overload_window_ms = config.overload_window_ms,
+                recovery_successes_to_exit = config.recovery_successes_to_exit,
+                queue_depth,
+                queue_capacity,
+                overload_utilization_pct = utilization_pct,
+                fallback_lane = "compat",
+                "Budget controller entered compatibility fallback mode"
+            );
+            return;
+        }
+
+        tracing::debug!(
+            event = "host_call.budget_controller.signal",
+            extension_id = %ext_id,
+            budget_tier = config.tier.as_str(),
+            trigger_reason = %reason,
+            overload_signal_count = signal_count,
+            overload_signal_threshold = config.overload_signals_to_fallback,
+            overload_window_ms = config.overload_window_ms,
+            queue_depth,
+            queue_capacity,
+            overload_utilization_pct = utilization_pct,
+            fallback_active = state.in_fallback,
+            "Budget controller recorded overload/anomaly signal"
+        );
+    }
+
+    fn record_budget_recovery_sample(&self, extension_id: Option<&str>, success: bool) {
+        let Some(ext_id) = extension_id.map(str::trim).filter(|id| !id.is_empty()) else {
+            return;
+        };
+        let Ok(mut guard) = self.inner.lock() else {
+            return;
+        };
+        let config = guard.budget_controller_config.clone();
+        if !config.enabled {
+            return;
+        }
+        let Some(state) = guard.budget_fallback_states.get_mut(ext_id) else {
+            return;
+        };
+        if !state.in_fallback {
+            return;
+        }
+
+        if !success {
+            state.healthy_success_streak = 0;
+            return;
+        }
+
+        state.healthy_success_streak = state.healthy_success_streak.saturating_add(1);
+        if state.healthy_success_streak < config.recovery_successes_to_exit {
+            return;
+        }
+
+        state.in_fallback = false;
+        state.healthy_success_streak = 0;
+        state.overload_timestamps_ms.clear();
+        tracing::info!(
+            event = "host_call.budget_controller.recovered",
+            extension_id = %ext_id,
+            budget_tier = config.tier.as_str(),
+            recovery_successes = config.recovery_successes_to_exit,
+            fallback_lane = "fast",
+            "Budget controller exited compatibility fallback mode"
+        );
+    }
+
+    #[cfg(test)]
+    fn budget_fallback_state_snapshot(
+        &self,
+        extension_id: &str,
+    ) -> Option<(bool, u32, usize, Option<String>)> {
+        let guard = self.inner.lock().ok()?;
+        guard.budget_fallback_states.get(extension_id).map(|state| {
+            (
+                state.in_fallback,
+                state.healthy_success_streak,
+                state.overload_timestamps_ms.len(),
+                state.last_trigger_reason.clone(),
             )
         })
     }
@@ -19670,7 +19960,15 @@ impl ExtensionManager {
         {
             return Some("forced_compat_extension_kill_switch");
         }
-        drop(guard);
+        if extension_id.is_some_and(|id| {
+            guard.budget_controller_config.enabled
+                && guard
+                    .budget_fallback_states
+                    .get(id)
+                    .is_some_and(|state| state.in_fallback)
+        }) {
+            return Some("forced_compat_budget_controller");
+        }
         None
     }
 
@@ -32218,6 +32516,135 @@ mod tests {
         assert_eq!(fast_lane_meta.lane, HostcallDispatchLane::Fast);
         assert_eq!(fast_lane_meta.decision_reason, "typed_opcode_context_v1");
         assert!(fast_lane_meta.fallback_reason.is_none());
+    }
+
+    #[test]
+    fn budget_controller_tier_defaults_are_ordered() {
+        let strict = ExtensionBudgetControllerConfig::for_tier(ExtensionBudgetTier::Strict);
+        let balanced = ExtensionBudgetControllerConfig::for_tier(ExtensionBudgetTier::Balanced);
+        let throughput =
+            ExtensionBudgetControllerConfig::for_tier(ExtensionBudgetTier::Throughput);
+
+        assert!(strict.enabled);
+        assert!(balanced.enabled);
+        assert!(throughput.enabled);
+        assert!(strict.overload_signals_to_fallback < balanced.overload_signals_to_fallback);
+        assert!(balanced.overload_signals_to_fallback < throughput.overload_signals_to_fallback);
+        assert!(strict.recovery_successes_to_exit < balanced.recovery_successes_to_exit);
+        assert!(balanced.recovery_successes_to_exit < throughput.recovery_successes_to_exit);
+    }
+
+    #[test]
+    fn budget_controller_enters_fallback_after_threshold() {
+        let manager = ExtensionManager::new();
+        manager.set_budget_controller_config(ExtensionBudgetControllerConfig {
+            enabled: true,
+            tier: ExtensionBudgetTier::Balanced,
+            overload_window_ms: 10_000,
+            overload_signals_to_fallback: 2,
+            recovery_successes_to_exit: 4,
+        });
+
+        assert_eq!(manager.hostcall_compat_kill_switch_reason(Some("ext.budget")), None);
+        manager.record_budget_overload_signal(Some("ext.budget"), "reactor_lane_overflow", None, None);
+        assert_eq!(manager.hostcall_compat_kill_switch_reason(Some("ext.budget")), None);
+        manager.record_budget_overload_signal(Some("ext.budget"), "reactor_lane_overflow", None, None);
+        assert_eq!(
+            manager.hostcall_compat_kill_switch_reason(Some("ext.budget")),
+            Some("forced_compat_budget_controller")
+        );
+
+        let snapshot = manager
+            .budget_fallback_state_snapshot("ext.budget")
+            .expect("budget state");
+        assert!(snapshot.0);
+        assert_eq!(snapshot.3.as_deref(), Some("reactor_lane_overflow"));
+    }
+
+    #[test]
+    fn budget_controller_recovery_requires_consecutive_successes() {
+        let manager = ExtensionManager::new();
+        manager.set_budget_controller_config(ExtensionBudgetControllerConfig {
+            enabled: true,
+            tier: ExtensionBudgetTier::Balanced,
+            overload_window_ms: 10_000,
+            overload_signals_to_fallback: 1,
+            recovery_successes_to_exit: 2,
+        });
+
+        manager.record_budget_overload_signal(Some("ext.recover"), "quota_exceeded", None, None);
+        assert_eq!(
+            manager.hostcall_compat_kill_switch_reason(Some("ext.recover")),
+            Some("forced_compat_budget_controller")
+        );
+
+        manager.record_budget_recovery_sample(Some("ext.recover"), true);
+        assert_eq!(
+            manager.hostcall_compat_kill_switch_reason(Some("ext.recover")),
+            Some("forced_compat_budget_controller")
+        );
+
+        manager.record_budget_overload_signal(Some("ext.recover"), "reactor_lane_overflow", None, None);
+        let snapshot = manager
+            .budget_fallback_state_snapshot("ext.recover")
+            .expect("budget state");
+        assert_eq!(snapshot.1, 0, "overload should reset recovery streak");
+
+        manager.record_budget_recovery_sample(Some("ext.recover"), true);
+        manager.record_budget_recovery_sample(Some("ext.recover"), true);
+        assert_eq!(manager.hostcall_compat_kill_switch_reason(Some("ext.recover")), None);
+    }
+
+    #[test]
+    fn dispatch_shared_allowed_budget_controller_forces_compat_lane() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("lane_budget.txt");
+        std::fs::write(&file, "lane-budget").expect("write test file");
+
+        let tools = ToolRegistry::new(&["read"], dir.path(), None);
+        let http = HttpConnector::with_defaults();
+        let policy = permissive_policy();
+        let manager = ExtensionManager::new();
+        manager.set_budget_controller_config(ExtensionBudgetControllerConfig {
+            enabled: true,
+            tier: ExtensionBudgetTier::Balanced,
+            overload_window_ms: 10_000,
+            overload_signals_to_fallback: 1,
+            recovery_successes_to_exit: 5,
+        });
+        manager.record_budget_overload_signal(
+            Some("ext.budget.lane"),
+            "reactor_lane_overflow",
+            Some(1),
+            Some(1),
+        );
+
+        let ctx = HostCallContext {
+            runtime_name: "test",
+            extension_id: Some("ext.budget.lane"),
+            tools: &tools,
+            http: &http,
+            manager: Some(manager),
+            policy: &policy,
+            js_runtime: None,
+            interceptor: None,
+        };
+
+        let payload = typed_tool_read_payload("lane-budget", file.to_str().expect("utf-8 path"));
+        let (outcome, lane_meta) =
+            run_async(async { dispatch_shared_allowed(&ctx, &payload).await });
+        let lane_meta = lane_meta.expect("lane metadata");
+        assert_eq!(lane_meta.lane, HostcallDispatchLane::Compat);
+        assert_eq!(lane_meta.decision_reason, "forced_compat_budget_controller");
+        assert_eq!(
+            lane_meta.fallback_reason.as_deref(),
+            Some("forced_compat_budget_controller")
+        );
+
+        match outcome {
+            HostcallOutcome::Success(_) => {}
+            other => panic!("expected success, got {other:?}"),
+        }
     }
 
     #[test]
