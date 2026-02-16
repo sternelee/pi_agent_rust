@@ -307,7 +307,6 @@ where
 {
     event_source: SseStream<S>,
     partial: AssistantMessage,
-    current_text: String,
     tool_calls: Vec<ToolCallState>,
     pending_events: VecDeque<StreamEvent>,
     started: bool,
@@ -339,7 +338,6 @@ where
                 error_message: None,
                 timestamp: chrono::Utc::now().timestamp_millis(),
             },
-            current_text: String::new(),
             tool_calls: Vec::new(),
             pending_events: VecDeque::new(),
             started: false,
@@ -426,44 +424,10 @@ where
             }
         }
 
-        // Process choices
+        // Process choices — handle content deltas BEFORE finish_reason so that
+        // TextEnd/ToolCallEnd events always follow the final delta (matching the
+        // OpenAI provider event ordering contract).
         for choice in choices {
-            // Handle finish reason
-            if let Some(reason) = choice.finish_reason {
-                self.partial.stop_reason = match reason.as_str() {
-                    "length" => StopReason::Length,
-                    "content_filter" => StopReason::Error,
-                    "tool_calls" => StopReason::ToolUse,
-                    // "stop" and any other reason treated as normal stop
-                    _ => StopReason::Stop,
-                };
-
-                // Finalize tool call arguments
-                self.finalize_tool_call_arguments();
-
-                // Emit TextEnd for all open text blocks.
-                for (content_index, block) in self.partial.content.iter().enumerate() {
-                    if let ContentBlock::Text(t) = block {
-                        self.pending_events.push_back(StreamEvent::TextEnd {
-                            content_index,
-                            content: t.text.clone(),
-                        });
-                    }
-                }
-
-                // Emit ToolCallEnd for each accumulated tool call
-                for tc in &self.tool_calls {
-                    if let Some(ContentBlock::ToolCall(tool_call)) =
-                        self.partial.content.get(tc.content_index)
-                    {
-                        self.pending_events.push_back(StreamEvent::ToolCallEnd {
-                            content_index: tc.content_index,
-                            tool_call: tool_call.clone(),
-                        });
-                    }
-                }
-            }
-
             // Handle text content
             if let Some(text) = choice.delta.content {
                 self.ensure_started();
@@ -541,6 +505,43 @@ where
                                 delta: args,
                             });
                         }
+                    }
+                }
+            }
+
+            // Handle finish reason (MUST come after delta processing so TextEnd/ToolCallEnd
+            // events contain the complete accumulated content).
+            if let Some(reason) = choice.finish_reason {
+                self.partial.stop_reason = match reason.as_str() {
+                    "length" => StopReason::Length,
+                    "content_filter" => StopReason::Error,
+                    "tool_calls" => StopReason::ToolUse,
+                    // "stop" and any other reason treated as normal stop
+                    _ => StopReason::Stop,
+                };
+
+                // Finalize tool call arguments
+                self.finalize_tool_call_arguments();
+
+                // Emit TextEnd for all open text blocks.
+                for (content_index, block) in self.partial.content.iter().enumerate() {
+                    if let ContentBlock::Text(t) = block {
+                        self.pending_events.push_back(StreamEvent::TextEnd {
+                            content_index,
+                            content: t.text.clone(),
+                        });
+                    }
+                }
+
+                // Emit ToolCallEnd for each accumulated tool call
+                for tc in &self.tool_calls {
+                    if let Some(ContentBlock::ToolCall(tool_call)) =
+                        self.partial.content.get(tc.content_index)
+                    {
+                        self.pending_events.push_back(StreamEvent::ToolCallEnd {
+                            content_index: tc.content_index,
+                            tool_call: tool_call.clone(),
+                        });
                     }
                 }
             }
@@ -756,19 +757,38 @@ fn convert_message_to_azure(message: &Message) -> Vec<AzureMessage> {
             messages
         }
         Message::ToolResult(result) => {
-            let content = result
+            let parts: Vec<AzureContentPart> = result
                 .content
                 .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::Text(t) => Some(t.text.clone()),
+                .filter_map(|block| match block {
+                    ContentBlock::Text(t) => Some(AzureContentPart::Text {
+                        text: t.text.clone(),
+                    }),
+                    ContentBlock::Image(img) => {
+                        let url = format!("data:{};base64,{}", img.mime_type, img.data);
+                        Some(AzureContentPart::ImageUrl {
+                            image_url: AzureImageUrl { url },
+                        })
+                    }
                     _ => None,
                 })
-                .collect::<Vec<_>>()
-                .join("\n");
+                .collect();
+
+            let content = if parts.is_empty() {
+                None
+            } else if parts.len() == 1 && matches!(parts[0], AzureContentPart::Text { .. }) {
+                if let AzureContentPart::Text { text } = &parts[0] {
+                    Some(AzureContent::Text(text.clone()))
+                } else {
+                    Some(AzureContent::Parts(parts))
+                }
+            } else {
+                Some(AzureContent::Parts(parts))
+            };
 
             vec![AzureMessage {
                 role: "tool",
-                content: Some(AzureContent::Text(content)),
+                content,
                 tool_calls: None,
                 tool_call_id: Some(result.tool_call_id.clone()),
             }]

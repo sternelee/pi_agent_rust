@@ -487,6 +487,9 @@ enum BedrockContent {
     Text {
         text: String,
     },
+    Image {
+        image: BedrockImageBlock,
+    },
     ToolUse {
         #[serde(rename = "toolUse")]
         tool_use: BedrockToolUse,
@@ -495,6 +498,17 @@ enum BedrockContent {
         #[serde(rename = "toolResult")]
         tool_result: BedrockToolResult,
     },
+}
+
+#[derive(Debug, Serialize)]
+struct BedrockImageBlock {
+    format: String,
+    source: BedrockImageSource,
+}
+
+#[derive(Debug, Serialize)]
+struct BedrockImageSource {
+    bytes: String,
 }
 
 #[derive(Debug, Serialize)]

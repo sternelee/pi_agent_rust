@@ -1002,19 +1002,39 @@ fn convert_message_to_openai(message: &Message) -> Vec<OpenAIMessage> {
         }
         Message::ToolResult(result) => {
             // OpenAI expects tool results as separate messages with role "tool"
-            let content = result
+            let parts: Vec<OpenAIContentPart> = result
                 .content
                 .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::Text(t) => Some(t.text.clone()),
+                .filter_map(|block| match block {
+                    ContentBlock::Text(t) => Some(OpenAIContentPart::Text {
+                        text: t.text.clone(),
+                    }),
+                    ContentBlock::Image(img) => {
+                        let url = format!("data:{};base64,{}", img.mime_type, img.data);
+                        Some(OpenAIContentPart::ImageUrl {
+                            image_url: OpenAIImageUrl { url },
+                        })
+                    }
                     _ => None,
                 })
-                .collect::<Vec<_>>()
-                .join("\n");
+                .collect();
+
+            let content = if parts.is_empty() {
+                None
+            } else if parts.len() == 1 && matches!(parts[0], OpenAIContentPart::Text { .. }) {
+                // Optimization: use simple text content if possible
+                if let OpenAIContentPart::Text { text } = &parts[0] {
+                    Some(OpenAIContent::Text(text.clone()))
+                } else {
+                    Some(OpenAIContent::Parts(parts))
+                }
+            } else {
+                Some(OpenAIContent::Parts(parts))
+            };
 
             vec![OpenAIMessage {
                 role: "tool",
-                content: Some(OpenAIContent::Text(content)),
+                content,
                 tool_calls: None,
                 tool_call_id: Some(result.tool_call_id.clone()),
             }]

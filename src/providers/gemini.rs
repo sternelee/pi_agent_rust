@@ -616,14 +616,16 @@ pub(crate) fn convert_message_to_gemini(message: &Message) -> Vec<GeminiContent>
             }]
         }
         Message::ToolResult(result) => {
-            // Gemini expects function responses as model role with functionResponse part
+            // Gemini expects function responses as user role with functionResponse part
             let content_text = result
                 .content
                 .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::Text(t) => Some(t.text.clone()),
-                    _ => None,
+                .map(|b| match b {
+                    ContentBlock::Text(t) => t.text.clone(),
+                    ContentBlock::Image(img) => format!("[Image ({}) omitted]", img.mime_type),
+                    _ => String::new(),
                 })
+                .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
                 .join("\n");
 
