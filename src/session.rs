@@ -1597,12 +1597,12 @@ impl Session {
                     // === Incremental append path ===
                     let new_start = self.persisted_entry_count.load(Ordering::SeqCst);
                     if new_start < self.entries.len() {
-                        // Pre-serialize new entries on the main thread (typically 1-3 entries).
-                        let mut serialized_bytes = Vec::new();
-                        for entry in &self.entries[new_start..] {
-                            let mut line = serde_json::to_vec(entry)?;
-                            line.push(b'\n');
-                            serialized_bytes.push(line);
+                        // Pre-serialize new entries into a single buffer (typically 1-3 entries).
+                        let new_entries = &self.entries[new_start..];
+                        let mut serialized_buf = Vec::with_capacity(new_entries.len() * 512);
+                        for entry in new_entries {
+                            serde_json::to_writer(&mut serialized_buf, entry)?;
+                            serialized_buf.push(b'\n');
                         }
                         let new_count = self.entries.len();
 
@@ -1612,15 +1612,11 @@ impl Session {
                         let path_for_thread = path_clone.clone();
                         let handle = thread::spawn(move || {
                             let res = || -> Result<()> {
-                                let file = std::fs::OpenOptions::new()
+                                let mut file = std::fs::OpenOptions::new()
                                     .append(true)
                                     .open(&path_for_thread)
                                     .map_err(|e| crate::Error::Io(Box::new(e)))?;
-                                let mut writer = std::io::BufWriter::new(file);
-                                for chunk in &serialized_bytes {
-                                    writer.write_all(chunk)?;
-                                }
-                                writer.flush()?;
+                                file.write_all(&serialized_buf)?;
 
                                 enqueue_session_index_snapshot_update(
                                     sessions_root.clone(),
