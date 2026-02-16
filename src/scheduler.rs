@@ -768,6 +768,28 @@ pub struct ReactorMeshTelemetry {
     pub queue_depths: Vec<usize>,
     pub max_queue_depths: Vec<usize>,
     pub rejected_enqueues: u64,
+    pub shard_bindings: Vec<ReactorShardBinding>,
+    pub fallback_reason: Option<ReactorPlacementFallbackReason>,
+}
+
+impl ReactorMeshTelemetry {
+    /// Render telemetry as machine-readable JSON for diagnostics.
+    #[must_use]
+    pub fn as_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "queue_depths": self.queue_depths,
+            "max_queue_depths": self.max_queue_depths,
+            "rejected_enqueues": self.rejected_enqueues,
+            "fallback_reason": self.fallback_reason.map(ReactorPlacementFallbackReason::as_code),
+            "shard_bindings": self.shard_bindings.iter().map(|binding| {
+                serde_json::json!({
+                    "shard_id": binding.shard_id,
+                    "core_id": binding.core_id,
+                    "numa_node": binding.numa_node,
+                })
+            }).collect::<Vec<_>>()
+        })
+    }
 }
 
 /// Deterministic SPSC-style lane.
@@ -890,12 +912,14 @@ impl ReactorMesh {
             queue_depths: self.lanes.iter().map(SpscLane::len).collect(),
             max_queue_depths: self.lanes.iter().map(|lane| lane.max_depth).collect(),
             rejected_enqueues: self.rejected_enqueues,
+            shard_bindings: self.placement_manifest.bindings.clone(),
+            fallback_reason: self.placement_manifest.fallback_reason,
         }
     }
 
     /// Deterministic shard placement manifest used by this mesh.
     #[must_use]
-    pub fn placement_manifest(&self) -> &ReactorPlacementManifest {
+    pub const fn placement_manifest(&self) -> &ReactorPlacementManifest {
         &self.placement_manifest
     }
 
@@ -1032,6 +1056,519 @@ impl ReactorMesh {
             }
         }
         drained
+    }
+}
+
+// ============================================================================
+// NUMA-aware slab allocator for extension hot paths
+// ============================================================================
+
+/// Configuration for hugepage-backed slab allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HugepageConfig {
+    /// Hugepage size in bytes (default 2 MiB = `2_097_152`).
+    pub page_size_bytes: usize,
+    /// Whether hugepage backing is requested (advisory — falls back gracefully).
+    pub enabled: bool,
+}
+
+impl Default for HugepageConfig {
+    fn default() -> Self {
+        Self {
+            page_size_bytes: 2 * 1024 * 1024, // 2 MiB
+            enabled: true,
+        }
+    }
+}
+
+/// Reason why hugepage-backed allocation was not used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HugepageFallbackReason {
+    /// Hugepage support was explicitly disabled in configuration.
+    Disabled,
+    /// No hugepage information available from the OS.
+    DetectionUnavailable,
+    /// System reports zero free hugepages.
+    InsufficientHugepages,
+    /// Requested slab size does not align to hugepage boundaries.
+    AlignmentMismatch,
+}
+
+impl HugepageFallbackReason {
+    #[must_use]
+    pub const fn as_code(self) -> &'static str {
+        match self {
+            Self::Disabled => "hugepage_disabled",
+            Self::DetectionUnavailable => "detection_unavailable",
+            Self::InsufficientHugepages => "insufficient_hugepages",
+            Self::AlignmentMismatch => "alignment_mismatch",
+        }
+    }
+}
+
+/// Hugepage availability snapshot from the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HugepageStatus {
+    /// Total hugepages configured on the system.
+    pub total_pages: u64,
+    /// Free hugepages available for allocation.
+    pub free_pages: u64,
+    /// Page size in bytes (typically 2 MiB).
+    pub page_size_bytes: usize,
+    /// Whether hugepages are actually being used by this pool.
+    pub active: bool,
+    /// If not active, why.
+    pub fallback_reason: Option<HugepageFallbackReason>,
+}
+
+impl HugepageStatus {
+    /// Determine hugepage viability from system metrics.
+    #[must_use]
+    pub const fn evaluate(config: &HugepageConfig, total: u64, free: u64) -> Self {
+        if !config.enabled {
+            return Self {
+                total_pages: total,
+                free_pages: free,
+                page_size_bytes: config.page_size_bytes,
+                active: false,
+                fallback_reason: Some(HugepageFallbackReason::Disabled),
+            };
+        }
+        if total == 0 && free == 0 {
+            return Self {
+                total_pages: 0,
+                free_pages: 0,
+                page_size_bytes: config.page_size_bytes,
+                active: false,
+                fallback_reason: Some(HugepageFallbackReason::DetectionUnavailable),
+            };
+        }
+        if free == 0 {
+            return Self {
+                total_pages: total,
+                free_pages: 0,
+                page_size_bytes: config.page_size_bytes,
+                active: false,
+                fallback_reason: Some(HugepageFallbackReason::InsufficientHugepages),
+            };
+        }
+        Self {
+            total_pages: total,
+            free_pages: free,
+            page_size_bytes: config.page_size_bytes,
+            active: true,
+            fallback_reason: None,
+        }
+    }
+
+    /// Render as stable JSON for diagnostics.
+    #[must_use]
+    pub fn as_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "total_pages": self.total_pages,
+            "free_pages": self.free_pages,
+            "page_size_bytes": self.page_size_bytes,
+            "active": self.active,
+            "fallback_reason": self.fallback_reason.map(HugepageFallbackReason::as_code),
+        })
+    }
+}
+
+/// Configuration for a NUMA-local slab pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NumaSlabConfig {
+    /// Maximum entries per NUMA-node slab.
+    pub slab_capacity: usize,
+    /// Logical size of each entry in bytes (for telemetry, not enforced at runtime).
+    pub entry_size_bytes: usize,
+    /// Hugepage configuration.
+    pub hugepage: HugepageConfig,
+}
+
+impl Default for NumaSlabConfig {
+    fn default() -> Self {
+        Self {
+            slab_capacity: 256,
+            entry_size_bytes: 512,
+            hugepage: HugepageConfig::default(),
+        }
+    }
+}
+
+/// Handle returned on successful slab allocation.
+///
+/// Contains enough information to deallocate safely and detect use-after-free
+/// via generation tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NumaSlabHandle {
+    /// NUMA node that owns this allocation.
+    pub node_id: usize,
+    /// Slot index within the node's slab.
+    pub slot_index: usize,
+    /// Generation at allocation time (prevents ABA on reuse).
+    pub generation: u64,
+}
+
+/// Per-NUMA-node slab with free-list recycling.
+#[derive(Debug, Clone)]
+pub struct NumaSlab {
+    node_id: usize,
+    capacity: usize,
+    generations: Vec<u64>,
+    allocated: Vec<bool>,
+    free_list: Vec<usize>,
+    // Telemetry counters.
+    total_allocs: u64,
+    total_frees: u64,
+    high_water_mark: usize,
+}
+
+impl NumaSlab {
+    /// Create a new slab for the given NUMA node with the specified capacity.
+    #[must_use]
+    pub fn new(node_id: usize, capacity: usize) -> Self {
+        let capacity = capacity.max(1);
+        let mut free_list = Vec::with_capacity(capacity);
+        // Fill free list in reverse so slot 0 is popped first (LIFO recycle).
+        for idx in (0..capacity).rev() {
+            free_list.push(idx);
+        }
+        Self {
+            node_id,
+            capacity,
+            generations: vec![0; capacity],
+            allocated: vec![false; capacity],
+            free_list,
+            total_allocs: 0,
+            total_frees: 0,
+            high_water_mark: 0,
+        }
+    }
+
+    /// Number of currently allocated slots.
+    #[must_use]
+    pub fn in_use(&self) -> usize {
+        self.capacity.saturating_sub(self.free_list.len())
+    }
+
+    /// Whether the slab has available capacity.
+    #[must_use]
+    pub fn has_capacity(&self) -> bool {
+        !self.free_list.is_empty()
+    }
+
+    /// Allocate a slot, returning a handle or `None` if exhausted.
+    pub fn allocate(&mut self) -> Option<NumaSlabHandle> {
+        let slot_index = self.free_list.pop()?;
+        self.allocated[slot_index] = true;
+        self.generations[slot_index] = self.generations[slot_index].saturating_add(1);
+        self.total_allocs = self.total_allocs.saturating_add(1);
+        self.high_water_mark = self.high_water_mark.max(self.in_use());
+        Some(NumaSlabHandle {
+            node_id: self.node_id,
+            slot_index,
+            generation: self.generations[slot_index],
+        })
+    }
+
+    /// Deallocate a slot identified by handle.
+    ///
+    /// Returns `true` if deallocation succeeded, `false` if the handle is stale
+    /// (wrong generation) or already freed.
+    pub fn deallocate(&mut self, handle: &NumaSlabHandle) -> bool {
+        if handle.node_id != self.node_id {
+            return false;
+        }
+        if handle.slot_index >= self.capacity {
+            return false;
+        }
+        if !self.allocated[handle.slot_index] {
+            return false;
+        }
+        if self.generations[handle.slot_index] != handle.generation {
+            return false;
+        }
+        self.allocated[handle.slot_index] = false;
+        self.free_list.push(handle.slot_index);
+        self.total_frees = self.total_frees.saturating_add(1);
+        true
+    }
+}
+
+/// Cross-node allocation reason for telemetry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrossNodeReason {
+    /// Local node slab is exhausted; allocated from nearest neighbor.
+    LocalExhausted,
+}
+
+impl CrossNodeReason {
+    #[must_use]
+    pub const fn as_code(self) -> &'static str {
+        match self {
+            Self::LocalExhausted => "local_exhausted",
+        }
+    }
+}
+
+/// Multi-node slab pool that routes allocations to NUMA-local slabs.
+#[derive(Debug, Clone)]
+pub struct NumaSlabPool {
+    slabs: Vec<NumaSlab>,
+    config: NumaSlabConfig,
+    hugepage_status: HugepageStatus,
+    cross_node_allocs: u64,
+}
+
+impl NumaSlabPool {
+    /// Create a pool with one slab per NUMA node identified in the placement manifest.
+    #[must_use]
+    pub fn from_manifest(manifest: &ReactorPlacementManifest, config: NumaSlabConfig) -> Self {
+        let mut node_ids = manifest
+            .bindings
+            .iter()
+            .map(|b| b.numa_node)
+            .collect::<Vec<_>>();
+        node_ids.sort_unstable();
+        node_ids.dedup();
+
+        if node_ids.is_empty() {
+            node_ids.push(0);
+        }
+
+        let slabs = node_ids
+            .iter()
+            .map(|&node_id| NumaSlab::new(node_id, config.slab_capacity))
+            .collect();
+
+        // Hugepage evaluation with zero system data (caller can override via
+        // `set_hugepage_status` once real data is available).
+        let hugepage_status = HugepageStatus::evaluate(&config.hugepage, 0, 0);
+
+        Self {
+            slabs,
+            config,
+            hugepage_status,
+            cross_node_allocs: 0,
+        }
+    }
+
+    /// Override hugepage status after querying the host.
+    pub const fn set_hugepage_status(&mut self, status: HugepageStatus) {
+        self.hugepage_status = status;
+    }
+
+    /// Number of NUMA nodes in this pool.
+    #[must_use]
+    pub fn node_count(&self) -> usize {
+        self.slabs.len()
+    }
+
+    /// Allocate from the preferred NUMA node, falling back to any node with capacity.
+    ///
+    /// Returns `(handle, cross_node_reason)` where the reason is `Some` when
+    /// the allocation was served from a non-preferred node.
+    pub fn allocate(
+        &mut self,
+        preferred_node: usize,
+    ) -> Option<(NumaSlabHandle, Option<CrossNodeReason>)> {
+        // Try preferred node first.
+        if let Some(slab) = self.slabs.iter_mut().find(|s| s.node_id == preferred_node) {
+            if let Some(handle) = slab.allocate() {
+                return Some((handle, None));
+            }
+        }
+        // Fallback: scan all nodes for available capacity.
+        for slab in &mut self.slabs {
+            if slab.node_id == preferred_node {
+                continue;
+            }
+            if let Some(handle) = slab.allocate() {
+                self.cross_node_allocs = self.cross_node_allocs.saturating_add(1);
+                return Some((handle, Some(CrossNodeReason::LocalExhausted)));
+            }
+        }
+        None
+    }
+
+    /// Deallocate a previously allocated handle.
+    ///
+    /// Returns `true` if deallocation succeeded.
+    pub fn deallocate(&mut self, handle: &NumaSlabHandle) -> bool {
+        for slab in &mut self.slabs {
+            if slab.node_id == handle.node_id {
+                return slab.deallocate(handle);
+            }
+        }
+        false
+    }
+
+    /// Snapshot telemetry for this pool.
+    #[must_use]
+    pub fn telemetry(&self) -> NumaSlabTelemetry {
+        let per_node = self
+            .slabs
+            .iter()
+            .map(|slab| NumaSlabNodeTelemetry {
+                node_id: slab.node_id,
+                capacity: slab.capacity,
+                in_use: slab.in_use(),
+                total_allocs: slab.total_allocs,
+                total_frees: slab.total_frees,
+                high_water_mark: slab.high_water_mark,
+            })
+            .collect();
+        NumaSlabTelemetry {
+            per_node,
+            cross_node_allocs: self.cross_node_allocs,
+            hugepage_status: self.hugepage_status,
+            config: self.config,
+        }
+    }
+}
+
+/// Per-node telemetry counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NumaSlabNodeTelemetry {
+    pub node_id: usize,
+    pub capacity: usize,
+    pub in_use: usize,
+    pub total_allocs: u64,
+    pub total_frees: u64,
+    pub high_water_mark: usize,
+}
+
+/// Aggregate slab pool telemetry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NumaSlabTelemetry {
+    pub per_node: Vec<NumaSlabNodeTelemetry>,
+    pub cross_node_allocs: u64,
+    pub hugepage_status: HugepageStatus,
+    pub config: NumaSlabConfig,
+}
+
+impl NumaSlabTelemetry {
+    /// Render as stable machine-readable JSON for diagnostics.
+    #[must_use]
+    pub fn as_json(&self) -> serde_json::Value {
+        let total_allocs: u64 = self.per_node.iter().map(|n| n.total_allocs).sum();
+        let total_frees: u64 = self.per_node.iter().map(|n| n.total_frees).sum();
+        let total_in_use: usize = self.per_node.iter().map(|n| n.in_use).sum();
+        serde_json::json!({
+            "node_count": self.per_node.len(),
+            "total_allocs": total_allocs,
+            "total_frees": total_frees,
+            "total_in_use": total_in_use,
+            "cross_node_allocs": self.cross_node_allocs,
+            "config": {
+                "slab_capacity": self.config.slab_capacity,
+                "entry_size_bytes": self.config.entry_size_bytes,
+                "hugepage_enabled": self.config.hugepage.enabled,
+                "hugepage_page_size_bytes": self.config.hugepage.page_size_bytes,
+            },
+            "hugepage": self.hugepage_status.as_json(),
+            "per_node": self.per_node.iter().map(|n| serde_json::json!({
+                "node_id": n.node_id,
+                "capacity": n.capacity,
+                "in_use": n.in_use,
+                "total_allocs": n.total_allocs,
+                "total_frees": n.total_frees,
+                "high_water_mark": n.high_water_mark,
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+
+// ============================================================================
+// Thread affinity advisory
+// ============================================================================
+
+/// Enforcement level for thread-to-core affinity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AffinityEnforcement {
+    /// Affinity is advisory only; scheduler may override.
+    Advisory,
+    /// Strict enforcement requested (requires OS support).
+    Strict,
+    /// Affinity enforcement is disabled.
+    Disabled,
+}
+
+impl AffinityEnforcement {
+    #[must_use]
+    pub const fn as_code(self) -> &'static str {
+        match self {
+            Self::Advisory => "advisory",
+            Self::Strict => "strict",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+/// Advisory thread-to-core binding produced from placement manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThreadAffinityAdvice {
+    pub shard_id: usize,
+    pub recommended_core: usize,
+    pub recommended_numa_node: usize,
+    pub enforcement: AffinityEnforcement,
+}
+
+impl ThreadAffinityAdvice {
+    /// Render as JSON for diagnostics.
+    #[must_use]
+    pub fn as_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "shard_id": self.shard_id,
+            "recommended_core": self.recommended_core,
+            "recommended_numa_node": self.recommended_numa_node,
+            "enforcement": self.enforcement.as_code(),
+        })
+    }
+}
+
+impl ReactorPlacementManifest {
+    /// Generate affinity advice for all shards in this manifest.
+    #[must_use]
+    pub fn affinity_advice(&self, enforcement: AffinityEnforcement) -> Vec<ThreadAffinityAdvice> {
+        self.bindings
+            .iter()
+            .map(|binding| ThreadAffinityAdvice {
+                shard_id: binding.shard_id,
+                recommended_core: binding.core_id,
+                recommended_numa_node: binding.numa_node,
+                enforcement,
+            })
+            .collect()
+    }
+
+    /// Look up the NUMA node for a specific shard.
+    #[must_use]
+    pub fn numa_node_for_shard(&self, shard_id: usize) -> Option<usize> {
+        self.bindings
+            .iter()
+            .find(|b| b.shard_id == shard_id)
+            .map(|b| b.numa_node)
+    }
+}
+
+// ============================================================================
+// ReactorMesh ↔ NUMA slab integration
+// ============================================================================
+
+impl ReactorMesh {
+    /// Look up the preferred NUMA node for a shard via the placement manifest.
+    #[must_use]
+    pub fn preferred_numa_node(&self, shard_id: usize) -> usize {
+        self.placement_manifest
+            .numa_node_for_shard(shard_id)
+            .unwrap_or(0)
+    }
+
+    /// Generate thread affinity advice from the mesh's placement manifest.
+    #[must_use]
+    pub fn affinity_advice(&self, enforcement: AffinityEnforcement) -> Vec<ThreadAffinityAdvice> {
+        self.placement_manifest.affinity_advice(enforcement)
     }
 }
 
@@ -2151,9 +2688,364 @@ mod tests {
             serde_json::json!(Some("single_numa_node"))
         );
         assert_eq!(
-            as_json["bindings"].as_array().map(|v| v.len()),
+            as_json["bindings"].as_array().map(std::vec::Vec::len),
             Some(3),
             "expected per-shard binding rows"
         );
+    }
+
+    #[test]
+    fn reactor_mesh_telemetry_includes_binding_and_fallback_metadata() {
+        let topology = ReactorTopologySnapshot::from_core_node_pairs(&[(10, 0), (11, 0)]);
+        let mut mesh = ReactorMesh::new(ReactorMeshConfig {
+            shard_count: 2,
+            lane_capacity: 4,
+            topology: Some(topology),
+        });
+        mesh.enqueue_event("evt-0".to_string(), serde_json::json!({}))
+            .expect("enqueue event");
+
+        let telemetry = mesh.telemetry();
+        assert_eq!(
+            telemetry.fallback_reason,
+            Some(ReactorPlacementFallbackReason::SingleNumaNode)
+        );
+        assert_eq!(telemetry.shard_bindings.len(), 2);
+        let telemetry_json = telemetry.as_json();
+        assert_eq!(
+            telemetry_json["fallback_reason"],
+            serde_json::json!(Some("single_numa_node"))
+        );
+        assert_eq!(
+            telemetry_json["shard_bindings"]
+                .as_array()
+                .map(std::vec::Vec::len),
+            Some(2)
+        );
+    }
+
+    // ====================================================================
+    // NUMA slab allocator tests
+    // ====================================================================
+
+    #[test]
+    fn numa_slab_alloc_dealloc_round_trip() {
+        let mut slab = NumaSlab::new(0, 4);
+        let handle = slab.allocate().expect("should allocate");
+        assert_eq!(handle.node_id, 0);
+        assert_eq!(handle.generation, 1);
+        assert!(slab.deallocate(&handle));
+        assert_eq!(slab.in_use(), 0);
+    }
+
+    #[test]
+    fn numa_slab_exhaustion_returns_none() {
+        let mut slab = NumaSlab::new(0, 2);
+        let _a = slab.allocate().expect("first alloc");
+        let _b = slab.allocate().expect("second alloc");
+        assert!(slab.allocate().is_none(), "slab should be exhausted");
+    }
+
+    #[test]
+    fn numa_slab_generation_prevents_stale_dealloc() {
+        let mut slab = NumaSlab::new(0, 2);
+        let handle_v1 = slab.allocate().expect("first alloc");
+        assert!(slab.deallocate(&handle_v1));
+        let _handle_v2 = slab.allocate().expect("reuse slot");
+        // The old handle has generation 1, the new allocation has generation 2.
+        assert!(
+            !slab.deallocate(&handle_v1),
+            "stale generation should reject dealloc"
+        );
+    }
+
+    #[test]
+    fn numa_slab_double_free_is_rejected() {
+        let mut slab = NumaSlab::new(0, 4);
+        let handle = slab.allocate().expect("alloc");
+        assert!(slab.deallocate(&handle));
+        assert!(!slab.deallocate(&handle), "double free must be rejected");
+    }
+
+    #[test]
+    fn numa_slab_wrong_node_dealloc_rejected() {
+        let mut slab = NumaSlab::new(0, 4);
+        let handle = slab.allocate().expect("alloc");
+        let wrong_handle = NumaSlabHandle {
+            node_id: 99,
+            ..handle
+        };
+        assert!(
+            !slab.deallocate(&wrong_handle),
+            "wrong node_id should reject dealloc"
+        );
+    }
+
+    #[test]
+    fn numa_slab_high_water_mark_tracks_peak() {
+        let mut slab = NumaSlab::new(0, 8);
+        let a = slab.allocate().expect("a");
+        let b = slab.allocate().expect("b");
+        let c = slab.allocate().expect("c");
+        assert_eq!(slab.high_water_mark, 3);
+        slab.deallocate(&a);
+        slab.deallocate(&b);
+        assert_eq!(
+            slab.high_water_mark, 3,
+            "high water mark should not decrease"
+        );
+        slab.deallocate(&c);
+        let _d = slab.allocate().expect("d");
+        assert_eq!(slab.high_water_mark, 3);
+    }
+
+    #[test]
+    fn numa_slab_pool_routes_to_local_node() {
+        let topology =
+            ReactorTopologySnapshot::from_core_node_pairs(&[(0, 0), (1, 0), (2, 1), (3, 1)]);
+        let manifest = ReactorPlacementManifest::plan(4, Some(&topology));
+        let config = NumaSlabConfig {
+            slab_capacity: 8,
+            entry_size_bytes: 256,
+            hugepage: HugepageConfig {
+                enabled: false,
+                ..HugepageConfig::default()
+            },
+        };
+        let mut pool = NumaSlabPool::from_manifest(&manifest, config);
+        assert_eq!(pool.node_count(), 2);
+
+        let (handle, reason) = pool.allocate(1).expect("allocate on node 1");
+        assert_eq!(handle.node_id, 1);
+        assert!(reason.is_none(), "should be local allocation");
+    }
+
+    #[test]
+    fn numa_slab_pool_cross_node_fallback_tracks_telemetry() {
+        let topology = ReactorTopologySnapshot::from_core_node_pairs(&[(0, 0), (2, 1)]);
+        let manifest = ReactorPlacementManifest::plan(2, Some(&topology));
+        let config = NumaSlabConfig {
+            slab_capacity: 1, // Only 1 slot per node
+            entry_size_bytes: 64,
+            hugepage: HugepageConfig {
+                enabled: false,
+                ..HugepageConfig::default()
+            },
+        };
+        let mut pool = NumaSlabPool::from_manifest(&manifest, config);
+
+        // Fill node 0's single slot.
+        let (h0, _) = pool.allocate(0).expect("fill node 0");
+        assert_eq!(h0.node_id, 0);
+
+        // Next alloc for node 0 should fall back to node 1.
+        let (h1, reason) = pool.allocate(0).expect("fallback to node 1");
+        assert_eq!(h1.node_id, 1);
+        assert_eq!(reason, Some(CrossNodeReason::LocalExhausted));
+
+        let telemetry = pool.telemetry();
+        assert_eq!(telemetry.cross_node_allocs, 1);
+    }
+
+    #[test]
+    fn numa_slab_pool_total_exhaustion_returns_none() {
+        let topology = ReactorTopologySnapshot::from_core_node_pairs(&[(0, 0)]);
+        let manifest = ReactorPlacementManifest::plan(1, Some(&topology));
+        let config = NumaSlabConfig {
+            slab_capacity: 1,
+            entry_size_bytes: 64,
+            hugepage: HugepageConfig {
+                enabled: false,
+                ..HugepageConfig::default()
+            },
+        };
+        let mut pool = NumaSlabPool::from_manifest(&manifest, config);
+        let _ = pool.allocate(0).expect("fill the only slot");
+        assert!(pool.allocate(0).is_none(), "pool should be exhausted");
+    }
+
+    #[test]
+    fn numa_slab_pool_deallocate_round_trip() {
+        let topology = ReactorTopologySnapshot::from_core_node_pairs(&[(0, 0), (1, 1)]);
+        let manifest = ReactorPlacementManifest::plan(2, Some(&topology));
+        let config = NumaSlabConfig::default();
+        let mut pool = NumaSlabPool::from_manifest(&manifest, config);
+
+        let (handle, _) = pool.allocate(1).expect("alloc");
+        assert!(pool.deallocate(&handle));
+        assert!(!pool.deallocate(&handle), "double free must be rejected");
+    }
+
+    #[test]
+    fn hugepage_status_disabled_reports_fallback() {
+        let config = HugepageConfig {
+            enabled: false,
+            ..HugepageConfig::default()
+        };
+        let status = HugepageStatus::evaluate(&config, 1024, 512);
+        assert!(!status.active);
+        assert_eq!(
+            status.fallback_reason,
+            Some(HugepageFallbackReason::Disabled)
+        );
+    }
+
+    #[test]
+    fn hugepage_status_zero_totals_means_unavailable() {
+        let config = HugepageConfig::default();
+        let status = HugepageStatus::evaluate(&config, 0, 0);
+        assert!(!status.active);
+        assert_eq!(
+            status.fallback_reason,
+            Some(HugepageFallbackReason::DetectionUnavailable)
+        );
+    }
+
+    #[test]
+    fn hugepage_status_zero_free_means_insufficient() {
+        let config = HugepageConfig::default();
+        let status = HugepageStatus::evaluate(&config, 1024, 0);
+        assert!(!status.active);
+        assert_eq!(
+            status.fallback_reason,
+            Some(HugepageFallbackReason::InsufficientHugepages)
+        );
+    }
+
+    #[test]
+    fn hugepage_status_available_is_active() {
+        let config = HugepageConfig::default();
+        let status = HugepageStatus::evaluate(&config, 1024, 512);
+        assert!(status.active);
+        assert!(status.fallback_reason.is_none());
+        assert_eq!(status.free_pages, 512);
+    }
+
+    #[test]
+    fn hugepage_status_json_is_stable() {
+        let config = HugepageConfig::default();
+        let status = HugepageStatus::evaluate(&config, 1024, 128);
+        let json = status.as_json();
+        assert_eq!(json["total_pages"], serde_json::json!(1024));
+        assert_eq!(json["free_pages"], serde_json::json!(128));
+        assert_eq!(json["active"], serde_json::json!(true));
+        assert!(json["fallback_reason"].is_null());
+    }
+
+    #[test]
+    fn numa_slab_telemetry_json_has_expected_shape() {
+        let topology =
+            ReactorTopologySnapshot::from_core_node_pairs(&[(0, 0), (1, 0), (4, 1), (5, 1)]);
+        let manifest = ReactorPlacementManifest::plan(4, Some(&topology));
+        let config = NumaSlabConfig {
+            slab_capacity: 16,
+            entry_size_bytes: 128,
+            hugepage: HugepageConfig {
+                enabled: false,
+                ..HugepageConfig::default()
+            },
+        };
+        let mut pool = NumaSlabPool::from_manifest(&manifest, config);
+        let _ = pool.allocate(0);
+        let _ = pool.allocate(1);
+        let _ = pool.allocate(0);
+
+        let telemetry = pool.telemetry();
+        let json = telemetry.as_json();
+        assert_eq!(json["node_count"], serde_json::json!(2));
+        assert_eq!(json["total_allocs"], serde_json::json!(3));
+        assert_eq!(json["total_in_use"], serde_json::json!(3));
+        assert_eq!(json["cross_node_allocs"], serde_json::json!(0));
+        assert_eq!(json["config"]["slab_capacity"], serde_json::json!(16));
+        assert_eq!(json["per_node"].as_array().map(std::vec::Vec::len), Some(2));
+    }
+
+    #[test]
+    fn thread_affinity_advice_matches_placement_manifest() {
+        let topology =
+            ReactorTopologySnapshot::from_core_node_pairs(&[(0, 0), (1, 0), (4, 1), (5, 1)]);
+        let manifest = ReactorPlacementManifest::plan(4, Some(&topology));
+        let advice = manifest.affinity_advice(AffinityEnforcement::Advisory);
+        assert_eq!(advice.len(), 4);
+        assert_eq!(advice[0].shard_id, 0);
+        assert_eq!(advice[0].recommended_core, 0);
+        assert_eq!(advice[0].recommended_numa_node, 0);
+        assert_eq!(advice[0].enforcement, AffinityEnforcement::Advisory);
+        assert_eq!(advice[1].recommended_numa_node, 1);
+        assert_eq!(advice[3].recommended_numa_node, 1);
+    }
+
+    #[test]
+    fn thread_affinity_advice_json_is_stable() {
+        let advice = ThreadAffinityAdvice {
+            shard_id: 0,
+            recommended_core: 3,
+            recommended_numa_node: 1,
+            enforcement: AffinityEnforcement::Strict,
+        };
+        let json = advice.as_json();
+        assert_eq!(json["shard_id"], serde_json::json!(0));
+        assert_eq!(json["recommended_core"], serde_json::json!(3));
+        assert_eq!(json["enforcement"], serde_json::json!("strict"));
+    }
+
+    #[test]
+    fn reactor_mesh_preferred_numa_node_uses_manifest() {
+        let topology = ReactorTopologySnapshot::from_core_node_pairs(&[(0, 0), (4, 1), (8, 2)]);
+        let mesh = ReactorMesh::new(ReactorMeshConfig {
+            shard_count: 3,
+            lane_capacity: 8,
+            topology: Some(topology),
+        });
+        assert_eq!(mesh.preferred_numa_node(0), 0);
+        assert_eq!(mesh.preferred_numa_node(1), 1);
+        assert_eq!(mesh.preferred_numa_node(2), 2);
+        assert_eq!(mesh.preferred_numa_node(99), 0); // fallback
+    }
+
+    #[test]
+    fn reactor_mesh_affinity_advice_covers_all_shards() {
+        let topology = ReactorTopologySnapshot::from_core_node_pairs(&[(0, 0), (1, 1)]);
+        let mesh = ReactorMesh::new(ReactorMeshConfig {
+            shard_count: 2,
+            lane_capacity: 8,
+            topology: Some(topology),
+        });
+        let advice = mesh.affinity_advice(AffinityEnforcement::Disabled);
+        assert_eq!(advice.len(), 2);
+        assert_eq!(advice[0].enforcement, AffinityEnforcement::Disabled);
+        assert_eq!(advice[1].enforcement, AffinityEnforcement::Disabled);
+    }
+
+    #[test]
+    fn numa_slab_pool_from_manifest_with_no_topology_creates_single_node() {
+        let manifest = ReactorPlacementManifest::plan(4, None);
+        let pool = NumaSlabPool::from_manifest(&manifest, NumaSlabConfig::default());
+        assert_eq!(pool.node_count(), 1);
+    }
+
+    #[test]
+    fn numa_node_for_shard_returns_none_for_unknown() {
+        let manifest = ReactorPlacementManifest::plan(2, None);
+        assert!(manifest.numa_node_for_shard(0).is_some());
+        assert!(manifest.numa_node_for_shard(99).is_none());
+    }
+
+    #[test]
+    fn numa_slab_capacity_clamp_to_at_least_one() {
+        let slab = NumaSlab::new(0, 0);
+        assert_eq!(slab.capacity, 1);
+    }
+
+    #[test]
+    fn cross_node_reason_code_matches() {
+        assert_eq!(CrossNodeReason::LocalExhausted.as_code(), "local_exhausted");
+    }
+
+    #[test]
+    fn affinity_enforcement_code_coverage() {
+        assert_eq!(AffinityEnforcement::Advisory.as_code(), "advisory");
+        assert_eq!(AffinityEnforcement::Strict.as_code(), "strict");
+        assert_eq!(AffinityEnforcement::Disabled.as_code(), "disabled");
     }
 }
