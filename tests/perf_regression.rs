@@ -42,6 +42,7 @@ use sysinfo::System;
 /// Serialize perf-sensitive tests to avoid scheduler noise.
 static PERF_LOCK: Mutex<()> = Mutex::new(());
 const PERF_RELEASE_BINARY_PATH_ENV: &str = "PERF_RELEASE_BINARY_PATH";
+const PI_PERF_STRICT_ENV: &str = "PI_PERF_STRICT";
 
 fn perf_guard() -> std::sync::MutexGuard<'static, ()> {
     match PERF_LOCK.lock() {
@@ -80,6 +81,16 @@ fn is_full_mode() -> bool {
     std::env::var("PERF_REGRESSION_FULL")
         .ok()
         .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+fn perf_strict_mode_from(raw: Option<&str>) -> bool {
+    raw.map(str::trim)
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+fn perf_strict_mode() -> bool {
+    let strict_raw = std::env::var(PI_PERF_STRICT_ENV).ok();
+    perf_strict_mode_from(strict_raw.as_deref())
 }
 
 /// Number of startup measurement iterations.
@@ -171,6 +182,16 @@ fn binary_size_candidates() -> Vec<PathBuf> {
 
 fn binary_size_binary() -> Option<PathBuf> {
     first_existing_candidate(binary_size_candidates())
+}
+
+fn binary_size_missing_release_outcome(strict_mode: bool, checked: &str) -> Result<(), String> {
+    if strict_mode {
+        Err(format!(
+            "release binary not found (checked: {checked}); strict mode requires a release artifact via {PERF_RELEASE_BINARY_PATH_ENV} or target/release/pi"
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn first_existing_candidate(candidates: Vec<PathBuf>) -> Option<PathBuf> {
@@ -752,9 +773,25 @@ fn binary_size_check() {
 
     let Some(release_path) = binary_size_binary() else {
         let checked = format_candidate_paths(&binary_size_candidates());
-        harness.log().info("skip", "release binary not found");
-        eprintln!("[perf_regression] SKIP: release binary not found (checked: {checked})",);
-        return;
+        let strict_mode = perf_strict_mode();
+        match binary_size_missing_release_outcome(strict_mode, &checked) {
+            Ok(()) => {
+                harness.log().info("skip", "release binary not found");
+                eprintln!("[perf_regression] SKIP: release binary not found (checked: {checked})",);
+                return;
+            }
+            Err(err) => {
+                harness.log().info_ctx(
+                    "missing_release_binary",
+                    &[
+                        ("strict_mode", "true"),
+                        ("env", PI_PERF_STRICT_ENV),
+                        ("checked", checked.as_str()),
+                    ],
+                );
+                panic!("{err}");
+            }
+        }
     };
 
     let meta = std::fs::metadata(&release_path).expect("stat release binary");
@@ -1395,4 +1432,39 @@ fn binary_size_candidate_selector_returns_none_when_release_candidates_missing()
         "perf",
     ));
     assert_eq!(selected, None);
+}
+
+#[test]
+fn binary_size_missing_release_outcome_skips_when_not_strict() {
+    assert!(binary_size_missing_release_outcome(false, "a,b").is_ok());
+}
+
+#[test]
+fn binary_size_missing_release_outcome_fails_closed_when_strict() {
+    let err = binary_size_missing_release_outcome(true, "x/y/release/pi")
+        .expect_err("strict mode must fail when release binary is missing");
+    assert!(
+        err.contains("x/y/release/pi"),
+        "error should contain checked candidate paths: {err}"
+    );
+    assert!(
+        err.contains(PERF_RELEASE_BINARY_PATH_ENV),
+        "error should point to release-binary override env var: {err}"
+    );
+}
+
+#[test]
+fn perf_strict_mode_from_accepts_truthy_tokens() {
+    assert!(perf_strict_mode_from(Some("1")));
+    assert!(perf_strict_mode_from(Some("true")));
+    assert!(perf_strict_mode_from(Some(" True ")));
+}
+
+#[test]
+fn perf_strict_mode_from_rejects_non_truthy_tokens() {
+    assert!(!perf_strict_mode_from(None));
+    assert!(!perf_strict_mode_from(Some("")));
+    assert!(!perf_strict_mode_from(Some("0")));
+    assert!(!perf_strict_mode_from(Some("false")));
+    assert!(!perf_strict_mode_from(Some("yes")));
 }
