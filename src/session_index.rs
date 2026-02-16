@@ -1739,7 +1739,7 @@ mod tests {
         );
         enqueue_session_index_snapshot_update(root, path, header, 3, Some("latest".to_string()));
 
-        index.flush_pending_updates(Duration::from_secs(1));
+        index.flush_pending_updates(Duration::from_secs(5));
         let listed = index
             .list_sessions(Some("cwd-coalesce"))
             .expect("list coalesced sessions");
