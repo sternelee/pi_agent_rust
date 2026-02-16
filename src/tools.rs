@@ -198,21 +198,26 @@ pub fn truncate_head(
     let mut byte_count: usize = 0;
     let mut truncated_by = None;
 
-    for (i, line) in content.split('\n').enumerate() {
+    let mut iter = content.split('\n').peekable();
+    let mut i = 0;
+    while let Some(line) = iter.next() {
         if i >= max_lines {
             truncated_by = Some(TruncatedBy::Lines);
             break;
         }
 
-        let line_bytes = line.len() + usize::from(i > 0); // +1 for newline
+        // If there is a next part, it means the current part was followed by a newline.
+        let has_newline = iter.peek().is_some();
+        let line_len = line.len() + usize::from(has_newline);
 
-        if byte_count + line_bytes > max_bytes {
+        if byte_count + line_len > max_bytes {
             truncated_by = Some(TruncatedBy::Bytes);
             break;
         }
 
         line_count += 1;
-        byte_count += line_bytes;
+        byte_count += line_len;
+        i += 1;
     }
 
     // Truncate in-place — no new allocation, just adjusts the String's length.
@@ -6037,5 +6042,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_truncate_head_preserves_newline() {
+        // "Line1\nLine2" truncated to 1 line should be "Line1\n"
+        let content = "Line1\nLine2".to_string();
+        let result = truncate_head(content, 1, 1000);
+        assert_eq!(result.content, "Line1\n");
+
+        // "Line1" truncated to 1 line should be "Line1"
+        let content = "Line1".to_string();
+        let result = truncate_head(content, 1, 1000);
+        assert_eq!(result.content, "Line1");
+
+        // "Line1\n" truncated to 1 line should be "Line1\n"
+        let content = "Line1\n".to_string();
+        let result = truncate_head(content, 1, 1000);
+        assert_eq!(result.content, "Line1\n");
     }
 }

@@ -22,7 +22,7 @@ use asupersync::runtime::{RuntimeBuilder, RuntimeHandle};
 use asupersync::sync::Mutex;
 use bubbletea::{Cmd, KeyMsg, KeyType, Message as BubbleMessage, Program, quit};
 use clap::error::ErrorKind;
-use pi::agent::{AbortHandle, Agent, AgentConfig, AgentEvent, AgentSession};
+use pi::agent::{AbortHandle, Agent, AgentConfig, AgentEvent, AgentSession, PreWarmedJsRuntime};
 use pi::app::StartupError;
 use pi::auth::{AuthCredential, AuthStorage};
 use pi::cli;
@@ -715,6 +715,63 @@ async fn run(
         .into());
     }
 
+    // Pre-warm the JS extension runtime in a background task so the expensive
+    // QuickJS init (~50-500ms) overlaps with auth refresh, model selection,
+    // and session creation.  The spawned task runs concurrently until awaited
+    // just before `enable_extensions_with_policy`.
+    let js_prewarm_handle = if !resources.extensions().is_empty() {
+        let pre_enabled_tools = cli.enabled_tools();
+        let pre_mgr = pi::extensions::ExtensionManager::new();
+        pre_mgr.set_cwd(cwd.display().to_string());
+
+        let pre_ext_policy = config
+            .resolve_extension_policy_with_metadata(cli.extension_policy.as_deref())
+            .policy;
+        let pre_repair_policy = config
+            .resolve_repair_policy_with_metadata(cli.repair_policy.as_deref());
+        let effective_repair = if pre_repair_policy.source == "default" {
+            pi::extensions::RepairPolicyMode::AutoStrict
+        } else {
+            pre_repair_policy.effective_mode
+        };
+        let repair_mode = AgentSession::runtime_repair_mode_from_policy_mode(effective_repair);
+
+        let pre_tools = Arc::new(ToolRegistry::new(&pre_enabled_tools, &cwd, Some(&config)));
+
+        let resolved_risk = config.resolve_extension_risk_with_metadata();
+        pre_mgr.set_runtime_risk_config(resolved_risk.settings);
+
+        let memory_limit =
+            (pre_ext_policy.max_memory_mb as usize).saturating_mul(1024 * 1024);
+        let cwd_str = cwd.display().to_string();
+        let mgr_for_boot = pre_mgr.clone();
+        let tools_for_boot = Arc::clone(&pre_tools);
+        let policy_for_boot = pre_ext_policy;
+        Some((
+            pre_mgr,
+            pre_tools,
+            runtime_handle.spawn(async move {
+                pi::extensions::JsExtensionRuntimeHandle::start_with_policy(
+                    pi::extensions_js::PiJsRuntimeConfig {
+                        cwd: cwd_str,
+                        limits: pi::extensions_js::PiJsRuntimeLimits {
+                            memory_limit_bytes: Some(memory_limit),
+                            ..Default::default()
+                        },
+                        repair_mode,
+                        ..Default::default()
+                    },
+                    tools_for_boot,
+                    mgr_for_boot,
+                    policy_for_boot,
+                )
+                .await
+            }),
+        ))
+    } else {
+        None
+    };
+
     let mut auth = auth_result?;
     auth.refresh_expired_oauth_tokens().await?;
     let global_dir = Config::global_dir();
@@ -928,6 +985,34 @@ async fn run(
     }
 
     if !resources.extensions().is_empty() {
+        // Await the pre-warmed JS runtime (spawned earlier to overlap with
+        // auth refresh, model selection, and session creation).
+        let pre_warmed = if let Some((mgr, tools, join_handle)) = js_prewarm_handle {
+            match join_handle.await {
+                Ok(js_runtime) => {
+                    tracing::info!(
+                        event = "pi.js_runtime.prewarm.success",
+                        "Pre-warmed JS extension runtime ready"
+                    );
+                    Some(PreWarmedJsRuntime {
+                        manager: mgr,
+                        js_runtime,
+                        tools,
+                    })
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        event = "pi.js_runtime.prewarm.failed",
+                        error = %e,
+                        "JS runtime pre-warm failed, falling back to inline creation"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let resolved_ext_policy =
             config.resolve_extension_policy_with_metadata(cli.extension_policy.as_deref());
         let resolved_repair_policy =
@@ -956,6 +1041,7 @@ async fn run(
                 resources.extensions(),
                 Some(resolved_ext_policy.policy),
                 Some(effective_repair_policy),
+                pre_warmed,
             )
             .await
             .map_err(anyhow::Error::new)?;

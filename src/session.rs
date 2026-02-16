@@ -1023,14 +1023,33 @@ impl Session {
 
         // Check for V2 sidecar store — enables O(index+tail) resume.
         if session_store_v2::has_v2_sidecar(&path) {
-            match Self::open_v2_with_diagnostics(&path).await {
-                Ok(result) => return Ok(result),
-                Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %e,
-                        "V2 sidecar resume failed, falling back to full JSONL parse"
-                    );
+            let is_stale = (|| -> Option<bool> {
+                let v2_index = session_store_v2::v2_sidecar_path(&path)
+                    .join("index")
+                    .join("offsets.jsonl");
+                let jsonl_meta = std::fs::metadata(&path).ok()?;
+                let v2_meta = std::fs::metadata(v2_index).ok()?;
+                let jsonl_mtime = jsonl_meta.modified().ok()?;
+                let v2_mtime = v2_meta.modified().ok()?;
+                Some(jsonl_mtime > v2_mtime)
+            })()
+            .unwrap_or(false);
+
+            if is_stale {
+                tracing::warn!(
+                    path = %path.display(),
+                    "V2 sidecar is stale (source JSONL newer); skipping V2 resume"
+                );
+            } else {
+                match Self::open_v2_with_diagnostics(&path).await {
+                    Ok(result) => return Ok(result),
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "V2 sidecar resume failed, falling back to full JSONL parse"
+                        );
+                    }
                 }
             }
         }

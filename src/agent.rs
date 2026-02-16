@@ -4413,11 +4413,12 @@ impl AgentSession {
             extension_entries,
             None,
             None,
+            None,
         )
         .await
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     pub async fn enable_extensions_with_policy(
         &mut self,
         enabled_tools: &[&str],
@@ -4426,9 +4427,66 @@ impl AgentSession {
         extension_entries: &[std::path::PathBuf],
         policy: Option<ExtensionPolicy>,
         repair_policy: Option<RepairPolicyMode>,
+        pre_warmed: Option<PreWarmedJsRuntime>,
     ) -> Result<()> {
-        let manager = ExtensionManager::new();
-        manager.set_cwd(cwd.display().to_string());
+        // Either use the pre-warmed JS runtime (booted concurrently with startup)
+        // or create a fresh one inline.
+        let (manager, tools) = if let Some(pre) = pre_warmed {
+            pre.manager
+                .set_js_runtime(pre.js_runtime);
+            (pre.manager, pre.tools)
+        } else {
+            let manager = ExtensionManager::new();
+            manager.set_cwd(cwd.display().to_string());
+
+            let resolved_policy = policy.clone().unwrap_or_default();
+            let resolved_repair_policy = repair_policy
+                .or_else(|| config.map(|cfg| cfg.resolve_repair_policy(None)))
+                .unwrap_or(RepairPolicyMode::AutoSafe);
+            let runtime_repair_mode =
+                Self::runtime_repair_mode_from_policy_mode(resolved_repair_policy);
+            let tools = Arc::new(ToolRegistry::new(enabled_tools, cwd, config));
+
+            if let Some(cfg) = config {
+                let resolved_risk = cfg.resolve_extension_risk_with_metadata();
+                tracing::info!(
+                    event = "pi.extension_runtime_risk.config",
+                    source = resolved_risk.source,
+                    enabled = resolved_risk.settings.enabled,
+                    alpha = resolved_risk.settings.alpha,
+                    window_size = resolved_risk.settings.window_size,
+                    ledger_limit = resolved_risk.settings.ledger_limit,
+                    fail_closed = resolved_risk.settings.fail_closed,
+                    "Resolved extension runtime risk settings"
+                );
+                manager.set_runtime_risk_config(resolved_risk.settings);
+            }
+
+            let js_runtime = JsExtensionRuntimeHandle::start_with_policy(
+                PiJsRuntimeConfig {
+                    cwd: cwd.display().to_string(),
+                    limits: crate::extensions_js::PiJsRuntimeLimits {
+                        memory_limit_bytes: Some(
+                            (resolved_policy.max_memory_mb as usize)
+                                .saturating_mul(1024 * 1024),
+                        ),
+                        ..Default::default()
+                    },
+                    repair_mode: runtime_repair_mode,
+                    ..Default::default()
+                },
+                Arc::clone(&tools),
+                manager.clone(),
+                resolved_policy,
+            )
+            .await?;
+            manager.set_js_runtime(js_runtime);
+            (manager, tools)
+        };
+
+        // Session, host actions, and message fetchers are always set here
+        // (after runtime boot) — the JS runtime only needs these when
+        // dispatching hostcalls, which happens during extension loading.
         manager.set_session(Arc::new(SessionHandle(self.session.clone())));
 
         let injected = Arc::new(StdMutex::new(ExtensionInjectedQueue::default()));
@@ -4465,48 +4523,6 @@ impl AgentSession {
             );
         }
 
-        let resolved_policy = policy.unwrap_or_default();
-        let resolved_repair_policy = repair_policy
-            .or_else(|| config.map(|cfg| cfg.resolve_repair_policy(None)))
-            .unwrap_or(RepairPolicyMode::AutoSafe);
-        let runtime_repair_mode =
-            Self::runtime_repair_mode_from_policy_mode(resolved_repair_policy);
-        let tools = Arc::new(ToolRegistry::new(enabled_tools, cwd, config));
-
-        if let Some(cfg) = config {
-            let resolved_risk = cfg.resolve_extension_risk_with_metadata();
-            tracing::info!(
-                event = "pi.extension_runtime_risk.config",
-                source = resolved_risk.source,
-                enabled = resolved_risk.settings.enabled,
-                alpha = resolved_risk.settings.alpha,
-                window_size = resolved_risk.settings.window_size,
-                ledger_limit = resolved_risk.settings.ledger_limit,
-                fail_closed = resolved_risk.settings.fail_closed,
-                "Resolved extension runtime risk settings"
-            );
-            manager.set_runtime_risk_config(resolved_risk.settings);
-        }
-
-        let js_runtime = JsExtensionRuntimeHandle::start_with_policy(
-            PiJsRuntimeConfig {
-                cwd: cwd.display().to_string(),
-                limits: crate::extensions_js::PiJsRuntimeLimits {
-                    memory_limit_bytes: Some(
-                        (resolved_policy.max_memory_mb as usize).saturating_mul(1024 * 1024),
-                    ),
-                    ..Default::default()
-                },
-                repair_mode: runtime_repair_mode,
-                ..Default::default()
-            },
-            Arc::clone(&tools),
-            manager.clone(),
-            resolved_policy.clone(),
-        )
-        .await?;
-        manager.set_js_runtime(js_runtime.clone());
-
         let mut js_specs = Vec::new();
         #[cfg(feature = "wasm-host")]
         let mut wasm_specs: Vec<WasmExtensionLoadSpec> = Vec::new();
@@ -4533,7 +4549,7 @@ impl AgentSession {
 
         #[cfg(feature = "wasm-host")]
         if !wasm_specs.is_empty() {
-            let host = WasmExtensionHost::new(cwd, resolved_policy.clone())?;
+            let host = WasmExtensionHost::new(cwd, policy.unwrap_or_default())?;
             manager
                 .load_wasm_extensions(&host, wasm_specs, Arc::clone(&tools))
                 .await?;

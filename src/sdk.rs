@@ -1615,6 +1615,7 @@ pub async fn create_agent_session(options: SessionOptions) -> Result<AgentSessio
                 &extension_paths,
                 Some(resolved_ext_policy.policy),
                 Some(resolved_repair_policy.effective_mode),
+                None,
             )
             .await?;
     }
