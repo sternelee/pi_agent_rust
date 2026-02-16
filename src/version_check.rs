@@ -204,4 +204,152 @@ mod tests {
         std::fs::write(&path, "").unwrap();
         assert_eq!(read_cached_version_at(&path), None);
     }
+
+    mod proptest_version_check {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// `is_newer` is irreflexive: no version is newer than itself.
+            #[test]
+            fn is_newer_irreflexive(
+                major in 0..100u32,
+                minor in 0..100u32,
+                patch in 0..100u32
+            ) {
+                let v = format!("{major}.{minor}.{patch}");
+                assert!(!is_newer(&v, &v));
+            }
+
+            /// `is_newer` is asymmetric: if a > b then !(b > a).
+            #[test]
+            fn is_newer_asymmetric(
+                major in 0..50u32,
+                minor in 0..50u32,
+                patch in 0..50u32,
+                bump in 1..10u32
+            ) {
+                let older = format!("{major}.{minor}.{patch}");
+                let newer = format!("{major}.{minor}.{}", patch + bump);
+                assert!(is_newer(&older, &newer));
+                assert!(!is_newer(&newer, &older));
+            }
+
+            /// Leading 'v' prefix is stripped transparently.
+            #[test]
+            fn v_prefix_transparent(
+                major in 0..100u32,
+                minor in 0..100u32,
+                patch in 0..100u32,
+                bump in 1..10u32
+            ) {
+                let older = format!("{major}.{minor}.{patch}");
+                let newer = format!("{major}.{minor}.{}", patch + bump);
+                assert_eq!(
+                    is_newer(&older, &newer),
+                    is_newer(&format!("v{older}"), &format!("v{newer}"))
+                );
+            }
+
+            /// Pre-release suffix is ignored for comparison.
+            #[test]
+            fn prerelease_stripped(
+                major in 0..100u32,
+                minor in 0..100u32,
+                patch in 0..100u32,
+                suffix in "[a-z]{1,8}"
+            ) {
+                let plain = format!("{major}.{minor}.{patch}");
+                let pre = format!("{major}.{minor}.{patch}-{suffix}");
+                // Same version regardless of suffix
+                assert!(!is_newer(&plain, &pre));
+                assert!(!is_newer(&pre, &plain));
+            }
+
+            /// Garbage strings never report newer.
+            #[test]
+            fn garbage_never_newer(s in "\\PC{1,30}") {
+                assert!(!is_newer(&s, "1.0.0") || s.contains('.'));
+                assert!(!is_newer("1.0.0", &s) || s.contains('.'));
+            }
+
+            /// `parse_github_release_version` extracts tag_name.
+            #[test]
+            fn parse_github_release_extracts_tag(ver in "[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}") {
+                let json = format!(r#"{{"tag_name": "v{ver}"}}"#);
+                assert_eq!(parse_github_release_version(&json), Some(ver));
+            }
+
+            /// Missing `tag_name` returns None.
+            #[test]
+            fn parse_github_release_no_tag(key in "[a-z_]{1,10}") {
+                prop_assume!(key != "tag_name");
+                let json = format!(r#"{{"{key}": "v1.0.0"}}"#);
+                assert_eq!(parse_github_release_version(&json), None);
+            }
+
+            /// Invalid JSON returns None.
+            #[test]
+            fn parse_github_release_invalid_json(s in "[^{}]{1,30}") {
+                assert_eq!(parse_github_release_version(&s), None);
+            }
+
+            /// Cache round-trip preserves version string.
+            #[test]
+            fn cache_round_trip_preserves(ver in "[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}") {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("cache");
+                write_cached_version_at(&path, &ver);
+                assert_eq!(read_cached_version_at(&path), Some(ver));
+            }
+
+            /// Major version bumps are always detected.
+            #[test]
+            fn major_bump_detected(
+                major in 0..50u32,
+                minor in 0..100u32,
+                patch in 0..100u32,
+                bump in 1..10u32
+            ) {
+                let older = format!("{major}.{minor}.{patch}");
+                let newer = format!("{}.0.0", major + bump);
+                assert!(is_newer(&older, &newer));
+            }
+
+            /// Two-component versions default patch to 0.
+            #[test]
+            fn two_component_version(
+                major in 0..100u32,
+                minor in 0..100u32,
+                bump in 1..10u32
+            ) {
+                let v2 = format!("{major}.{minor}");
+                let v3 = format!("{major}.{minor}.0");
+                // Both should parse the same, so neither is newer
+                assert!(!is_newer(&v2, &v3));
+                assert!(!is_newer(&v3, &v2));
+                // But a bumped version IS newer
+                let bumped = format!("{major}.{}.0", minor + bump);
+                assert!(is_newer(&v2, &bumped));
+            }
+
+            /// Strict patch bumps are transitive for well-formed versions.
+            #[test]
+            fn patch_bump_transitivity(
+                major in 0..100u32,
+                minor in 0..100u32,
+                patch in 0..100u32,
+                bump_a in 1..10u32,
+                bump_b in 1..10u32
+            ) {
+                let base = format!("{major}.{minor}.{patch}");
+                let mid = format!("{major}.{minor}.{}", patch + bump_a);
+                let top = format!("{major}.{minor}.{}", patch + bump_a + bump_b);
+
+                assert!(is_newer(&base, &mid));
+                assert!(is_newer(&mid, &top));
+                assert!(is_newer(&base, &top));
+            }
+        }
+    }
 }

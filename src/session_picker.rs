@@ -1117,4 +1117,121 @@ mod tests {
         );
         assert!(!session_path.exists(), "session file should remain deleted");
     }
+
+    mod proptest_session_picker {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// `truncate_session_id` never returns more chars than requested.
+            #[test]
+            fn truncate_respects_limit(s in "[a-z0-9\\-]{1,40}", max in 0..50usize) {
+                let result = truncate_session_id(&s, max);
+                assert!(result.chars().count() <= max);
+            }
+
+            /// `truncate_session_id` is a prefix of the original.
+            #[test]
+            fn truncate_is_prefix(s in "[a-z0-9\\-]{1,40}", max in 1..50usize) {
+                let result = truncate_session_id(&s, max);
+                assert!(s.starts_with(result));
+            }
+
+            /// `truncate_session_id` with max >= len returns the whole string.
+            #[test]
+            fn truncate_large_limit_identity(s in "[a-z0-9\\-]{1,20}") {
+                let len = s.chars().count();
+                let result = truncate_session_id(&s, len + 10);
+                assert_eq!(result, s.as_str());
+            }
+
+            /// `truncate_session_id` with max=0 returns empty.
+            #[test]
+            fn truncate_zero_is_empty(s in "\\PC{1,20}") {
+                assert_eq!(truncate_session_id(&s, 0), "");
+            }
+
+            /// `format_time` never panics on arbitrary strings.
+            #[test]
+            fn format_time_never_panics(ts in "\\PC{0,40}") {
+                let _ = format_time(&ts);
+            }
+
+            /// Valid RFC3339 timestamps format to YYYY-MM-DD HH:MM.
+            #[test]
+            fn format_time_valid_rfc3339(
+                year in 2020..2030u32,
+                month in 1..12u32,
+                day in 1..28u32,
+                hour in 0..23u32,
+                min in 0..59u32
+            ) {
+                let ts = format!("{year}-{month:02}-{day:02}T{hour:02}:{min:02}:00Z");
+                let result = format_time(&ts);
+                assert!(result.contains(&format!("{year}-{month:02}-{day:02}")));
+                assert!(result.contains(&format!("{hour:02}:{min:02}")));
+            }
+
+            /// Invalid timestamps are returned as-is.
+            #[test]
+            fn format_time_invalid_passthrough(s in "[a-z]{5,15}") {
+                assert_eq!(format_time(&s), s);
+            }
+
+            /// `is_session_file_path` accepts .jsonl files.
+            #[test]
+            fn is_session_file_path_accepts_jsonl(name in "[a-z]{1,10}") {
+                let path = format!("/tmp/{name}.jsonl");
+                assert!(is_session_file_path(Path::new(&path)));
+            }
+
+            /// `is_session_file_path` rejects random extensions.
+            #[test]
+            fn is_session_file_path_rejects_other(
+                name in "[a-z]{1,10}",
+                ext in "[a-z]{1,5}"
+            ) {
+                prop_assume!(ext != "jsonl" && ext != "sqlite");
+                let path = format!("/tmp/{name}.{ext}");
+                assert!(!is_session_file_path(Path::new(&path)));
+            }
+
+            /// `is_session_file_path` rejects files without extensions.
+            #[test]
+            fn is_session_file_path_rejects_no_ext(name in "[a-z]{1,10}") {
+                assert!(!is_session_file_path(Path::new(&format!("/tmp/{name}"))));
+            }
+
+            /// `truncate_session_id` handles multi-byte unicode.
+            #[test]
+            fn truncate_unicode(max in 0..10usize) {
+                let s = "\u{1F600}\u{1F601}\u{1F602}\u{1F603}\u{1F604}"; // 5 emoji
+                let result = truncate_session_id(s, max);
+                assert!(result.chars().count() <= max);
+                assert!(s.starts_with(result));
+            }
+
+            /// Truncation is idempotent for a fixed limit.
+            #[test]
+            fn truncate_idempotent(s in "\\PC{1,40}", max in 0..40usize) {
+                let once = truncate_session_id(&s, max);
+                let twice = truncate_session_id(once, max);
+                assert_eq!(once, twice);
+            }
+
+            /// Valid RFC3339 formatting is fixed-width (`YYYY-MM-DD HH:MM`).
+            #[test]
+            fn format_time_valid_rfc3339_fixed_width(
+                year in 2020..2030u32,
+                month in 1..12u32,
+                day in 1..28u32,
+                hour in 0..23u32,
+                min in 0..59u32
+            ) {
+                let ts = format!("{year}-{month:02}-{day:02}T{hour:02}:{min:02}:00Z");
+                let result = format_time(&ts);
+                assert_eq!(result.len(), 16);
+            }
+        }
+    }
 }

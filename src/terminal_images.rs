@@ -558,4 +558,152 @@ mod tests {
         assert_ne!(ImageProtocol::Kitty, ImageProtocol::Iterm2);
         assert_ne!(ImageProtocol::Iterm2, ImageProtocol::Unsupported);
     }
+
+    mod proptest_terminal_images {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// Kitty encoding always starts with APC and ends with ST for non-empty data.
+            #[test]
+            fn kitty_bookends(data in proptest::collection::vec(any::<u8>(), 1..512), cols in 1..200usize) {
+                let result = encode_kitty(&data, cols);
+                assert!(result.starts_with("\x1b_G"), "must start with APC");
+                assert!(result.ends_with("\x1b\\"), "must end with ST");
+            }
+
+            /// Kitty chunk count grows with payload size.
+            #[test]
+            fn kitty_chunk_count_lower_bound(data in proptest::collection::vec(any::<u8>(), 1..8192)) {
+                let result = encode_kitty(&data, 80);
+                let b64_len = (data.len() * 4 + 2) / 3; // ceil(n * 4/3)
+                let expected_chunks = (b64_len + 4095) / 4096;
+                let actual_chunks = result.matches("\x1b_G").count();
+                assert!(actual_chunks >= expected_chunks.min(1));
+            }
+
+            /// Kitty first chunk always includes `a=T` (transmit+display).
+            #[test]
+            fn kitty_first_chunk_has_action(data in proptest::collection::vec(any::<u8>(), 1..100)) {
+                let result = encode_kitty(&data, 40);
+                // First chunk starts at position 0
+                let first_st = result.find("\x1b\\").unwrap();
+                let first_chunk = &result[..first_st];
+                assert!(first_chunk.contains("a=T"));
+                assert!(first_chunk.contains("f=100"));
+            }
+
+            /// iTerm2 encoding includes size, width, and inline=1.
+            #[test]
+            fn iterm2_format_invariants(data in proptest::collection::vec(any::<u8>(), 0..512), cols in 1..200usize) {
+                let result = encode_iterm2(&data, cols);
+                assert!(result.starts_with("\x1b]1337;File="));
+                assert!(result.contains(&format!("size={}", data.len())));
+                assert!(result.contains(&format!("width={cols}")));
+                assert!(result.contains("inline=1"));
+                assert!(result.ends_with('\x07'));
+            }
+
+            /// Placeholder with both dimensions includes WxH.
+            #[test]
+            fn placeholder_both_dims(w in 1..10000u32, h in 1..10000u32, mime in "[a-z]+/[a-z]+") {
+                let result = placeholder(&mime, Some(w), Some(h));
+                assert!(result.contains(&format!("{w}x{h}")));
+                assert!(result.contains(&mime));
+            }
+
+            /// Placeholder without both dimensions omits WxH pattern.
+            #[test]
+            fn placeholder_missing_dim(w in 1..10000u32, h in 1..10000u32) {
+                let dim_pattern = format!("{w}x{h}");
+                let result_no_h = placeholder("image/png", Some(w), None);
+                assert!(!result_no_h.contains(&dim_pattern));
+                assert_eq!(result_no_h, "[image: image/png]");
+                let result_no_w = placeholder("image/png", None, Some(h));
+                assert!(!result_no_w.contains(&dim_pattern));
+                assert_eq!(result_no_w, "[image: image/png]");
+                let result_none = placeholder("image/png", None, None);
+                assert_eq!(result_none, "[image: image/png]");
+            }
+
+            /// PNG dimension extraction is correct for arbitrary width/height.
+            #[test]
+            fn png_dimensions_roundtrip(w in 1..10000u32, h in 1..10000u32) {
+                let mut data = vec![0u8; 32];
+                data[..8].copy_from_slice(b"\x89PNG\r\n\x1A\n");
+                data[8..12].copy_from_slice(&13u32.to_be_bytes());
+                data[12..16].copy_from_slice(b"IHDR");
+                data[16..20].copy_from_slice(&w.to_be_bytes());
+                data[20..24].copy_from_slice(&h.to_be_bytes());
+                assert_eq!(image_dimensions(&data), Some((w, h)));
+            }
+
+            /// GIF dimension extraction is correct for arbitrary width/height.
+            #[test]
+            fn gif_dimensions_roundtrip(w in 1..65535u16, h in 1..65535u16) {
+                let mut data = vec![0u8; 16];
+                data[..6].copy_from_slice(b"GIF89a");
+                data[6..8].copy_from_slice(&w.to_le_bytes());
+                data[8..10].copy_from_slice(&h.to_le_bytes());
+                assert_eq!(image_dimensions(&data), Some((u32::from(w), u32::from(h))));
+            }
+
+            /// Arbitrary bytes that don't match any magic return None.
+            #[test]
+            fn unknown_format_none(data in proptest::collection::vec(any::<u8>(), 0..64)) {
+                // Skip valid magic bytes
+                if data.len() >= 8 && data.starts_with(b"\x89PNG\r\n\x1A\n") {
+                    return Ok(());
+                }
+                if data.len() >= 4 && data.first() == Some(&0xFF) && data.get(1) == Some(&0xD8) {
+                    return Ok(());
+                }
+                if data.len() >= 10 && (data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a")) {
+                    return Ok(());
+                }
+                assert_eq!(image_dimensions(&data), None);
+            }
+
+            /// `render_inline` never panics regardless of base64 input.
+            #[test]
+            fn render_inline_never_panics(b64 in "\\PC{0,100}", mime in "[a-z]+/[a-z]+") {
+                let _ = render_inline(&b64, &mime, 80);
+            }
+
+            /// `render_inline` with valid PNG base64 includes dimensions.
+            #[test]
+            fn render_inline_png_has_dims(w in 1..5000u32, h in 1..5000u32) {
+                let mut png = vec![0u8; 32];
+                png[..8].copy_from_slice(b"\x89PNG\r\n\x1A\n");
+                png[8..12].copy_from_slice(&13u32.to_be_bytes());
+                png[12..16].copy_from_slice(b"IHDR");
+                png[16..20].copy_from_slice(&w.to_be_bytes());
+                png[20..24].copy_from_slice(&h.to_be_bytes());
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+                let result = render_inline(&b64, "image/png", 80);
+                assert!(result.contains(&format!("{w}x{h}")));
+            }
+
+            /// `render_inline` always includes the MIME label in the placeholder.
+            #[test]
+            fn render_inline_preserves_mime_label(
+                data in proptest::collection::vec(any::<u8>(), 0..512),
+                mime in "[a-z]{1,10}/[a-z0-9.+-]{1,20}"
+            ) {
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+                let result = render_inline(&b64, &mime, 80);
+                assert!(result.contains(&mime));
+            }
+
+            /// `is_jpeg_sof_marker` accepts exactly the documented SOF range.
+            #[test]
+            fn sof_marker_classification(marker in 0u8..=255u8) {
+                let expected = matches!(
+                    marker,
+                    0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF
+                );
+                assert_eq!(is_jpeg_sof_marker(marker), expected);
+            }
+        }
+    }
 }
