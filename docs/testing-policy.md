@@ -365,6 +365,13 @@ This gate is intentionally **blocking by default** and evaluates the newest
 
 - `tests/e2e_results/**/evidence_contract.json`
 - `tests/ext_conformance/reports/conformance_summary.json`
+- `tests/e2e_results/perf-ci-*/results/baseline_variance_confidence.json`
+- `tests/e2e_results/perf-ci-*/results/extension_benchmark_stratification.json`
+
+The runner-level evidence contract (`scripts/e2e/run_all.sh`) now enforces
+claim-integrity fail-closed conditions from `docs/perf_sli_matrix.json#ci_enforcement`
+when `CLAIM_INTEGRITY_REQUIRED=1` (set in Linux CI lane). This blocks stale,
+partial, missing-partition, invalid-label, and microbench-only global claims.
 
 The step writes a structured verdict at:
 
@@ -382,6 +389,7 @@ Defaults are provided in-repo and can be overridden via repository variables.
 | `CI_GATE_MIN_PASS_RATE_PCT` | `80.0` | Minimum allowed conformance pass rate. |
 | `CI_GATE_MAX_FAIL_COUNT` | `36` | Maximum allowed conformance failure count. |
 | `CI_GATE_MAX_NA_COUNT` | `170` | Maximum allowed conformance N/A count. |
+| `CLAIM_INTEGRITY_REQUIRED` | `1` (Linux CI lane) | Enables fail-closed claim-integrity evidence checks in `run_all.sh`. |
 
 #### Rollback procedure (emergency, short-lived)
 

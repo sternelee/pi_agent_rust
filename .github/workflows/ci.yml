@@ -606,10 +606,37 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo test --all-targets --features wasm-host
 
+      - name: Prepare claim-integrity perf paths [linux]
+        if: runner.os == 'Linux'
+        run: |
+          set -euxo pipefail
+          PERF_CLAIM_CORRELATION_ID="ci-claim-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          PERF_EVIDENCE_DIR="tests/e2e_results/perf-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "PERF_CLAIM_CORRELATION_ID=${PERF_CLAIM_CORRELATION_ID}" >> "$GITHUB_ENV"
+          echo "PERF_EVIDENCE_DIR=${PERF_EVIDENCE_DIR}" >> "$GITHUB_ENV"
+          echo "PERF_BASELINE_CONFIDENCE_JSON=${PERF_EVIDENCE_DIR}/results/baseline_variance_confidence.json" >> "$GITHUB_ENV"
+          echo "PERF_EXTENSION_STRATIFICATION_JSON=${PERF_EVIDENCE_DIR}/results/extension_benchmark_stratification.json" >> "$GITHUB_ENV"
+
+      - name: Generate perf claim-integrity evidence bundle [linux]
+        if: runner.os == 'Linux'
+        run: |
+          set -euxo pipefail
+          CI_CORRELATION_ID="$PERF_CLAIM_CORRELATION_ID" \
+          PERF_OUTPUT_DIR="$PERF_EVIDENCE_DIR" \
+          ./scripts/perf/orchestrate.sh \
+            --profile ci \
+            --skip-build \
+            --skip-env-check
+
       - name: Unified verification runner (ci profile) [linux]
         if: runner.os == 'Linux'
         run: |
           set -euxo pipefail
+          CI_CORRELATION_ID="$PERF_CLAIM_CORRELATION_ID" \
+          CLAIM_INTEGRITY_REQUIRED=1 \
+          PERF_EVIDENCE_DIR="$PERF_EVIDENCE_DIR" \
+          PERF_BASELINE_CONFIDENCE_JSON="$PERF_BASELINE_CONFIDENCE_JSON" \
+          PERF_EXTENSION_STRATIFICATION_JSON="$PERF_EXTENSION_STRATIFICATION_JSON" \
           ./scripts/e2e/run_all.sh --profile ci
 
       - name: CI gate promotion (strict/rollback) [linux]
