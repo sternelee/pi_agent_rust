@@ -1669,7 +1669,10 @@ fn e2e_partial_migration_recovery_with_forensic_check() -> PiResult<()> {
     // Simulate a partial migration: create V2 dir with segments but no index.
     let v2_root = pi::session_store_v2::v2_sidecar_path(&jsonl);
     fs::create_dir_all(v2_root.join("segments"))?;
-    fs::write(v2_root.join("segments").join("0000000000000001.seg"), "partial_data\n")?;
+    fs::write(
+        v2_root.join("segments").join("0000000000000001.seg"),
+        "partial_data\n",
+    )?;
 
     // Status should be Partial.
     assert_eq!(
@@ -1678,8 +1681,7 @@ fn e2e_partial_migration_recovery_with_forensic_check() -> PiResult<()> {
     );
 
     // Recover with re-migration.
-    let state =
-        pi::session::recover_partial_migration(&jsonl, "partial-recovery-e2e", true)?;
+    let state = pi::session::recover_partial_migration(&jsonl, "partial-recovery-e2e", true)?;
     assert_eq!(state, MigrationState::Migrated);
 
     // Verify data integrity after recovery.
@@ -1716,8 +1718,7 @@ fn e2e_corrupt_migration_recovery_cleanup_only() -> PiResult<()> {
     }
 
     // Recover WITHOUT re-migration.
-    let state =
-        pi::session::recover_partial_migration(&jsonl, "corrupt-cleanup", false)?;
+    let state = pi::session::recover_partial_migration(&jsonl, "corrupt-cleanup", false)?;
     assert_eq!(state, MigrationState::Unmigrated);
     assert!(!v2_root.exists());
 
@@ -1833,8 +1834,7 @@ fn e2e_migration_state_machine_transitions() -> PiResult<()> {
     }
 
     // State 4: Recovered via recover_partial_migration (with re-migration).
-    let state =
-        pi::session::recover_partial_migration(&jsonl, "sm-recovery", true)?;
+    let state = pi::session::recover_partial_migration(&jsonl, "sm-recovery", true)?;
     assert_eq!(state, MigrationState::Migrated);
 
     // Verify integrity post-recovery.
@@ -1859,7 +1859,10 @@ fn e2e_large_session_migration_integrity_and_chain() -> PiResult<()> {
         entries.push(make_message_entry(
             &format!("big{i}"),
             parent.as_deref(),
-            &format!("message body for entry {i} with padding: {}", "x".repeat(50)),
+            &format!(
+                "message body for entry {i} with padding: {}",
+                "x".repeat(50)
+            ),
         ));
     }
     let jsonl = build_test_jsonl(dir.path(), &entries);
@@ -1985,8 +1988,7 @@ fn e2e_recover_unmigrated_is_noop() -> PiResult<()> {
     let jsonl = build_test_jsonl(dir.path(), &entries);
 
     // Already unmigrated — recover should be a noop.
-    let state =
-        pi::session::recover_partial_migration(&jsonl, "noop-test", true)?;
+    let state = pi::session::recover_partial_migration(&jsonl, "noop-test", true)?;
     assert_eq!(state, MigrationState::Unmigrated);
 
     // Still unmigrated (recover doesn't migrate an unmigrated session).
@@ -2012,8 +2014,7 @@ fn e2e_recover_migrated_is_noop() -> PiResult<()> {
     );
 
     // Recover on already-migrated — should be a noop.
-    let state =
-        pi::session::recover_partial_migration(&jsonl, "noop-migrated", false)?;
+    let state = pi::session::recover_partial_migration(&jsonl, "noop-migrated", false)?;
     assert_eq!(state, MigrationState::Migrated);
 
     Ok(())
@@ -2125,7 +2126,10 @@ fn e2e_forensic_ledger_is_valid_jsonl() -> PiResult<()> {
     // Read the raw ledger file and verify each line is valid JSON.
     let v2_root = pi::session_store_v2::v2_sidecar_path(&jsonl);
     let ledger_path = v2_root.join("migrations").join("ledger.jsonl");
-    assert!(ledger_path.exists(), "ledger file must exist after migration");
+    assert!(
+        ledger_path.exists(),
+        "ledger file must exist after migration"
+    );
 
     let ledger_content = fs::read_to_string(&ledger_path)?;
     let mut line_count = 0;
@@ -2177,7 +2181,10 @@ fn e2e_rapid_migrate_rollback_cycles_clean() -> PiResult<()> {
 
         // Rollback.
         pi::session::rollback_v2_sidecar(&jsonl, &corr)?;
-        assert!(!v2_root.exists(), "V2 root should not exist after rollback at cycle {cycle}");
+        assert!(
+            !v2_root.exists(),
+            "V2 root should not exist after rollback at cycle {cycle}"
+        );
     }
 
     // Final state is unmigrated, JSONL intact.
@@ -2214,7 +2221,10 @@ fn e2e_verification_detects_post_migration_jsonl_modification() -> PiResult<()> 
     let store = SessionStoreV2::create(&v2_root, 64 * 1024 * 1024)?;
     let verification = pi::session::verify_v2_against_jsonl(&jsonl, &store)?;
 
-    assert!(!verification.entry_count_match, "entry count should NOT match after JSONL modification");
+    assert!(
+        !verification.entry_count_match,
+        "entry count should NOT match after JSONL modification"
+    );
 
     Ok(())
 }

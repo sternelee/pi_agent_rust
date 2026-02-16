@@ -844,7 +844,13 @@ fn validate_phase1_matrix_validation_record(record: &Value) -> Result<(), String
             .get("stage_attribution")
             .and_then(Value::as_object)
             .ok_or_else(|| "matrix cell stage_attribution must be object".to_string())?;
-        for field in &["open_ms", "append_ms", "save_ms", "index_ms", "total_stage_ms"] {
+        for field in &[
+            "open_ms",
+            "append_ms",
+            "save_ms",
+            "index_ms",
+            "total_stage_ms",
+        ] {
             if !stage.contains_key(*field) {
                 return Err(format!("matrix cell stage_attribution missing {field}"));
             }
@@ -1458,13 +1464,13 @@ fn phase1_matrix_validator_accepts_golden_fixture() {
         "correlation_id": "abc123def456",
         "matrix_requirements": {
             "required_partition_tags": ["matched-state", "realistic"],
-            "required_session_message_sizes": [100000, 200000, 500000, 1000000, 5000000],
+            "required_session_message_sizes": [100_000, 200_000, 500_000, 1_000_000, 5_000_000],
             "required_cell_count": 10
         },
         "matrix_cells": [
             {
                 "workload_partition": "matched-state",
-                "session_messages": 100000,
+                "session_messages": 100_000,
                 "scenario_id": "matched-state/session_100000",
                 "status": "pass",
                 "missing_reasons": [],
@@ -1491,7 +1497,7 @@ fn phase1_matrix_validator_accepts_golden_fixture() {
             },
             {
                 "workload_partition": "realistic",
-                "session_messages": 100000,
+                "session_messages": 100_000,
                 "scenario_id": "realistic/session_100000",
                 "status": "pass",
                 "missing_reasons": [],
@@ -1580,13 +1586,13 @@ fn phase1_matrix_validator_rejects_missing_stage_attribution() {
         "correlation_id": "abc123def456",
         "matrix_requirements": {
             "required_partition_tags": ["matched-state", "realistic"],
-            "required_session_message_sizes": [100000],
+            "required_session_message_sizes": [100_000],
             "required_cell_count": 2
         },
         "matrix_cells": [
             {
                 "workload_partition": "matched-state",
-                "session_messages": 100000,
+                "session_messages": 100_000,
                 "scenario_id": "matched-state/session_100000",
                 "status": "pass",
                 "primary_e2e": {
@@ -1951,7 +1957,11 @@ fn orchestrate_generates_phase1_matrix_validation_artifact() {
     let cells = matrix["matrix_cells"]
         .as_array()
         .expect("matrix_cells array");
-    assert_eq!(cells.len(), 10, "matrix artifact should contain one cell per requirement");
+    assert_eq!(
+        cells.len(),
+        10,
+        "matrix artifact should contain one cell per requirement"
+    );
 
     let seen_partitions: HashSet<&str> = cells
         .iter()
