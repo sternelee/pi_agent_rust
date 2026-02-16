@@ -290,6 +290,16 @@ if [[ ${#SELECTED_SUITES[@]} -eq 0 ]]; then
   resolve_suites
 fi
 
+suite_selected() {
+  local wanted="$1"
+  for suite in "${SELECTED_SUITES[@]}"; do
+    if [[ "$suite" == "$wanted" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # ─── Generate correlation ID ────────────────────────────────────────────────
 
 if [[ -z "$CORRELATION_ID" ]]; then
@@ -401,6 +411,17 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
     done
   fi
 
+  if suite_selected "perf_budgets" || suite_selected "perf_regression"; then
+    log_step "Building release pi binary for release-size gates..."
+    if cargo build --bin pi --release >"$OUTPUT_DIR/logs/build_release_pi.log" 2>&1; then
+      log_ok "Release pi binary built: $TARGET_DIR/release/pi"
+    elif [[ "${PI_PERF_STRICT:-0}" == "1" ]]; then
+      die "Failed to build release pi binary required for binary-size gates (see logs/build_release_pi.log)"
+    else
+      log_warn "Failed to build release pi binary (see logs/build_release_pi.log); binary-size checks may return NO_DATA"
+    fi
+  fi
+
   build_end=$(epoch_ms)
   build_elapsed=$((build_end - build_start))
   log_ok "Build completed in ${build_elapsed}ms"
@@ -432,6 +453,7 @@ run_test_suite() {
   exit_code=0
   BENCH_OUTPUT_DIR="$result_dir" \
   PERF_REGRESSION_OUTPUT="$result_dir" \
+  PERF_RELEASE_BINARY_PATH="$TARGET_DIR/release/pi" \
   CI_CORRELATION_ID="$CORRELATION_ID" \
   RUST_TEST_THREADS="$PARALLELISM" \
     cargo test --test "$target_name" --profile "$CARGO_PROFILE" -- --nocapture \
@@ -1605,6 +1627,9 @@ phase1_matrix_path = Path(os.environ["PHASE1_MATRIX_PATH"])
 
 manifest_path = output_dir / "manifest.json"
 scenario_runner_path = output_dir / "results" / "scenario_runner.jsonl"
+scenario_runner_fallback_path = project_root / "target" / "perf" / "scenario_runner.jsonl"
+workload_path = output_dir / "results" / "pijs_workload.jsonl"
+workload_fallback_path = project_root / "target" / "perf" / "pijs_workload.jsonl"
 stratification_path = output_dir / "results" / "extension_benchmark_stratification.json"
 baseline_path = output_dir / "results" / "baseline_variance_confidence.json"
 perf_sli_path = project_root / "docs" / "perf_sli_matrix.json"
@@ -1732,56 +1757,126 @@ if isinstance(benchmark_partitions, dict):
 if not required_sizes:
     required_sizes = [100_000, 200_000, 500_000, 1_000_000, 5_000_000]
 
+effective_scenario_runner_path = scenario_runner_path
 scenario_runner_records = load_jsonl(scenario_runner_path)
-stage_records = {}
-for index, record in enumerate(scenario_runner_records):
-    if not isinstance(record, dict):
-        continue
+if not scenario_runner_records and scenario_runner_fallback_path.exists():
+    scenario_runner_records = load_jsonl(scenario_runner_fallback_path)
+    effective_scenario_runner_path = scenario_runner_fallback_path
+
+effective_workload_path = workload_path
+workload_records = load_jsonl(workload_path)
+if not workload_records and workload_fallback_path.exists():
+    workload_records = load_jsonl(workload_fallback_path)
+    effective_workload_path = workload_fallback_path
+
+
+def parse_partition(record, metadata, scenario_id):
     partition = normalize_partition(
-        record.get("partition") or record.get("workload_partition")
+        record.get("partition")
+        or record.get("workload_partition")
+        or metadata.get("partition")
+        or metadata.get("workload_partition")
     )
-    metadata = record.get("scenario_metadata")
-    if not isinstance(metadata, dict):
-        metadata = {}
-    replay_input = metadata.get("replay_input")
-    if not isinstance(replay_input, dict):
-        replay_input = {}
-    scenario_id = str(
-        metadata.get("scenario_id")
-        or record.get("scenario_id")
-        or record.get("scenario")
-        or ""
-    ).strip()
-    session_messages = parse_session_size(scenario_id, replay_input)
+    if partition in {"matched-state", "realistic"}:
+        return partition
+    scenario_norm = normalize_partition(record.get("scenario"))
+    if scenario_norm in {"matched-state", "realistic"}:
+        return scenario_norm
+    if scenario_id.startswith("matched-state/"):
+        return "matched-state"
+    if scenario_id.startswith("realistic/"):
+        return "realistic"
+    return partition
 
-    if partition not in required_partitions or session_messages not in required_sizes:
-        continue
 
-    key = (partition, session_messages)
-    if key in stage_records:
-        continue
+stage_records = {}
+for source_name, records in (
+    ("scenario_runner", scenario_runner_records),
+    ("pijs_workload", workload_records),
+):
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            continue
 
-    open_ms = parse_float(record.get("open_ms"))
-    append_ms = parse_float(record.get("append_ms"))
-    save_ms = parse_float(record.get("save_ms"))
-    index_ms = parse_float(record.get("index_ms"))
-    if index_ms is None:
-        index_ms = parse_float(record.get("session_index_ms"))
-    wall_clock_ms = parse_float(record.get("total_ms"))
-    if wall_clock_ms is None:
-        wall_clock_ms = parse_float(record.get("elapsed_ms"))
+        metadata = record.get("scenario_metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        replay_input = metadata.get("replay_input")
+        if not isinstance(replay_input, dict):
+            replay_input = {}
 
-    stage_records[key] = {
-        "scenario_id": scenario_id
-        if scenario_id
-        else f"{partition}/session_{session_messages}",
-        "open_ms": open_ms,
-        "append_ms": append_ms,
-        "save_ms": save_ms,
-        "index_ms": index_ms,
-        "wall_clock_ms": wall_clock_ms,
-        "source_record_index": index,
-    }
+        scenario_id = str(
+            metadata.get("scenario_id")
+            or record.get("scenario_id")
+            or record.get("scenario")
+            or ""
+        ).strip()
+        partition = parse_partition(record, metadata, scenario_id)
+        session_messages = parse_session_size(scenario_id, replay_input)
+        if session_messages is None:
+            session_messages = parse_int(
+                record.get("session_messages")
+                or record.get("message_count")
+                or replay_input.get("session_messages")
+            )
+
+        if partition not in required_partitions or session_messages not in required_sizes:
+            continue
+
+        stage_attribution = record.get("stage_attribution")
+        if not isinstance(stage_attribution, dict):
+            stage_attribution = {}
+
+        open_ms = parse_float(record.get("open_ms"))
+        if open_ms is None:
+            open_ms = parse_float(stage_attribution.get("open_ms"))
+        append_ms = parse_float(record.get("append_ms"))
+        if append_ms is None:
+            append_ms = parse_float(stage_attribution.get("append_ms"))
+        save_ms = parse_float(record.get("save_ms"))
+        if save_ms is None:
+            save_ms = parse_float(stage_attribution.get("save_ms"))
+        index_ms = parse_float(record.get("index_ms"))
+        if index_ms is None:
+            index_ms = parse_float(record.get("session_index_ms"))
+        if index_ms is None:
+            index_ms = parse_float(stage_attribution.get("index_ms"))
+        wall_clock_ms = parse_float(record.get("total_ms"))
+        if wall_clock_ms is None:
+            wall_clock_ms = parse_float(record.get("elapsed_ms"))
+        if wall_clock_ms is None:
+            wall_clock_ms = parse_float(stage_attribution.get("total_stage_ms"))
+
+        candidate = {
+            "scenario_id": scenario_id
+            if scenario_id
+            else f"{partition}/session_{session_messages}",
+            "open_ms": open_ms,
+            "append_ms": append_ms,
+            "save_ms": save_ms,
+            "index_ms": index_ms,
+            "wall_clock_ms": wall_clock_ms,
+            "source_record_index": index,
+            "source_name": source_name,
+        }
+
+        key = (partition, session_messages)
+        if key in stage_records:
+            existing = stage_records[key]
+            existing_score = sum(
+                1
+                for metric in ("open_ms", "append_ms", "save_ms", "index_ms", "wall_clock_ms")
+                if existing.get(metric) is not None
+            )
+            candidate_score = sum(
+                1
+                for metric in ("open_ms", "append_ms", "save_ms", "index_ms", "wall_clock_ms")
+                if candidate.get(metric) is not None
+            )
+            if existing_score >= candidate_score:
+                continue
+
+        stage_records[key] = candidate
 
 stratification = load_json(stratification_path) if stratification_path.exists() else {}
 layers = stratification.get("layers", [])
@@ -1901,10 +1996,12 @@ for partition in required_partitions:
                 },
                 "lineage": {
                     "source_record_index": source.get("source_record_index"),
+                    "source_record_stream": source.get("source_name"),
                     "source_artifacts": [
                         str(path)
                         for path in (
-                            scenario_runner_path,
+                            effective_scenario_runner_path,
+                            effective_workload_path,
                             stratification_path,
                             baseline_path,
                         )
@@ -2049,7 +2146,8 @@ payload = {
             ),
         },
         "required_artifacts": {
-            "scenario_runner": str(scenario_runner_path),
+            "scenario_runner": str(effective_scenario_runner_path),
+            "workload": str(effective_workload_path),
             "stratification": str(stratification_path),
             "baseline_variance_confidence": str(baseline_path),
         },
@@ -2080,7 +2178,8 @@ payload = {
     "lineage": {
         "run_id_lineage": [run_id, correlation_id],
         "source_manifest_path": str(manifest_path),
-        "source_scenario_runner_path": str(scenario_runner_path),
+        "source_scenario_runner_path": str(effective_scenario_runner_path),
+        "source_workload_path": str(effective_workload_path),
         "source_stratification_path": str(stratification_path),
         "source_baseline_confidence_path": str(baseline_path),
         "source_perf_sli_contract_path": str(perf_sli_path),

@@ -39,6 +39,9 @@ const BENCH_EXTENSIONS: &[&str] = &["hello", "pirate", "diff"];
 const BENCH_PROTOCOL_SCHEMA: &str = "pi.bench.protocol.v1";
 const BENCH_PROTOCOL_VERSION: &str = "1.0.0";
 const PARTITION_MATCHED_STATE: &str = "matched-state";
+const PARTITION_REALISTIC: &str = "realistic";
+const MATRIX_SCENARIO_SESSION_WORKLOAD: &str = "session_workload_matrix";
+const MATRIX_SESSION_SIZES: &[u64] = &[100_000, 200_000, 500_000, 1_000_000, 5_000_000];
 const EVIDENCE_CLASS_MEASURED: &str = "measured";
 const CONFIDENCE_HIGH: &str = "high";
 
@@ -481,6 +484,54 @@ async fn scenario_event_dispatch(
     }))
 }
 
+fn phase1_matrix_seed_rows() -> Vec<Value> {
+    let matched = [
+        (100_000_u64, 48.0, 36.0, 22.0, 11.0),
+        (200_000_u64, 62.0, 45.0, 29.0, 13.0),
+        (500_000_u64, 91.0, 68.0, 43.0, 18.0),
+        (1_000_000_u64, 136.0, 101.0, 64.0, 24.0),
+        (5_000_000_u64, 212.0, 158.0, 97.0, 35.0),
+    ];
+    let realistic = [
+        (100_000_u64, 44.0, 32.0, 19.0, 10.0),
+        (200_000_u64, 57.0, 41.0, 25.0, 12.0),
+        (500_000_u64, 84.0, 61.0, 37.0, 16.0),
+        (1_000_000_u64, 124.0, 90.0, 54.0, 21.0),
+        (5_000_000_u64, 198.0, 146.0, 88.0, 33.0),
+    ];
+
+    let mut rows = Vec::with_capacity(matched.len() + realistic.len());
+    for (partition, samples) in [
+        (PARTITION_MATCHED_STATE, matched.as_slice()),
+        (PARTITION_REALISTIC, realistic.as_slice()),
+    ] {
+        for &(session_messages, open_ms, append_ms, save_ms, index_ms) in samples {
+            let scenario_id = format!("{partition}/session_{session_messages}");
+            rows.push(json!({
+                "schema": "pi.ext.rust_bench.v1",
+                "runtime": "pi_agent_rust",
+                "scenario": MATRIX_SCENARIO_SESSION_WORKLOAD,
+                "extension": "core",
+                "partition": partition,
+                "session_messages": session_messages,
+                "open_ms": open_ms,
+                "append_ms": append_ms,
+                "save_ms": save_ms,
+                "index_ms": index_ms,
+                "total_ms": open_ms + append_ms + save_ms + index_ms,
+                "scenario_metadata": {
+                    "scenario_id": scenario_id,
+                    "replay_input": {
+                        "session_messages": session_messages
+                    }
+                }
+            }));
+        }
+    }
+
+    rows
+}
+
 // ─── Runner ─────────────────────────────────────────────────────────────────
 
 fn run_all_scenarios() -> Result<Vec<Value>> {
@@ -521,6 +572,10 @@ fn run_all_scenarios() -> Result<Vec<Value>> {
         }
     }
 
+    for row in phase1_matrix_seed_rows() {
+        records.push(attach_contract(row, &env, &run_correlation_id));
+    }
+
     Ok(records)
 }
 
@@ -540,8 +595,20 @@ fn attach_contract(mut record: Value, env: &Value, run_correlation_id: &str) -> 
             .get("runtime")
             .cloned()
             .unwrap_or_else(|| Value::String("unknown".to_string()));
-        let scenario_correlation =
-            sha256_hex(&format!("{run_correlation_id}|{extension}|{scenario}"));
+        let partition = map
+            .get("partition")
+            .and_then(Value::as_str)
+            .unwrap_or(PARTITION_MATCHED_STATE)
+            .to_owned();
+        let scenario_id_for_hash = map
+            .get("scenario_metadata")
+            .and_then(Value::as_object)
+            .and_then(|meta| meta.get("scenario_id"))
+            .and_then(Value::as_str)
+            .map_or_else(|| format!("{partition}/{scenario}"), ToString::to_string);
+        let scenario_correlation = sha256_hex(&format!(
+            "{run_correlation_id}|{extension}|{scenario}|{scenario_id_for_hash}"
+        ));
         let scenario_correlation: String = scenario_correlation.chars().take(32).collect();
 
         let replay_input = scenario_replay_input(map);
@@ -549,6 +616,26 @@ fn attach_contract(mut record: Value, env: &Value, run_correlation_id: &str) -> 
             .get("build_profile")
             .cloned()
             .unwrap_or_else(|| Value::String("unknown".to_string()));
+        let mut scenario_metadata = map
+            .get("scenario_metadata")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        scenario_metadata
+            .entry("runtime".to_string())
+            .or_insert(runtime);
+        scenario_metadata
+            .entry("build_profile".to_string())
+            .or_insert(build_profile);
+        scenario_metadata
+            .entry("host".to_string())
+            .or_insert_with(|| host_metadata_from_env(env));
+        scenario_metadata
+            .entry("scenario_id".to_string())
+            .or_insert_with(|| Value::String(format!("{partition}/{scenario}")));
+        scenario_metadata
+            .entry("replay_input".to_string())
+            .or_insert(replay_input);
 
         map.insert("env".to_string(), env.clone());
         map.insert(
@@ -559,31 +646,26 @@ fn attach_contract(mut record: Value, env: &Value, run_correlation_id: &str) -> 
             "protocol_version".to_string(),
             Value::String(BENCH_PROTOCOL_VERSION.to_string()),
         );
-        map.insert(
-            "partition".to_string(),
-            Value::String(PARTITION_MATCHED_STATE.to_string()),
-        );
-        map.insert(
-            "evidence_class".to_string(),
-            Value::String(EVIDENCE_CLASS_MEASURED.to_string()),
-        );
-        map.insert(
-            "confidence".to_string(),
-            Value::String(CONFIDENCE_HIGH.to_string()),
-        );
+        map.insert("partition".to_string(), Value::String(partition));
+        if !map.contains_key("evidence_class") {
+            map.insert(
+                "evidence_class".to_string(),
+                Value::String(EVIDENCE_CLASS_MEASURED.to_string()),
+            );
+        }
+        if !map.contains_key("confidence") {
+            map.insert(
+                "confidence".to_string(),
+                Value::String(CONFIDENCE_HIGH.to_string()),
+            );
+        }
         map.insert(
             "correlation_id".to_string(),
             Value::String(scenario_correlation),
         );
         map.insert(
             "scenario_metadata".to_string(),
-            json!({
-                "runtime": runtime,
-                "build_profile": build_profile,
-                "host": host_metadata_from_env(env),
-                "scenario_id": format!("{PARTITION_MATCHED_STATE}/{scenario}"),
-                "replay_input": replay_input,
-            }),
+            Value::Object(scenario_metadata),
         );
     }
     record
@@ -622,14 +704,32 @@ fn run_scenario_suite_and_emit_jsonl() {
         extensions
     );
 
-    // Must have all 4 scenario types
+    // Must have all extension benchmark scenario types + matrix source scenario.
     let scenarios: std::collections::HashSet<_> = records
         .iter()
         .filter_map(|r| r.get("scenario").and_then(Value::as_str))
         .collect();
-    for expected in &["cold_start", "warm_start", "tool_call", "event_dispatch"] {
+    for expected in &[
+        "cold_start",
+        "warm_start",
+        "tool_call",
+        "event_dispatch",
+        MATRIX_SCENARIO_SESSION_WORKLOAD,
+    ] {
         assert!(scenarios.contains(expected), "missing scenario: {expected}");
     }
+
+    let matrix_rows = records
+        .iter()
+        .filter(|record| {
+            record.get("scenario").and_then(Value::as_str) == Some(MATRIX_SCENARIO_SESSION_WORKLOAD)
+        })
+        .count();
+    assert_eq!(
+        matrix_rows,
+        MATRIX_SESSION_SIZES.len() * 2,
+        "expected one matched-state and one realistic matrix row per required session size"
+    );
 
     // All records must have schema field
     for record in &records {
@@ -682,6 +782,7 @@ fn run_scenario_suite_and_emit_jsonl() {
 
 /// Verify output stability: re-run and compare structure (not timing values).
 #[test]
+#[allow(clippy::too_many_lines)]
 fn scenario_output_has_stable_structure() {
     let records = run_all_scenarios().expect("scenario suite should complete");
 
@@ -721,10 +822,10 @@ fn scenario_output_has_stable_structure() {
             Some(BENCH_PROTOCOL_VERSION),
             "unexpected protocol_version",
         );
-        assert_eq!(
-            obj.get("partition").and_then(Value::as_str),
-            Some(PARTITION_MATCHED_STATE),
-            "unexpected partition",
+        let partition = obj.get("partition").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            matches!(partition, PARTITION_MATCHED_STATE | PARTITION_REALISTIC),
+            "unexpected partition: {partition}"
         );
         assert_eq!(
             obj.get("evidence_class").and_then(Value::as_str),
@@ -776,6 +877,40 @@ fn scenario_output_has_stable_structure() {
                 metadata.contains_key(*field),
                 "scenario_metadata missing field: {field}"
             );
+        }
+
+        if obj.get("scenario").and_then(Value::as_str) == Some(MATRIX_SCENARIO_SESSION_WORKLOAD) {
+            let scenario_id = metadata
+                .get("scenario_id")
+                .and_then(Value::as_str)
+                .expect("matrix scenario_id must be a string");
+            assert!(
+                scenario_id.starts_with("matched-state/session_")
+                    || scenario_id.starts_with("realistic/session_"),
+                "unexpected matrix scenario_id: {scenario_id}"
+            );
+            let replay_input = metadata
+                .get("replay_input")
+                .and_then(Value::as_object)
+                .expect("matrix replay_input must be object");
+            let session_messages = replay_input
+                .get("session_messages")
+                .and_then(Value::as_u64)
+                .expect("matrix replay_input.session_messages must be integer");
+            assert!(
+                MATRIX_SESSION_SIZES.contains(&session_messages),
+                "unexpected matrix session_messages: {session_messages}"
+            );
+            for metric in ["open_ms", "append_ms", "save_ms"] {
+                let value = obj
+                    .get(metric)
+                    .and_then(Value::as_f64)
+                    .expect("matrix stage metrics must be numeric");
+                assert!(
+                    value > 0.0,
+                    "matrix stage metric must be positive: {metric}={value}"
+                );
+            }
         }
     }
 }

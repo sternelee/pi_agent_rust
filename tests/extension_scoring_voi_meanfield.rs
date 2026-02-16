@@ -139,14 +139,14 @@ fn voi_selects_candidates_within_budget() {
     assert!(selected_ids.contains(&"cheap"), "cheap should be selected");
 
     // Expensive should be budget-exceeded
-    let budget_exceeded: Vec<&str> = plan
+    let has_budget_exceeded_expensive = plan
         .skipped
         .iter()
         .filter(|s| s.reason == VoiSkipReason::BudgetExceeded)
         .map(|s| s.id.as_str())
-        .collect();
+        .any(|id| id == "expensive");
     assert!(
-        budget_exceeded.contains(&"expensive"),
+        has_budget_exceeded_expensive,
         "expensive should be budget-exceeded"
     );
 }
@@ -196,13 +196,13 @@ fn voi_skips_stale_candidates() {
     assert!(selected_ids.contains(&"fresh"));
     assert!(!selected_ids.contains(&"stale"));
 
-    let stale_skipped: Vec<&str> = plan
+    let has_stale_skipped = plan
         .skipped
         .iter()
         .filter(|s| s.reason == VoiSkipReason::StaleEvidence)
         .map(|s| s.id.as_str())
-        .collect();
-    assert!(stale_skipped.contains(&"stale"));
+        .any(|id| id == "stale");
+    assert!(has_stale_skipped);
 }
 
 #[test]
@@ -247,13 +247,13 @@ fn voi_skips_below_utility_floor() {
     assert!(selected_ids.contains(&"high"));
     assert!(!selected_ids.contains(&"low"));
 
-    let utility_skipped: Vec<&str> = plan
+    let has_utility_skipped_low = plan
         .skipped
         .iter()
         .filter(|s| s.reason == VoiSkipReason::BelowUtilityFloor)
         .map(|s| s.id.as_str())
-        .collect();
-    assert!(utility_skipped.contains(&"low"));
+        .any(|id| id == "low");
+    assert!(has_utility_skipped_low);
 }
 
 #[test]
@@ -361,7 +361,7 @@ fn meanfield_empty_observations_converged() {
         "empty observation set should be converged"
     );
     assert!(report.controls.is_empty());
-    assert_eq!(report.global_pressure, 0.0);
+    assert!(report.global_pressure.abs() <= f64::EPSILON);
     assert_eq!(report.clipped_count, 0);
     assert_eq!(report.oscillation_guard_count, 0);
 }
@@ -608,10 +608,10 @@ fn meanfield_clipping_reported_correctly() {
     // With a very small max_step, any non-trivial adjustment should be clipped
     let routing_delta_abs = ctrl.routing_delta.abs();
     if routing_delta_abs > f64::EPSILON {
+        let max_allowed = config.damping.mul_add(config.max_step, config.max_step) + 0.01;
         assert!(
-            routing_delta_abs <= config.max_step + config.damping * config.max_step + 0.01,
-            "routing delta {} should be bounded by max_step",
-            routing_delta_abs
+            routing_delta_abs <= max_allowed,
+            "routing delta {routing_delta_abs} should be bounded by max_step"
         );
     }
 }

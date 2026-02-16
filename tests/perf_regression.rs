@@ -41,6 +41,7 @@ use sysinfo::System;
 
 /// Serialize perf-sensitive tests to avoid scheduler noise.
 static PERF_LOCK: Mutex<()> = Mutex::new(());
+const PERF_RELEASE_BINARY_PATH_ENV: &str = "PERF_RELEASE_BINARY_PATH";
 
 fn perf_guard() -> std::sync::MutexGuard<'static, ()> {
     match PERF_LOCK.lock() {
@@ -136,13 +137,25 @@ fn pi_binary() -> Option<PathBuf> {
     first_existing_candidate(pi_binary_candidates())
 }
 
-fn build_binary_size_candidates(target_dir: &Path, detected_profile: &str) -> Vec<PathBuf> {
+fn binary_size_release_override() -> Option<PathBuf> {
+    std::env::var(PERF_RELEASE_BINARY_PATH_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn build_binary_size_candidates(
+    target_dir: &Path,
+    release_binary_override: Option<PathBuf>,
+    _detected_profile: &str,
+) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    let normalized_profile = detected_profile.trim();
-    candidates.push(target_dir.join("release/pi"));
-    if !normalized_profile.is_empty() && !normalized_profile.eq_ignore_ascii_case("debug") {
-        candidates.push(target_dir.join(normalized_profile).join("pi"));
+    if let Some(path) = release_binary_override {
+        candidates.push(path);
     }
+    // Budget methodology is explicitly release-only; do not fall back to perf/debug.
+    candidates.push(target_dir.join("release/pi"));
 
     let mut dedup = HashSet::new();
     candidates.retain(|path| dedup.insert(path.clone()));
@@ -151,8 +164,9 @@ fn build_binary_size_candidates(target_dir: &Path, detected_profile: &str) -> Ve
 
 fn binary_size_candidates() -> Vec<PathBuf> {
     let target_dir = target_dir();
+    let release_binary_override = binary_size_release_override();
     let detected_profile = perf_build::detect_build_profile();
-    build_binary_size_candidates(&target_dir, &detected_profile)
+    build_binary_size_candidates(&target_dir, release_binary_override, &detected_profile)
 }
 
 fn binary_size_binary() -> Option<PathBuf> {
@@ -1308,89 +1322,77 @@ fn pi_binary_candidate_builder_env_override_wins_and_dedups() {
 }
 
 #[test]
-fn binary_size_candidate_builder_prefers_release_then_detected_profile() {
+fn binary_size_candidate_builder_release_only_default() {
     let root = Path::new("/tmp/pi-agent-target");
-    let candidates = build_binary_size_candidates(root, "bench-profile");
-    assert_eq!(
-        candidates,
-        vec![root.join("release/pi"), root.join("bench-profile/pi")]
-    );
-}
-
-#[test]
-fn binary_size_candidate_builder_dedups_release_profile() {
-    let root = Path::new("/tmp/pi-agent-target");
-    let candidates = build_binary_size_candidates(root, "release");
+    let candidates = build_binary_size_candidates(root, None, "bench-profile");
     assert_eq!(candidates, vec![root.join("release/pi")]);
 }
 
 #[test]
-fn binary_size_candidate_builder_dedups_padded_release_profile() {
+fn binary_size_candidate_builder_prefers_release_override_then_release_default() {
     let root = Path::new("/tmp/pi-agent-target");
-    let candidates = build_binary_size_candidates(root, "  release  ");
-    assert_eq!(candidates, vec![root.join("release/pi")]);
+    let override_path = root.join("custom-release/pi");
+    let candidates = build_binary_size_candidates(root, Some(override_path.clone()), "debug");
+    assert_eq!(candidates, vec![override_path, root.join("release/pi")]);
 }
 
 #[test]
-fn binary_size_candidate_builder_ignores_debug_profile() {
+fn binary_size_candidate_builder_dedups_override_matching_release() {
     let root = Path::new("/tmp/pi-agent-target");
-    let candidates = build_binary_size_candidates(root, "debug");
-    assert_eq!(candidates, vec![root.join("release/pi")]);
+    let release = root.join("release/pi");
+    let candidates = build_binary_size_candidates(root, Some(release.clone()), "release");
+    assert_eq!(candidates, vec![release]);
 }
 
 #[test]
-fn binary_size_candidate_builder_ignores_padded_debug_profile() {
-    let root = Path::new("/tmp/pi-agent-target");
-    let candidates = build_binary_size_candidates(root, "  debug  ");
-    assert_eq!(candidates, vec![root.join("release/pi")]);
-}
-
-#[test]
-fn binary_size_candidate_builder_ignores_whitespace_only_profile() {
-    let root = Path::new("/tmp/pi-agent-target");
-    let candidates = build_binary_size_candidates(root, "  \t  ");
-    assert_eq!(candidates, vec![root.join("release/pi")]);
-}
-
-#[test]
-fn binary_size_candidate_selector_prefers_existing_release_artifact() {
+fn binary_size_candidate_selector_prefers_existing_release_override() {
     let temp = tempfile::tempdir().expect("create temp dir");
     let root = temp.path();
     let release = root.join("release/pi");
-    let profile = root.join("bench-profile/pi");
+    let override_path = root.join("custom-release/pi");
 
     std::fs::create_dir_all(release.parent().expect("release parent")).expect("mkdir release");
-    std::fs::create_dir_all(profile.parent().expect("profile parent")).expect("mkdir profile");
+    std::fs::create_dir_all(override_path.parent().expect("override parent"))
+        .expect("mkdir override");
     std::fs::write(&release, b"release").expect("write release binary");
-    std::fs::write(&profile, b"profile").expect("write profile binary");
+    std::fs::write(&override_path, b"override").expect("write override binary");
 
-    let selected = first_existing_candidate(build_binary_size_candidates(root, "bench-profile"));
+    let selected = first_existing_candidate(build_binary_size_candidates(
+        root,
+        Some(override_path.clone()),
+        "perf",
+    ));
+    assert_eq!(selected.as_deref(), Some(override_path.as_path()));
+}
+
+#[test]
+fn binary_size_candidate_selector_falls_back_to_release_when_override_missing() {
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let root = temp.path();
+    let release = root.join("release/pi");
+    let override_path = root.join("custom-release/pi");
+
+    std::fs::create_dir_all(release.parent().expect("release parent")).expect("mkdir release");
+    std::fs::write(&release, b"release").expect("write release binary");
+
+    let selected = first_existing_candidate(build_binary_size_candidates(
+        root,
+        Some(override_path),
+        "perf",
+    ));
     assert_eq!(selected.as_deref(), Some(release.as_path()));
 }
 
 #[test]
-fn binary_size_candidate_selector_falls_back_when_release_missing() {
+fn binary_size_candidate_selector_returns_none_when_release_candidates_missing() {
     let temp = tempfile::tempdir().expect("create temp dir");
     let root = temp.path();
-    let profile = root.join("bench-profile/pi");
+    let override_path = root.join("custom-release/pi");
 
-    std::fs::create_dir_all(profile.parent().expect("profile parent")).expect("mkdir profile");
-    std::fs::write(&profile, b"profile").expect("write profile binary");
-
-    let selected = first_existing_candidate(build_binary_size_candidates(root, "bench-profile"));
-    assert_eq!(selected.as_deref(), Some(profile.as_path()));
-}
-
-#[test]
-fn binary_size_candidate_selector_falls_back_with_padded_profile() {
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let root = temp.path();
-    let profile = root.join("bench-profile/pi");
-
-    std::fs::create_dir_all(profile.parent().expect("profile parent")).expect("mkdir profile");
-    std::fs::write(&profile, b"profile").expect("write profile binary");
-
-    let selected =
-        first_existing_candidate(build_binary_size_candidates(root, " \tbench-profile  "));
-    assert_eq!(selected.as_deref(), Some(profile.as_path()));
+    let selected = first_existing_candidate(build_binary_size_candidates(
+        root,
+        Some(override_path),
+        "perf",
+    ));
+    assert_eq!(selected, None);
 }

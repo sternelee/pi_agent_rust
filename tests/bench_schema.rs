@@ -2792,6 +2792,7 @@ fn orchestrate_script_emits_phase1_matrix_validation_contract() {
         "\"source_identity\"",
         "\"source_manifest_path\"",
         "\"source_scenario_runner_path\"",
+        "\"source_workload_path\"",
         "\"source_stratification_path\"",
         "\"source_baseline_confidence_path\"",
         "\"source_perf_sli_contract_path\"",
@@ -2977,6 +2978,11 @@ fn orchestrate_generates_phase1_matrix_validation_artifact() {
         matrix["lineage"]["source_scenario_runner_path"].as_str(),
         matrix["evidence_links"]["required_artifacts"]["scenario_runner"].as_str(),
         "lineage scenario_runner path must match required_artifacts.scenario_runner"
+    );
+    assert_eq!(
+        matrix["lineage"]["source_workload_path"].as_str(),
+        matrix["evidence_links"]["required_artifacts"]["workload"].as_str(),
+        "lineage workload path must match required_artifacts.workload"
     );
     assert_eq!(
         matrix["lineage"]["source_stratification_path"].as_str(),
