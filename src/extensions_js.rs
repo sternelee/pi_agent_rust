@@ -26,7 +26,7 @@
 use crate::error::{Error, Result};
 use crate::hostcall_queue::{
     HOSTCALL_FAST_RING_CAPACITY, HOSTCALL_OVERFLOW_CAPACITY, HostcallQueueEnqueueResult,
-    HostcallQueueTelemetry, HostcallRequestQueue,
+    HostcallQueueTelemetry, HostcallRequestQueue, QueueTenant,
 };
 use crate::scheduler::{Clock as SchedulerClock, HostcallOutcome, Scheduler, WallClock};
 use base64::Engine as _;
@@ -204,6 +204,12 @@ pub struct HostcallRequest {
     pub trace_id: u64,
     /// Active extension id (when known) for policy/log correlation.
     pub extension_id: Option<String>,
+}
+
+impl QueueTenant for HostcallRequest {
+    fn tenant_key(&self) -> Option<&str> {
+        self.extension_id.as_deref()
+    }
 }
 
 /// Tool definition registered by a JS extension.

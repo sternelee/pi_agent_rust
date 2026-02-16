@@ -5,7 +5,7 @@
 //! preserve FIFO ordering across the two lanes.
 
 use crossbeam_queue::ArrayQueue;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -13,6 +13,11 @@ pub const HOSTCALL_FAST_RING_CAPACITY: usize = 256;
 pub const HOSTCALL_OVERFLOW_CAPACITY: usize = 2_048;
 const SAFE_FALLBACK_BACKLOG_MULTIPLIER: usize = 8;
 const SAFE_FALLBACK_BACKLOG_MIN: usize = 32;
+const S3_FIFO_GHOST_CAPACITY_MULTIPLIER: usize = 2;
+const S3_FIFO_GHOST_CAPACITY_MIN: usize = 16;
+const S3_FIFO_MIN_SIGNAL_SAMPLES: u64 = 32;
+const S3_FIFO_MAX_SIGNALLESS_STREAK: u64 = 64;
+const S3_FIFO_UNSTABLE_REJECTION_STREAK: u64 = 16;
 
 /// BRAVO-style lock bias mode for metadata contention handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,6 +282,267 @@ impl Default for BravoContentionState {
     }
 }
 
+/// Optional per-request tenant key used for fairness/admission accounting.
+///
+/// Implement this for queue payloads that can expose extension-level identity.
+/// Primitive test payloads may use the default `None` implementation.
+pub trait QueueTenant {
+    #[must_use]
+    fn tenant_key(&self) -> Option<&str> {
+        None
+    }
+}
+
+macro_rules! impl_queue_tenant_none {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl QueueTenant for $ty {}
+        )+
+    };
+}
+
+impl_queue_tenant_none!(
+    (),
+    bool,
+    char,
+    u8,
+    u16,
+    u32,
+    u64,
+    usize,
+    i8,
+    i16,
+    i32,
+    i64,
+    isize,
+    String,
+);
+
+/// Runtime mode for S3-FIFO-inspired queue admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum S3FifoMode {
+    Active,
+    ConservativeFifo,
+}
+
+/// Explicit fallback reason when S3-FIFO admission is disabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum S3FifoFallbackReason {
+    InsufficientSignalQuality,
+    UnstableAdmissionFeedback,
+}
+
+/// Deterministic admission configuration for S3-FIFO-inspired behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct S3FifoConfig {
+    pub tenant_budget: usize,
+    pub ghost_capacity: usize,
+    pub min_signal_samples: u64,
+    pub max_signalless_streak: u64,
+    pub unstable_rejection_streak: u64,
+}
+
+impl S3FifoConfig {
+    #[must_use]
+    pub fn from_capacities(fast_capacity: usize, overflow_capacity: usize) -> Self {
+        let tenant_budget = (overflow_capacity / 2).max(1);
+        let ghost_capacity = fast_capacity
+            .saturating_add(overflow_capacity)
+            .saturating_mul(S3_FIFO_GHOST_CAPACITY_MULTIPLIER)
+            .max(S3_FIFO_GHOST_CAPACITY_MIN);
+        Self {
+            tenant_budget,
+            ghost_capacity,
+            min_signal_samples: S3_FIFO_MIN_SIGNAL_SAMPLES,
+            max_signalless_streak: S3_FIFO_MAX_SIGNALLESS_STREAK,
+            unstable_rejection_streak: S3_FIFO_UNSTABLE_REJECTION_STREAK,
+        }
+    }
+}
+
+/// Lightweight diagnostics snapshot for S3-FIFO admission internals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct S3FifoTelemetry {
+    pub mode: S3FifoMode,
+    pub fallback_reason: Option<S3FifoFallbackReason>,
+    pub ghost_depth: usize,
+    pub ghost_hits_total: u64,
+    pub fairness_rejected_total: u64,
+    pub signal_samples: u64,
+    pub signalless_streak: u64,
+    pub fallback_transitions: u64,
+    pub tenant_budget: usize,
+    pub active_tenants: usize,
+}
+
+#[derive(Debug, Clone)]
+struct S3FifoState {
+    config: S3FifoConfig,
+    mode: S3FifoMode,
+    fallback_reason: Option<S3FifoFallbackReason>,
+    ghost: VecDeque<String>,
+    tenant_backlog: BTreeMap<String, usize>,
+    ghost_hits_total: u64,
+    fairness_rejected_total: u64,
+    signal_samples: u64,
+    signalless_streak: u64,
+    unstable_rejection_streak: u64,
+    fallback_transitions: u64,
+}
+
+impl S3FifoState {
+    #[must_use]
+    const fn new(config: S3FifoConfig) -> Self {
+        Self {
+            config,
+            mode: S3FifoMode::Active,
+            fallback_reason: None,
+            ghost: VecDeque::new(),
+            tenant_backlog: BTreeMap::new(),
+            ghost_hits_total: 0,
+            fairness_rejected_total: 0,
+            signal_samples: 0,
+            signalless_streak: 0,
+            unstable_rejection_streak: 0,
+            fallback_transitions: 0,
+        }
+    }
+
+    fn observe_signal(&mut self, tenant_key: Option<&str>) {
+        if self.mode != S3FifoMode::Active {
+            return;
+        }
+        if tenant_key.is_some() {
+            self.signal_samples = self.signal_samples.saturating_add(1);
+            self.signalless_streak = 0;
+        } else {
+            self.signalless_streak = self.signalless_streak.saturating_add(1);
+            if self.signalless_streak >= self.config.max_signalless_streak
+                && self.signal_samples < self.config.min_signal_samples
+            {
+                self.transition_to_fallback(S3FifoFallbackReason::InsufficientSignalQuality);
+            }
+        }
+    }
+
+    fn allow_main_admission(&mut self, tenant_key: Option<&str>) -> bool {
+        if self.mode != S3FifoMode::Active {
+            return true;
+        }
+        let Some(tenant_key) = tenant_key else {
+            return true;
+        };
+        let backlog = self.tenant_backlog.get(tenant_key).copied().unwrap_or(0);
+        if backlog < self.config.tenant_budget {
+            return true;
+        }
+        if self.consume_ghost_hit(tenant_key) {
+            self.unstable_rejection_streak = 0;
+            return true;
+        }
+
+        self.fairness_rejected_total = self.fairness_rejected_total.saturating_add(1);
+        self.unstable_rejection_streak = self.unstable_rejection_streak.saturating_add(1);
+        self.record_ghost(tenant_key);
+        if self.unstable_rejection_streak >= self.config.unstable_rejection_streak {
+            self.transition_to_fallback(S3FifoFallbackReason::UnstableAdmissionFeedback);
+        }
+        false
+    }
+
+    fn on_main_enqueued(&mut self, tenant_key: Option<&str>) {
+        if self.mode != S3FifoMode::Active {
+            return;
+        }
+        if let Some(tenant_key) = tenant_key {
+            let entry = self
+                .tenant_backlog
+                .entry(tenant_key.to_string())
+                .or_insert(0);
+            *entry = entry.saturating_add(1);
+        }
+        self.unstable_rejection_streak = 0;
+    }
+
+    fn on_main_dequeued(&mut self, tenant_key: Option<&str>) {
+        if self.mode != S3FifoMode::Active {
+            return;
+        }
+        if let Some(tenant_key) = tenant_key {
+            if let Some(backlog) = self.tenant_backlog.get_mut(tenant_key) {
+                *backlog = backlog.saturating_sub(1);
+                if *backlog == 0 {
+                    self.tenant_backlog.remove(tenant_key);
+                }
+            }
+            self.record_ghost(tenant_key);
+        }
+    }
+
+    fn on_main_overflow_reject(&mut self, tenant_key: Option<&str>) {
+        if self.mode != S3FifoMode::Active {
+            return;
+        }
+        if let Some(tenant_key) = tenant_key {
+            self.record_ghost(tenant_key);
+        }
+        self.unstable_rejection_streak = self.unstable_rejection_streak.saturating_add(1);
+        if self.unstable_rejection_streak >= self.config.unstable_rejection_streak {
+            self.transition_to_fallback(S3FifoFallbackReason::UnstableAdmissionFeedback);
+        }
+    }
+
+    fn transition_to_fallback(&mut self, reason: S3FifoFallbackReason) {
+        if self.mode == S3FifoMode::ConservativeFifo {
+            return;
+        }
+        self.mode = S3FifoMode::ConservativeFifo;
+        self.fallback_reason = Some(reason);
+        self.fallback_transitions = self.fallback_transitions.saturating_add(1);
+        self.ghost.clear();
+        self.tenant_backlog.clear();
+    }
+
+    fn consume_ghost_hit(&mut self, tenant_key: &str) -> bool {
+        let position = self.ghost.iter().position(|entry| entry == tenant_key);
+        let Some(position) = position else {
+            return false;
+        };
+        self.ghost.remove(position);
+        self.ghost_hits_total = self.ghost_hits_total.saturating_add(1);
+        true
+    }
+
+    fn record_ghost(&mut self, tenant_key: &str) {
+        if tenant_key.is_empty() {
+            return;
+        }
+        if let Some(position) = self.ghost.iter().position(|entry| entry == tenant_key) {
+            self.ghost.remove(position);
+        }
+        self.ghost.push_back(tenant_key.to_string());
+        while self.ghost.len() > self.config.ghost_capacity {
+            let _ = self.ghost.pop_front();
+        }
+    }
+
+    #[must_use]
+    fn snapshot(&self) -> S3FifoTelemetry {
+        S3FifoTelemetry {
+            mode: self.mode,
+            fallback_reason: self.fallback_reason,
+            ghost_depth: self.ghost.len(),
+            ghost_hits_total: self.ghost_hits_total,
+            fairness_rejected_total: self.fairness_rejected_total,
+            signal_samples: self.signal_samples,
+            signalless_streak: self.signalless_streak,
+            fallback_transitions: self.fallback_transitions,
+            tenant_budget: self.config.tenant_budget,
+            active_tenants: self.tenant_backlog.len(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostcallQueueMode {
     /// Use epoch-based retirement bookkeeping.
@@ -338,6 +604,16 @@ pub struct HostcallQueueTelemetry {
     pub bravo_consecutive_read_bias_windows: u32,
     pub bravo_writer_recovery_remaining: u32,
     pub bravo_last_signature: ContentionSignature,
+    pub s3fifo_mode: S3FifoMode,
+    pub s3fifo_fallback_reason: Option<S3FifoFallbackReason>,
+    pub s3fifo_ghost_depth: usize,
+    pub s3fifo_ghost_hits_total: u64,
+    pub s3fifo_fairness_rejected_total: u64,
+    pub s3fifo_signal_samples: u64,
+    pub s3fifo_signalless_streak: u64,
+    pub s3fifo_fallback_transitions: u64,
+    pub s3fifo_tenant_budget: usize,
+    pub s3fifo_active_tenants: usize,
 }
 
 #[derive(Debug)]
@@ -359,7 +635,7 @@ impl Drop for HostcallEpochPin {
 }
 
 #[derive(Debug)]
-pub struct HostcallRequestQueue<T: Clone> {
+pub struct HostcallRequestQueue<T: Clone + QueueTenant> {
     fast: ArrayQueue<T>,
     fast_capacity: usize,
     overflow: VecDeque<T>,
@@ -377,9 +653,10 @@ pub struct HostcallRequestQueue<T: Clone> {
     fallback_transitions: u64,
     safe_fallback_backlog_threshold: usize,
     contention_policy: BravoContentionState,
+    s3fifo: S3FifoState,
 }
 
-impl<T: Clone> HostcallRequestQueue<T> {
+impl<T: Clone + QueueTenant> HostcallRequestQueue<T> {
     #[must_use]
     pub fn with_capacities(fast_capacity: usize, overflow_capacity: usize) -> Self {
         Self::with_mode(
@@ -401,6 +678,10 @@ impl<T: Clone> HostcallRequestQueue<T> {
             .saturating_add(overflow_capacity)
             .saturating_mul(SAFE_FALLBACK_BACKLOG_MULTIPLIER)
             .max(SAFE_FALLBACK_BACKLOG_MIN);
+        let s3fifo = S3FifoState::new(S3FifoConfig::from_capacities(
+            fast_capacity,
+            overflow_capacity,
+        ));
         Self {
             fast: ArrayQueue::new(fast_capacity),
             fast_capacity,
@@ -419,6 +700,7 @@ impl<T: Clone> HostcallRequestQueue<T> {
             fallback_transitions: 0,
             safe_fallback_backlog_threshold,
             contention_policy: BravoContentionState::default(),
+            s3fifo,
         }
     }
 
@@ -457,9 +739,15 @@ impl<T: Clone> HostcallRequestQueue<T> {
         self.reclamation_latency_max_epochs = 0;
         self.fallback_transitions = 0;
         self.contention_policy = BravoContentionState::default();
+        self.s3fifo = S3FifoState::new(S3FifoConfig::from_capacities(
+            self.fast_capacity,
+            self.overflow_capacity,
+        ));
     }
 
     pub fn push_back(&mut self, request: T) -> HostcallQueueEnqueueResult {
+        let tenant_key = request.tenant_key().map(std::borrow::ToOwned::to_owned);
+        self.s3fifo.observe_signal(tenant_key.as_deref());
         let mut request = request;
 
         // Preserve FIFO across lanes by pinning to overflow once spill begins.
@@ -470,20 +758,54 @@ impl<T: Clone> HostcallRequestQueue<T> {
                     self.try_reclaim();
                     let depth = self.len();
                     self.max_depth_seen = self.max_depth_seen.max(depth);
+                    tracing::debug!(
+                        target: "pi.extensions.hostcall_queue",
+                        event = "hostcall_queue.enqueue",
+                        reason = "small_tier",
+                        depth,
+                        overflow_depth = self.overflow.len(),
+                        "hostcall admitted to fast tier"
+                    );
                     return HostcallQueueEnqueueResult::FastPath { depth };
                 }
                 Err(returned) => request = returned,
             }
         }
 
+        if !self.s3fifo.allow_main_admission(tenant_key.as_deref()) {
+            self.overflow_rejected_total = self.overflow_rejected_total.saturating_add(1);
+            tracing::debug!(
+                target: "pi.extensions.hostcall_queue",
+                event = "hostcall_queue.reject",
+                reason = "fairness_budget",
+                depth = self.len(),
+                overflow_depth = self.overflow.len(),
+                s3fifo_mode = ?self.s3fifo.snapshot().mode,
+                "hostcall rejected by S3-FIFO fairness budget"
+            );
+            return HostcallQueueEnqueueResult::Rejected {
+                depth: self.len(),
+                overflow_depth: self.overflow.len(),
+            };
+        }
+
         if self.overflow.len() < self.overflow_capacity {
             self.overflow.push_back(request);
             self.overflow_enqueued_total = self.overflow_enqueued_total.saturating_add(1);
+            self.s3fifo.on_main_enqueued(tenant_key.as_deref());
             self.bump_epoch();
             self.try_reclaim();
             let depth = self.len();
             let overflow_depth = self.overflow.len();
             self.max_depth_seen = self.max_depth_seen.max(depth);
+            tracing::debug!(
+                target: "pi.extensions.hostcall_queue",
+                event = "hostcall_queue.enqueue",
+                reason = "main_tier",
+                depth,
+                overflow_depth,
+                "hostcall admitted to overflow/main tier"
+            );
             return HostcallQueueEnqueueResult::OverflowPath {
                 depth,
                 overflow_depth,
@@ -491,6 +813,15 @@ impl<T: Clone> HostcallRequestQueue<T> {
         }
 
         self.overflow_rejected_total = self.overflow_rejected_total.saturating_add(1);
+        self.s3fifo.on_main_overflow_reject(tenant_key.as_deref());
+        tracing::debug!(
+            target: "pi.extensions.hostcall_queue",
+            event = "hostcall_queue.reject",
+            reason = "overflow_capacity",
+            depth = self.len(),
+            overflow_depth = self.overflow.len(),
+            "hostcall rejected because overflow queue reached capacity"
+        );
         HostcallQueueEnqueueResult::Rejected {
             depth: self.len(),
             overflow_depth: self.overflow.len(),
@@ -498,7 +829,14 @@ impl<T: Clone> HostcallRequestQueue<T> {
     }
 
     fn pop_front(&mut self) -> Option<T> {
-        let value = self.fast.pop().or_else(|| self.overflow.pop_front())?;
+        let value = if let Some(value) = self.fast.pop() {
+            value
+        } else {
+            let value = self.overflow.pop_front()?;
+            let tenant_key = value.tenant_key().map(std::borrow::ToOwned::to_owned);
+            self.s3fifo.on_main_dequeued(tenant_key.as_deref());
+            value
+        };
         self.bump_epoch();
         if self.reclamation_mode == HostcallQueueMode::Ebr {
             self.retire_for_reclamation(value.clone());
@@ -543,6 +881,7 @@ impl<T: Clone> HostcallRequestQueue<T> {
             self.current_epoch.saturating_sub(node.retired_epoch)
         });
         let contention = self.contention_policy.snapshot();
+        let s3fifo = self.s3fifo.snapshot();
 
         HostcallQueueTelemetry {
             fast_depth: self.fast.len(),
@@ -568,6 +907,16 @@ impl<T: Clone> HostcallRequestQueue<T> {
             bravo_consecutive_read_bias_windows: contention.consecutive_read_bias_windows,
             bravo_writer_recovery_remaining: contention.writer_recovery_remaining,
             bravo_last_signature: contention.last_signature,
+            s3fifo_mode: s3fifo.mode,
+            s3fifo_fallback_reason: s3fifo.fallback_reason,
+            s3fifo_ghost_depth: s3fifo.ghost_depth,
+            s3fifo_ghost_hits_total: s3fifo.ghost_hits_total,
+            s3fifo_fairness_rejected_total: s3fifo.fairness_rejected_total,
+            s3fifo_signal_samples: s3fifo.signal_samples,
+            s3fifo_signalless_streak: s3fifo.signalless_streak,
+            s3fifo_fallback_transitions: s3fifo.fallback_transitions,
+            s3fifo_tenant_budget: s3fifo.tenant_budget,
+            s3fifo_active_tenants: s3fifo.active_tenants,
         }
     }
 
@@ -624,7 +973,7 @@ impl<T: Clone> HostcallRequestQueue<T> {
     }
 }
 
-impl<T: Clone> Default for HostcallRequestQueue<T> {
+impl<T: Clone + QueueTenant> Default for HostcallRequestQueue<T> {
     fn default() -> Self {
         Self::with_capacities(HOSTCALL_FAST_RING_CAPACITY, HOSTCALL_OVERFLOW_CAPACITY)
     }
@@ -660,6 +1009,18 @@ mod tests {
             read_wait_p95_us,
             write_wait_p95_us,
             write_timeouts,
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct TenantRequest {
+        tenant: Option<&'static str>,
+        value: u8,
+    }
+
+    impl QueueTenant for TenantRequest {
+        fn tenant_key(&self) -> Option<&str> {
+            self.tenant
         }
     }
 
@@ -802,6 +1163,119 @@ mod tests {
         assert_eq!(snapshot.total_depth, 2);
         assert_eq!(snapshot.overflow_depth, 1);
         assert_eq!(snapshot.overflow_rejected_total, 1);
+    }
+
+    #[test]
+    fn s3fifo_fairness_budget_rejects_noisy_tenant_before_overflow_full() {
+        let mut queue = HostcallRequestQueue::with_mode(1, 3, HostcallQueueMode::SafeFallback);
+
+        assert!(matches!(
+            queue.push_back(TenantRequest {
+                tenant: Some("ext.noisy"),
+                value: 0
+            }),
+            HostcallQueueEnqueueResult::FastPath { .. }
+        ));
+        assert!(matches!(
+            queue.push_back(TenantRequest {
+                tenant: Some("ext.noisy"),
+                value: 1
+            }),
+            HostcallQueueEnqueueResult::OverflowPath { .. }
+        ));
+        assert!(matches!(
+            queue.push_back(TenantRequest {
+                tenant: Some("ext.noisy"),
+                value: 2
+            }),
+            HostcallQueueEnqueueResult::Rejected { .. }
+        ));
+
+        let snapshot = queue.snapshot();
+        assert_eq!(snapshot.s3fifo_mode, S3FifoMode::Active);
+        assert_eq!(snapshot.s3fifo_tenant_budget, 1);
+        assert_eq!(snapshot.s3fifo_fairness_rejected_total, 1);
+        assert_eq!(snapshot.overflow_rejected_total, 1);
+    }
+
+    #[test]
+    fn s3fifo_ghost_hits_allow_reentry_after_prior_rejection() {
+        let mut queue = HostcallRequestQueue::with_mode(1, 4, HostcallQueueMode::SafeFallback);
+
+        assert!(matches!(
+            queue.push_back(TenantRequest {
+                tenant: Some("ext.ghost"),
+                value: 0
+            }),
+            HostcallQueueEnqueueResult::FastPath { .. }
+        ));
+        assert!(matches!(
+            queue.push_back(TenantRequest {
+                tenant: Some("ext.ghost"),
+                value: 1
+            }),
+            HostcallQueueEnqueueResult::OverflowPath { .. }
+        ));
+        assert!(matches!(
+            queue.push_back(TenantRequest {
+                tenant: Some("ext.ghost"),
+                value: 2
+            }),
+            HostcallQueueEnqueueResult::Rejected { .. }
+        ));
+
+        let drained = queue.drain_all();
+        assert_eq!(
+            drained
+                .into_iter()
+                .map(|entry| entry.value)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+
+        assert!(matches!(
+            queue.push_back(TenantRequest {
+                tenant: Some("ext.ghost"),
+                value: 3
+            }),
+            HostcallQueueEnqueueResult::FastPath { .. }
+        ));
+        assert!(matches!(
+            queue.push_back(TenantRequest {
+                tenant: Some("ext.ghost"),
+                value: 4
+            }),
+            HostcallQueueEnqueueResult::OverflowPath { .. }
+        ));
+        assert!(matches!(
+            queue.push_back(TenantRequest {
+                tenant: Some("ext.ghost"),
+                value: 5
+            }),
+            HostcallQueueEnqueueResult::OverflowPath { .. }
+        ));
+
+        let snapshot = queue.snapshot();
+        assert!(snapshot.s3fifo_ghost_hits_total >= 1);
+        assert_eq!(snapshot.s3fifo_fairness_rejected_total, 1);
+    }
+
+    #[test]
+    fn s3fifo_falls_back_to_conservative_fifo_when_signal_is_insufficient() {
+        let mut queue = HostcallRequestQueue::with_mode(1, 2, HostcallQueueMode::SafeFallback);
+
+        for value in 0..96_u8 {
+            let _ = queue.push_back(value);
+            let _ = queue.drain_all();
+        }
+
+        let snapshot = queue.snapshot();
+        assert_eq!(snapshot.s3fifo_mode, S3FifoMode::ConservativeFifo);
+        assert_eq!(
+            snapshot.s3fifo_fallback_reason,
+            Some(S3FifoFallbackReason::InsufficientSignalQuality)
+        );
+        assert!(snapshot.s3fifo_fallback_transitions >= 1);
     }
 
     #[test]
