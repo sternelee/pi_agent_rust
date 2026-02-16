@@ -37499,6 +37499,8 @@ mod tests {
         let host = JsRuntimeHost {
             tools: Arc::new(ToolRegistry::new(&["read"], cwd, None)),
             manager_ref: Arc::downgrade(&manager.inner),
+            manager_snapshot: Arc::clone(&manager.snapshot),
+            manager_snapshot_version: Arc::clone(&manager.snapshot_version),
             http: Arc::new(HttpConnector::with_defaults()),
             policy: permissive_policy(),
             interceptor: None,
