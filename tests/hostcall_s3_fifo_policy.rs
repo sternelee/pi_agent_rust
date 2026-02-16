@@ -602,6 +602,25 @@ fn config_caps_window_thresholds_without_over_clamping_in_range_values() {
 }
 
 #[test]
+fn config_clamps_live_capacity_one_to_two_with_single_small_slot() {
+    let policy: S3FifoPolicy<String> = S3FifoPolicy::new(S3FifoConfig {
+        live_capacity: 1,
+        small_capacity: usize::MAX,
+        ghost_capacity: 2,
+        max_entries_per_owner: 2,
+        fallback_window: 4,
+        min_ghost_hits_in_window: 0,
+        max_budget_rejections_in_window: 0,
+    });
+
+    let cfg = policy.config();
+    assert_eq!(cfg.live_capacity, 2);
+    assert_eq!(cfg.small_capacity, 1);
+    assert_eq!(cfg.ghost_capacity, 2);
+    assert_eq!(cfg.fallback_window, 4);
+}
+
+#[test]
 fn fairness_fallback_never_triggers_when_budget_threshold_clamps_to_window_size() {
     let mut policy = S3FifoPolicy::new(S3FifoConfig {
         live_capacity: 8,
