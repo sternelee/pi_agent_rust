@@ -91,3 +91,12 @@ __pycache__/
 
 # Ephemeral agent progress trackers
 claude-upgrade-progress.json
+
+# Claude Code IDE config
+.claude/
+
+# Ephemeral agent scratch/repro/plan files
+repro_fuzzy.rs
+PLAN_TO_FIX_READ_TOOL.md
+scripts/skill-smoke.sh
+tests/conformance/test_read_streaming.rs
