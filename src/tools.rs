@@ -764,7 +764,8 @@ pub(crate) fn resize_image_if_needed(
     use image::codecs::jpeg::JpegEncoder;
     use image::codecs::png::PngEncoder;
     use image::imageops::FilterType;
-    use image::{GenericImageView, ImageEncoder};
+    use image::{GenericImageView, ImageEncoder, ImageReader, Limits};
+    use std::io::Cursor;
 
     const MAX_WIDTH: u32 = 2000;
     const MAX_HEIGHT: u32 = 2000;
@@ -823,7 +824,19 @@ pub(crate) fn resize_image_if_needed(
         }
     }
 
-    let Ok(img) = image::load_from_memory(bytes) else {
+    // Use ImageReader with explicit limits to prevent decompression bomb attacks.
+    // 128MB allocation limit allows reasonable images but stops massive expansions.
+    let mut limits = Limits::default();
+    limits.max_alloc = Some(128 * 1024 * 1024);
+
+    let reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| Error::tool("read", format!("Failed to detect image format: {e}")))?;
+
+    let mut reader = reader;
+    reader.limits(limits);
+
+    let Ok(img) = reader.decode() else {
         return Ok(ResizedImage::original(bytes.to_vec(), mime_type));
     };
 
@@ -1264,6 +1277,12 @@ impl Tool for ReadTool {
             let line_num = start_line + i + 1;
             let line = line.strip_suffix('\r').unwrap_or(line);
             let _ = write!(selected_content, "{line_num:>line_num_width$}→{line}");
+
+            // Safety break: if we've accumulated significantly more than the truncation limit,
+            // stop reading to prevent OOM on huge files/limits.
+            if selected_content.len() > DEFAULT_MAX_BYTES * 2 {
+                break;
+            }
         }
 
         let mut truncation = truncate_head(
