@@ -99,17 +99,19 @@ fn format_candidate_paths(paths: &[PathBuf]) -> String {
         .join(", ")
 }
 
-fn pi_binary_candidates() -> Vec<PathBuf> {
-    let target_dir = target_dir();
+fn build_pi_binary_candidates(
+    target_dir: &Path,
+    cargo_bin_override: Option<PathBuf>,
+    detected_profile: &str,
+) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
-    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_pi") {
-        candidates.push(PathBuf::from(path));
+    if let Some(path) = cargo_bin_override {
+        candidates.push(path);
     }
 
-    let detected_profile = perf_build::detect_build_profile();
     if !detected_profile.is_empty() {
-        candidates.push(target_dir.join(&detected_profile).join("pi"));
+        candidates.push(target_dir.join(detected_profile).join("pi"));
     }
 
     candidates.push(target_dir.join("release/pi"));
@@ -121,9 +123,40 @@ fn pi_binary_candidates() -> Vec<PathBuf> {
     candidates
 }
 
+fn pi_binary_candidates() -> Vec<PathBuf> {
+    let target_dir = target_dir();
+    let cargo_bin_override = std::env::var_os("CARGO_BIN_EXE_pi").map(PathBuf::from);
+    let detected_profile = perf_build::detect_build_profile();
+    build_pi_binary_candidates(&target_dir, cargo_bin_override, &detected_profile)
+}
+
 /// Find the first available `pi` binary from test/build-profile candidates.
 fn pi_binary() -> Option<PathBuf> {
     pi_binary_candidates()
+        .into_iter()
+        .find(|candidate| candidate.exists())
+}
+
+fn build_binary_size_candidates(target_dir: &Path, detected_profile: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if !detected_profile.is_empty() {
+        candidates.push(target_dir.join(detected_profile).join("pi"));
+    }
+    candidates.push(target_dir.join("release/pi"));
+
+    let mut dedup = HashSet::new();
+    candidates.retain(|path| dedup.insert(path.clone()));
+    candidates
+}
+
+fn binary_size_candidates() -> Vec<PathBuf> {
+    let target_dir = target_dir();
+    let detected_profile = perf_build::detect_build_profile();
+    build_binary_size_candidates(&target_dir, &detected_profile)
+}
+
+fn binary_size_binary() -> Option<PathBuf> {
+    binary_size_candidates()
         .into_iter()
         .find(|candidate| candidate.exists())
 }
@@ -701,20 +734,16 @@ fn binary_size_check() {
     let _guard = perf_guard();
     let harness = TestHarness::new("binary_size_check");
 
-    let release_path = target_dir().join("release/pi");
-    if !release_path.exists() {
-        let checked = format_candidate_paths(&pi_binary_candidates());
+    let Some(release_path) = binary_size_binary() else {
+        let checked = format_candidate_paths(&binary_size_candidates());
         harness.log().info("skip", "release binary not found");
-        eprintln!(
-            "[perf_regression] SKIP: release binary not found at {} (checked: {checked})",
-            release_path.display(),
-        );
+        eprintln!("[perf_regression] SKIP: release binary not found (checked: {checked})",);
         return;
-    }
+    };
 
     let meta = std::fs::metadata(&release_path).expect("stat release binary");
     let size_mb = meta.len() as f64 / 1024.0 / 1024.0;
-    let threshold = 22.0; // 22MB budget (current stripped release footprint)
+    let threshold = perf_build::BINARY_SIZE_RELEASE_BUDGET_MB;
     let status = check_threshold(size_mb, threshold, false);
 
     let baseline = read_baseline("binary_size_release");
@@ -1206,4 +1235,65 @@ fn append_jsonl(path: &Path, line: &str) {
         .open(path)
         .expect("open JSONL for append");
     let _ = writeln!(file, "{line}");
+}
+
+#[test]
+fn pi_binary_candidate_builder_default_order_is_release_perf_debug() {
+    let root = Path::new("/tmp/pi-agent-target");
+    let candidates = build_pi_binary_candidates(root, None, "");
+    assert_eq!(
+        candidates,
+        vec![
+            root.join("release/pi"),
+            root.join("perf/pi"),
+            root.join("debug/pi"),
+        ]
+    );
+}
+
+#[test]
+fn pi_binary_candidate_builder_includes_profile_before_release() {
+    let root = Path::new("/tmp/pi-agent-target");
+    let candidates = build_pi_binary_candidates(root, None, "bench-profile");
+    assert_eq!(candidates[0], root.join("bench-profile/pi"));
+    assert_eq!(candidates[1], root.join("release/pi"));
+    assert_eq!(candidates[2], root.join("perf/pi"));
+    assert_eq!(candidates[3], root.join("debug/pi"));
+}
+
+#[test]
+fn pi_binary_candidate_builder_env_override_wins_and_dedups() {
+    let root = Path::new("/tmp/pi-agent-target");
+    let override_path = root.join("release/pi");
+    let candidates = build_pi_binary_candidates(root, Some(override_path.clone()), "release");
+
+    assert_eq!(candidates.first(), Some(&override_path));
+    assert_eq!(
+        candidates
+            .iter()
+            .filter(|path| **path == override_path)
+            .count(),
+        1
+    );
+    assert_eq!(
+        candidates,
+        vec![override_path, root.join("perf/pi"), root.join("debug/pi")]
+    );
+}
+
+#[test]
+fn binary_size_candidate_builder_prefers_detected_profile_then_release() {
+    let root = Path::new("/tmp/pi-agent-target");
+    let candidates = build_binary_size_candidates(root, "bench-profile");
+    assert_eq!(
+        candidates,
+        vec![root.join("bench-profile/pi"), root.join("release/pi")]
+    );
+}
+
+#[test]
+fn binary_size_candidate_builder_dedups_release_profile() {
+    let root = Path::new("/tmp/pi-agent-target");
+    let candidates = build_binary_size_candidates(root, "release");
+    assert_eq!(candidates, vec![root.join("release/pi")]);
 }

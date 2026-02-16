@@ -32,7 +32,7 @@
 
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 const CI_WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
 const RUN_ALL_SCRIPT_PATH: &str = "scripts/e2e/run_all.sh";
@@ -426,21 +426,124 @@ fn parse_required_evidence_paths(
         ));
     }
 
+    let mut seen_paths = HashSet::new();
     let mut paths = Vec::with_capacity(values.len());
     for (path_idx, value) in values.iter().enumerate() {
-        let path = value.as_str().ok_or_else(|| {
+        let raw_path = value.as_str().ok_or_else(|| {
             format!("coverage_rows[{row_idx}] field '{field_name}[{path_idx}]' must be a string")
         })?;
-        let path = path.trim();
-        if path.is_empty() {
+        let raw_path = raw_path.trim();
+        if raw_path.is_empty() {
             return Err(format!(
                 "coverage_rows[{row_idx}] field '{field_name}[{path_idx}]' must not be empty"
             ));
         }
-        paths.push(path.to_string());
+        let normalized_path =
+            normalize_repo_relative_evidence_path(raw_path, row_idx, field_name, path_idx)?;
+        if !seen_paths.insert(normalized_path.clone()) {
+            return Err(format!(
+                "coverage_rows[{row_idx}] field '{field_name}' contains duplicate path: {normalized_path}"
+            ));
+        }
+        paths.push(normalized_path);
     }
 
     Ok(paths)
+}
+
+fn normalize_repo_relative_evidence_path(
+    raw_path: &str,
+    row_idx: usize,
+    field_name: &str,
+    path_idx: usize,
+) -> Result<String, String> {
+    let normalized_separators = raw_path.replace('\\', "/");
+    if normalized_separators.starts_with("//") {
+        return Err(format!(
+            "coverage_rows[{row_idx}] field '{field_name}[{path_idx}]' must not use UNC paths: {raw_path}"
+        ));
+    }
+    if is_windows_absolute_path(&normalized_separators) {
+        return Err(format!(
+            "coverage_rows[{row_idx}] field '{field_name}[{path_idx}]' must not use windows-absolute paths: {raw_path}"
+        ));
+    }
+
+    let candidate = Path::new(&normalized_separators);
+    if candidate.is_absolute() {
+        return Err(format!(
+            "coverage_rows[{row_idx}] field '{field_name}[{path_idx}]' must be repo-relative, got absolute path: {raw_path}"
+        ));
+    }
+
+    let mut parts = Vec::new();
+    for component in candidate.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(segment) => parts.push(segment.to_string_lossy().into_owned()),
+            Component::ParentDir => {
+                return Err(format!(
+                    "coverage_rows[{row_idx}] field '{field_name}[{path_idx}]' must not contain parent traversal ('..'): {raw_path}"
+                ));
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(format!(
+                    "coverage_rows[{row_idx}] field '{field_name}[{path_idx}]' must be repo-relative: {raw_path}"
+                ));
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        return Err(format!(
+            "coverage_rows[{row_idx}] field '{field_name}[{path_idx}]' must contain a path segment: {raw_path}"
+        ));
+    }
+
+    Ok(parts.join("/"))
+}
+
+fn is_windows_absolute_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    if bytes.len() < 2 {
+        return false;
+    }
+    bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && (bytes.len() == 2 || bytes[2] == b'/')
+}
+
+fn is_canonical_perf3x_bead_id(bead: &str) -> bool {
+    let Some(suffix) = bead.strip_prefix("bd-3ar8v.") else {
+        return false;
+    };
+    if suffix.is_empty() {
+        return false;
+    }
+    suffix
+        .split('.')
+        .all(|segment| !segment.is_empty() && segment.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn validate_cross_category_evidence_uniqueness(
+    row_idx: usize,
+    unit_evidence: &[String],
+    e2e_evidence: &[String],
+    log_evidence: &[String],
+) -> Result<(), String> {
+    let mut seen_paths = HashMap::new();
+    for (field_name, paths) in [
+        ("unit_evidence", unit_evidence),
+        ("e2e_evidence", e2e_evidence),
+        ("log_evidence", log_evidence),
+    ] {
+        for path in paths {
+            if let Some(previous_field) = seen_paths.insert(path.clone(), field_name) {
+                return Err(format!(
+                    "coverage_rows[{row_idx}] reuses evidence path across categories: {path} appears in '{previous_field}' and '{field_name}'"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Parse and validate the bead coverage contract.
@@ -472,7 +575,7 @@ fn validate_perf3x_bead_coverage_contract(
             .ok_or_else(|| format!("coverage_rows[{row_idx}] missing 'bead' string"))?
             .trim()
             .to_string();
-        if !bead.starts_with("bd-3ar8v.") {
+        if !is_canonical_perf3x_bead_id(&bead) {
             return Err(format!(
                 "coverage_rows[{row_idx}] has invalid PERF-3X bead id: {bead}"
             ));
@@ -481,11 +584,21 @@ fn validate_perf3x_bead_coverage_contract(
             return Err(format!("duplicate bead in coverage_rows: {bead}"));
         }
 
+        let unit_evidence = parse_required_evidence_paths(row, row_idx, "unit_evidence")?;
+        let e2e_evidence = parse_required_evidence_paths(row, row_idx, "e2e_evidence")?;
+        let log_evidence = parse_required_evidence_paths(row, row_idx, "log_evidence")?;
+        validate_cross_category_evidence_uniqueness(
+            row_idx,
+            &unit_evidence,
+            &e2e_evidence,
+            &log_evidence,
+        )?;
+
         parsed.push(Perf3xBeadCoverageRow {
             bead,
-            unit_evidence: parse_required_evidence_paths(row, row_idx, "unit_evidence")?,
-            e2e_evidence: parse_required_evidence_paths(row, row_idx, "e2e_evidence")?,
-            log_evidence: parse_required_evidence_paths(row, row_idx, "log_evidence")?,
+            unit_evidence,
+            e2e_evidence,
+            log_evidence,
         });
     }
 
@@ -551,9 +664,9 @@ fn evaluate_perf3x_bead_coverage(root: &Path, contract: &Value) -> (String, Opti
         .join(", ");
     let suffix = if missing.len() > 3 { " ..." } else { "" };
     (
-        "warn".to_string(),
+        "fail".to_string(),
         Some(format!(
-            "Coverage contract parsed ({} rows) but {} evidence path(s) are missing: {}{}",
+            "Coverage contract parsed ({} rows) but {} evidence path(s) are missing (fail-closed): {}{}",
             rows.len(),
             missing.len(),
             preview,
@@ -979,7 +1092,7 @@ fn collect_gates(root: &Path) -> Vec<SubGate> {
         name: "PERF-3X bead-to-artifact coverage audit".to_string(),
         bead: "bd-3ar8v.6.11".to_string(),
         status,
-        blocking: false,
+        blocking: true,
         artifact_path: Some("tests/full_suite_gate/certification_events.jsonl".to_string()),
         detail,
         reproduce_command: Some(
@@ -2148,7 +2261,189 @@ fn perf3x_bead_coverage_contract_fails_closed_on_missing_critical_bead() {
 }
 
 #[test]
-fn perf3x_bead_coverage_evaluator_warns_when_evidence_paths_are_missing() {
+fn perf3x_bead_coverage_contract_fails_closed_on_non_numeric_bead_segment() {
+    let mut contract = perf3x_bead_coverage_contract();
+    contract["coverage_rows"][0]["bead"] = serde_json::json!("bd-3ar8v.4.alpha");
+
+    let err = validate_perf3x_bead_coverage_contract(&contract)
+        .expect_err("non-numeric bead segment must fail closed");
+    assert!(
+        err.contains("invalid PERF-3X bead id"),
+        "error should mention invalid bead id, got: {err}"
+    );
+}
+
+#[test]
+fn perf3x_bead_coverage_contract_fails_closed_on_empty_bead_segment() {
+    let mut contract = perf3x_bead_coverage_contract();
+    contract["coverage_rows"][0]["bead"] = serde_json::json!("bd-3ar8v.4..10");
+
+    let err = validate_perf3x_bead_coverage_contract(&contract)
+        .expect_err("empty bead segment must fail closed");
+    assert!(
+        err.contains("invalid PERF-3X bead id"),
+        "error should mention invalid bead id, got: {err}"
+    );
+}
+
+#[test]
+fn perf3x_bead_coverage_contract_fails_closed_on_missing_bead_suffix() {
+    let mut contract = perf3x_bead_coverage_contract();
+    contract["coverage_rows"][0]["bead"] = serde_json::json!("bd-3ar8v");
+
+    let err = validate_perf3x_bead_coverage_contract(&contract)
+        .expect_err("missing bead suffix must fail closed");
+    assert!(
+        err.contains("invalid PERF-3X bead id"),
+        "error should mention invalid bead id, got: {err}"
+    );
+}
+
+#[test]
+fn perf3x_bead_coverage_contract_fails_closed_on_duplicate_unit_evidence_path() {
+    let mut contract = perf3x_bead_coverage_contract();
+    contract["coverage_rows"][0]["unit_evidence"] =
+        serde_json::json!(["tests/bench_schema.rs", "tests/bench_schema.rs"]);
+
+    let err = validate_perf3x_bead_coverage_contract(&contract)
+        .expect_err("duplicate unit evidence path must fail closed");
+    assert!(
+        err.contains("duplicate path"),
+        "error should mention duplicate path, got: {err}"
+    );
+}
+
+#[test]
+fn perf3x_bead_coverage_contract_fails_closed_on_cross_category_duplicate_path() {
+    let mut contract = perf3x_bead_coverage_contract();
+    contract["coverage_rows"][0]["unit_evidence"] = serde_json::json!(["tests/bench_schema.rs"]);
+    contract["coverage_rows"][0]["e2e_evidence"] = serde_json::json!(["tests/bench_schema.rs"]);
+
+    let err = validate_perf3x_bead_coverage_contract(&contract)
+        .expect_err("cross-category duplicate path must fail closed");
+    assert!(
+        err.contains("reuses evidence path across categories"),
+        "error should mention cross-category reuse, got: {err}"
+    );
+}
+
+#[test]
+fn perf3x_bead_coverage_contract_fails_closed_on_cross_category_duplicate_after_normalization() {
+    let mut contract = perf3x_bead_coverage_contract();
+    contract["coverage_rows"][0]["e2e_evidence"] = serde_json::json!(["./tests/e2e_results"]);
+    contract["coverage_rows"][0]["log_evidence"] = serde_json::json!(["tests/e2e_results"]);
+
+    let err = validate_perf3x_bead_coverage_contract(&contract)
+        .expect_err("normalized cross-category duplicate path must fail closed");
+    assert!(
+        err.contains("reuses evidence path across categories"),
+        "error should mention cross-category reuse, got: {err}"
+    );
+}
+
+#[test]
+fn perf3x_bead_coverage_contract_fails_closed_on_parent_traversal_path() {
+    let mut contract = perf3x_bead_coverage_contract();
+    contract["coverage_rows"][0]["log_evidence"] = serde_json::json!([
+        "tests/full_suite_gate/certification_events.jsonl",
+        "../escape.json"
+    ]);
+
+    let err = validate_perf3x_bead_coverage_contract(&contract)
+        .expect_err("parent traversal path must fail closed");
+    assert!(
+        err.contains("parent traversal"),
+        "error should mention parent traversal, got: {err}"
+    );
+}
+
+#[test]
+fn perf3x_bead_coverage_contract_fails_closed_on_absolute_path() {
+    let mut contract = perf3x_bead_coverage_contract();
+    contract["coverage_rows"][0]["e2e_evidence"] =
+        serde_json::json!(["tests/e2e_results", "/tmp/outside_repo.json"]);
+
+    let err = validate_perf3x_bead_coverage_contract(&contract)
+        .expect_err("absolute path must fail closed");
+    assert!(
+        err.contains("absolute path"),
+        "error should mention absolute path, got: {err}"
+    );
+}
+
+#[test]
+fn perf3x_bead_coverage_contract_fails_closed_on_normalized_duplicate_dot_slash_variant() {
+    let mut contract = perf3x_bead_coverage_contract();
+    contract["coverage_rows"][0]["unit_evidence"] =
+        serde_json::json!(["./tests/bench_schema.rs", "tests/bench_schema.rs"]);
+
+    let err = validate_perf3x_bead_coverage_contract(&contract)
+        .expect_err("normalized duplicate evidence path must fail closed");
+    assert!(
+        err.contains("duplicate path"),
+        "error should mention duplicate path, got: {err}"
+    );
+}
+
+#[test]
+fn perf3x_bead_coverage_contract_fails_closed_on_normalized_duplicate_backslash_variant() {
+    let mut contract = perf3x_bead_coverage_contract();
+    contract["coverage_rows"][0]["unit_evidence"] =
+        serde_json::json!(["tests\\bench_schema.rs", "tests/bench_schema.rs"]);
+
+    let err = validate_perf3x_bead_coverage_contract(&contract)
+        .expect_err("normalized duplicate backslash variant must fail closed");
+    assert!(
+        err.contains("duplicate path"),
+        "error should mention duplicate path, got: {err}"
+    );
+}
+
+#[test]
+fn perf3x_bead_coverage_contract_normalizes_relative_paths_before_storage() {
+    let mut contract = perf3x_bead_coverage_contract();
+    contract["coverage_rows"][0]["unit_evidence"] = serde_json::json!(["./tests//bench_schema.rs"]);
+
+    let parsed = validate_perf3x_bead_coverage_contract(&contract)
+        .expect("normalized relative path should pass");
+    assert_eq!(
+        parsed[0].unit_evidence[0], "tests/bench_schema.rs",
+        "path should be normalized before storage"
+    );
+}
+
+#[test]
+fn perf3x_bead_coverage_contract_fails_closed_on_windows_absolute_path() {
+    let mut contract = perf3x_bead_coverage_contract();
+    contract["coverage_rows"][0]["e2e_evidence"] =
+        serde_json::json!(["tests/e2e_results", "C:\\temp\\outside.json"]);
+
+    let err = validate_perf3x_bead_coverage_contract(&contract)
+        .expect_err("windows absolute path must fail closed");
+    assert!(
+        err.contains("windows-absolute"),
+        "error should mention windows-absolute path, got: {err}"
+    );
+}
+
+#[test]
+fn perf3x_bead_coverage_contract_fails_closed_on_unc_path() {
+    let mut contract = perf3x_bead_coverage_contract();
+    contract["coverage_rows"][0]["log_evidence"] = serde_json::json!([
+        "tests/full_suite_gate/certification_events.jsonl",
+        "\\\\server\\share\\outside.json"
+    ]);
+
+    let err =
+        validate_perf3x_bead_coverage_contract(&contract).expect_err("UNC path must fail closed");
+    assert!(
+        err.contains("UNC paths"),
+        "error should mention UNC path rejection, got: {err}"
+    );
+}
+
+#[test]
+fn perf3x_bead_coverage_evaluator_fails_closed_when_evidence_paths_are_missing() {
     let mut temp = std::env::temp_dir();
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2158,14 +2453,31 @@ fn perf3x_bead_coverage_evaluator_warns_when_evidence_paths_are_missing() {
     std::fs::create_dir_all(&temp).expect("create temp root");
 
     let (status, detail) = evaluate_perf3x_bead_coverage(&temp, &perf3x_bead_coverage_contract());
-    assert_eq!(status, "warn", "missing paths should warn");
+    assert_eq!(status, "fail", "missing paths should fail closed");
     let detail = detail.unwrap_or_default();
     assert!(
         detail.contains("missing"),
-        "warn detail should mention missing paths: {detail}"
+        "failure detail should mention missing paths: {detail}"
+    );
+    assert!(
+        detail.contains("fail-closed"),
+        "failure detail should indicate fail-closed policy: {detail}"
     );
 
     let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn perf3x_bead_coverage_sub_gate_is_blocking() {
+    let gates = collect_gates(&repo_root());
+    let gate = gates
+        .iter()
+        .find(|gate| gate.id == "perf3x_bead_coverage")
+        .expect("perf3x_bead_coverage gate should exist");
+    assert!(
+        gate.blocking,
+        "PERF-3X bead coverage gate must be release-blocking"
+    );
 }
 
 #[test]
@@ -2235,7 +2547,17 @@ fn run_all_wires_scenario_cell_status_artifacts_into_evidence_contract() {
         "claim_integrity.phase1_matrix_primary_outcomes_ordering_policy",
         "claim_integrity.phase1_matrix_cells_primary_e2e_metrics_present",
         "primary_e2e_before_microbench",
+        "cherry_pick_guard.global_claim_valid must be true",
+        "required_layers = [",
+        "\"full_e2e_long_session\",",
+        "extension_stratification.global_claim_valid",
         "claim_integrity.realistic_session_shape_coverage",
+        "claim_integrity.unresolved_conflicting_claims",
+        "claim_integrity.evidence_adjudication_matrix_schema",
+        "claim_integrity_evidence_adjudication_matrix.json",
+        "claim_integrity_evidence_adjudication_matrix.md",
+        "pi.claim_integrity.evidence_adjudication_matrix.v1",
+        "\"claim_integrity_adjudication_matrix\"",
         "\"source\"",
         "\"source_path\"",
         "phase1_matrix_validation",

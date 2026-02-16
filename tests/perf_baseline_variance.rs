@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 
 const BASELINE_VARIANCE_SCHEMA: &str = "pi.perf.baseline_variance.v1";
 const BASELINE_VARIANCE_VERSION: &str = "1.0.0";
+const EVIDENCE_ADJUDICATION_MATRIX_SCHEMA: &str = "pi.qa.evidence_adjudication_matrix.v1";
 
 // ─── Statistical Primitives ─────────────────────────────────────────────────
 
@@ -534,6 +535,68 @@ fn cross_env_breakdown_threshold_gate_behavior() {
     );
 }
 
+#[test]
+fn cross_env_breakdown_component_decomposition_conserves_spread() {
+    let env_means = vec![100.0, 111.0, 109.0, 107.0];
+    let env_cvs_pct = vec![2.0, 2.5, 2.2, 2.1];
+    let stats = compute_cross_env_variance_breakdown(&env_means, &env_cvs_pct, 10.0)
+        .expect("breakdown should compute");
+
+    let reconstructed_spread = stats.environment_component_pct + stats.noise_component_pct;
+    let spread_delta = (reconstructed_spread - stats.spread_pct).abs();
+    assert!(
+        spread_delta < 1e-9,
+        "component decomposition should conserve spread: reconstructed={reconstructed_spread:.12}, spread={:.12}, delta={spread_delta:.12}",
+        stats.spread_pct
+    );
+    assert!(
+        (stats.runtime_component_pct - stats.noise_component_pct).abs() < 1e-9,
+        "runtime component should track noise component in current decomposition model"
+    );
+    assert!(
+        stats.build_component_pct.abs() < f64::EPSILON,
+        "build component is currently modeled as zero"
+    );
+}
+
+#[test]
+fn cross_env_breakdown_zero_noise_floor_yields_finite_signal_ratio() {
+    let env_means = vec![100.0, 125.0, 75.0];
+    let env_cvs_pct = vec![0.0, 0.0, 0.0];
+    let stats = compute_cross_env_variance_breakdown(&env_means, &env_cvs_pct, 10.0)
+        .expect("breakdown should compute");
+
+    assert!(
+        stats.noise_floor_pct.abs() < f64::EPSILON,
+        "noise floor should be exactly zero for zero-CV input"
+    );
+    assert!(
+        stats.signal_to_noise.is_finite() && stats.signal_to_noise > 0.0,
+        "signal-to-noise should remain finite and positive when noise floor is zero: {}",
+        stats.signal_to_noise
+    );
+    assert_eq!(
+        stats.dominant_source, "environment",
+        "with zero noise floor and nonzero spread, environment should dominate"
+    );
+}
+
+#[test]
+fn cross_env_breakdown_rejects_invalid_input_shapes() {
+    assert!(
+        compute_cross_env_variance_breakdown(&[100.0], &[2.0], 10.0).is_none(),
+        "single-environment input should fail closed"
+    );
+    assert!(
+        compute_cross_env_variance_breakdown(&[100.0, 105.0], &[2.0], 10.0).is_none(),
+        "length mismatch should fail closed"
+    );
+    assert!(
+        compute_cross_env_variance_breakdown(&[], &[], 10.0).is_none(),
+        "empty input should fail closed"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Tests: Inline Baseline Variance Analysis
 // ═══════════════════════════════════════════════════════════════════════════
@@ -724,6 +787,56 @@ fn baseline_variance_schema_registered_in_instance() {
     assert!(
         found,
         "{BASELINE_VARIANCE_SCHEMA} must be registered in the schema instance"
+    );
+}
+
+#[test]
+fn evidence_adjudication_matrix_schema_registered_in_instance() {
+    let instance_path = project_root().join("docs/schema/test_evidence_logging_instance.json");
+    let content = std::fs::read_to_string(instance_path).unwrap();
+    let instance: Value = serde_json::from_str(&content).unwrap();
+
+    let schemas = instance["schema_registry"]["schemas"]
+        .as_array()
+        .expect("must have schemas array");
+
+    let found = schemas
+        .iter()
+        .any(|s| s["schema_id"].as_str() == Some(EVIDENCE_ADJUDICATION_MATRIX_SCHEMA));
+    assert!(
+        found,
+        "{EVIDENCE_ADJUDICATION_MATRIX_SCHEMA} must be registered in the schema instance"
+    );
+}
+
+#[test]
+fn evidence_adjudication_matrix_schema_has_core_relationships() {
+    let instance_path = project_root().join("docs/schema/test_evidence_logging_instance.json");
+    let content = std::fs::read_to_string(instance_path).unwrap();
+    let instance: Value = serde_json::from_str(&content).unwrap();
+
+    let relationships = instance["schema_registry"]["schema_relationships"]
+        .as_array()
+        .expect("must have schema_relationships array");
+
+    let evidence_to_adjudication = relationships.iter().any(|rel| {
+        rel["from_schema"] == "pi.qa.evidence_contract.v1"
+            && rel["to_schema"] == EVIDENCE_ADJUDICATION_MATRIX_SCHEMA
+            && rel["join_field"] == "correlation_id"
+    });
+    assert!(
+        evidence_to_adjudication,
+        "schema relationships must link evidence_contract to evidence_adjudication_matrix by correlation_id"
+    );
+
+    let run_manifest_to_adjudication = relationships.iter().any(|rel| {
+        rel["from_schema"] == "pi.perf.run_manifest.v1"
+            && rel["to_schema"] == EVIDENCE_ADJUDICATION_MATRIX_SCHEMA
+            && rel["join_field"] == "correlation_id"
+    });
+    assert!(
+        run_manifest_to_adjudication,
+        "schema relationships must link run_manifest to evidence_adjudication_matrix by correlation_id"
     );
 }
 

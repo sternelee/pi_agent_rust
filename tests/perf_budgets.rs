@@ -12,6 +12,7 @@
     clippy::unreadable_literal
 )]
 
+use pi::perf_build::BINARY_SIZE_RELEASE_BUDGET_MB;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::fmt::Write as _;
@@ -152,7 +153,7 @@ const BUDGETS: &[Budget] = &[
         category: "binary",
         metric: "release binary size",
         unit: "MB",
-        threshold: 22.0,
+        threshold: BINARY_SIZE_RELEASE_BUDGET_MB,
         methodology: "ls -la target/release/pi (stripped)",
         ci_enforced: true,
     },

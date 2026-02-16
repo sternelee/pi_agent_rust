@@ -1089,10 +1089,167 @@ fn validate_phase1_matrix_validation_record(record: &Value) -> Result<(), String
         .get("regression_guards")
         .and_then(Value::as_object)
         .ok_or_else(|| "regression_guards must be an object".to_string())?;
-    for field in &["memory", "correctness", "security"] {
+    for field in &[
+        "memory",
+        "correctness",
+        "security",
+        "failure_or_gap_reasons",
+    ] {
         if !regression_guards.contains_key(*field) {
             return Err(format!("regression_guards missing {field}"));
         }
+    }
+    let failure_or_gap_reasons = regression_guards
+        .get("failure_or_gap_reasons")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "regression_guards.failure_or_gap_reasons must be an array".to_string())?;
+    let mut reason_set = HashSet::new();
+    let mut memory_guard_status = "";
+    let mut correctness_guard_status = "";
+    let mut security_guard_status = "";
+    for reason in failure_or_gap_reasons {
+        let reason = reason.as_str().ok_or_else(|| {
+            "regression_guards.failure_or_gap_reasons entries must be non-empty strings".to_string()
+        })?;
+        if reason.trim().is_empty() {
+            return Err(
+                "regression_guards.failure_or_gap_reasons entries must be non-empty strings"
+                    .to_string(),
+            );
+        }
+        if !reason_set.insert(reason.to_string()) {
+            return Err(format!(
+                "regression_guards.failure_or_gap_reasons must not contain duplicates: {reason}"
+            ));
+        }
+    }
+    for guard_name in ["memory", "correctness", "security"] {
+        let status = regression_guards
+            .get(guard_name)
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                format!("regression_guards.{guard_name} must be one of pass/fail/missing")
+            })?;
+        match guard_name {
+            "memory" => memory_guard_status = status,
+            "correctness" => correctness_guard_status = status,
+            "security" => security_guard_status = status,
+            _ => {}
+        }
+        if !matches!(status, "pass" | "fail" | "missing") {
+            return Err(format!(
+                "regression_guards.{guard_name} must be one of pass/fail/missing, got: {status}"
+            ));
+        }
+        let fail_reason = format!("{guard_name}_regression");
+        let unverified_reason = format!("{guard_name}_regression_unverified");
+        let has_fail_reason = reason_set.contains(&fail_reason);
+        let has_unverified_reason = reason_set.contains(&unverified_reason);
+        match status {
+            "pass" => {
+                if has_fail_reason || has_unverified_reason {
+                    return Err(format!(
+                        "regression_guards.{guard_name} is pass but failure_or_gap_reasons includes {fail_reason} or {unverified_reason}"
+                    ));
+                }
+            }
+            "fail" => {
+                if !has_fail_reason {
+                    return Err(format!(
+                        "regression_guards.{guard_name} is fail and failure_or_gap_reasons must include {fail_reason}"
+                    ));
+                }
+                if has_unverified_reason {
+                    return Err(format!(
+                        "regression_guards.{guard_name} is fail and failure_or_gap_reasons must not include {unverified_reason}"
+                    ));
+                }
+            }
+            "missing" => {
+                if !has_unverified_reason {
+                    return Err(format!(
+                        "regression_guards.{guard_name} is missing and failure_or_gap_reasons must include {unverified_reason}"
+                    ));
+                }
+                if has_fail_reason {
+                    return Err(format!(
+                        "regression_guards.{guard_name} is missing and failure_or_gap_reasons must not include {fail_reason}"
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    for reason in &reason_set {
+        let known = ["memory", "correctness", "security"]
+            .iter()
+            .any(|guard_name| {
+                reason == &format!("{guard_name}_regression")
+                    || reason == &format!("{guard_name}_regression_unverified")
+            });
+        if !known {
+            return Err(format!(
+                "regression_guards.failure_or_gap_reasons contains unknown reason: {reason}"
+            ));
+        }
+    }
+
+    let evidence_links = record
+        .get("evidence_links")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "evidence_links must be an object".to_string())?;
+    for field in &[
+        "phase1_unit_and_fault_injection",
+        "required_artifacts",
+        "source_identity",
+    ] {
+        if !evidence_links.contains_key(*field) {
+            return Err(format!("evidence_links missing {field}"));
+        }
+    }
+    let required_artifacts = evidence_links
+        .get("required_artifacts")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "evidence_links.required_artifacts must be an object".to_string())?;
+    let scenario_runner_path = require_non_empty_string_field(
+        required_artifacts,
+        "evidence_links.required_artifacts",
+        "scenario_runner",
+    )?;
+    let stratification_path = require_non_empty_string_field(
+        required_artifacts,
+        "evidence_links.required_artifacts",
+        "stratification",
+    )?;
+    let baseline_confidence_path = require_non_empty_string_field(
+        required_artifacts,
+        "evidence_links.required_artifacts",
+        "baseline_variance_confidence",
+    )?;
+
+    let source_identity = evidence_links
+        .get("source_identity")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "evidence_links.source_identity must be an object".to_string())?;
+    let source_identity_run_id = require_non_empty_string_field(
+        source_identity,
+        "evidence_links.source_identity",
+        "run_id",
+    )?;
+    let source_identity_correlation_id = require_non_empty_string_field(
+        source_identity,
+        "evidence_links.source_identity",
+        "correlation_id",
+    )?;
+    if source_identity_run_id != run_id {
+        return Err(format!(
+            "evidence_links.source_identity.run_id ({source_identity_run_id}) must match run_id ({run_id})"
+        ));
+    }
+    if source_identity_correlation_id != correlation_id {
+        return Err(format!(
+            "evidence_links.source_identity.correlation_id ({source_identity_correlation_id}) must match correlation_id ({correlation_id})"
+        ));
     }
 
     let consumption_contract = record
@@ -1101,6 +1258,23 @@ fn validate_phase1_matrix_validation_record(record: &Value) -> Result<(), String
         .ok_or_else(|| "consumption_contract must be an object".to_string())?;
     if !consumption_contract.contains_key("artifact_ready_for_phase5") {
         return Err("consumption_contract missing artifact_ready_for_phase5".to_string());
+    }
+    let artifact_ready_for_phase5 = consumption_contract
+        .get("artifact_ready_for_phase5")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            "consumption_contract.artifact_ready_for_phase5 must be a boolean".to_string()
+        })?;
+    let expected_artifact_ready_for_phase5 = primary_status == "pass"
+        && missing_cells_count == 0
+        && complete_cells == required_cell_count
+        && memory_guard_status == "pass"
+        && correctness_guard_status == "pass"
+        && security_guard_status == "pass";
+    if artifact_ready_for_phase5 != expected_artifact_ready_for_phase5 {
+        return Err(format!(
+            "consumption_contract.artifact_ready_for_phase5 ({artifact_ready_for_phase5}) must equal expected deterministic value ({expected_artifact_ready_for_phase5}) from primary_outcomes.status={primary_status}, stage_summary(cells_with_complete_stage_breakdown={complete_cells}, cells_missing_stage_breakdown={missing_cells_count}, required_cell_count={required_cell_count}), regression_guards(memory={memory_guard_status}, correctness={correctness_guard_status}, security={security_guard_status})"
+        ));
     }
 
     let lineage = record
@@ -1132,6 +1306,29 @@ fn validate_phase1_matrix_validation_record(record: &Value) -> Result<(), String
             "lineage.run_id_lineage[1] ({lineage_correlation_id}) must match correlation_id ({correlation_id})"
         ));
     }
+    let _ = require_non_empty_string_field(lineage, "lineage", "source_manifest_path")?;
+    let lineage_scenario_runner =
+        require_non_empty_string_field(lineage, "lineage", "source_scenario_runner_path")?;
+    let lineage_stratification =
+        require_non_empty_string_field(lineage, "lineage", "source_stratification_path")?;
+    let lineage_baseline_confidence =
+        require_non_empty_string_field(lineage, "lineage", "source_baseline_confidence_path")?;
+    let _ = require_non_empty_string_field(lineage, "lineage", "source_perf_sli_contract_path")?;
+    if lineage_scenario_runner != scenario_runner_path {
+        return Err(format!(
+            "lineage.source_scenario_runner_path ({lineage_scenario_runner}) must match evidence_links.required_artifacts.scenario_runner ({scenario_runner_path})"
+        ));
+    }
+    if lineage_stratification != stratification_path {
+        return Err(format!(
+            "lineage.source_stratification_path ({lineage_stratification}) must match evidence_links.required_artifacts.stratification ({stratification_path})"
+        ));
+    }
+    if lineage_baseline_confidence != baseline_confidence_path {
+        return Err(format!(
+            "lineage.source_baseline_confidence_path ({lineage_baseline_confidence}) must match evidence_links.required_artifacts.baseline_variance_confidence ({baseline_confidence_path})"
+        ));
+    }
 
     Ok(())
 }
@@ -1151,6 +1348,21 @@ fn require_positive_metric(
         ));
     }
     Ok(value)
+}
+
+fn require_non_empty_string_field(
+    obj: &serde_json::Map<String, Value>,
+    context: &str,
+    field: &str,
+) -> Result<String, String> {
+    let value = obj
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{context}.{field} must be a non-empty string"))?;
+    if value.trim().is_empty() {
+        return Err(format!("{context}.{field} must be a non-empty string"));
+    }
+    Ok(value.to_string())
 }
 
 fn phase1_matrix_validation_golden_fixture() -> Value {
@@ -1255,6 +1467,10 @@ fn phase1_matrix_validation_golden_fixture() -> Value {
                 "scenario_runner": "target/perf/scenario_runner.jsonl",
                 "stratification": "target/perf/extension_benchmark_stratification.json",
                 "baseline_variance_confidence": "target/perf/baseline_variance_confidence.json"
+            },
+            "source_identity": {
+                "run_id": "20260216T010101Z",
+                "correlation_id": "abc123def456"
             }
         },
         "consumption_contract": {
@@ -1264,7 +1480,11 @@ fn phase1_matrix_validation_golden_fixture() -> Value {
         },
         "lineage": {
             "run_id_lineage": ["20260216T010101Z", "abc123def456"],
-            "source_manifest_path": "target/perf/runs/20260216T010101Z/manifest.json"
+            "source_manifest_path": "target/perf/runs/20260216T010101Z/manifest.json",
+            "source_scenario_runner_path": "target/perf/scenario_runner.jsonl",
+            "source_stratification_path": "target/perf/extension_benchmark_stratification.json",
+            "source_baseline_confidence_path": "target/perf/baseline_variance_confidence.json",
+            "source_perf_sli_contract_path": "docs/perf_sli_matrix.json"
         }
     })
 }
@@ -2187,6 +2407,111 @@ fn phase1_matrix_validator_rejects_lineage_mismatch_with_top_level_ids() {
 }
 
 #[test]
+fn phase1_matrix_validator_rejects_missing_evidence_source_identity() {
+    let mut malformed = phase1_matrix_validation_golden_fixture();
+    malformed["evidence_links"]
+        .as_object_mut()
+        .expect("evidence_links object")
+        .remove("source_identity");
+
+    let err = validate_phase1_matrix_validation_record(&malformed).expect_err("fixture must fail");
+    assert!(
+        err.contains("evidence_links missing source_identity"),
+        "expected evidence_links.source_identity failure, got: {err}"
+    );
+}
+
+#[test]
+fn phase1_matrix_validator_rejects_lineage_required_artifact_mismatch() {
+    let mut malformed = phase1_matrix_validation_golden_fixture();
+    malformed["lineage"]["source_stratification_path"] = json!("target/perf/other.json");
+
+    let err = validate_phase1_matrix_validation_record(&malformed).expect_err("fixture must fail");
+    assert!(
+        err.contains("lineage.source_stratification_path")
+            && err.contains("required_artifacts.stratification"),
+        "expected lineage/evidence_links stratification mismatch failure, got: {err}"
+    );
+}
+
+#[test]
+fn phase1_matrix_validator_rejects_invalid_regression_guard_status() {
+    let mut malformed = phase1_matrix_validation_golden_fixture();
+    malformed["regression_guards"]["memory"] = json!("warn");
+
+    let err = validate_phase1_matrix_validation_record(&malformed).expect_err("fixture must fail");
+    assert!(
+        err.contains("regression_guards.memory must be one of pass/fail/missing"),
+        "expected regression_guards status enum failure, got: {err}"
+    );
+}
+
+#[test]
+fn phase1_matrix_validator_rejects_missing_reason_for_failed_regression_guard() {
+    let mut malformed = phase1_matrix_validation_golden_fixture();
+    malformed["regression_guards"]["correctness"] = json!("fail");
+    malformed["regression_guards"]["failure_or_gap_reasons"] = json!([]);
+
+    let err = validate_phase1_matrix_validation_record(&malformed).expect_err("fixture must fail");
+    assert!(
+        err.contains("must include correctness_regression"),
+        "expected missing fail reason failure, got: {err}"
+    );
+}
+
+#[test]
+fn phase1_matrix_validator_rejects_reason_for_passing_regression_guard() {
+    let mut malformed = phase1_matrix_validation_golden_fixture();
+    malformed["regression_guards"]["failure_or_gap_reasons"] = json!(["security_regression"]);
+
+    let err = validate_phase1_matrix_validation_record(&malformed).expect_err("fixture must fail");
+    assert!(
+        err.contains("regression_guards.security is pass"),
+        "expected pass/reason mismatch failure, got: {err}"
+    );
+}
+
+#[test]
+fn phase1_matrix_validator_rejects_unknown_regression_guard_reason() {
+    let mut malformed = phase1_matrix_validation_golden_fixture();
+    malformed["regression_guards"]["memory"] = json!("missing");
+    malformed["regression_guards"]["failure_or_gap_reasons"] =
+        json!(["memory_regression_unverified", "unexpected_reason"]);
+
+    let err = validate_phase1_matrix_validation_record(&malformed).expect_err("fixture must fail");
+    assert!(
+        err.contains("contains unknown reason"),
+        "expected unknown regression reason failure, got: {err}"
+    );
+}
+
+#[test]
+fn phase1_matrix_validator_rejects_phase5_ready_true_when_prerequisites_fail() {
+    let mut malformed = phase1_matrix_validation_golden_fixture();
+    malformed["primary_outcomes"]["status"] = json!("fail");
+
+    let err = validate_phase1_matrix_validation_record(&malformed).expect_err("fixture must fail");
+    assert!(
+        err.contains("artifact_ready_for_phase5 (true)")
+            && err.contains("expected deterministic value (false)"),
+        "expected phase5 deterministic mismatch failure, got: {err}"
+    );
+}
+
+#[test]
+fn phase1_matrix_validator_rejects_phase5_ready_false_when_prerequisites_pass() {
+    let mut malformed = phase1_matrix_validation_golden_fixture();
+    malformed["consumption_contract"]["artifact_ready_for_phase5"] = json!(false);
+
+    let err = validate_phase1_matrix_validation_record(&malformed).expect_err("fixture must fail");
+    assert!(
+        err.contains("artifact_ready_for_phase5 (false)")
+            && err.contains("expected deterministic value (true)"),
+        "expected phase5 deterministic mismatch failure, got: {err}"
+    );
+}
+
+#[test]
 fn evidence_contract_schema_includes_benchmark_protocol_definition() {
     let schema_path = project_root().join("docs/evidence-contract-schema.json");
     let content = std::fs::read_to_string(&schema_path)
@@ -2310,6 +2635,14 @@ fn orchestrate_script_emits_phase1_matrix_validation_contract() {
         "\"cells_with_complete_stage_breakdown\"",
         "\"primary_e2e_before_microbench\"",
         "\"artifact_ready_for_phase5\"",
+        "\"failure_or_gap_reasons\"",
+        "_regression_unverified",
+        "\"source_identity\"",
+        "\"source_manifest_path\"",
+        "\"source_scenario_runner_path\"",
+        "\"source_stratification_path\"",
+        "\"source_baseline_confidence_path\"",
+        "\"source_perf_sli_contract_path\"",
     ] {
         assert!(
             content.contains(token),
@@ -2477,6 +2810,113 @@ fn orchestrate_generates_phase1_matrix_validation_artifact() {
         matrix.get("correlation_id").and_then(Value::as_str),
         manifest.get("correlation_id").and_then(Value::as_str),
         "phase1 correlation_id must match manifest"
+    );
+    assert_eq!(
+        matrix["evidence_links"]["source_identity"]["run_id"].as_str(),
+        matrix.get("run_id").and_then(Value::as_str),
+        "evidence_links.source_identity.run_id must match top-level run_id"
+    );
+    assert_eq!(
+        matrix["evidence_links"]["source_identity"]["correlation_id"].as_str(),
+        matrix.get("correlation_id").and_then(Value::as_str),
+        "evidence_links.source_identity.correlation_id must match top-level correlation_id"
+    );
+    assert_eq!(
+        matrix["lineage"]["source_scenario_runner_path"].as_str(),
+        matrix["evidence_links"]["required_artifacts"]["scenario_runner"].as_str(),
+        "lineage scenario_runner path must match required_artifacts.scenario_runner"
+    );
+    assert_eq!(
+        matrix["lineage"]["source_stratification_path"].as_str(),
+        matrix["evidence_links"]["required_artifacts"]["stratification"].as_str(),
+        "lineage stratification path must match required_artifacts.stratification"
+    );
+    assert_eq!(
+        matrix["lineage"]["source_baseline_confidence_path"].as_str(),
+        matrix["evidence_links"]["required_artifacts"]["baseline_variance_confidence"].as_str(),
+        "lineage baseline path must match required_artifacts.baseline_variance_confidence"
+    );
+    let perf_sli_contract_path = matrix["lineage"]["source_perf_sli_contract_path"]
+        .as_str()
+        .expect("lineage.source_perf_sli_contract_path string");
+    assert!(
+        perf_sli_contract_path.ends_with("docs/perf_sli_matrix.json"),
+        "lineage must include canonical perf_sli contract path, got: {perf_sli_contract_path}"
+    );
+    let regression_guards = matrix["regression_guards"]
+        .as_object()
+        .expect("regression_guards object");
+    let failure_or_gap_reasons = regression_guards
+        .get("failure_or_gap_reasons")
+        .and_then(Value::as_array)
+        .expect("regression_guards.failure_or_gap_reasons array");
+    let mut reason_set = HashSet::new();
+    for reason in failure_or_gap_reasons {
+        let reason = reason
+            .as_str()
+            .expect("regression_guards.failure_or_gap_reasons entries must be strings")
+            .to_string();
+        assert!(
+            reason_set.insert(reason.clone()),
+            "regression_guards.failure_or_gap_reasons must not contain duplicates: {reason}"
+        );
+    }
+    for guard_name in ["memory", "correctness", "security"] {
+        let status = regression_guards
+            .get(guard_name)
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            matches!(status, "pass" | "fail" | "missing"),
+            "regression_guards.{guard_name} must be pass/fail/missing, got: {status}"
+        );
+        let fail_reason = format!("{guard_name}_regression");
+        let unverified_reason = format!("{guard_name}_regression_unverified");
+        let has_fail_reason = reason_set.contains(&fail_reason);
+        let has_unverified_reason = reason_set.contains(&unverified_reason);
+        match status {
+            "pass" => {
+                assert!(
+                    !has_fail_reason && !has_unverified_reason,
+                    "regression_guards.{guard_name}=pass must not emit {fail_reason} or {unverified_reason}"
+                );
+            }
+            "fail" => {
+                assert!(
+                    has_fail_reason && !has_unverified_reason,
+                    "regression_guards.{guard_name}=fail must emit {fail_reason} (without {unverified_reason})"
+                );
+            }
+            "missing" => {
+                assert!(
+                    has_unverified_reason && !has_fail_reason,
+                    "regression_guards.{guard_name}=missing must emit {unverified_reason} (without {fail_reason})"
+                );
+            }
+            _ => {}
+        }
+    }
+    let artifact_ready_for_phase5 = matrix["consumption_contract"]["artifact_ready_for_phase5"]
+        .as_bool()
+        .expect("consumption_contract.artifact_ready_for_phase5 bool");
+    let expected_artifact_ready_for_phase5 = matrix["primary_outcomes"]["status"]
+        .as_str()
+        .is_some_and(|status| status == "pass")
+        && matrix["stage_summary"]["cells_missing_stage_breakdown"]
+            .as_u64()
+            .is_some_and(|value| value == 0)
+        && matrix["stage_summary"]["cells_with_complete_stage_breakdown"].as_u64()
+            == matrix["matrix_requirements"]["required_cell_count"].as_u64()
+        && ["memory", "correctness", "security"]
+            .into_iter()
+            .all(|guard_name| {
+                matrix["regression_guards"][guard_name]
+                    .as_str()
+                    .is_some_and(|status| status == "pass")
+            });
+    assert_eq!(
+        artifact_ready_for_phase5, expected_artifact_ready_for_phase5,
+        "consumption_contract.artifact_ready_for_phase5 must match deterministic readiness prerequisites"
     );
 
     assert_eq!(

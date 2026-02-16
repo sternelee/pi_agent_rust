@@ -1354,6 +1354,7 @@ fn perf_sli_confidence_and_evidence_labels_are_machine_enforced() {
         "invalid_confidence_label",
         "microbench_only_claim",
         "global_claim_missing_partition_coverage",
+        "unresolved_conflicting_claims",
     ] {
         assert!(
             fail_closed.contains(condition),
@@ -1381,6 +1382,14 @@ fn run_all_claim_integrity_gate_wires_fail_closed_conditions() {
         "claim_integrity.phase1_matrix_primary_outcomes_status_valid",
         "claim_integrity.phase1_matrix_primary_outcomes_metrics_present",
         "claim_integrity.phase1_matrix_primary_outcomes_ordering_policy",
+        "claim_integrity.phase1_matrix_regression_guards_object",
+        "claim_integrity.phase1_matrix_regression_guards_required_fields",
+        "claim_integrity.phase1_matrix_regression_guard_reasons_format",
+        "claim_integrity.phase1_matrix_regression_guard_reasons_known",
+        "claim_integrity.phase1_matrix_regression_guard_status_valid",
+        "claim_integrity.phase1_matrix_regression_guard_reason_alignment",
+        "failure_or_gap_reasons",
+        "_regression_unverified",
         "claim_integrity.phase1_matrix_cells_primary_e2e_metrics_present",
         "primary_e2e_before_microbench",
         "claim_integrity.missing_or_stale_evidence",
@@ -1392,7 +1401,13 @@ fn run_all_claim_integrity_gate_wires_fail_closed_conditions() {
         "claim_integrity.invalid_confidence_label",
         "claim_integrity.realistic_session_shape_coverage",
         "claim_integrity.microbench_only_claim",
+        "cherry_pick_guard.global_claim_valid must be true",
+        "required_layers = [",
+        "\"full_e2e_long_session\",",
+        "extension_stratification.global_claim_valid",
         "claim_integrity.global_claim_missing_partition_coverage",
+        "claim_integrity.evidence_adjudication_matrix_schema",
+        "claim_integrity.unresolved_conflicting_claims",
     ] {
         assert!(
             run_all.contains(token),
@@ -1441,6 +1456,28 @@ fn run_all_emits_scenario_cell_status_artifacts() {
         assert!(
             run_all.contains(token),
             "scripts/e2e/run_all.sh must include scenario-cell status token: {token}"
+        );
+    }
+}
+
+#[test]
+fn run_all_emits_evidence_adjudication_matrix_artifacts() {
+    let run_all = load_text("scripts/e2e/run_all.sh");
+
+    for token in [
+        "pi.claim_integrity.evidence_adjudication_matrix.v1",
+        "claim_integrity_evidence_adjudication_matrix.json",
+        "claim_integrity_evidence_adjudication_matrix.md",
+        "claim_integrity.evidence_adjudication_matrix_json",
+        "claim_integrity.evidence_adjudication_matrix_markdown",
+        "\"claim_integrity_adjudication_matrix\"",
+        "\"unresolved_conflict_count\"",
+        "\"canonical_sources\"",
+        "\"stale_or_noncanonical_sources\"",
+    ] {
+        assert!(
+            run_all.contains(token),
+            "scripts/e2e/run_all.sh must include adjudication-matrix token: {token}"
         );
     }
 }
