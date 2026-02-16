@@ -9780,6 +9780,65 @@ mod tests {
     }
 
     #[test]
+    fn parse_protocol_hostcall_method_normalizes_case_and_whitespace() {
+        assert!(matches!(
+            parse_protocol_hostcall_method(" Tool "),
+            Some(ProtocolHostcallMethod::Tool)
+        ));
+        assert!(matches!(
+            parse_protocol_hostcall_method("EXEC"),
+            Some(ProtocolHostcallMethod::Exec)
+        ));
+        assert!(matches!(
+            parse_protocol_hostcall_method(" session "),
+            Some(ProtocolHostcallMethod::Session)
+        ));
+    }
+
+    #[test]
+    fn parse_protocol_hostcall_method_rejects_unknown_or_empty_values() {
+        assert!(parse_protocol_hostcall_method("").is_none());
+        assert!(parse_protocol_hostcall_method("   ").is_none());
+        assert!(parse_protocol_hostcall_method("not_a_method").is_none());
+    }
+
+    #[test]
+    fn protocol_error_fallback_reason_preserves_invalid_request_taxonomy() {
+        assert_eq!(
+            protocol_error_fallback_reason("tool", "invalid_request"),
+            "schema_validation_failed"
+        );
+        assert_eq!(
+            protocol_error_fallback_reason("  SESSION ", "invalid_request"),
+            "schema_validation_failed"
+        );
+        assert_eq!(
+            protocol_error_fallback_reason("unknown", "invalid_request"),
+            "unsupported_method_fallback"
+        );
+    }
+
+    #[test]
+    fn protocol_error_fallback_reason_maps_non_invalid_request_codes() {
+        assert_eq!(
+            protocol_error_fallback_reason("tool", "denied"),
+            "policy_denied"
+        );
+        assert_eq!(
+            protocol_error_fallback_reason("tool", "timeout"),
+            "handler_timeout"
+        );
+        assert_eq!(
+            protocol_error_fallback_reason("tool", "tool_error"),
+            "handler_error"
+        );
+        assert_eq!(
+            protocol_error_fallback_reason("tool", "unexpected"),
+            "runtime_internal_error"
+        );
+    }
+
+    #[test]
     fn protocol_normalize_output_passes_object_through() {
         let obj = serde_json::json!({ "key": "value" });
         assert_eq!(protocol_normalize_output(obj.clone()), obj);
@@ -9843,6 +9902,46 @@ mod tests {
             timeout_ms: None,
             cancel_token: None,
             context: None,
+        }
+    }
+
+    fn assert_protocol_result_equivalent_except_error_details(
+        plain: &HostResultPayload,
+        traced: &HostResultPayload,
+    ) {
+        assert_eq!(plain.call_id, traced.call_id);
+        assert_eq!(plain.output, traced.output);
+        assert_eq!(plain.is_error, traced.is_error);
+        assert_eq!(
+            plain.chunk.as_ref().map(|chunk| {
+                (
+                    chunk.index,
+                    chunk.is_last,
+                    chunk
+                        .backpressure
+                        .as_ref()
+                        .map(|bp| (bp.credits, bp.delay_ms)),
+                )
+            }),
+            traced.chunk.as_ref().map(|chunk| {
+                (
+                    chunk.index,
+                    chunk.is_last,
+                    chunk
+                        .backpressure
+                        .as_ref()
+                        .map(|bp| (bp.credits, bp.delay_ms)),
+                )
+            })
+        );
+        match (plain.error.as_ref(), traced.error.as_ref()) {
+            (None, None) => {}
+            (Some(plain_error), Some(traced_error)) => {
+                assert_eq!(plain_error.code, traced_error.code);
+                assert_eq!(plain_error.message, traced_error.message);
+                assert_eq!(plain_error.retryable, traced_error.retryable);
+            }
+            _ => panic!("plain and traced protocol results disagree on error presence"),
         }
     }
 
@@ -9942,6 +10041,77 @@ mod tests {
         );
         let error = result.error.expect("should have error");
         assert_eq!(error.code, HostCallErrorCode::Internal);
+    }
+
+    #[test]
+    fn hostcall_outcome_to_protocol_result_with_trace_success_equivalent_to_plain() {
+        let payload = test_protocol_payload("call-trace-success");
+        let outcome = HostcallOutcome::Success(serde_json::json!({
+            "ok": true,
+            "nested": { "n": 7 }
+        }));
+        let plain = hostcall_outcome_to_protocol_result(&payload.call_id, outcome.clone());
+        let traced = hostcall_outcome_to_protocol_result_with_trace(&payload, outcome);
+
+        assert_protocol_result_equivalent_except_error_details(&plain, &traced);
+        assert!(traced.error.is_none());
+    }
+
+    #[test]
+    fn hostcall_outcome_to_protocol_result_with_trace_stream_equivalent_to_plain() {
+        let payload = test_protocol_payload("call-trace-stream");
+        let outcome = HostcallOutcome::StreamChunk {
+            sequence: 3,
+            chunk: serde_json::json!({ "stdout": "chunk" }),
+            is_final: false,
+        };
+        let plain = hostcall_outcome_to_protocol_result(&payload.call_id, outcome.clone());
+        let traced = hostcall_outcome_to_protocol_result_with_trace(&payload, outcome);
+
+        assert_protocol_result_equivalent_except_error_details(&plain, &traced);
+        assert!(traced.error.is_none());
+    }
+
+    #[test]
+    fn hostcall_outcome_to_protocol_result_with_trace_error_adds_details_without_mutating_error_core()
+     {
+        let mut payload = test_protocol_payload("call-trace-error");
+        payload.method = "tool".to_string();
+        payload.params = serde_json::json!({ "zeta": 1, "alpha": 2 });
+        let outcome = HostcallOutcome::Error {
+            code: "invalid_request".to_string(),
+            message: "invalid payload".to_string(),
+        };
+        let plain = hostcall_outcome_to_protocol_result(&payload.call_id, outcome.clone());
+        let traced = hostcall_outcome_to_protocol_result_with_trace(&payload, outcome);
+
+        assert_protocol_result_equivalent_except_error_details(&plain, &traced);
+
+        let plain_error = plain.error.expect("plain conversion should include error");
+        assert!(
+            plain_error.details.is_none(),
+            "plain conversion should not inject trace details"
+        );
+        let traced_error = traced.error.expect("trace conversion should include error");
+        let details = traced_error
+            .details
+            .expect("trace conversion should include structured details");
+        assert_eq!(
+            details["dispatcherDecisionTrace"]["fallbackReason"],
+            serde_json::json!("schema_validation_failed")
+        );
+        assert_eq!(
+            details["schemaDiff"]["observedParamKeys"],
+            serde_json::json!(["alpha", "zeta"])
+        );
+        assert_eq!(
+            details["extensionInput"]["callId"],
+            serde_json::json!("call-trace-error")
+        );
+        assert_eq!(
+            details["extensionOutput"]["code"],
+            serde_json::json!("invalid_request")
+        );
     }
 
     #[test]
