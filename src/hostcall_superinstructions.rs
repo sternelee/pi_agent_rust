@@ -692,4 +692,161 @@ mod tests {
         let disabled = HostcallSuperinstructionCompiler::new(false, 2, 3);
         assert!(!disabled.enabled());
     }
+
+    // ── Property tests ──
+
+    mod proptest_superinstructions {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn arb_opcode() -> impl Strategy<Value = String> {
+            prop::sample::select(vec![
+                "session.get_state".to_string(),
+                "session.get_messages".to_string(),
+                "events.list".to_string(),
+                "events.emit".to_string(),
+                "tool.read".to_string(),
+                "tool.write".to_string(),
+                "events.get_model".to_string(),
+                "session.set_label".to_string(),
+            ])
+        }
+
+        fn arb_trace() -> impl Strategy<Value = Vec<String>> {
+            prop::collection::vec(arb_opcode(), 0..6)
+        }
+
+        fn arb_compiler() -> impl Strategy<Value = HostcallSuperinstructionCompiler> {
+            (2..8u32, 2..6usize).prop_map(|(min_support, max_window)| {
+                HostcallSuperinstructionCompiler::new(true, min_support, max_window)
+            })
+        }
+
+        proptest! {
+            #[test]
+            fn compile_plans_is_deterministic(
+                compiler in arb_compiler(),
+                traces in prop::collection::vec(arb_trace(), 0..8),
+            ) {
+                let plans1 = compiler.compile_plans(&traces);
+                let plans2 = compiler.compile_plans(&traces);
+                assert!(plans1 == plans2, "compile_plans must be deterministic");
+            }
+
+            #[test]
+            fn all_plans_have_positive_cost_delta(
+                compiler in arb_compiler(),
+                traces in prop::collection::vec(arb_trace(), 1..8),
+            ) {
+                let plans = compiler.compile_plans(&traces);
+                for plan in &plans {
+                    assert!(
+                        plan.expected_cost_delta > 0,
+                        "plan {} has non-positive delta {}",
+                        plan.plan_id,
+                        plan.expected_cost_delta,
+                    );
+                }
+            }
+
+            #[test]
+            fn plans_sorted_by_cost_delta_descending(
+                compiler in arb_compiler(),
+                traces in prop::collection::vec(arb_trace(), 1..8),
+            ) {
+                let plans = compiler.compile_plans(&traces);
+                for pair in plans.windows(2) {
+                    assert!(
+                        pair[0].expected_cost_delta >= pair[1].expected_cost_delta,
+                        "plans must be sorted by cost delta descending: {} vs {}",
+                        pair[0].expected_cost_delta,
+                        pair[1].expected_cost_delta,
+                    );
+                }
+            }
+
+            #[test]
+            fn cost_delta_equals_baseline_minus_fused(
+                width in 2..64usize,
+            ) {
+                let baseline = estimated_baseline_cost(width);
+                let fused = estimated_fused_cost(width);
+                let delta = baseline.saturating_sub(fused);
+                assert!(
+                    delta > 0,
+                    "fused cost must be less than baseline for width {width}"
+                );
+                assert!(
+                    delta == baseline - fused,
+                    "delta must equal baseline - fused"
+                );
+            }
+
+            #[test]
+            fn fused_cost_strictly_less_than_baseline_for_width_ge_2(
+                width in 2..1000usize,
+            ) {
+                let baseline = estimated_baseline_cost(width);
+                let fused = estimated_fused_cost(width);
+                assert!(
+                    fused < baseline,
+                    "fused ({fused}) must be < baseline ({baseline}) at width {width}"
+                );
+            }
+
+            #[test]
+            fn opcode_window_signature_is_deterministic(
+                window in prop::collection::vec(arb_opcode(), 1..6),
+            ) {
+                let sig1 = opcode_window_signature(&window);
+                let sig2 = opcode_window_signature(&window);
+                assert!(sig1 == sig2, "signature must be deterministic");
+                assert!(sig1.len() == 16, "signature must be 16 hex chars");
+            }
+
+            #[test]
+            fn disabled_compiler_always_returns_empty(
+                min_support in 1..10u32,
+                max_window in 2..8usize,
+                traces in prop::collection::vec(arb_trace(), 0..8),
+            ) {
+                let compiler = HostcallSuperinstructionCompiler::new(false, min_support, max_window);
+                let plans = compiler.compile_plans(&traces);
+                assert!(plans.is_empty(), "disabled compiler must return no plans");
+            }
+
+            #[test]
+            fn plan_width_never_exceeds_max_window(
+                compiler in arb_compiler(),
+                traces in prop::collection::vec(arb_trace(), 1..8),
+            ) {
+                let plans = compiler.compile_plans(&traces);
+                for plan in &plans {
+                    assert!(
+                        plan.width() <= compiler.max_window(),
+                        "plan width {} exceeds max_window {}",
+                        plan.width(),
+                        compiler.max_window(),
+                    );
+                }
+            }
+
+            #[test]
+            fn plan_support_count_meets_min_support(
+                compiler in arb_compiler(),
+                traces in prop::collection::vec(arb_trace(), 1..10),
+            ) {
+                let plans = compiler.compile_plans(&traces);
+                for plan in &plans {
+                    assert!(
+                        plan.support_count >= compiler.min_support(),
+                        "plan {} has support {} < min_support {}",
+                        plan.plan_id,
+                        plan.support_count,
+                        compiler.min_support(),
+                    );
+                }
+            }
+        }
+    }
 }

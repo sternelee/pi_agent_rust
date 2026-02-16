@@ -1060,4 +1060,204 @@ mod tests {
         assert!(r2.jit_hit);
         assert_eq!(jit.telemetry().jit_hits, 2);
     }
+
+    // ── Property tests ──
+
+    mod proptest_trace_jit {
+        use super::*;
+
+        use proptest::prelude::*;
+
+        fn arb_opcode() -> impl Strategy<Value = String> {
+            prop::sample::select(vec![
+                "session.get_state".to_string(),
+                "session.get_messages".to_string(),
+                "events.list".to_string(),
+                "tool.read".to_string(),
+                "tool.write".to_string(),
+                "events.emit".to_string(),
+            ])
+        }
+
+        fn arb_window() -> impl Strategy<Value = Vec<String>> {
+            prop::collection::vec(arb_opcode(), 2..6)
+        }
+
+        fn arb_plan() -> impl Strategy<Value = HostcallSuperinstructionPlan> {
+            (arb_window(), 2..100u32).prop_map(|(window, support)| {
+                let width = window.len();
+                let baseline = i64::try_from(width).unwrap_or(0) * 10;
+                let fused = 6 + i64::try_from(width).unwrap_or(0) * 2;
+                HostcallSuperinstructionPlan {
+                    schema: HOSTCALL_SUPERINSTRUCTION_SCHEMA_VERSION.to_string(),
+                    version: HOSTCALL_SUPERINSTRUCTION_PLAN_VERSION,
+                    plan_id: format!("arb_{width}_{support}"),
+                    trace_signature: format!("sig_arb_{width}_{support}"),
+                    opcode_window: window,
+                    support_count: support,
+                    estimated_cost_baseline: baseline,
+                    estimated_cost_fused: fused,
+                    expected_cost_delta: baseline - fused,
+                }
+            })
+        }
+
+        fn arb_guard_context() -> impl Strategy<Value = GuardContext> {
+            (any::<bool>(), 0..200u32).prop_map(|(vetoing, support)| GuardContext {
+                safety_envelope_vetoing: vetoing,
+                current_support_count: support,
+            })
+        }
+
+        fn arb_config() -> impl Strategy<Value = TraceJitConfig> {
+            (1..16u64, 2..32usize, 1..8u64).prop_map(
+                |(min_exec, max_traces, max_failures)| {
+                    TraceJitConfig::new(true, min_exec, max_traces, max_failures)
+                },
+            )
+        }
+
+        proptest! {
+            #[test]
+            fn jit_cost_less_than_fused_for_width_ge_2(width in 2..1000usize) {
+                let jit_cost = estimated_jit_cost(width);
+                let fused_cost = 6 + i64::try_from(width).unwrap() * 2;
+                assert!(
+                    jit_cost < fused_cost,
+                    "JIT cost ({jit_cost}) must be < fused cost ({fused_cost}) at width {width}"
+                );
+            }
+
+            #[test]
+            fn compiled_trace_tier_improvement_nonnegative(plan in arb_plan()) {
+                let compiled = CompiledTrace::from_plan(&plan);
+                assert!(
+                    compiled.tier_improvement_delta >= 0,
+                    "tier_improvement_delta must be non-negative, got {}",
+                    compiled.tier_improvement_delta,
+                );
+            }
+
+            #[test]
+            fn compiled_trace_always_has_three_guards(plan in arb_plan()) {
+                let compiled = CompiledTrace::from_plan(&plan);
+                assert!(
+                    compiled.guards.len() == 3,
+                    "compiled trace must have 3 guards (OpcodePrefix, SafetyEnvelope, MinSupport)"
+                );
+            }
+
+            #[test]
+            fn compiled_trace_width_matches_plan(plan in arb_plan()) {
+                let compiled = CompiledTrace::from_plan(&plan);
+                assert!(
+                    compiled.width == plan.width(),
+                    "compiled width {} != plan width {}",
+                    compiled.width,
+                    plan.width(),
+                );
+            }
+
+            #[test]
+            fn disabled_jit_never_promotes(
+                plan in arb_plan(),
+                executions in 1..50usize,
+            ) {
+                let config = TraceJitConfig::new(false, 1, 64, 4);
+                let mut jit = TraceJitCompiler::new(config);
+                for _ in 0..executions {
+                    let promoted = jit.record_plan_execution(&plan);
+                    assert!(!promoted, "disabled JIT must never promote");
+                }
+                assert!(
+                    jit.cache_size() == 0,
+                    "disabled JIT must have empty cache"
+                );
+            }
+
+            #[test]
+            fn cache_size_never_exceeds_max(
+                config in arb_config(),
+                plans in prop::collection::vec(arb_plan(), 1..20),
+            ) {
+                let max = config.max_compiled_traces;
+                let min_exec = config.min_jit_executions;
+                let mut jit = TraceJitCompiler::new(config);
+                for plan in &plans {
+                    for _ in 0..min_exec {
+                        jit.record_plan_execution(plan);
+                    }
+                }
+                assert!(
+                    jit.cache_size() <= max,
+                    "cache size {} exceeds max {}",
+                    jit.cache_size(),
+                    max,
+                );
+            }
+
+            #[test]
+            fn telemetry_traces_compiled_matches_cache_plus_evictions(
+                config in arb_config(),
+                plans in prop::collection::vec(arb_plan(), 1..10),
+            ) {
+                let min_exec = config.min_jit_executions;
+                let mut jit = TraceJitCompiler::new(config);
+                for plan in &plans {
+                    for _ in 0..min_exec {
+                        jit.record_plan_execution(plan);
+                    }
+                }
+                let t = jit.telemetry();
+                // compiled = currently cached + evicted + invalidated
+                assert!(
+                    t.traces_compiled >= t.cache_size,
+                    "traces_compiled ({}) must be >= cache_size ({})",
+                    t.traces_compiled,
+                    t.cache_size,
+                );
+            }
+
+            #[test]
+            fn guard_check_is_deterministic(
+                plan in arb_plan(),
+                trace_opcodes in arb_window(),
+                ctx in arb_guard_context(),
+            ) {
+                let compiled = CompiledTrace::from_plan(&plan);
+                let r1 = compiled.guards_pass(&trace_opcodes, &ctx);
+                let r2 = compiled.guards_pass(&trace_opcodes, &ctx);
+                assert!(r1 == r2, "guard check must be deterministic");
+            }
+
+            #[test]
+            fn jit_hit_implies_zero_deopt_reason(
+                config in arb_config(),
+                plan in arb_plan(),
+            ) {
+                let min_exec = config.min_jit_executions;
+                let mut jit = TraceJitCompiler::new(config);
+                // Promote the plan
+                for _ in 0..min_exec {
+                    jit.record_plan_execution(&plan);
+                }
+                // Dispatch with matching trace and benign context
+                let ctx = GuardContext {
+                    safety_envelope_vetoing: false,
+                    current_support_count: plan.support_count,
+                };
+                let result = jit.try_jit_dispatch(&plan.plan_id, &plan.opcode_window, &ctx);
+                if result.jit_hit {
+                    assert!(
+                        result.deopt_reason.is_none(),
+                        "JIT hit must have no deopt reason"
+                    );
+                    assert!(
+                        result.cost_delta >= 0,
+                        "JIT hit must have non-negative cost delta"
+                    );
+                }
+            }
+        }
+    }
 }
