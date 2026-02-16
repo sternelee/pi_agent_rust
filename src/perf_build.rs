@@ -275,4 +275,138 @@ mod tests {
             assert!(resolved.fallback_reason.is_none());
         }
     }
+
+    // ── Property tests ──
+
+    mod proptest_perf_build {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn resolve_allocator_effective_is_always_compiled(
+                raw_value in prop::option::of("[a-z]{0,20}"),
+            ) {
+                let resolved = resolve_bench_allocator_from(raw_value.as_deref());
+                assert!(
+                    resolved.effective == super::super::compiled_allocator(),
+                    "effective allocator must always be compiled allocator"
+                );
+            }
+
+            #[test]
+            fn resolve_allocator_known_tokens_have_no_unknown_fallback(
+                token in prop::sample::select(vec![
+                    "auto", "default", "system", "native", "jemalloc", "je",
+                ]),
+            ) {
+                let resolved = resolve_bench_allocator_from(Some(token));
+                // Known tokens never produce "unknown allocator" fallback
+                if let Some(reason) = &resolved.fallback_reason {
+                    assert!(
+                        !reason.starts_with("unknown allocator"),
+                        "known token '{token}' should not produce unknown fallback: {reason}"
+                    );
+                }
+            }
+
+            #[test]
+            fn resolve_allocator_unknown_tokens_always_have_fallback(
+                token in "[a-z]{3,10}".prop_filter(
+                    "must not be known",
+                    |t| !matches!(t.as_str(), "auto" | "default" | "system" | "native" | "jemalloc" | "je"),
+                ),
+            ) {
+                let resolved = resolve_bench_allocator_from(Some(&token));
+                assert!(
+                    resolved.fallback_reason.is_some(),
+                    "unknown token '{token}' must produce a fallback reason"
+                );
+                assert!(
+                    resolved.requested == token,
+                    "unknown token should be passed through as-is"
+                );
+            }
+
+            #[test]
+            fn resolve_allocator_empty_or_whitespace_defaults_to_auto(
+                value in prop::sample::select(vec!["", " ", "  ", "\t"]),
+            ) {
+                let resolved = resolve_bench_allocator_from(Some(value));
+                assert!(
+                    resolved.requested == "auto",
+                    "empty/whitespace should default to 'auto', got '{}'",
+                    resolved.requested,
+                );
+                assert!(resolved.requested_source == "default");
+            }
+
+            #[test]
+            fn resolve_allocator_none_defaults_to_auto(_dummy in Just(())) {
+                let resolved = resolve_bench_allocator_from(None);
+                assert!(resolved.requested == "auto");
+                assert!(resolved.requested_source == "default");
+                assert!(resolved.fallback_reason.is_none());
+            }
+
+            #[test]
+            fn profile_from_target_path_requires_target_dir(
+                dir in "[a-z]{1,10}",
+                binary in "[a-z_]{1,10}",
+            ) {
+                // Paths without "target" component always return None
+                let path_str = format!("/{dir}/{binary}");
+                let path = Path::new(&path_str);
+                assert!(
+                    profile_from_target_path(path).is_none(),
+                    "path without 'target' should return None: {path_str}"
+                );
+            }
+
+            #[test]
+            fn profile_from_target_path_extracts_profile(
+                profile in "[a-z]{3,10}",
+                binary in "[a-z_]{3,10}",
+            ) {
+                let path_str = format!("/repo/target/{profile}/{binary}");
+                let path = Path::new(&path_str);
+                let result = profile_from_target_path(path);
+                assert!(
+                    result == Some(profile.clone()),
+                    "expected Some(\"{profile}\"), got {result:?} for path {path_str}"
+                );
+            }
+
+            #[test]
+            fn detect_build_profile_env_overrides_all(
+                env_val in "[a-z]{1,15}",
+            ) {
+                let result = detect_build_profile_from(
+                    Some(&env_val),
+                    Some(Path::new("/target/release/bin")),
+                    true,
+                );
+                assert!(
+                    result == env_val,
+                    "env override should take priority: expected '{env_val}', got '{result}'"
+                );
+            }
+
+            #[test]
+            fn allocator_kind_as_str_is_stable(
+                kind in prop::sample::select(vec![
+                    AllocatorKind::System,
+                    AllocatorKind::Jemalloc,
+                ]),
+            ) {
+                let s1 = kind.as_str();
+                let s2 = kind.as_str();
+                assert!(s1 == s2, "as_str must be deterministic");
+                assert!(
+                    s1 == "system" || s1 == "jemalloc",
+                    "as_str must return known value: {s1}"
+                );
+            }
+        }
+    }
 }

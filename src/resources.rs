@@ -2246,4 +2246,286 @@ still frontmatter",
         assert_eq!(result.skills.len(), 1);
         assert_eq!(result.skills[0].name, "my-skill");
     }
+
+    // ── Property tests ──────────────────────────────────────────────────
+
+    mod proptest_resources {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn arb_valid_name() -> impl Strategy<Value = String> {
+            "[a-z0-9]([a-z0-9]|(-[a-z0-9])){0,20}".prop_filter(
+                "no consecutive hyphens",
+                |s| !s.contains("--"),
+            )
+        }
+
+        proptest! {
+            #[test]
+            fn validate_name_accepts_valid_names(name in arb_valid_name()) {
+                let errors = validate_name(&name, &name);
+                assert!(
+                    errors.is_empty(),
+                    "valid name '{name}' should have no errors, got: {errors:?}"
+                );
+            }
+
+            #[test]
+            fn validate_name_rejects_uppercase(
+                prefix in "[a-z]{1,5}",
+                upper in "[A-Z]{1,3}",
+                suffix in "[a-z]{1,5}",
+            ) {
+                let name = format!("{prefix}{upper}{suffix}");
+                let errors = validate_name(&name, &name);
+                assert!(
+                    errors.iter().any(|e| e.contains("invalid characters")),
+                    "uppercase in '{name}' should be rejected, got: {errors:?}"
+                );
+            }
+
+            #[test]
+            fn validate_name_rejects_leading_or_trailing_hyphen(
+                core in "[a-z]{1,10}",
+                leading in proptest::bool::ANY,
+            ) {
+                let name = if leading {
+                    format!("-{core}")
+                } else {
+                    format!("{core}-")
+                };
+                let errors = validate_name(&name, &name);
+                assert!(
+                    errors.iter().any(|e| e.contains("must not start or end with a hyphen")),
+                    "name '{name}' should fail hyphen check, got: {errors:?}"
+                );
+            }
+
+            #[test]
+            fn validate_name_rejects_consecutive_hyphens(
+                left in "[a-z]{1,8}",
+                right in "[a-z]{1,8}",
+            ) {
+                let name = format!("{left}--{right}");
+                let errors = validate_name(&name, &name);
+                assert!(
+                    errors.iter().any(|e| e.contains("consecutive hyphens")),
+                    "name '{name}' should fail consecutive-hyphen check, got: {errors:?}"
+                );
+            }
+
+            #[test]
+            fn validate_name_length_limit_enforced(extra_len in 1..100usize) {
+                let name: String = "a".repeat(MAX_SKILL_NAME_LEN + extra_len);
+                let errors = validate_name(&name, &name);
+                assert!(
+                    errors.iter().any(|e| e.contains("exceeds")),
+                    "name of length {} should exceed limit, got: {errors:?}",
+                    name.len()
+                );
+            }
+
+            #[test]
+            fn validate_description_accepts_within_limit(
+                desc in "[a-zA-Z]{1,5}[a-zA-Z ]{0,95}",
+            ) {
+                let errors = validate_description(&desc);
+                assert!(
+                    errors.is_empty(),
+                    "short description should be valid, got: {errors:?}"
+                );
+            }
+
+            #[test]
+            fn validate_description_rejects_over_limit(extra in 1..200usize) {
+                let desc = "x".repeat(MAX_SKILL_DESC_LEN + extra);
+                let errors = validate_description(&desc);
+                assert!(
+                    errors.iter().any(|e| e.contains("exceeds")),
+                    "description of length {} should exceed limit",
+                    desc.len()
+                );
+            }
+
+            #[test]
+            fn escape_xml_idempotent_on_safe_strings(s in "[a-zA-Z0-9 ]{0,50}") {
+                assert_eq!(
+                    escape_xml(&s), s,
+                    "safe string should pass through unchanged"
+                );
+            }
+
+            #[test]
+            fn escape_xml_output_never_contains_raw_special_chars(s in ".*") {
+                let escaped = escape_xml(&s);
+                // After escaping, no raw `<`, `>`, `&` (except in escape sequences),
+                // `"`, or `'` should remain unescaped.
+                // We check that re-escaping is idempotent on the escaped output.
+                // A simpler check: the escaped output, when re-escaped, should only
+                // double-encode the `&` in existing entities.
+                let double_escaped = escape_xml(&escaped);
+                // If no raw specials in escaped, then double-escape only affects `&`
+                // in entities like `&amp;` → `&amp;amp;`.
+                // We just check the output doesn't contain bare `<` or `>`.
+                assert!(
+                    !escaped.contains('<') && !escaped.contains('>'),
+                    "escaped output should not contain raw < or >: {escaped}"
+                );
+                let _ = double_escaped; // suppress unused warning
+            }
+
+            #[test]
+            fn parse_command_args_round_trip_simple_tokens(
+                tokens in prop::collection::vec("[a-zA-Z0-9]{1,10}", 0..8),
+            ) {
+                let input = tokens.join(" ");
+                let parsed = parse_command_args(&input);
+                assert_eq!(
+                    parsed, tokens,
+                    "simple space-separated tokens should round-trip"
+                );
+            }
+
+            #[test]
+            fn parse_command_args_quoted_preserves_spaces(
+                before in "[a-z]{1,5}",
+                inner in "[a-z ]{1,10}",
+                after in "[a-z]{1,5}",
+            ) {
+                let input = format!("{before} \"{inner}\" {after}");
+                let parsed = parse_command_args(&input);
+                assert!(
+                    parsed.contains(&inner),
+                    "quoted token '{inner}' should appear in parsed output: {parsed:?}"
+                );
+            }
+
+            #[test]
+            fn substitute_args_positional_in_range(
+                idx in 1..10usize,
+                values in prop::collection::vec("[a-z]{1,5}", 1..10),
+            ) {
+                let template = format!("${idx}");
+                let result = substitute_args(&template, &values);
+                let expected = values.get(idx.saturating_sub(1)).cloned().unwrap_or_default();
+                assert_eq!(
+                    result, expected,
+                    "positional ${idx} should resolve correctly"
+                );
+            }
+
+            #[test]
+            fn substitute_args_dollar_at_is_all_joined(
+                values in prop::collection::vec("[a-z]{1,5}", 0..8),
+            ) {
+                let result = substitute_args("$@", &values);
+                let expected = values.join(" ");
+                assert_eq!(result, expected, "$@ should join all args");
+            }
+
+            #[test]
+            fn substitute_args_arguments_equals_dollar_at(
+                values in prop::collection::vec("[a-z]{1,5}", 0..8),
+            ) {
+                let r1 = substitute_args("$@", &values);
+                let r2 = substitute_args("$ARGUMENTS", &values);
+                assert_eq!(r1, r2, "$@ and $ARGUMENTS should be equivalent");
+            }
+
+            #[test]
+            fn parse_frontmatter_no_dashes_returns_raw_body(
+                body in "[a-zA-Z0-9 \n]{0,100}",
+            ) {
+                let parsed = parse_frontmatter(&body);
+                assert!(
+                    parsed.frontmatter.is_empty(),
+                    "no --- means no frontmatter"
+                );
+                assert_eq!(parsed.body, body);
+            }
+
+            #[test]
+            fn parse_frontmatter_unclosed_returns_raw(
+                key in "[a-z]{1,8}",
+                val in "[a-z]{1,8}",
+            ) {
+                let raw = format!("---\n{key}: {val}\nmore stuff");
+                let parsed = parse_frontmatter(&raw);
+                assert!(
+                    parsed.frontmatter.is_empty(),
+                    "unclosed frontmatter should return empty map"
+                );
+                assert_eq!(parsed.body, raw);
+            }
+
+            #[test]
+            fn parse_frontmatter_closed_extracts_key_value(
+                key in "[a-z]{1,8}",
+                val in "[a-z]{1,8}",
+                body in "[a-z ]{0,30}",
+            ) {
+                let raw = format!("---\n{key}: {val}\n---\n{body}");
+                let parsed = parse_frontmatter(&raw);
+                assert_eq!(
+                    parsed.frontmatter.get(&key),
+                    Some(&val),
+                    "closed frontmatter should extract {key}: {val}"
+                );
+                assert_eq!(parsed.body, body);
+            }
+
+            #[test]
+            fn resolve_path_absolute_is_identity(
+                suffix in "[a-z]{1,10}(/[a-z]{1,10}){0,3}",
+            ) {
+                let abs = format!("/{suffix}");
+                let cwd = Path::new("/some/cwd");
+                let resolved = resolve_path(&abs, cwd);
+                assert_eq!(
+                    resolved,
+                    PathBuf::from(&abs),
+                    "absolute path should pass through unchanged"
+                );
+            }
+
+            #[test]
+            fn resolve_path_relative_is_under_cwd(
+                rel in "[a-z]{1,10}(/[a-z]{1,10}){0,2}",
+            ) {
+                let cwd = Path::new("/work/dir");
+                let resolved = resolve_path(&rel, cwd);
+                assert!(
+                    resolved.starts_with(cwd),
+                    "relative path should resolve under cwd: {resolved:?}"
+                );
+            }
+
+            #[test]
+            fn dedupe_paths_preserves_first_and_removes_dups(
+                paths in prop::collection::vec("[a-z]{1,5}", 1..20),
+            ) {
+                let path_bufs: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+                let deduped = dedupe_paths(path_bufs.clone());
+
+                // All elements in deduped should be unique
+                let unique: HashSet<String> = deduped.iter()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect();
+                assert_eq!(
+                    deduped.len(), unique.len(),
+                    "deduped output must contain no duplicates"
+                );
+
+                // First occurrence order preserved
+                let mut seen = HashSet::new();
+                let expected: Vec<&PathBuf> = path_bufs.iter()
+                    .filter(|p| seen.insert(p.to_string_lossy().to_string()))
+                    .collect();
+                assert_eq!(
+                    deduped.iter().collect::<Vec<_>>(), expected,
+                    "deduped must preserve first-occurrence order"
+                );
+            }
+        }
+    }
 }
