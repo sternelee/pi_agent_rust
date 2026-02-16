@@ -2694,6 +2694,9 @@ fn run_all_wires_scenario_cell_status_artifacts_into_evidence_contract() {
         .unwrap_or_else(|err| panic!("failed to read {RUN_ALL_SCRIPT_PATH}: {err}"));
 
     for token in [
+        "CLAIM_INTEGRITY_REQUIRED",
+        "PERF_BASELINE_CONFIDENCE_JSON",
+        "PERF_EXTENSION_STRATIFICATION_JSON",
         "claim_integrity_scenario_cell_status.json",
         "claim_integrity_scenario_cell_status.md",
         "pi.claim_integrity.scenario_cell_status.v1",
@@ -2722,6 +2725,7 @@ fn run_all_wires_scenario_cell_status_artifacts_into_evidence_contract() {
         "claim_integrity.phase1_matrix_regression_guard_status_valid",
         "claim_integrity.phase1_matrix_regression_guard_reason_alignment",
         "claim_integrity.phase1_matrix_regression_guard_reason_set_exact",
+        "_regression_unverified",
         "failure_or_gap_reasons",
         "expected_regression_guard_reason_set",
         "claim_id=\"phase1_matrix_validation.matrix_cells.status\"",

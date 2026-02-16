@@ -10228,6 +10228,11 @@ mod tests {
                     "message": "hello",
                 }),
             ),
+            test_hostcall_request(
+                "log-non-object-case",
+                HostcallKind::Log,
+                serde_json::json!("raw-log-payload"),
+            ),
             test_hostcall_request("log-null-case", HostcallKind::Log, Value::Null),
         ];
 
