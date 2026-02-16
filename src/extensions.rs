@@ -406,6 +406,12 @@ const MARKER_EVAL: u16 = 1 << 6;
 const MARKER_BINDING: u16 = 1 << 7;
 const MARKER_DLOPEN: u16 = 1 << 8;
 
+struct ScannerState {
+    in_block_comment: bool,
+    in_template: bool,
+    last_significant_char: Option<char>,
+}
+
 impl CompatibilityScanner {
     #[must_use]
     pub const fn new(root: PathBuf) -> Self {
@@ -515,15 +521,22 @@ impl CompatibilityScanner {
         };
 
         let rel = relative_posix(&self.root, path);
-        let mut in_block_comment = false;
+        let mut state = ScannerState {
+            in_block_comment: false,
+            in_template: false,
+            last_significant_char: None,
+        };
 
         for (idx, raw_line) in content.lines().enumerate() {
             let line_no = idx + 1;
-            let maybe_contains_comment = in_block_comment
+            let maybe_scan_needed = state.in_block_comment
+                || state.in_template
                 || (raw_line.as_bytes().contains(&b'/')
-                    && (raw_line.contains("//") || raw_line.contains("/*")));
-            let stripped = if maybe_contains_comment {
-                Cow::Owned(strip_js_comments(raw_line, &mut in_block_comment))
+                    && (raw_line.contains("//") || raw_line.contains("/*")))
+                || raw_line.contains('`');
+
+            let stripped = if maybe_scan_needed {
+                Cow::Owned(strip_js_comments(raw_line, &mut state))
             } else {
                 Cow::Borrowed(raw_line)
             };
@@ -1267,33 +1280,61 @@ fn looks_like_node_builtin(module_root: &str) -> bool {
 }
 
 /// Strip single-line (`//`) and block (`/* ... */`) JS comments from a line,
-/// respecting string literals (double/single/backtick).
+/// respecting string literals (double/single/backtick) and regex literals.
 ///
-/// `in_block_comment` carries block-comment state across lines.
-fn strip_js_comments(line: &str, in_block_comment: &mut bool) -> String {
+/// `state` carries block-comment and template-literal state across lines.
+fn strip_js_comments(line: &str, state: &mut ScannerState) -> String {
     let mut result = String::with_capacity(line.len());
     let mut chars = line.chars().peekable();
     let mut in_single_quote = false;
     let mut in_double_quote = false;
-    let mut in_template = false;
+    let mut in_regex = false;
+    let mut in_regex_class = false;
     let mut escaped = false;
 
     while let Some(ch) = chars.next() {
-        if *in_block_comment {
+        if state.in_block_comment {
             if ch == '*' && matches!(chars.peek(), Some('/')) {
                 chars.next();
-                *in_block_comment = false;
+                state.in_block_comment = false;
             }
+            continue;
+        }
+
+        if state.in_template {
+            if escaped {
+                result.push(ch);
+                escaped = false;
+                if !ch.is_whitespace() {
+                    state.last_significant_char = Some(ch);
+                }
+                continue;
+            }
+            if ch == '\\' {
+                result.push(ch);
+                escaped = true;
+                continue;
+            }
+            if ch == '`' {
+                state.in_template = false;
+                state.last_significant_char = Some(ch);
+            } else if !ch.is_whitespace() {
+                state.last_significant_char = Some(ch);
+            }
+            result.push(ch);
             continue;
         }
 
         if escaped {
             result.push(ch);
             escaped = false;
+            if !ch.is_whitespace() {
+                state.last_significant_char = Some(ch);
+            }
             continue;
         }
 
-        if ch == '\\' && (in_single_quote || in_double_quote || in_template) {
+        if ch == '\\' && (in_single_quote || in_double_quote || in_regex) {
             result.push(ch);
             escaped = true;
             continue;
@@ -1304,6 +1345,7 @@ fn strip_js_comments(line: &str, in_block_comment: &mut bool) -> String {
                 in_single_quote = false;
             }
             result.push(ch);
+            state.last_significant_char = Some(ch);
             continue;
         }
 
@@ -1312,36 +1354,90 @@ fn strip_js_comments(line: &str, in_block_comment: &mut bool) -> String {
                 in_double_quote = false;
             }
             result.push(ch);
+            state.last_significant_char = Some(ch);
             continue;
         }
 
-        if in_template {
-            if ch == '`' {
-                in_template = false;
+        if in_regex {
+            if in_regex_class {
+                if ch == ']' {
+                    in_regex_class = false;
+                }
+            } else if ch == '[' {
+                in_regex_class = true;
+            } else if ch == '/' {
+                in_regex = false;
             }
             result.push(ch);
+            state.last_significant_char = Some(ch);
             continue;
         }
 
         match ch {
-            '/' if matches!(chars.peek(), Some(&'/')) => break,
-            '/' if matches!(chars.peek(), Some(&'*')) => {
-                chars.next();
-                *in_block_comment = true;
+            '/' => {
+                if matches!(chars.peek(), Some(&'/')) {
+                    break;
+                }
+                if matches!(chars.peek(), Some(&'*')) {
+                    chars.next();
+                    state.in_block_comment = true;
+                    continue;
+                }
+
+                // Disambiguate regex start vs division.
+                let is_regex_start = match state.last_significant_char {
+                    None => true, // Start of line
+                    Some(c) => matches!(
+                        c,
+                        '=' | '('
+                            | ','
+                            | ':'
+                            | ';'
+                            | '!'
+                            | '&'
+                            | '|'
+                            | '?'
+                            | '['
+                            | '{'
+                            | '}'
+                            | '^'
+                            | '~'
+                            | '*'
+                            | '+'
+                            | '-'
+                            | '<'
+                            | '>'
+                    ),
+                };
+
+                if is_regex_start {
+                    in_regex = true;
+                }
+                result.push(ch);
+                state.last_significant_char = Some(ch);
             }
             '\'' => {
                 in_single_quote = true;
                 result.push(ch);
+                state.last_significant_char = Some(ch);
             }
             '"' => {
                 in_double_quote = true;
                 result.push(ch);
+                state.last_significant_char = Some(ch);
             }
             '`' => {
-                in_template = true;
+                state.in_template = true;
                 result.push(ch);
+                state.last_significant_char = Some(ch);
             }
-            _ => result.push(ch),
+            c if c.is_whitespace() => {
+                result.push(c);
+            }
+            c => {
+                result.push(c);
+                state.last_significant_char = Some(c);
+            }
         }
     }
 
@@ -1350,19 +1446,77 @@ fn strip_js_comments(line: &str, in_block_comment: &mut bool) -> String {
 
 #[cfg(test)]
 mod compatibility_scanner_comment_tests {
-    use super::{CompatibilityScanner, strip_js_comments};
+    use super::{CompatibilityScanner, ScannerState, strip_js_comments};
     use std::fs;
 
     #[test]
     fn strip_js_comments_keeps_comment_markers_inside_strings() {
-        let mut in_block_comment = false;
+        let mut state = ScannerState {
+            in_block_comment: false,
+            in_template: false,
+            last_significant_char: None,
+        };
         let line = r#"const code = "import('fs') // not a comment"; // real comment"#;
-        let stripped = strip_js_comments(line, &mut in_block_comment);
+        let stripped = strip_js_comments(line, &mut state);
         assert_eq!(
             stripped.trim(),
             r#"const code = "import('fs') // not a comment";"#
         );
-        assert!(!in_block_comment);
+        assert!(!state.in_block_comment);
+    }
+
+    #[test]
+    fn strip_js_comments_keeps_comment_markers_inside_regex() {
+        let mut state = ScannerState {
+            in_block_comment: false,
+            in_template: false,
+            last_significant_char: None,
+        };
+        // Regex matching `//` inside a class: /[//]/
+        // Followed by code: ; import 'fs';
+        let line = r#"const r = /[//]/; import 'fs'; // real comment"#;
+        let stripped = strip_js_comments(line, &mut state);
+        assert_eq!(stripped.trim(), r#"const r = /[//]/; import 'fs';"#);
+        assert!(!state.in_block_comment);
+
+        // Regex matching `/*` inside a class: /[\/*]/
+        let mut state2 = ScannerState {
+            in_block_comment: false,
+            in_template: false,
+            last_significant_char: None,
+        };
+        let line2 = r#"const r2 = /[\/*]/; import 'path'; /* real comment */"#;
+        let stripped2 = strip_js_comments(line2, &mut state2);
+        assert_eq!(stripped2.trim(), r#"const r2 = /[\/*]/; import 'path';"#);
+        assert!(!state2.in_block_comment);
+    }
+
+    #[test]
+    fn strip_js_comments_handles_multiline_templates() {
+        let mut state = ScannerState {
+            in_block_comment: false,
+            in_template: false,
+            last_significant_char: None,
+        };
+
+        // Line 1: open template
+        let line1 = "const s = `";
+        let stripped1 = strip_js_comments(line1, &mut state);
+        assert_eq!(stripped1, "const s = `");
+        assert!(state.in_template);
+
+        // Line 2: content with pseudo-comment
+        let line2 = "/* not a comment */";
+        let stripped2 = strip_js_comments(line2, &mut state);
+        assert_eq!(stripped2, "/* not a comment */");
+        assert!(state.in_template);
+        assert!(!state.in_block_comment);
+
+        // Line 3: close template
+        let line3 = "`; // real comment";
+        let stripped3 = strip_js_comments(line3, &mut state);
+        assert_eq!(stripped3, "`; ");
+        assert!(!state.in_template);
     }
 
     #[test]
@@ -1388,6 +1542,32 @@ mod compatibility_scanner_comment_tests {
         assert!(ledger.rewrites.is_empty());
         assert!(ledger.forbidden.is_empty());
         assert!(ledger.flagged.is_empty());
+    }
+
+    #[test]
+    fn compatibility_scanner_ignores_comment_markers_in_templates() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let entry = temp.path().join("template.js");
+        // This test case ensures that `/*` inside a template literal doesn't start
+        // a block comment that hides subsequent code.
+        fs::write(
+            &entry,
+            r#"
+const s = `
+/* not a comment
+`;
+import fs from "fs";
+"#,
+        )
+        .expect("write test file");
+
+        let scanner = CompatibilityScanner::new(temp.path().to_path_buf());
+        let ledger = scanner.scan_path(&entry).expect("scan");
+
+        assert!(
+            ledger.capabilities.iter().any(|c| c.capability == "read"),
+            "import fs should be detected even if preceded by pseudo-comment in template"
+        );
     }
 
     #[test]

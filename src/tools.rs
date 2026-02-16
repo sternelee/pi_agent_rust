@@ -2215,26 +2215,59 @@ impl Tool for EditTool {
             ));
         }
 
+        // Try variants of old_text to handle Unicode normalization differences (NFC vs NFD)
+        // and potential input normalization (clipboard, LLM output).
+        //
+        // Note: normalized_content is already LF-normalized but preserves Unicode form
+        // (from String::from_utf8).
+        use unicode_normalization::UnicodeNormalization;
+
+        let mut variants = Vec::with_capacity(3);
+        variants.push(normalized_old_text.clone());
+
+        let nfc = normalized_old_text.nfc().collect::<String>();
+        if nfc != normalized_old_text {
+            variants.push(nfc);
+        }
+
+        let nfd = normalized_old_text.nfd().collect::<String>();
+        if nfd != normalized_old_text {
+            variants.push(nfd);
+        }
+
         // Pre-compute normalized versions once and reuse for both matching and
         // occurrence counting (avoids 2x redundant O(n) normalization).
         let precomputed_content = build_normalized_content(&normalized_content);
-        let precomputed_old = build_normalized_content(&normalized_old_text);
 
-        let (match_result, normalized_pair) = fuzzy_find_text_with_normalized(
-            &normalized_content,
-            &normalized_old_text,
-            Some(precomputed_content),
-            Some(precomputed_old),
-        );
-        if !match_result.found {
-            return Err(Error::tool(
-                "edit",
-                format!(
-                    "Could not find the exact text in {}. The old text must match exactly including all whitespace and newlines.",
-                    input.path
-                ),
-            ));
+        let mut best_match: Option<(FuzzyMatchResult, Option<(String, String)>)> = None;
+
+        for variant in variants {
+            let precomputed_variant = build_normalized_content(&variant);
+            let (match_result, normalized_pair) = fuzzy_find_text_with_normalized(
+                &normalized_content,
+                &variant,
+                Some(precomputed_content.clone()),
+                Some(precomputed_variant),
+            );
+
+            if match_result.found {
+                best_match = Some((match_result, normalized_pair));
+                break;
+            }
         }
+
+        let (match_result, normalized_pair) = match best_match {
+            Some(res) => res,
+            None => {
+                return Err(Error::tool(
+                    "edit",
+                    format!(
+                        "Could not find the exact text in {}. The old text must match exactly including all whitespace and newlines.",
+                        input.path
+                    ),
+                ));
+            }
+        };
 
         // Count occurrences reusing pre-computed normalized versions.
         let occurrences = if let Some((fuzzy_content, fuzzy_old_text)) = &normalized_pair {

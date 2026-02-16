@@ -373,12 +373,30 @@ impl HostcallRequest {
     }
 }
 
+const MAX_JSON_DEPTH: usize = 64;
+
 /// Convert a serde_json::Value to a rquickjs Value.
 #[allow(clippy::option_if_let_else)]
 pub(crate) fn json_to_js<'js>(
     ctx: &Ctx<'js>,
     value: &serde_json::Value,
 ) -> rquickjs::Result<Value<'js>> {
+    json_to_js_inner(ctx, value, 0)
+}
+
+fn json_to_js_inner<'js>(
+    ctx: &Ctx<'js>,
+    value: &serde_json::Value,
+    depth: usize,
+) -> rquickjs::Result<Value<'js>> {
+    if depth > MAX_JSON_DEPTH {
+        return Err(rquickjs::Error::new_into_js_message(
+            "json",
+            "parse",
+            "JSON object too deep",
+        ));
+    }
+
     match value {
         serde_json::Value::Null => Ok(Value::new_null(ctx.clone())),
         serde_json::Value::Bool(b) => Ok(Value::new_bool(ctx.clone(), *b)),
@@ -396,7 +414,7 @@ pub(crate) fn json_to_js<'js>(
         serde_json::Value::Array(arr) => {
             let js_arr = rquickjs::Array::new(ctx.clone())?;
             for (i, v) in arr.iter().enumerate() {
-                let js_v = json_to_js(ctx, v)?;
+                let js_v = json_to_js_inner(ctx, v, depth + 1)?;
                 js_arr.set(i, js_v)?;
             }
             Ok(js_arr.into_value())
@@ -404,7 +422,7 @@ pub(crate) fn json_to_js<'js>(
         serde_json::Value::Object(obj) => {
             let js_obj = Object::new(ctx.clone())?;
             for (k, v) in obj {
-                let js_v = json_to_js(ctx, v)?;
+                let js_v = json_to_js_inner(ctx, v, depth + 1)?;
                 js_obj.set(k.as_str(), js_v)?;
             }
             Ok(js_obj.into_value())
@@ -414,6 +432,18 @@ pub(crate) fn json_to_js<'js>(
 
 /// Convert a rquickjs Value to a serde_json::Value.
 pub(crate) fn js_to_json(value: &Value<'_>) -> rquickjs::Result<serde_json::Value> {
+    js_to_json_inner(value, 0)
+}
+
+fn js_to_json_inner(value: &Value<'_>, depth: usize) -> rquickjs::Result<serde_json::Value> {
+    if depth > MAX_JSON_DEPTH {
+        return Err(rquickjs::Error::new_into_js_message(
+            "json",
+            "stringify",
+            "Object too deep or contains cycles",
+        ));
+    }
+
     if value.is_null() || value.is_undefined() {
         return Ok(serde_json::Value::Null);
     }
@@ -435,7 +465,7 @@ pub(crate) fn js_to_json(value: &Value<'_>) -> rquickjs::Result<serde_json::Valu
         let mut result = Vec::with_capacity(len);
         for i in 0..len {
             let v: Value<'_> = arr.get(i)?;
-            result.push(js_to_json(&v)?);
+            result.push(js_to_json_inner(&v, depth + 1)?);
         }
         return Ok(serde_json::Value::Array(result));
     }
@@ -443,7 +473,7 @@ pub(crate) fn js_to_json(value: &Value<'_>) -> rquickjs::Result<serde_json::Valu
         let mut result = serde_json::Map::new();
         for item in obj.props::<String, Value<'_>>() {
             let (k, v) = item?;
-            result.insert(k, js_to_json(&v)?);
+            result.insert(k, js_to_json_inner(&v, depth + 1)?);
         }
         return Ok(serde_json::Value::Object(result));
     }

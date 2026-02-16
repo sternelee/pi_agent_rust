@@ -1912,7 +1912,7 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
         cmd: &str,
         payload: serde_json::Value,
     ) -> HostcallOutcome {
-        use std::io::{BufRead as _, Read as _};
+        use std::io::Read as _;
         use std::process::{Command, Stdio};
         use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
         use std::sync::mpsc::{self, SyncSender};
@@ -1925,27 +1925,149 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
         }
 
         fn pump_stream<R: std::io::Read>(
-            reader: R,
+            mut reader: R,
             tx: &SyncSender<ExecStreamFrame>,
             stdout: bool,
         ) -> std::result::Result<(), String> {
-            let mut reader = std::io::BufReader::new(reader);
+            let mut buf = [0u8; 4096];
+            let mut partial = Vec::new();
+
             loop {
-                let mut buf = Vec::new();
-                let read = reader
-                    .read_until(b'\n', &mut buf)
-                    .map_err(|err| err.to_string())?;
+                // If we have a partial suffix, copy it to the start of the buffer
+                // to simplify the read logic, or just append to it?
+                // Simpler: read into buf, then process `partial + buf`.
+                let read = reader.read(&mut buf).map_err(|err| err.to_string())?;
                 if read == 0 {
+                    // EOF. Flush partial if any (lossy).
+                    if !partial.is_empty() {
+                        let text = String::from_utf8_lossy(&partial).to_string();
+                        let frame = if stdout {
+                            ExecStreamFrame::Stdout(text)
+                        } else {
+                            ExecStreamFrame::Stderr(text)
+                        };
+                        let _ = tx.send(frame);
+                    }
                     break;
                 }
-                let text = String::from_utf8_lossy(&buf).to_string();
-                let frame = if stdout {
-                    ExecStreamFrame::Stdout(text)
+
+                let chunk = &buf[..read];
+                let (valid, suffix) = if partial.is_empty() {
+                    // Fast path: try parsing the whole chunk
+                    match std::str::from_utf8(chunk) {
+                        Ok(s) => (s, None),
+                        Err(e) => {
+                            let valid_len = e.valid_up_to();
+                            let s = std::str::from_utf8(&chunk[..valid_len])
+                                .map_err(|err| err.to_string())?;
+                            if e.error_len().is_none() {
+                                // Incomplete sequence at end
+                                (s, Some(&chunk[valid_len..]))
+                            } else {
+                                // Invalid sequence in middle - valid up to error,
+                                // but we might want to recover.
+                                // Simplest robust strategy: use from_utf8_lossy on the whole thing?
+                                // No, that replaces.
+                                // We want to wait for more data ONLY if it's an incomplete sequence at the end.
+                                // If error_len() is Some, it's a real error.
+                                // If error_len() is None, it's incomplete.
+                                (s, Some(&chunk[valid_len..]))
+                            }
+                        }
+                    }
                 } else {
-                    ExecStreamFrame::Stderr(text)
+                    // Slow path: append to partial
+                    partial.extend_from_slice(chunk);
+                    match std::str::from_utf8(&partial) {
+                        Ok(s) => {
+                            // This borrows from partial, which we are about to clear.
+                            // We need to emit and clear.
+                            // To return a &str, we can't mutate partial.
+                            // Let's just handle logic inline.
+                            let text = s.to_string();
+                            let frame = if stdout {
+                                ExecStreamFrame::Stdout(text)
+                            } else {
+                                ExecStreamFrame::Stderr(text)
+                            };
+                            if tx.send(frame).is_err() {
+                                return Ok(());
+                            }
+                            partial.clear();
+                            continue;
+                        }
+                        Err(e) => {
+                            let valid_len = e.valid_up_to();
+                            let s = std::str::from_utf8(&partial[..valid_len])
+                                .map_err(|err| err.to_string())?;
+                            let text = s.to_string();
+                            if !text.is_empty() {
+                                let frame = if stdout {
+                                    ExecStreamFrame::Stdout(text)
+                                } else {
+                                    ExecStreamFrame::Stderr(text)
+                                };
+                                if tx.send(frame).is_err() {
+                                    return Ok(());
+                                }
+                            }
+                            
+                            if e.error_len().is_none() {
+                                // Incomplete at end
+                                let new_partial = partial[valid_len..].to_vec();
+                                partial = new_partial;
+                                continue;
+                            } else {
+                                // Real error. Emit replacement and continue?
+                                // String::from_utf8_lossy will handle this gracefully.
+                                // But we want to preserve the incomplete suffix check.
+                                // Ideally we'd valid-up-to, then replace one char, then try again?
+                                // Too complex. 
+                                // Let's just treat "real error" as "emit lossy and clear".
+                                // BUT we must distinguish "incomplete" from "invalid".
+                                // std::str::from_utf8 returns Utf8Error.
+                                // error_len() is None if incomplete.
+                                // So if None, keep suffix.
+                                // If Some, it's invalid. We can consume the invalid part (lossy) or just emit it.
+                                // Let's simplify: 
+                                // If we have partial, and we added data, and it's STILL valid_up_to same point and error_len is None?
+                                // Actually, if we have partial data and add more, and it's still incomplete, we just keep accumulating.
+                                // LIMIT: if partial grows too large (e.g. 4KB), force flush lossy.
+                                if partial.len() > 4096 {
+                                     let text = String::from_utf8_lossy(&partial).to_string();
+                                     let frame = if stdout {
+                                        ExecStreamFrame::Stdout(text)
+                                    } else {
+                                        ExecStreamFrame::Stderr(text)
+                                    };
+                                    if tx.send(frame).is_err() {
+                                        return Ok(());
+                                    }
+                                    partial.clear();
+                                } else {
+                                    let new_partial = partial[valid_len..].to_vec();
+                                    partial = new_partial;
+                                }
+                                continue;
+                            }
+                        }
+                    }
                 };
-                if tx.send(frame).is_err() {
-                    break;
+
+                // Logic for the fast path (partial was empty)
+                if !valid.is_empty() {
+                    let frame = if stdout {
+                        ExecStreamFrame::Stdout(valid.to_string())
+                    } else {
+                        ExecStreamFrame::Stderr(valid.to_string())
+                    };
+                    if tx.send(frame).is_err() {
+                        return Ok(());
+                    }
+                }
+
+                if let Some(s) = suffix {
+                    partial.extend_from_slice(s);
                 }
             }
             Ok(())
@@ -2023,7 +2145,7 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
 
             let cmd = cmd.to_string();
             let args = args.clone();
-            let (tx, rx) = mpsc::sync_channel::<ExecStreamFrame>(256);
+            let (tx, rx) = mpsc::sync_channel::<ExecStreamFrame>(1024);
             let cancel = Arc::new(AtomicBool::new(false));
             let cancel_worker = Arc::clone(&cancel);
             let call_id_for_error = call_id.to_string();
@@ -11564,6 +11686,569 @@ mod tests {
                 other => panic!("expected cancellation error outcome, got {other:?}"),
             }
         });
+    }
+
+    // ========================================================================
+    // bd-3ar8v.4.8.21: Protocol error-code taxonomy and validation tests
+    // ========================================================================
+
+    #[test]
+    fn protocol_error_code_timeout_maps_correctly() {
+        assert_eq!(protocol_error_code("timeout"), HostCallErrorCode::Timeout);
+    }
+
+    #[test]
+    fn protocol_error_code_denied_maps_correctly() {
+        assert_eq!(protocol_error_code("denied"), HostCallErrorCode::Denied);
+    }
+
+    #[test]
+    fn protocol_error_code_io_maps_correctly() {
+        assert_eq!(protocol_error_code("io"), HostCallErrorCode::Io);
+    }
+
+    #[test]
+    fn protocol_error_code_tool_error_maps_to_io() {
+        assert_eq!(protocol_error_code("tool_error"), HostCallErrorCode::Io);
+    }
+
+    #[test]
+    fn protocol_error_code_invalid_request_maps_correctly() {
+        assert_eq!(
+            protocol_error_code("invalid_request"),
+            HostCallErrorCode::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn protocol_error_code_unknown_maps_to_internal() {
+        assert_eq!(
+            protocol_error_code("completely_unknown"),
+            HostCallErrorCode::Internal
+        );
+    }
+
+    #[test]
+    fn protocol_error_code_empty_string_maps_to_internal() {
+        assert_eq!(protocol_error_code(""), HostCallErrorCode::Internal);
+    }
+
+    #[test]
+    fn protocol_error_code_whitespace_only_maps_to_internal() {
+        assert_eq!(protocol_error_code("   "), HostCallErrorCode::Internal);
+    }
+
+    #[test]
+    fn protocol_error_code_case_insensitive_timeout() {
+        assert_eq!(protocol_error_code("TIMEOUT"), HostCallErrorCode::Timeout);
+        assert_eq!(protocol_error_code("Timeout"), HostCallErrorCode::Timeout);
+        assert_eq!(protocol_error_code("TimeOut"), HostCallErrorCode::Timeout);
+    }
+
+    #[test]
+    fn protocol_error_code_case_insensitive_denied() {
+        assert_eq!(protocol_error_code("DENIED"), HostCallErrorCode::Denied);
+        assert_eq!(protocol_error_code("Denied"), HostCallErrorCode::Denied);
+    }
+
+    #[test]
+    fn protocol_error_code_case_insensitive_io() {
+        assert_eq!(protocol_error_code("IO"), HostCallErrorCode::Io);
+        assert_eq!(protocol_error_code("Io"), HostCallErrorCode::Io);
+        assert_eq!(protocol_error_code("TOOL_ERROR"), HostCallErrorCode::Io);
+        assert_eq!(protocol_error_code("Tool_Error"), HostCallErrorCode::Io);
+    }
+
+    #[test]
+    fn protocol_error_code_case_insensitive_invalid_request() {
+        assert_eq!(
+            protocol_error_code("INVALID_REQUEST"),
+            HostCallErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            protocol_error_code("Invalid_Request"),
+            HostCallErrorCode::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn protocol_error_code_trims_whitespace() {
+        assert_eq!(
+            protocol_error_code("  timeout  "),
+            HostCallErrorCode::Timeout
+        );
+        assert_eq!(
+            protocol_error_code("\tdenied\n"),
+            HostCallErrorCode::Denied
+        );
+    }
+
+    #[test]
+    fn parse_protocol_hostcall_method_all_known_methods() {
+        assert_eq!(
+            parse_protocol_hostcall_method("tool"),
+            Some(ProtocolHostcallMethod::Tool)
+        );
+        assert_eq!(
+            parse_protocol_hostcall_method("exec"),
+            Some(ProtocolHostcallMethod::Exec)
+        );
+        assert_eq!(
+            parse_protocol_hostcall_method("http"),
+            Some(ProtocolHostcallMethod::Http)
+        );
+        assert_eq!(
+            parse_protocol_hostcall_method("session"),
+            Some(ProtocolHostcallMethod::Session)
+        );
+        assert_eq!(
+            parse_protocol_hostcall_method("ui"),
+            Some(ProtocolHostcallMethod::Ui)
+        );
+        assert_eq!(
+            parse_protocol_hostcall_method("events"),
+            Some(ProtocolHostcallMethod::Events)
+        );
+        assert_eq!(
+            parse_protocol_hostcall_method("log"),
+            Some(ProtocolHostcallMethod::Log)
+        );
+    }
+
+    #[test]
+    fn parse_protocol_hostcall_method_case_insensitive() {
+        assert_eq!(
+            parse_protocol_hostcall_method("TOOL"),
+            Some(ProtocolHostcallMethod::Tool)
+        );
+        assert_eq!(
+            parse_protocol_hostcall_method("Tool"),
+            Some(ProtocolHostcallMethod::Tool)
+        );
+        assert_eq!(
+            parse_protocol_hostcall_method("SESSION"),
+            Some(ProtocolHostcallMethod::Session)
+        );
+        assert_eq!(
+            parse_protocol_hostcall_method("Events"),
+            Some(ProtocolHostcallMethod::Events)
+        );
+    }
+
+    #[test]
+    fn parse_protocol_hostcall_method_trims_whitespace() {
+        assert_eq!(
+            parse_protocol_hostcall_method("  tool  "),
+            Some(ProtocolHostcallMethod::Tool)
+        );
+        assert_eq!(
+            parse_protocol_hostcall_method("\texec\n"),
+            Some(ProtocolHostcallMethod::Exec)
+        );
+    }
+
+    #[test]
+    fn parse_protocol_hostcall_method_rejects_unknown() {
+        assert_eq!(parse_protocol_hostcall_method("unknown"), None);
+        assert_eq!(parse_protocol_hostcall_method("foobar"), None);
+        assert_eq!(parse_protocol_hostcall_method("tools"), None);
+    }
+
+    #[test]
+    fn parse_protocol_hostcall_method_rejects_empty() {
+        assert_eq!(parse_protocol_hostcall_method(""), None);
+        assert_eq!(parse_protocol_hostcall_method("   "), None);
+    }
+
+    #[test]
+    fn protocol_normalize_output_preserves_objects() {
+        let obj = serde_json::json!({"key": "value", "nested": {"a": 1}});
+        let result = protocol_normalize_output(obj.clone());
+        assert_eq!(result, obj);
+    }
+
+    #[test]
+    fn protocol_normalize_output_wraps_string() {
+        let val = serde_json::json!("hello");
+        let result = protocol_normalize_output(val);
+        assert_eq!(result, serde_json::json!({"value": "hello"}));
+    }
+
+    #[test]
+    fn protocol_normalize_output_wraps_number() {
+        let val = serde_json::json!(42);
+        let result = protocol_normalize_output(val);
+        assert_eq!(result, serde_json::json!({"value": 42}));
+    }
+
+    #[test]
+    fn protocol_normalize_output_wraps_bool() {
+        let val = serde_json::json!(true);
+        let result = protocol_normalize_output(val);
+        assert_eq!(result, serde_json::json!({"value": true}));
+    }
+
+    #[test]
+    fn protocol_normalize_output_wraps_null() {
+        let val = Value::Null;
+        let result = protocol_normalize_output(val);
+        assert_eq!(result, serde_json::json!({"value": null}));
+    }
+
+    #[test]
+    fn protocol_normalize_output_wraps_array() {
+        let val = serde_json::json!([1, 2, 3]);
+        let result = protocol_normalize_output(val);
+        assert_eq!(result, serde_json::json!({"value": [1, 2, 3]}));
+    }
+
+    #[test]
+    fn protocol_normalize_output_preserves_empty_object() {
+        let val = serde_json::json!({});
+        let result = protocol_normalize_output(val.clone());
+        assert_eq!(result, val);
+    }
+
+    #[test]
+    fn protocol_error_fallback_reason_denied() {
+        assert_eq!(
+            protocol_error_fallback_reason("tool", "denied"),
+            "policy_denied"
+        );
+        assert_eq!(
+            protocol_error_fallback_reason("exec", "DENIED"),
+            "policy_denied"
+        );
+    }
+
+    #[test]
+    fn protocol_error_fallback_reason_timeout() {
+        assert_eq!(
+            protocol_error_fallback_reason("tool", "timeout"),
+            "handler_timeout"
+        );
+    }
+
+    #[test]
+    fn protocol_error_fallback_reason_io() {
+        assert_eq!(
+            protocol_error_fallback_reason("tool", "io"),
+            "handler_error"
+        );
+        assert_eq!(
+            protocol_error_fallback_reason("exec", "tool_error"),
+            "handler_error"
+        );
+    }
+
+    #[test]
+    fn protocol_error_fallback_reason_invalid_request_known_method() {
+        assert_eq!(
+            protocol_error_fallback_reason("tool", "invalid_request"),
+            "schema_validation_failed"
+        );
+        assert_eq!(
+            protocol_error_fallback_reason("session", "invalid_request"),
+            "schema_validation_failed"
+        );
+    }
+
+    #[test]
+    fn protocol_error_fallback_reason_invalid_request_unknown_method() {
+        assert_eq!(
+            protocol_error_fallback_reason("nonexistent", "invalid_request"),
+            "unsupported_method_fallback"
+        );
+    }
+
+    #[test]
+    fn protocol_error_fallback_reason_unknown_code() {
+        assert_eq!(
+            protocol_error_fallback_reason("tool", "something_else"),
+            "runtime_internal_error"
+        );
+        assert_eq!(
+            protocol_error_fallback_reason("tool", ""),
+            "runtime_internal_error"
+        );
+    }
+
+    #[test]
+    fn protocol_error_details_structure_complete() {
+        let payload = HostCallPayload {
+            call_id: "test-call-1".to_string(),
+            capability: "tool".to_string(),
+            method: "tool".to_string(),
+            params: serde_json::json!({"name": "read", "input": {"path": "/tmp/test"}}),
+            timeout_ms: None,
+            cancel_token: None,
+            context: None,
+        };
+
+        let details = protocol_error_details(&payload, "invalid_request", "Tool not found");
+
+        // Verify top-level structure
+        assert!(details.get("dispatcherDecisionTrace").is_some());
+        assert!(details.get("schemaDiff").is_some());
+        assert!(details.get("extensionInput").is_some());
+        assert!(details.get("extensionOutput").is_some());
+
+        // Verify dispatcher decision trace
+        let trace = &details["dispatcherDecisionTrace"];
+        assert_eq!(
+            trace["selectedRuntime"],
+            "rust-extension-dispatcher"
+        );
+        assert_eq!(trace["schemaVersion"], PROTOCOL_VERSION);
+        assert_eq!(trace["method"], "tool");
+        assert_eq!(trace["capability"], "tool");
+        assert_eq!(trace["fallbackReason"], "schema_validation_failed");
+
+        // Verify schema diff has sorted keys
+        let observed_keys = details["schemaDiff"]["observedParamKeys"]
+            .as_array()
+            .expect("observedParamKeys must be array");
+        let keys: Vec<&str> = observed_keys.iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(keys, vec!["input", "name"]);
+
+        // Verify extension input
+        assert_eq!(details["extensionInput"]["callId"], "test-call-1");
+        assert_eq!(details["extensionInput"]["capability"], "tool");
+        assert_eq!(details["extensionInput"]["method"], "tool");
+
+        // Verify extension output
+        assert_eq!(details["extensionOutput"]["code"], "invalid_request");
+        assert_eq!(details["extensionOutput"]["message"], "Tool not found");
+    }
+
+    #[test]
+    fn protocol_error_details_non_object_params_yields_empty_keys() {
+        let payload = HostCallPayload {
+            call_id: "test-call-2".to_string(),
+            capability: "exec".to_string(),
+            method: "exec".to_string(),
+            params: serde_json::json!("not an object"),
+            timeout_ms: None,
+            cancel_token: None,
+            context: None,
+        };
+
+        let details = protocol_error_details(&payload, "io", "exec failed");
+        let observed_keys = details["schemaDiff"]["observedParamKeys"]
+            .as_array()
+            .expect("must be array");
+        assert!(observed_keys.is_empty());
+        assert_eq!(
+            details["dispatcherDecisionTrace"]["fallbackReason"],
+            "handler_error"
+        );
+    }
+
+    #[test]
+    fn protocol_hostcall_op_extracts_from_op_key() {
+        let params = serde_json::json!({"op": "getState"});
+        assert_eq!(protocol_hostcall_op(&params), Some("getState"));
+    }
+
+    #[test]
+    fn protocol_hostcall_op_extracts_from_method_key() {
+        let params = serde_json::json!({"method": "setModel"});
+        assert_eq!(protocol_hostcall_op(&params), Some("setModel"));
+    }
+
+    #[test]
+    fn protocol_hostcall_op_extracts_from_name_key() {
+        let params = serde_json::json!({"name": "read"});
+        assert_eq!(protocol_hostcall_op(&params), Some("read"));
+    }
+
+    #[test]
+    fn protocol_hostcall_op_prefers_op_over_method() {
+        let params = serde_json::json!({"op": "first", "method": "second"});
+        assert_eq!(protocol_hostcall_op(&params), Some("first"));
+    }
+
+    #[test]
+    fn protocol_hostcall_op_prefers_method_over_name() {
+        let params = serde_json::json!({"method": "first", "name": "second"});
+        assert_eq!(protocol_hostcall_op(&params), Some("first"));
+    }
+
+    #[test]
+    fn protocol_hostcall_op_returns_none_for_empty_params() {
+        let params = serde_json::json!({});
+        assert_eq!(protocol_hostcall_op(&params), None);
+    }
+
+    #[test]
+    fn protocol_hostcall_op_returns_none_for_empty_string_value() {
+        let params = serde_json::json!({"op": ""});
+        assert_eq!(protocol_hostcall_op(&params), None);
+    }
+
+    #[test]
+    fn protocol_hostcall_op_returns_none_for_whitespace_only_value() {
+        let params = serde_json::json!({"op": "   "});
+        assert_eq!(protocol_hostcall_op(&params), None);
+    }
+
+    #[test]
+    fn protocol_hostcall_op_trims_result() {
+        let params = serde_json::json!({"op": "  getState  "});
+        assert_eq!(protocol_hostcall_op(&params), Some("getState"));
+    }
+
+    #[test]
+    fn protocol_hostcall_op_returns_none_for_non_string_value() {
+        let params = serde_json::json!({"op": 42});
+        assert_eq!(protocol_hostcall_op(&params), None);
+    }
+
+    #[test]
+    fn hostcall_outcome_to_protocol_result_success_normalizes_output() {
+        let result = hostcall_outcome_to_protocol_result(
+            "call-s1",
+            HostcallOutcome::Success(serde_json::json!({"result": "ok"})),
+        );
+        assert_eq!(result.call_id, "call-s1");
+        assert!(!result.is_error);
+        assert!(result.error.is_none());
+        assert!(result.chunk.is_none());
+        assert_eq!(result.output, serde_json::json!({"result": "ok"}));
+    }
+
+    #[test]
+    fn hostcall_outcome_to_protocol_result_success_wraps_non_object() {
+        let result = hostcall_outcome_to_protocol_result(
+            "call-s2",
+            HostcallOutcome::Success(serde_json::json!("plain string")),
+        );
+        assert_eq!(
+            result.output,
+            serde_json::json!({"value": "plain string"})
+        );
+    }
+
+    #[test]
+    fn hostcall_outcome_to_protocol_result_error_maps_code() {
+        let result = hostcall_outcome_to_protocol_result(
+            "call-e1",
+            HostcallOutcome::Error {
+                code: "denied".to_string(),
+                message: "not allowed".to_string(),
+            },
+        );
+        assert_eq!(result.call_id, "call-e1");
+        assert!(result.is_error);
+        let err = result.error.as_ref().expect("error payload");
+        assert_eq!(err.code, HostCallErrorCode::Denied);
+        assert_eq!(err.message, "not allowed");
+        assert!(err.details.is_none());
+        assert!(result.output.is_object());
+    }
+
+    #[test]
+    fn hostcall_outcome_to_protocol_result_error_unknown_code_maps_internal() {
+        let result = hostcall_outcome_to_protocol_result(
+            "call-e2",
+            HostcallOutcome::Error {
+                code: "mystery_error".to_string(),
+                message: "something broke".to_string(),
+            },
+        );
+        let err = result.error.as_ref().expect("error payload");
+        assert_eq!(err.code, HostCallErrorCode::Internal);
+    }
+
+    #[test]
+    fn hostcall_outcome_to_protocol_result_stream_chunk() {
+        let result = hostcall_outcome_to_protocol_result(
+            "call-sc1",
+            HostcallOutcome::StreamChunk {
+                sequence: 5,
+                chunk: serde_json::json!({"data": "partial"}),
+                is_final: false,
+            },
+        );
+        assert_eq!(result.call_id, "call-sc1");
+        assert!(!result.is_error);
+        assert!(result.error.is_none());
+        let chunk = result.chunk.as_ref().expect("chunk metadata");
+        assert_eq!(chunk.index, 5);
+        assert!(!chunk.is_last);
+        assert_eq!(result.output["sequence"], 5);
+        assert_eq!(result.output["isFinal"], false);
+    }
+
+    #[test]
+    fn hostcall_outcome_to_protocol_result_stream_final_chunk() {
+        let result = hostcall_outcome_to_protocol_result(
+            "call-sc2",
+            HostcallOutcome::StreamChunk {
+                sequence: 10,
+                chunk: serde_json::json!(null),
+                is_final: true,
+            },
+        );
+        let chunk = result.chunk.as_ref().expect("chunk metadata");
+        assert!(chunk.is_last);
+        assert_eq!(result.output["isFinal"], true);
+    }
+
+    #[test]
+    fn hostcall_outcome_to_protocol_result_with_trace_error_includes_details() {
+        let payload = HostCallPayload {
+            call_id: "call-trace-1".to_string(),
+            capability: "tool".to_string(),
+            method: "tool".to_string(),
+            params: serde_json::json!({"name": "read"}),
+            timeout_ms: None,
+            cancel_token: None,
+            context: None,
+        };
+
+        let result = hostcall_outcome_to_protocol_result_with_trace(
+            &payload,
+            HostcallOutcome::Error {
+                code: "timeout".to_string(),
+                message: "operation timed out".to_string(),
+            },
+        );
+
+        assert!(result.is_error);
+        let err = result.error.as_ref().expect("error");
+        assert_eq!(err.code, HostCallErrorCode::Timeout);
+        assert_eq!(err.message, "operation timed out");
+
+        // With-trace variant must include details
+        let details = err.details.as_ref().expect("details must be present");
+        assert!(details.get("dispatcherDecisionTrace").is_some());
+        assert_eq!(
+            details["dispatcherDecisionTrace"]["fallbackReason"],
+            "handler_timeout"
+        );
+    }
+
+    #[test]
+    fn hostcall_outcome_to_protocol_result_with_trace_success_no_details() {
+        let payload = HostCallPayload {
+            call_id: "call-trace-2".to_string(),
+            capability: "tool".to_string(),
+            method: "tool".to_string(),
+            params: serde_json::json!({"name": "read"}),
+            timeout_ms: None,
+            cancel_token: None,
+            context: None,
+        };
+
+        let result = hostcall_outcome_to_protocol_result_with_trace(
+            &payload,
+            HostcallOutcome::Success(serde_json::json!({"content": "file data"})),
+        );
+
+        assert!(!result.is_error);
+        assert!(result.error.is_none());
+        assert_eq!(result.output["content"], "file data");
     }
 
     // ── Property tests ──
