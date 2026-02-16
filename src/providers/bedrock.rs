@@ -598,8 +598,8 @@ fn convert_user_message(message: &crate::model::UserMessage) -> Option<BedrockMe
                     ContentBlock::Image(img) => {
                         let format = img
                             .mime_type
-                            .split('/')
-                            .last()
+                            .rsplit('/')
+                            .next()
                             .unwrap_or("png")
                             .to_string();
                         content.push(BedrockContent::Image {

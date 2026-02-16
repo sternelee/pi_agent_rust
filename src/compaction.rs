@@ -48,7 +48,7 @@ fn json_byte_len(value: &Value) -> usize {
         }
     }
     let mut c = Counter(0);
-    if let Err(_) = serde_json::to_writer(&mut c, value) {
+    if serde_json::to_writer(&mut c, value).is_err() {
         // Fallback or partial count on error (e.g. recursion limit)
     }
     c.0

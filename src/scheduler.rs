@@ -1498,12 +1498,9 @@ impl NumaSlabTelemetry {
         if denominator == 0 {
             return 0;
         }
-        let scaled = (u128::from(numerator) * u128::from(Self::RATIO_SCALE_BPS))
-            / u128::from(denominator);
-        match u64::try_from(scaled) {
-            Ok(value) => value,
-            Err(_) => Self::RATIO_SCALE_BPS,
-        }
+        let scaled =
+            (u128::from(numerator) * u128::from(Self::RATIO_SCALE_BPS)) / u128::from(denominator);
+        u64::try_from(scaled).unwrap_or(Self::RATIO_SCALE_BPS)
     }
 
     /// Render as stable machine-readable JSON for diagnostics.
@@ -3401,10 +3398,7 @@ mod tests {
             json["allocation_ratio_bps"]["local"],
             serde_json::json!(10_000)
         );
-        assert_eq!(
-            json["allocation_ratio_bps"]["remote"],
-            serde_json::json!(0)
-        );
+        assert_eq!(json["allocation_ratio_bps"]["remote"], serde_json::json!(0));
         assert_eq!(
             json["allocation_ratio_bps"]["scale"],
             serde_json::json!(10_000)
