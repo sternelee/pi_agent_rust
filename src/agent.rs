@@ -1516,9 +1516,10 @@ impl Agent {
         for (index, tool_call) in tool_calls.iter().enumerate() {
             // Extract the result, tracking whether the tool actually executed.
             // If `tool_outputs[index]` is `Some`, `execute_tool` ran and already
-            // emitted its own Update/End events. If `None`, the tool was
-            // skipped/aborted and we must emit placeholder events here (Phase 1
-            // already emitted Start for all tools).
+            // emitted streaming Update events via its callback. If `None`, the
+            // tool was skipped/aborted and we must emit a placeholder Update
+            // event here. In both cases, Phase 1 already emitted Start and we
+            // emit End below.
             let (output, is_error, was_executed) =
                 if let Some((out, err)) = tool_outputs[index].take() {
                     (out, err, true)
@@ -1537,25 +1538,31 @@ impl Agent {
                 };
 
             if !was_executed {
-                // Emit missing events for aborted/skipped tools.
-                let event_output = ToolOutput {
-                    content: output.content.clone(),
-                    details: output.details.clone(),
-                    is_error,
-                };
+                // Emit placeholder Update for aborted/skipped tools.
                 on_event(AgentEvent::ToolExecutionUpdate {
                     tool_call_id: tool_call.id.clone(),
                     tool_name: tool_call.name.clone(),
                     args: tool_call.arguments.clone(),
-                    partial_result: event_output.clone(),
-                });
-                on_event(AgentEvent::ToolExecutionEnd {
-                    tool_call_id: tool_call.id.clone(),
-                    tool_name: tool_call.name.clone(),
-                    result: event_output,
-                    is_error,
+                    partial_result: ToolOutput {
+                        content: output.content.clone(),
+                        details: output.details.clone(),
+                        is_error,
+                    },
                 });
             }
+
+            // Always emit ToolExecutionEnd to close the lifecycle started
+            // by Phase 1's ToolExecutionStart.
+            on_event(AgentEvent::ToolExecutionEnd {
+                tool_call_id: tool_call.id.clone(),
+                tool_name: tool_call.name.clone(),
+                result: ToolOutput {
+                    content: output.content.clone(),
+                    details: output.details.clone(),
+                    is_error,
+                },
+                is_error,
+            });
 
             let tool_result = Arc::new(ToolResultMessage {
                 tool_call_id: tool_call.id.clone(),
