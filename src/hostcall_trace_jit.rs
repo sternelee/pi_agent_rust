@@ -350,10 +350,7 @@ impl TraceJitCompiler {
     ///
     /// If the plan reaches the hotness threshold, it is promoted to JIT.
     /// Returns `true` if the plan was promoted.
-    pub fn record_plan_execution(
-        &mut self,
-        plan: &HostcallSuperinstructionPlan,
-    ) -> bool {
+    pub fn record_plan_execution(&mut self, plan: &HostcallSuperinstructionPlan) -> bool {
         if !self.config.enabled {
             return false;
         }
@@ -361,10 +358,7 @@ impl TraceJitCompiler {
         self.telemetry.plans_evaluated += 1;
         self.generation += 1;
 
-        let profile = self
-            .profiles
-            .entry(plan.plan_id.clone())
-            .or_default();
+        let profile = self.profiles.entry(plan.plan_id.clone()).or_default();
 
         profile.execution_count += 1;
         profile.last_access_generation = self.generation;
@@ -412,8 +406,7 @@ impl TraceJitCompiler {
         if let Some(plan_id) = lru_plan_id {
             self.cache.remove(&plan_id);
             self.telemetry.evictions += 1;
-            self.telemetry.cache_size =
-                u64::try_from(self.cache.len()).unwrap_or(u64::MAX);
+            self.telemetry.cache_size = u64::try_from(self.cache.len()).unwrap_or(u64::MAX);
         }
     }
 
@@ -502,8 +495,7 @@ impl TraceJitCompiler {
                 profile.invalidated = true;
                 self.cache.remove(plan_id);
                 self.telemetry.invalidations += 1;
-                self.telemetry.cache_size =
-                    u64::try_from(self.cache.len()).unwrap_or(u64::MAX);
+                self.telemetry.cache_size = u64::try_from(self.cache.len()).unwrap_or(u64::MAX);
             }
         }
     }
@@ -537,8 +529,7 @@ impl TraceJitCompiler {
 #[must_use]
 pub fn estimated_jit_cost(width: usize) -> i64 {
     let width_units = i64::try_from(width).unwrap_or(i64::MAX);
-    JIT_DISPATCH_COST_UNITS
-        .saturating_add(width_units.saturating_mul(JIT_DISPATCH_STEP_COST_UNITS))
+    JIT_DISPATCH_COST_UNITS.saturating_add(width_units.saturating_mul(JIT_DISPATCH_STEP_COST_UNITS))
 }
 
 // ── Environment helpers ──────────────────────────────────────────────
@@ -572,8 +563,8 @@ fn usize_from_env(var: &str, default: usize) -> usize {
 mod tests {
     use super::*;
     use crate::hostcall_superinstructions::{
-        HostcallSuperinstructionPlan, HOSTCALL_SUPERINSTRUCTION_PLAN_VERSION,
-        HOSTCALL_SUPERINSTRUCTION_SCHEMA_VERSION,
+        HOSTCALL_SUPERINSTRUCTION_PLAN_VERSION, HOSTCALL_SUPERINSTRUCTION_SCHEMA_VERSION,
+        HostcallSuperinstructionPlan,
     };
 
     fn make_plan(
@@ -1031,9 +1022,7 @@ mod tests {
                 guard_index: 1,
                 description: "test".to_string(),
             },
-            DeoptReason::TraceInvalidated {
-                total_failures: 5,
-            },
+            DeoptReason::TraceInvalidated { total_failures: 5 },
             DeoptReason::JitDisabled,
             DeoptReason::NotCompiled,
             DeoptReason::SafetyVeto,

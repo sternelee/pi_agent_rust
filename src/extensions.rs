@@ -13,13 +13,13 @@ use crate::extensions_js::{
     PiJsRuntimeConfig, js_to_json, json_to_js,
 };
 use crate::hostcall_amac::AmacBatchExecutor;
-use crate::hostcall_trace_jit::{GuardContext, TraceJitCompiler};
 use crate::hostcall_rewrite::{
     HostcallRewriteEngine, HostcallRewritePlan, HostcallRewritePlanKind,
 };
 use crate::hostcall_superinstructions::{
     HostcallSuperinstructionCompiler, HostcallSuperinstructionPlan, execute_with_superinstruction,
 };
+use crate::hostcall_trace_jit::{GuardContext, TraceJitCompiler};
 use crate::permissions::{PermissionStore, PersistedDecision};
 use crate::scheduler::HostcallOutcome;
 use crate::session::SessionMessage;
@@ -3041,7 +3041,7 @@ struct OcoTunerState {
 }
 
 impl OcoTunerState {
-    fn from_config(config: &OcoTunerConfig) -> Self {
+    const fn from_config(config: &OcoTunerConfig) -> Self {
         let queue_budget = config
             .initial_queue_budget
             .clamp(config.min_queue_budget, config.max_queue_budget);
@@ -3062,7 +3062,7 @@ impl OcoTunerState {
         }
     }
 
-    fn snapshot(&self) -> OcoTunerSnapshot {
+    const fn snapshot(&self) -> OcoTunerSnapshot {
         OcoTunerSnapshot {
             queue_budget: self.queue_budget,
             batch_budget: self.batch_budget,
@@ -3074,7 +3074,7 @@ impl OcoTunerState {
         }
     }
 
-    fn rollback_to_safe_profile(&mut self, config: &OcoTunerConfig) {
+    const fn rollback_to_safe_profile(&mut self, config: &OcoTunerConfig) {
         self.queue_budget = config
             .initial_queue_budget
             .clamp(config.min_queue_budget, config.max_queue_budget);
@@ -3121,11 +3121,17 @@ impl OcoTunerState {
             0.2
         };
 
-        self.queue_budget = (self.queue_budget - config.learning_rate * grad_queue)
+        self.queue_budget = config
+            .learning_rate
+            .mul_add(-grad_queue, self.queue_budget)
             .clamp(config.min_queue_budget, config.max_queue_budget);
-        self.batch_budget = (self.batch_budget - config.learning_rate * grad_batch)
+        self.batch_budget = config
+            .learning_rate
+            .mul_add(-grad_batch, self.batch_budget)
             .clamp(config.min_batch_budget, config.max_batch_budget);
-        self.time_slice_ms = (self.time_slice_ms - config.learning_rate * grad_time_slice)
+        self.time_slice_ms = config
+            .learning_rate
+            .mul_add(-grad_time_slice, self.time_slice_ms)
             .clamp(config.min_time_slice_ms, config.max_time_slice_ms);
 
         let rolled_back = loss > config.rollback_loss_threshold;
@@ -3147,7 +3153,7 @@ impl OcoTunerState {
             1.0
         };
         let scaled = f64::from(base) * adjustment.clamp(0.5, 1.5);
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         {
             scaled.round().max(1.0) as u32
         }
@@ -9432,6 +9438,7 @@ fn hostcall_superinstruction_state() -> &'static Mutex<HostcallSuperinstructionR
     STATE.get_or_init(|| Mutex::new(HostcallSuperinstructionRuntimeState::default()))
 }
 
+#[allow(clippy::option_if_let_else)]
 fn hostcall_superinstruction_telemetry(
     opcode: Option<CommonHostcallOpcode>,
 ) -> HostcallSuperinstructionTelemetry {
@@ -9497,7 +9504,9 @@ fn hostcall_superinstruction_telemetry(
                     });
             if replace {
                 // Attempt JIT promotion and dispatch for this plan.
-                let (jit_hit, jit_cost_delta) = if let Some(ref pid) = candidate.selection.selected_plan_id {
+                let (jit_hit, jit_cost_delta) = if let Some(ref pid) =
+                    candidate.selection.selected_plan_id
+                {
                     // Find the matching plan to record execution.
                     let matched_plan = state.plans.iter().find(|p| p.plan_id == *pid);
                     if let Some(plan) = matched_plan {
@@ -9618,6 +9627,7 @@ impl<'a> HostcallPayloadArena<'a> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn marshal(&self) -> HostcallMarshallingArtifacts {
         let baseline_started = Instant::now();
         let baseline_params_hash = hostcall_params_hash(self.method, self.params);
@@ -20453,6 +20463,7 @@ impl ExtensionManager {
     }
 
     /// Update the budget-controller configuration.
+    #[allow(clippy::too_many_lines)]
     pub fn set_budget_controller_config(&self, config: ExtensionBudgetControllerConfig) {
         if let Ok(mut guard) = self.inner.lock() {
             let mut clamped = config;
@@ -20475,45 +20486,58 @@ impl ExtensionManager {
             {
                 clamped.regime_shift.bocpd_lambda = default_regime_shift.bocpd_lambda;
             }
-            clamped.regime_shift.bocpd_threshold = if clamped.regime_shift.bocpd_threshold.is_finite()
-            {
-                clamped.regime_shift.bocpd_threshold.clamp(0.01, 0.99)
-            } else {
-                default_regime_shift.bocpd_threshold
-            };
+            clamped.regime_shift.bocpd_threshold =
+                if clamped.regime_shift.bocpd_threshold.is_finite() {
+                    clamped.regime_shift.bocpd_threshold.clamp(0.01, 0.99)
+                } else {
+                    default_regime_shift.bocpd_threshold
+                };
             clamped.regime_shift.bocpd_max_run_length =
                 clamped.regime_shift.bocpd_max_run_length.clamp(8, 10_000);
 
             clamped.safety_envelope.conformal_confidence =
                 if clamped.safety_envelope.conformal_confidence.is_finite() {
-                    clamped.safety_envelope.conformal_confidence.clamp(0.5, 0.999)
+                    clamped
+                        .safety_envelope
+                        .conformal_confidence
+                        .clamp(0.5, 0.999)
                 } else {
                     default_safety.conformal_confidence
                 };
-            clamped.safety_envelope.conformal_calibration_size =
-                clamped.safety_envelope.conformal_calibration_size.clamp(16, 10_000);
-            clamped.safety_envelope.pac_bayes_delta = if clamped.safety_envelope.pac_bayes_delta.is_finite()
-            {
-                clamped.safety_envelope.pac_bayes_delta.clamp(1.0e-6, 0.5)
-            } else {
-                default_safety.pac_bayes_delta
-            };
+            clamped.safety_envelope.conformal_calibration_size = clamped
+                .safety_envelope
+                .conformal_calibration_size
+                .clamp(16, 10_000);
+            clamped.safety_envelope.pac_bayes_delta =
+                if clamped.safety_envelope.pac_bayes_delta.is_finite() {
+                    clamped.safety_envelope.pac_bayes_delta.clamp(1.0e-6, 0.5)
+                } else {
+                    default_safety.pac_bayes_delta
+                };
             clamped.safety_envelope.pac_bayes_prior_weight =
                 if clamped.safety_envelope.pac_bayes_prior_weight.is_finite() {
-                    clamped.safety_envelope.pac_bayes_prior_weight.clamp(0.01, 100.0)
+                    clamped
+                        .safety_envelope
+                        .pac_bayes_prior_weight
+                        .clamp(0.01, 100.0)
                 } else {
                     default_safety.pac_bayes_prior_weight
                 };
             clamped.safety_envelope.safety_error_threshold =
                 if clamped.safety_envelope.safety_error_threshold.is_finite() {
-                    clamped.safety_envelope.safety_error_threshold.clamp(0.0, 1.0)
+                    clamped
+                        .safety_envelope
+                        .safety_error_threshold
+                        .clamp(0.0, 1.0)
                 } else {
                     default_safety.safety_error_threshold
                 };
             clamped.safety_envelope.min_observations =
                 clamped.safety_envelope.min_observations.max(1);
 
-            if !clamped.oco_tuner.learning_rate.is_finite() || clamped.oco_tuner.learning_rate <= 0.0 {
+            if !clamped.oco_tuner.learning_rate.is_finite()
+                || clamped.oco_tuner.learning_rate <= 0.0
+            {
                 clamped.oco_tuner.learning_rate = default_oco.learning_rate;
             }
             clamped.oco_tuner.learning_rate = clamped.oco_tuner.learning_rate.clamp(1.0e-4, 1.0);
@@ -20557,33 +20581,36 @@ impl ExtensionManager {
                 clamped.oco_tuner.max_time_slice_ms = clamped.oco_tuner.min_time_slice_ms;
             }
 
-            clamped.oco_tuner.initial_queue_budget = if clamped.oco_tuner.initial_queue_budget.is_finite() {
-                clamped.oco_tuner.initial_queue_budget
-            } else {
-                default_oco.initial_queue_budget
-            }
-            .clamp(
-                clamped.oco_tuner.min_queue_budget,
-                clamped.oco_tuner.max_queue_budget,
-            );
-            clamped.oco_tuner.initial_batch_budget = if clamped.oco_tuner.initial_batch_budget.is_finite() {
-                clamped.oco_tuner.initial_batch_budget
-            } else {
-                default_oco.initial_batch_budget
-            }
-            .clamp(
-                clamped.oco_tuner.min_batch_budget,
-                clamped.oco_tuner.max_batch_budget,
-            );
-            clamped.oco_tuner.initial_time_slice_ms = if clamped.oco_tuner.initial_time_slice_ms.is_finite() {
-                clamped.oco_tuner.initial_time_slice_ms
-            } else {
-                default_oco.initial_time_slice_ms
-            }
-            .clamp(
-                clamped.oco_tuner.min_time_slice_ms,
-                clamped.oco_tuner.max_time_slice_ms,
-            );
+            clamped.oco_tuner.initial_queue_budget =
+                if clamped.oco_tuner.initial_queue_budget.is_finite() {
+                    clamped.oco_tuner.initial_queue_budget
+                } else {
+                    default_oco.initial_queue_budget
+                }
+                .clamp(
+                    clamped.oco_tuner.min_queue_budget,
+                    clamped.oco_tuner.max_queue_budget,
+                );
+            clamped.oco_tuner.initial_batch_budget =
+                if clamped.oco_tuner.initial_batch_budget.is_finite() {
+                    clamped.oco_tuner.initial_batch_budget
+                } else {
+                    default_oco.initial_batch_budget
+                }
+                .clamp(
+                    clamped.oco_tuner.min_batch_budget,
+                    clamped.oco_tuner.max_batch_budget,
+                );
+            clamped.oco_tuner.initial_time_slice_ms =
+                if clamped.oco_tuner.initial_time_slice_ms.is_finite() {
+                    clamped.oco_tuner.initial_time_slice_ms
+                } else {
+                    default_oco.initial_time_slice_ms
+                }
+                .clamp(
+                    clamped.oco_tuner.min_time_slice_ms,
+                    clamped.oco_tuner.max_time_slice_ms,
+                );
             clamped.oco_tuner.rollback_loss_threshold =
                 if clamped.oco_tuner.rollback_loss_threshold.is_finite() {
                     clamped.oco_tuner.rollback_loss_threshold.clamp(0.1, 10.0)
@@ -20701,9 +20728,10 @@ impl ExtensionManager {
             .oco_tuner
             .as_ref()
             .filter(|_| config.oco_tuner.enabled)
-            .map_or(config.overload_signals_to_fallback.max(1), |state| {
-                state.adaptive_overload_threshold(config.overload_signals_to_fallback)
-            });
+            .map_or_else(
+                || config.overload_signals_to_fallback.max(1),
+                |state| state.adaptive_overload_threshold(config.overload_signals_to_fallback),
+            );
 
         let signal_count = u32::try_from(state.overload_timestamps_ms.len()).unwrap_or(u32::MAX);
         let utilization_pct = if adaptive_threshold == 0 {
@@ -34367,7 +34395,12 @@ mod tests {
         });
 
         for _ in 0..8 {
-            manager.record_budget_overload_signal(Some("ext.oco.bounds"), "reactor_burst", Some(8), Some(8));
+            manager.record_budget_overload_signal(
+                Some("ext.oco.bounds"),
+                "reactor_burst",
+                Some(8),
+                Some(8),
+            );
         }
         let snapshot = manager
             .oco_tuner_snapshot("ext.oco.bounds")
@@ -34940,7 +34973,6 @@ mod tests {
                 ..Default::default()
             },
             oco_tuner: OcoTunerConfig::for_tier(ExtensionBudgetTier::Balanced),
-            ..Default::default()
         });
 
         for _ in 0..50 {
@@ -35264,7 +35296,6 @@ mod tests {
                 pac_bayes_prior_weight: 1.0,
             },
             oco_tuner: OcoTunerConfig::for_tier(ExtensionBudgetTier::Strict),
-            ..Default::default()
         });
 
         // Before enough signals, no fallback.

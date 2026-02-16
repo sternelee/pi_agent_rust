@@ -1,5 +1,6 @@
 //! CLI argument parsing using Clap.
 
+use clap::error::ErrorKind;
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,11 +218,21 @@ pub fn parse_with_extension_flags(raw_args: Vec<String>) -> Result<ParsedCli, cl
         });
     }
 
-    if let Ok(cli) = Cli::try_parse_from(raw_args.clone()) {
-        return Ok(ParsedCli {
-            cli,
-            extension_flags: Vec::new(),
-        });
+    match Cli::try_parse_from(raw_args.clone()) {
+        Ok(cli) => {
+            return Ok(ParsedCli {
+                cli,
+                extension_flags: Vec::new(),
+            });
+        }
+        Err(err) => {
+            if matches!(
+                err.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) {
+                return Err(err);
+            }
+        }
     }
 
     let (filtered_args, extension_flags) = preprocess_extension_flags(&raw_args);
@@ -555,6 +566,13 @@ mod tests {
     fn parse_version_long_flag() {
         let cli = Cli::parse_from(["pi", "--version"]);
         assert!(cli.version);
+    }
+
+    #[test]
+    fn parse_with_extension_flags_preserves_help_error() {
+        let err = parse_with_extension_flags(vec!["pi".into(), "--help".into()])
+            .expect_err("`--help` should stay a clap help path");
+        assert!(matches!(err.kind(), clap::error::ErrorKind::DisplayHelp));
     }
 
     #[test]
