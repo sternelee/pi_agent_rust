@@ -3055,9 +3055,18 @@ mod tests {
     fn enqueue_hostcall_completions_batch_preserves_order() {
         let mut sched = Scheduler::with_clock(DeterministicClock::new(0));
         let completions = vec![
-            ("c-1".to_string(), HostcallOutcome::Success(serde_json::json!(1))),
-            ("c-2".to_string(), HostcallOutcome::Success(serde_json::json!(2))),
-            ("c-3".to_string(), HostcallOutcome::Success(serde_json::json!(3))),
+            (
+                "c-1".to_string(),
+                HostcallOutcome::Success(serde_json::json!(1)),
+            ),
+            (
+                "c-2".to_string(),
+                HostcallOutcome::Success(serde_json::json!(2)),
+            ),
+            (
+                "c-3".to_string(),
+                HostcallOutcome::Success(serde_json::json!(3)),
+            ),
         ];
         sched.enqueue_hostcall_completions(completions);
         assert_eq!(sched.macrotask_count(), 3);
@@ -3168,7 +3177,8 @@ mod tests {
 
     #[test]
     fn reactor_placement_manifest_as_json_has_expected_fields() {
-        let topology = ReactorTopologySnapshot::from_core_node_pairs(&[(0, 0), (1, 0), (2, 1), (3, 1)]);
+        let topology =
+            ReactorTopologySnapshot::from_core_node_pairs(&[(0, 0), (1, 0), (2, 1), (3, 1)]);
         let manifest = ReactorPlacementManifest::plan(4, Some(&topology));
         let json = manifest.as_json();
 
@@ -3247,7 +3257,10 @@ mod tests {
         assert_eq!(pool.node_count(), 1);
 
         let status = HugepageStatus::evaluate(
-            &HugepageConfig { page_size_bytes: 2 * 1024 * 1024, enabled: true },
+            &HugepageConfig {
+                page_size_bytes: 2 * 1024 * 1024,
+                enabled: true,
+            },
             512,
             256,
         );

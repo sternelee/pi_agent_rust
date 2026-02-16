@@ -889,28 +889,33 @@ mod tests {
         }
 
         fn arb_config() -> impl Strategy<Value = IoUringLanePolicyConfig> {
-            (any::<bool>(), any::<bool>(), 1..512usize, any::<bool>(), any::<bool>()).prop_map(
-                |(enabled, ring_available, max_queue_depth, allow_fs, allow_net)| {
-                    IoUringLanePolicyConfig {
-                        enabled,
-                        ring_available,
-                        max_queue_depth,
-                        allow_filesystem: allow_fs,
-                        allow_network: allow_net,
-                    }
-                },
+            (
+                any::<bool>(),
+                any::<bool>(),
+                1..512usize,
+                any::<bool>(),
+                any::<bool>(),
             )
+                .prop_map(
+                    |(enabled, ring_available, max_queue_depth, allow_fs, allow_net)| {
+                        IoUringLanePolicyConfig {
+                            enabled,
+                            ring_available,
+                            max_queue_depth,
+                            allow_filesystem: allow_fs,
+                            allow_network: allow_net,
+                        }
+                    },
+                )
         }
 
         fn arb_input() -> impl Strategy<Value = IoUringLaneDecisionInput> {
             (arb_capability(), arb_io_hint(), 0..1024usize, any::<bool>()).prop_map(
-                |(capability, io_hint, queue_depth, force_compat_lane)| {
-                    IoUringLaneDecisionInput {
-                        capability,
-                        io_hint,
-                        queue_depth,
-                        force_compat_lane,
-                    }
+                |(capability, io_hint, queue_depth, force_compat_lane)| IoUringLaneDecisionInput {
+                    capability,
+                    io_hint,
+                    queue_depth,
+                    force_compat_lane,
                 },
             )
         }

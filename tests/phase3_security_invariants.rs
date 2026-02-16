@@ -12,8 +12,8 @@ use pi::extension_scoring::{
     OpeEvaluatorConfig, OpeGateReason, OpeTraceSample, evaluate_off_policy,
 };
 use pi::extensions::{
-    ALL_CAPABILITIES, Capability, ExtensionOverride, ExtensionPolicy, ExtensionPolicyMode,
-    ExecMediationPolicy, PolicyDecision, PolicyProfile, PolicySnapshot, SecretBrokerPolicy,
+    ALL_CAPABILITIES, Capability, ExecMediationPolicy, ExtensionOverride, ExtensionPolicy,
+    ExtensionPolicyMode, PolicyDecision, PolicyProfile, PolicySnapshot, SecretBrokerPolicy,
 };
 use pi::hostcall_io_uring_lane::{
     HostcallCapabilityClass, HostcallDispatchLane, HostcallIoHint, IoUringFallbackReason,
@@ -34,7 +34,8 @@ fn invariant_snapshot_matches_evaluate_for_all_known_caps() {
         let dynamic = policy.evaluate_for(cap.as_str(), None);
         let cached = snapshot.lookup(cap.as_str(), None);
         assert_eq!(
-            dynamic.decision, cached.decision,
+            dynamic.decision,
+            cached.decision,
             "snapshot mismatch for cap={} without extension context",
             cap.as_str()
         );
@@ -70,7 +71,8 @@ fn invariant_snapshot_matches_evaluate_for_per_extension_overrides() {
             let dynamic = policy.evaluate_for(cap.as_str(), Some(ext_id));
             let cached = snapshot.lookup(cap.as_str(), Some(ext_id));
             assert_eq!(
-                dynamic.decision, cached.decision,
+                dynamic.decision,
+                cached.decision,
                 "snapshot mismatch: cap={}, ext={ext_id}",
                 cap.as_str()
             );
@@ -113,7 +115,8 @@ fn invariant_snapshot_per_extension_unknown_ext_uses_global() {
         let dynamic = policy.evaluate_for(cap.as_str(), Some("unknown-ext"));
         let cached = snapshot.lookup(cap.as_str(), Some("unknown-ext"));
         assert_eq!(
-            dynamic.decision, cached.decision,
+            dynamic.decision,
+            cached.decision,
             "unknown ext should use global: cap={}",
             cap.as_str()
         );
@@ -238,7 +241,10 @@ fn invariant_empty_capability_always_denied() {
 
 #[test]
 fn invariant_dangerous_caps_classification_stable() {
-    let dangerous: Vec<&Capability> = ALL_CAPABILITIES.iter().filter(|c| c.is_dangerous()).collect();
+    let dangerous: Vec<&Capability> = ALL_CAPABILITIES
+        .iter()
+        .filter(|c| c.is_dangerous())
+        .collect();
     let safe: Vec<&Capability> = ALL_CAPABILITIES
         .iter()
         .filter(|c| !c.is_dangerous())
@@ -1000,15 +1006,21 @@ fn invariant_snapshot_agrees_with_policy_complex_multi_extension() {
 
     let snapshot = PolicySnapshot::compile(&policy);
 
-    let test_contexts: Vec<Option<&str>> =
-        vec![None, Some("ext-a"), Some("ext-b"), Some("ext-c"), Some("ext-unknown")];
+    let test_contexts: Vec<Option<&str>> = vec![
+        None,
+        Some("ext-a"),
+        Some("ext-b"),
+        Some("ext-c"),
+        Some("ext-unknown"),
+    ];
 
     for ext_id in &test_contexts {
         for cap in ALL_CAPABILITIES {
             let dynamic = policy.evaluate_for(cap.as_str(), *ext_id);
             let cached = snapshot.lookup(cap.as_str(), *ext_id);
             assert_eq!(
-                dynamic.decision, cached.decision,
+                dynamic.decision,
+                cached.decision,
                 "MISMATCH: cap={}, ext={:?} → dynamic={:?} cached={:?}",
                 cap.as_str(),
                 ext_id,

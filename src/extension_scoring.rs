@@ -2999,18 +2999,16 @@ mod tests {
                 prop::option::of(0..10_000u64),
                 prop::option::of(0..1_000_000u64),
             )
-                .prop_map(
-                    |(listing, example, gist, stars, forks, npm)| Signals {
-                        official_listing: listing,
-                        pi_mono_example: example,
-                        badlogic_gist: gist,
-                        github_stars: stars,
-                        github_forks: forks,
-                        npm_downloads_month: npm,
-                        references: Vec::new(),
-                        marketplace: None,
-                    },
-                )
+                .prop_map(|(listing, example, gist, stars, forks, npm)| Signals {
+                    official_listing: listing,
+                    pi_mono_example: example,
+                    badlogic_gist: gist,
+                    github_stars: stars,
+                    github_forks: forks,
+                    npm_downloads_month: npm,
+                    references: Vec::new(),
+                    marketplace: None,
+                })
         }
 
         fn arb_tags() -> impl Strategy<Value = Tags> {

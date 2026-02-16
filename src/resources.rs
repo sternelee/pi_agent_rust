@@ -2254,10 +2254,8 @@ still frontmatter",
         use proptest::prelude::*;
 
         fn arb_valid_name() -> impl Strategy<Value = String> {
-            "[a-z0-9]([a-z0-9]|(-[a-z0-9])){0,20}".prop_filter(
-                "no consecutive hyphens",
-                |s| !s.contains("--"),
-            )
+            "[a-z0-9]([a-z0-9]|(-[a-z0-9])){0,20}"
+                .prop_filter("no consecutive hyphens", |s| !s.contains("--"))
         }
 
         proptest! {

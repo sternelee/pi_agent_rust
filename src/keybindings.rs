@@ -2365,12 +2365,44 @@ mod tests {
         use proptest::prelude::*;
 
         fn arb_valid_key() -> impl Strategy<Value = String> {
-            prop::sample::select(vec![
-                "a", "b", "c", "z", "escape", "enter", "tab", "space",
-                "backspace", "delete", "home", "end", "pageup", "pagedown",
-                "up", "down", "left", "right", "f1", "f5", "f12", "f20",
-                "`", "-", "=", "[", "]", ";", ",", ".", "/",
-            ].into_iter().map(String::from).collect::<Vec<_>>())
+            prop::sample::select(
+                vec![
+                    "a",
+                    "b",
+                    "c",
+                    "z",
+                    "escape",
+                    "enter",
+                    "tab",
+                    "space",
+                    "backspace",
+                    "delete",
+                    "home",
+                    "end",
+                    "pageup",
+                    "pagedown",
+                    "up",
+                    "down",
+                    "left",
+                    "right",
+                    "f1",
+                    "f5",
+                    "f12",
+                    "f20",
+                    "`",
+                    "-",
+                    "=",
+                    "[",
+                    "]",
+                    ";",
+                    ",",
+                    ".",
+                    "/",
+                ]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>(),
+            )
         }
 
         fn arb_modifiers() -> impl Strategy<Value = (bool, bool, bool)> {
@@ -2380,9 +2412,15 @@ mod tests {
         fn arb_binding_string() -> impl Strategy<Value = String> {
             (arb_modifiers(), arb_valid_key()).prop_map(|((ctrl, alt, shift), key)| {
                 let mut parts = Vec::new();
-                if ctrl { parts.push("ctrl".to_string()); }
-                if alt { parts.push("alt".to_string()); }
-                if shift { parts.push("shift".to_string()); }
+                if ctrl {
+                    parts.push("ctrl".to_string());
+                }
+                if alt {
+                    parts.push("alt".to_string());
+                }
+                if shift {
+                    parts.push("shift".to_string());
+                }
                 parts.push(key);
                 parts.join("+")
             })

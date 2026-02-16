@@ -421,7 +421,10 @@ mod tests {
                     "fatal: out of memory".to_string(),
                     FlakeCategory::ResourceExhaustion
                 )),
-                Just(("error: ENOMEM".to_string(), FlakeCategory::ResourceExhaustion)),
+                Just((
+                    "error: ENOMEM".to_string(),
+                    FlakeCategory::ResourceExhaustion
+                )),
                 Just((
                     "cannot allocate 4 GB".to_string(),
                     FlakeCategory::ResourceExhaustion

@@ -800,12 +800,7 @@ impl ReplayRecorder {
         kind: ReplayEventKind,
         attributes: BTreeMap<String, String>,
     ) {
-        let mut draft = ReplayEventDraft::new(
-            self.logical_clock,
-            extension_id,
-            request_id,
-            kind,
-        );
+        let mut draft = ReplayEventDraft::new(self.logical_clock, extension_id, request_id, kind);
         draft.attributes = attributes;
         self.builder.push(draft);
         self.event_count = self.event_count.saturating_add(1);
@@ -818,7 +813,12 @@ impl ReplayRecorder {
         request_id: impl Into<String>,
         attributes: BTreeMap<String, String>,
     ) {
-        self.record(extension_id, request_id, ReplayEventKind::Scheduled, attributes);
+        self.record(
+            extension_id,
+            request_id,
+            ReplayEventKind::Scheduled,
+            attributes,
+        );
     }
 
     /// Record a `QueueAccepted` event.
@@ -828,7 +828,12 @@ impl ReplayRecorder {
         request_id: impl Into<String>,
         attributes: BTreeMap<String, String>,
     ) {
-        self.record(extension_id, request_id, ReplayEventKind::QueueAccepted, attributes);
+        self.record(
+            extension_id,
+            request_id,
+            ReplayEventKind::QueueAccepted,
+            attributes,
+        );
     }
 
     /// Record a `PolicyDecision` event.
@@ -838,7 +843,12 @@ impl ReplayRecorder {
         request_id: impl Into<String>,
         attributes: BTreeMap<String, String>,
     ) {
-        self.record(extension_id, request_id, ReplayEventKind::PolicyDecision, attributes);
+        self.record(
+            extension_id,
+            request_id,
+            ReplayEventKind::PolicyDecision,
+            attributes,
+        );
     }
 
     /// Record a `Cancelled` event.
@@ -848,7 +858,12 @@ impl ReplayRecorder {
         request_id: impl Into<String>,
         attributes: BTreeMap<String, String>,
     ) {
-        self.record(extension_id, request_id, ReplayEventKind::Cancelled, attributes);
+        self.record(
+            extension_id,
+            request_id,
+            ReplayEventKind::Cancelled,
+            attributes,
+        );
     }
 
     /// Record a `Retried` event.
@@ -858,7 +873,12 @@ impl ReplayRecorder {
         request_id: impl Into<String>,
         attributes: BTreeMap<String, String>,
     ) {
-        self.record(extension_id, request_id, ReplayEventKind::Retried, attributes);
+        self.record(
+            extension_id,
+            request_id,
+            ReplayEventKind::Retried,
+            attributes,
+        );
     }
 
     /// Record a `Completed` event.
@@ -868,7 +888,12 @@ impl ReplayRecorder {
         request_id: impl Into<String>,
         attributes: BTreeMap<String, String>,
     ) {
-        self.record(extension_id, request_id, ReplayEventKind::Completed, attributes);
+        self.record(
+            extension_id,
+            request_id,
+            ReplayEventKind::Completed,
+            attributes,
+        );
     }
 
     /// Record a `Failed` event.
@@ -878,7 +903,12 @@ impl ReplayRecorder {
         request_id: impl Into<String>,
         attributes: BTreeMap<String, String>,
     ) {
-        self.record(extension_id, request_id, ReplayEventKind::Failed, attributes);
+        self.record(
+            extension_id,
+            request_id,
+            ReplayEventKind::Failed,
+            attributes,
+        );
     }
 
     /// Finalize the recording: canonicalize event ordering, apply budget gate,
@@ -1383,8 +1413,14 @@ mod tests {
         builder.insert_metadata("version", "1.2.3");
         builder.push(draft(1, "ext.a", "req-1", ReplayEventKind::Scheduled));
         let bundle = builder.build().expect("bundle with metadata");
-        assert_eq!(bundle.metadata.get("env").map(String::as_str), Some("production"));
-        assert_eq!(bundle.metadata.get("version").map(String::as_str), Some("1.2.3"));
+        assert_eq!(
+            bundle.metadata.get("env").map(String::as_str),
+            Some("production")
+        );
+        assert_eq!(
+            bundle.metadata.get("version").map(String::as_str),
+            Some("1.2.3")
+        );
     }
 
     #[test]
@@ -1400,14 +1436,19 @@ mod tests {
     #[test]
     fn draft_attributes_carried_through_build() {
         let mut d = draft(1, "ext.a", "req-1", ReplayEventKind::PolicyDecision);
-        d.attributes.insert("policy".to_string(), "fast_lane".to_string());
-        d.attributes.insert("latency_ms".to_string(), "12".to_string());
+        d.attributes
+            .insert("policy".to_string(), "fast_lane".to_string());
+        d.attributes
+            .insert("latency_ms".to_string(), "12".to_string());
         let mut builder = ReplayTraceBuilder::new("trace-attrs");
         builder.push(d);
         let bundle = builder.build().expect("bundle with attrs");
         assert_eq!(bundle.events[0].attributes.len(), 2);
         assert_eq!(
-            bundle.events[0].attributes.get("policy").map(String::as_str),
+            bundle.events[0]
+                .attributes
+                .get("policy")
+                .map(String::as_str),
             Some("fast_lane")
         );
     }
@@ -1426,7 +1467,9 @@ mod tests {
     fn validate_rejects_whitespace_only_trace_id() {
         let mut builder = ReplayTraceBuilder::new("   ");
         builder.push(draft(1, "ext.a", "req-1", ReplayEventKind::Scheduled));
-        let err = builder.build().expect_err("whitespace trace_id should fail");
+        let err = builder
+            .build()
+            .expect_err("whitespace trace_id should fail");
         assert!(matches!(err, ReplayTraceValidationError::EmptyTraceId));
     }
 
@@ -1470,7 +1513,9 @@ mod tests {
         builder.push(draft(1, "ext.a", "req-1", ReplayEventKind::Cancelled));
         builder.push(draft(2, "ext.a", "req-1", ReplayEventKind::Retried));
         builder.push(draft(3, "ext.a", "req-1", ReplayEventKind::Cancelled));
-        let bundle = builder.build().expect("cancel-retry-cancel should be valid");
+        let bundle = builder
+            .build()
+            .expect("cancel-retry-cancel should be valid");
         assert_eq!(bundle.events.len(), 3);
     }
 
@@ -1480,7 +1525,9 @@ mod tests {
         builder.push(draft(1, "ext.a", "req-1", ReplayEventKind::Cancelled));
         builder.push(draft(2, "ext.a", "req-1", ReplayEventKind::Completed));
         builder.push(draft(3, "ext.a", "req-1", ReplayEventKind::Cancelled));
-        let bundle = builder.build().expect("completed should clear cancel state");
+        let bundle = builder
+            .build()
+            .expect("completed should clear cancel state");
         assert_eq!(bundle.events.len(), 3);
     }
 
@@ -1551,13 +1598,15 @@ mod tests {
     fn divergence_detects_attribute_mismatch() {
         let mut builder_a = ReplayTraceBuilder::new("trace-attrs-cmp");
         let mut d1 = draft(1, "ext.a", "req-1", ReplayEventKind::PolicyDecision);
-        d1.attributes.insert("decision".to_string(), "fast".to_string());
+        d1.attributes
+            .insert("decision".to_string(), "fast".to_string());
         builder_a.push(d1);
         let expected = builder_a.build().expect("bundle a");
 
         let mut builder_b = ReplayTraceBuilder::new("trace-attrs-cmp");
         let mut d2 = draft(1, "ext.a", "req-1", ReplayEventKind::PolicyDecision);
-        d2.attributes.insert("decision".to_string(), "slow".to_string());
+        d2.attributes
+            .insert("decision".to_string(), "slow".to_string());
         builder_b.push(d2);
         let observed = builder_b.build().expect("bundle b");
 
@@ -1643,7 +1692,10 @@ mod tests {
         };
         let report = evaluate_replay_capture_gate(budget, over_limit);
         assert!(!report.capture_allowed);
-        assert_eq!(report.reason, ReplayCaptureGateReason::DisabledByTraceBudget);
+        assert_eq!(
+            report.reason,
+            ReplayCaptureGateReason::DisabledByTraceBudget
+        );
     }
 
     // ── Diagnostic snapshot root cause hints ──
@@ -1664,8 +1716,7 @@ mod tests {
                 trace_bytes: 0,
             },
         );
-        let snapshot =
-            build_replay_diagnostic_snapshot(&bundle, gate, None).expect("snapshot");
+        let snapshot = build_replay_diagnostic_snapshot(&bundle, gate, None).expect("snapshot");
         assert_eq!(
             snapshot.root_cause_hints,
             vec![ReplayRootCauseHint::PolicyGateDisabled]
@@ -1688,8 +1739,7 @@ mod tests {
                 trace_bytes: 200,
             },
         );
-        let snapshot =
-            build_replay_diagnostic_snapshot(&bundle, gate, None).expect("snapshot");
+        let snapshot = build_replay_diagnostic_snapshot(&bundle, gate, None).expect("snapshot");
         assert_eq!(
             snapshot.root_cause_hints,
             vec![ReplayRootCauseHint::TraceBudgetExceeded]
@@ -1707,8 +1757,7 @@ mod tests {
                 trace_bytes: 64,
             },
         );
-        let snapshot =
-            build_replay_diagnostic_snapshot(&bundle, gate, None).expect("snapshot");
+        let snapshot = build_replay_diagnostic_snapshot(&bundle, gate, None).expect("snapshot");
         let json = serde_json::to_string(&snapshot).expect("serialize");
         let roundtrip: super::ReplayDiagnosticSnapshot =
             serde_json::from_str(&json).expect("deserialize");
@@ -1761,7 +1810,9 @@ mod tests {
         assert_eq!(recorder.event_count(), 0);
         assert_eq!(recorder.logical_clock(), 0);
 
-        let result = recorder.finish(within_budget_observation()).expect("finish");
+        let result = recorder
+            .finish(within_budget_observation())
+            .expect("finish");
         assert!(result.bundle.events.is_empty());
         assert!(result.gate_report.capture_allowed);
         assert_eq!(result.diagnostic.event_count, 0);
@@ -1782,11 +1833,16 @@ mod tests {
         assert_eq!(recorder.event_count(), 4);
         assert_eq!(recorder.logical_clock(), 4);
 
-        let result = recorder.finish(within_budget_observation()).expect("finish");
+        let result = recorder
+            .finish(within_budget_observation())
+            .expect("finish");
         assert_eq!(result.bundle.events.len(), 4);
         assert_eq!(result.bundle.events[0].kind, ReplayEventKind::Scheduled);
         assert_eq!(result.bundle.events[1].kind, ReplayEventKind::QueueAccepted);
-        assert_eq!(result.bundle.events[2].kind, ReplayEventKind::PolicyDecision);
+        assert_eq!(
+            result.bundle.events[2].kind,
+            ReplayEventKind::PolicyDecision
+        );
         assert_eq!(result.bundle.events[3].kind, ReplayEventKind::Completed);
 
         // Sequences are 1-based contiguous
@@ -1804,10 +1860,18 @@ mod tests {
         attrs.insert("capability".to_string(), "tool".to_string());
         recorder.record_policy_decision("ext.a", "req-1", attrs);
 
-        let result = recorder.finish(within_budget_observation()).expect("finish");
+        let result = recorder
+            .finish(within_budget_observation())
+            .expect("finish");
         let event = &result.bundle.events[0];
-        assert_eq!(event.attributes.get("lane").map(String::as_str), Some("fast"));
-        assert_eq!(event.attributes.get("capability").map(String::as_str), Some("tool"));
+        assert_eq!(
+            event.attributes.get("lane").map(String::as_str),
+            Some("fast")
+        );
+        assert_eq!(
+            event.attributes.get("capability").map(String::as_str),
+            Some("tool")
+        );
     }
 
     #[test]
@@ -1819,9 +1883,17 @@ mod tests {
         recorder.tick();
         recorder.record_scheduled("ext.a", "req-1", BTreeMap::new());
 
-        let result = recorder.finish(within_budget_observation()).expect("finish");
-        assert_eq!(result.bundle.metadata.get("env").map(String::as_str), Some("staging"));
-        assert_eq!(result.bundle.metadata.get("worker").map(String::as_str), Some("w-3"));
+        let result = recorder
+            .finish(within_budget_observation())
+            .expect("finish");
+        assert_eq!(
+            result.bundle.metadata.get("env").map(String::as_str),
+            Some("staging")
+        );
+        assert_eq!(
+            result.bundle.metadata.get("worker").map(String::as_str),
+            Some("w-3")
+        );
     }
 
     #[test]
@@ -1836,7 +1908,9 @@ mod tests {
         recorder.tick();
         recorder.record_completed("ext.a", "req-1", BTreeMap::new());
 
-        let result = recorder.finish(within_budget_observation()).expect("finish");
+        let result = recorder
+            .finish(within_budget_observation())
+            .expect("finish");
         assert_eq!(result.bundle.events.len(), 4);
         assert_eq!(result.bundle.events[1].kind, ReplayEventKind::Cancelled);
         assert_eq!(result.bundle.events[2].kind, ReplayEventKind::Retried);
@@ -1852,10 +1926,15 @@ mod tests {
         attrs.insert("error".to_string(), "timeout".to_string());
         recorder.record_failed("ext.a", "req-1", attrs);
 
-        let result = recorder.finish(within_budget_observation()).expect("finish");
+        let result = recorder
+            .finish(within_budget_observation())
+            .expect("finish");
         assert_eq!(result.bundle.events[1].kind, ReplayEventKind::Failed);
         assert_eq!(
-            result.bundle.events[1].attributes.get("error").map(String::as_str),
+            result.bundle.events[1]
+                .attributes
+                .get("error")
+                .map(String::as_str),
             Some("timeout")
         );
     }
@@ -1898,7 +1977,9 @@ mod tests {
         recorder.tick();
         recorder.record_completed("ext.a", "req-1", BTreeMap::new());
 
-        let result = recorder.finish(within_budget_observation()).expect("finish");
+        let result = recorder
+            .finish(within_budget_observation())
+            .expect("finish");
         assert_eq!(result.diagnostic.trace_id, "trace-diag");
         assert_eq!(result.diagnostic.schema, REPLAY_TRACE_SCHEMA_V1);
         assert_eq!(result.diagnostic.event_count, 2);
@@ -1913,7 +1994,10 @@ mod tests {
         rec1.record_scheduled("ext.a", "req-1", BTreeMap::new());
         rec1.tick();
         rec1.record_completed("ext.a", "req-1", BTreeMap::new());
-        let reference = rec1.finish(within_budget_observation()).expect("ref").bundle;
+        let reference = rec1
+            .finish(within_budget_observation())
+            .expect("ref")
+            .bundle;
 
         let mut rec2 = super::ReplayRecorder::new("trace-cmp", standard_lane_config());
         rec2.tick();
@@ -1938,7 +2022,10 @@ mod tests {
         rec1.record_scheduled("ext.a", "req-1", BTreeMap::new());
         rec1.tick();
         rec1.record_completed("ext.a", "req-1", BTreeMap::new());
-        let reference = rec1.finish(within_budget_observation()).expect("ref").bundle;
+        let reference = rec1
+            .finish(within_budget_observation())
+            .expect("ref")
+            .bundle;
 
         let mut rec2 = super::ReplayRecorder::new("trace-div", standard_lane_config());
         rec2.tick();
@@ -1973,7 +2060,9 @@ mod tests {
         recorder.record_completed("ext.a", "req-1", BTreeMap::new());
         recorder.record_completed("ext.b", "req-2", BTreeMap::new());
 
-        let result = recorder.finish(within_budget_observation()).expect("finish");
+        let result = recorder
+            .finish(within_budget_observation())
+            .expect("finish");
         assert_eq!(result.bundle.events.len(), 6);
 
         // Canonical ordering: at same clock, ext.a < ext.b
@@ -1993,10 +2082,8 @@ mod tests {
     #[test]
     fn compare_replay_bundles_no_divergence() {
         let bundle = standard_bundle();
-        let gate = evaluate_replay_capture_gate(
-            standard_capture_budget(),
-            within_budget_observation(),
-        );
+        let gate =
+            evaluate_replay_capture_gate(standard_capture_budget(), within_budget_observation());
 
         let (diagnostic, comparison) =
             super::compare_replay_bundles(&bundle, &bundle, gate).expect("compare");
@@ -2014,10 +2101,8 @@ mod tests {
         observed_builder.push(draft(3, "ext.a", "req-1", ReplayEventKind::Failed));
         let observed = observed_builder.build().expect("observed bundle");
 
-        let gate = evaluate_replay_capture_gate(
-            standard_capture_budget(),
-            within_budget_observation(),
-        );
+        let gate =
+            evaluate_replay_capture_gate(standard_capture_budget(), within_budget_observation());
 
         let (diagnostic, comparison) =
             super::compare_replay_bundles(&reference, &observed, gate).expect("compare");
@@ -2034,8 +2119,7 @@ mod tests {
         config.insert_metadata("env", "prod");
 
         let json = serde_json::to_string(&config).expect("serialize");
-        let roundtrip: super::ReplayLaneConfig =
-            serde_json::from_str(&json).expect("deserialize");
+        let roundtrip: super::ReplayLaneConfig = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(config, roundtrip);
     }
 
@@ -2054,10 +2138,11 @@ mod tests {
         recorder.tick();
         recorder.record_completed("ext.a", "req-1", BTreeMap::new());
 
-        let result = recorder.finish(within_budget_observation()).expect("finish");
+        let result = recorder
+            .finish(within_budget_observation())
+            .expect("finish");
         let json = serde_json::to_string(&result).expect("serialize");
-        let roundtrip: super::ReplayLaneResult =
-            serde_json::from_str(&json).expect("deserialize");
+        let roundtrip: super::ReplayLaneResult = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(result, roundtrip);
     }
 
@@ -2111,9 +2196,8 @@ mod tests {
         }
 
         fn arb_simple_draft() -> impl Strategy<Value = ReplayEventDraft> {
-            (1..100u64, arb_ext_id(), arb_req_id(), arb_event_kind()).prop_map(
-                |(clock, ext, req, kind)| ReplayEventDraft::new(clock, ext, req, kind),
-            )
+            (1..100u64, arb_ext_id(), arb_req_id(), arb_event_kind())
+                .prop_map(|(clock, ext, req, kind)| ReplayEventDraft::new(clock, ext, req, kind))
         }
 
         proptest! {

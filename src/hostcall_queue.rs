@@ -1478,12 +1478,8 @@ mod tests {
         let ebr = HostcallRequestQueue::<u8>::with_mode(2, 2, HostcallQueueMode::Ebr);
         assert_eq!(ebr.reclamation_mode(), HostcallQueueMode::Ebr);
 
-        let fallback =
-            HostcallRequestQueue::<u8>::with_mode(2, 2, HostcallQueueMode::SafeFallback);
-        assert_eq!(
-            fallback.reclamation_mode(),
-            HostcallQueueMode::SafeFallback
-        );
+        let fallback = HostcallRequestQueue::<u8>::with_mode(2, 2, HostcallQueueMode::SafeFallback);
+        assert_eq!(fallback.reclamation_mode(), HostcallQueueMode::SafeFallback);
     }
 
     #[test]
@@ -1518,15 +1514,22 @@ mod tests {
         use proptest::prelude::*;
 
         fn arb_sample() -> impl Strategy<Value = ContentionSample> {
-            (0..10_000u64, 0..10_000u64, 0..50_000u64, 0..50_000u64, 0..100u64).prop_map(
-                |(reads, writes, r_wait, w_wait, w_timeouts)| ContentionSample {
-                    read_acquires: reads,
-                    write_acquires: writes,
-                    read_wait_p95_us: r_wait,
-                    write_wait_p95_us: w_wait,
-                    write_timeouts: w_timeouts,
-                },
+            (
+                0..10_000u64,
+                0..10_000u64,
+                0..50_000u64,
+                0..50_000u64,
+                0..100u64,
             )
+                .prop_map(|(reads, writes, r_wait, w_wait, w_timeouts)| {
+                    ContentionSample {
+                        read_acquires: reads,
+                        write_acquires: writes,
+                        read_wait_p95_us: r_wait,
+                        write_wait_p95_us: w_wait,
+                        write_timeouts: w_timeouts,
+                    }
+                })
         }
 
         fn arb_config() -> impl Strategy<Value = BravoContentionConfig> {
