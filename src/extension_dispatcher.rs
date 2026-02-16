@@ -148,7 +148,7 @@ fn policy_lookup_path(capability: &str) -> &'static str {
 }
 
 fn protocol_error_code(code: &str) -> HostCallErrorCode {
-    match code {
+    match code.trim().to_ascii_lowercase().as_str() {
         "timeout" => HostCallErrorCode::Timeout,
         "denied" => HostCallErrorCode::Denied,
         "io" | "tool_error" => HostCallErrorCode::Io,
@@ -158,7 +158,7 @@ fn protocol_error_code(code: &str) -> HostCallErrorCode {
 }
 
 fn protocol_error_fallback_reason(method: &str, code: &str) -> &'static str {
-    match code {
+    match code.trim().to_ascii_lowercase().as_str() {
         "denied" => "policy_denied",
         "timeout" => "handler_timeout",
         "io" | "tool_error" => "handler_error",
@@ -9924,6 +9924,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn protocol_error_code_normalizes_case_and_whitespace() {
+        assert_eq!(protocol_error_code(" Timeout "), HostCallErrorCode::Timeout);
+        assert_eq!(protocol_error_code("DENIED"), HostCallErrorCode::Denied);
+        assert_eq!(protocol_error_code(" Tool_Error "), HostCallErrorCode::Io);
+        assert_eq!(
+            protocol_error_code(" Invalid_Request "),
+            HostCallErrorCode::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn protocol_error_fallback_reason_normalizes_code_before_taxonomy_mapping() {
+        assert_eq!(
+            protocol_error_fallback_reason(" session ", " INVALID_REQUEST "),
+            "schema_validation_failed"
+        );
+        assert_eq!(
+            protocol_error_fallback_reason("unknown", " INVALID_REQUEST "),
+            "unsupported_method_fallback"
+        );
+        assert_eq!(
+            protocol_error_fallback_reason("tool", " TOOL_ERROR "),
+            "handler_error"
+        );
+    }
+
     fn test_protocol_payload(call_id: &str) -> HostCallPayload {
         HostCallPayload {
             call_id: call_id.to_string(),
@@ -9933,6 +9960,150 @@ mod tests {
             timeout_ms: None,
             cancel_token: None,
             context: None,
+        }
+    }
+
+    fn test_hostcall_request(call_id: &str, kind: HostcallKind, payload: Value) -> HostcallRequest {
+        HostcallRequest {
+            call_id: call_id.to_string(),
+            kind,
+            payload,
+            trace_id: 0,
+            extension_id: Some("ext.protocol.params".to_string()),
+        }
+    }
+
+    #[test]
+    fn protocol_params_from_request_matches_hostcall_request_params_for_hash() {
+        let requests = vec![
+            test_hostcall_request(
+                "tool-case",
+                HostcallKind::Tool {
+                    name: "read".to_string(),
+                },
+                serde_json::json!({ "path": "README.md" }),
+            ),
+            test_hostcall_request(
+                "exec-object-case",
+                HostcallKind::Exec {
+                    cmd: "echo from kind".to_string(),
+                },
+                serde_json::json!({
+                    "command": "legacy alias should be removed",
+                    "cmd": "payload override should lose",
+                    "args": ["hello"],
+                }),
+            ),
+            test_hostcall_request(
+                "exec-non-object-case",
+                HostcallKind::Exec {
+                    cmd: "bash -lc true".to_string(),
+                },
+                serde_json::json!("raw payload"),
+            ),
+            test_hostcall_request(
+                "http-case",
+                HostcallKind::Http,
+                serde_json::json!({
+                    "url": "https://example.com",
+                    "method": "GET",
+                }),
+            ),
+            test_hostcall_request(
+                "session-case",
+                HostcallKind::Session {
+                    op: "get_state".to_string(),
+                },
+                serde_json::json!({
+                    "op": "payload override should lose",
+                    "includeEntries": true,
+                }),
+            ),
+            test_hostcall_request(
+                "ui-non-object-case",
+                HostcallKind::Ui {
+                    op: "set_status".to_string(),
+                },
+                serde_json::json!("ready"),
+            ),
+            test_hostcall_request(
+                "events-null-case",
+                HostcallKind::Events {
+                    op: "list_flags".to_string(),
+                },
+                Value::Null,
+            ),
+            test_hostcall_request(
+                "log-case",
+                HostcallKind::Log,
+                serde_json::json!({
+                    "level": "info",
+                    "event": "test.protocol",
+                    "message": "hello",
+                }),
+            ),
+        ];
+
+        for request in requests {
+            assert_eq!(
+                protocol_params_from_request(&request),
+                request.params_for_hash(),
+                "protocol params shape diverged for {}",
+                request.call_id
+            );
+        }
+    }
+
+    #[test]
+    fn protocol_params_from_request_preserves_reserved_key_precedence() {
+        let exec_request = test_hostcall_request(
+            "exec-precedence",
+            HostcallKind::Exec {
+                cmd: "echo from kind".to_string(),
+            },
+            serde_json::json!({
+                "command": "legacy alias",
+                "cmd": "payload cmd should not win",
+                "args": ["a", "b"],
+            }),
+        );
+        let exec_params = protocol_params_from_request(&exec_request);
+        assert_eq!(exec_params["cmd"], serde_json::json!("echo from kind"));
+        assert_eq!(exec_params.get("command"), None);
+
+        for (call_id, kind) in [
+            (
+                "session-precedence",
+                HostcallKind::Session {
+                    op: "get_state".to_string(),
+                },
+            ),
+            (
+                "ui-precedence",
+                HostcallKind::Ui {
+                    op: "set_status".to_string(),
+                },
+            ),
+            (
+                "events-precedence",
+                HostcallKind::Events {
+                    op: "list_flags".to_string(),
+                },
+            ),
+        ] {
+            let request = test_hostcall_request(
+                call_id,
+                kind.clone(),
+                serde_json::json!({ "op": "payload op should not win", "x": 1 }),
+            );
+            let params = protocol_params_from_request(&request);
+            let expected_op = match kind {
+                HostcallKind::Session { ref op }
+                | HostcallKind::Ui { ref op }
+                | HostcallKind::Events { ref op } => op.clone(),
+                _ => unreachable!("loop only includes op-based hostcall kinds"),
+            };
+            assert_eq!(params["op"], Value::String(expected_op));
         }
     }
 

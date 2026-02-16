@@ -101,7 +101,7 @@ fn is_negative_numeric_token(token: &str) -> bool {
     if !token.starts_with('-') || token == "-" || token.starts_with("--") {
         return false;
     }
-    token.parse::<i64>().is_ok() || token.parse::<f64>().is_ok()
+    token.parse::<i64>().is_ok() || token.parse::<f64>().is_ok_and(f64::is_finite)
 }
 
 #[allow(clippy::too_many_lines)] // Argument normalization needs single-pass stateful parsing.
