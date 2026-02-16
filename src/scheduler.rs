@@ -1491,18 +1491,44 @@ pub struct NumaSlabTelemetry {
 }
 
 impl NumaSlabTelemetry {
+    const RATIO_SCALE_BPS: u64 = 10_000;
+
+    #[must_use]
+    fn ratio_basis_points(numerator: u64, denominator: u64) -> u64 {
+        if denominator == 0 {
+            return 0;
+        }
+        let scaled = (u128::from(numerator) * u128::from(Self::RATIO_SCALE_BPS))
+            / u128::from(denominator);
+        match u64::try_from(scaled) {
+            Ok(value) => value,
+            Err(_) => Self::RATIO_SCALE_BPS,
+        }
+    }
+
     /// Render as stable machine-readable JSON for diagnostics.
     #[must_use]
     pub fn as_json(&self) -> serde_json::Value {
         let total_allocs: u64 = self.per_node.iter().map(|n| n.total_allocs).sum();
         let total_frees: u64 = self.per_node.iter().map(|n| n.total_frees).sum();
         let total_in_use: usize = self.per_node.iter().map(|n| n.in_use).sum();
+        let remote_allocs = self.cross_node_allocs.min(total_allocs);
+        let local_allocs = total_allocs.saturating_sub(remote_allocs);
+        let local_ratio_bps = Self::ratio_basis_points(local_allocs, total_allocs);
+        let remote_ratio_bps = Self::ratio_basis_points(remote_allocs, total_allocs);
         serde_json::json!({
             "node_count": self.per_node.len(),
             "total_allocs": total_allocs,
             "total_frees": total_frees,
             "total_in_use": total_in_use,
             "cross_node_allocs": self.cross_node_allocs,
+            "local_allocs": local_allocs,
+            "remote_allocs": remote_allocs,
+            "allocation_ratio_bps": {
+                "scale": Self::RATIO_SCALE_BPS,
+                "local": local_ratio_bps,
+                "remote": remote_ratio_bps,
+            },
             "config": {
                 "slab_capacity": self.config.slab_capacity,
                 "entry_size_bytes": self.config.entry_size_bytes,
@@ -2937,6 +2963,22 @@ mod tests {
 
         let telemetry = pool.telemetry();
         assert_eq!(telemetry.cross_node_allocs, 1);
+        let json = telemetry.as_json();
+        assert_eq!(json["total_allocs"], serde_json::json!(2));
+        assert_eq!(json["local_allocs"], serde_json::json!(1));
+        assert_eq!(json["remote_allocs"], serde_json::json!(1));
+        assert_eq!(
+            json["allocation_ratio_bps"]["local"],
+            serde_json::json!(5000)
+        );
+        assert_eq!(
+            json["allocation_ratio_bps"]["remote"],
+            serde_json::json!(5000)
+        );
+        assert_eq!(
+            json["allocation_ratio_bps"]["scale"],
+            serde_json::json!(10_000)
+        );
     }
 
     #[test]
@@ -3353,6 +3395,20 @@ mod tests {
         assert_eq!(json["total_allocs"], serde_json::json!(3));
         assert_eq!(json["total_in_use"], serde_json::json!(3));
         assert_eq!(json["cross_node_allocs"], serde_json::json!(0));
+        assert_eq!(json["local_allocs"], serde_json::json!(3));
+        assert_eq!(json["remote_allocs"], serde_json::json!(0));
+        assert_eq!(
+            json["allocation_ratio_bps"]["local"],
+            serde_json::json!(10_000)
+        );
+        assert_eq!(
+            json["allocation_ratio_bps"]["remote"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            json["allocation_ratio_bps"]["scale"],
+            serde_json::json!(10_000)
+        );
         assert_eq!(json["config"]["slab_capacity"], serde_json::json!(16));
         assert_eq!(json["per_node"].as_array().map(std::vec::Vec::len), Some(2));
     }
