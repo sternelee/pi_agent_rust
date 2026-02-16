@@ -4509,6 +4509,12 @@ pub struct RuntimeHostcallTelemetryEvent {
     /// Deoptimization reason when superinstruction plan selection falls back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marshalling_superinstruction_deopt_reason: Option<String>,
+    /// Whether the tier-2 trace-JIT dispatched this call.
+    #[serde(default)]
+    pub marshalling_superinstruction_jit_hit: bool,
+    /// Tier-2 JIT cost improvement delta over tier-1 fused cost.
+    #[serde(default)]
+    pub marshalling_superinstruction_jit_cost_delta: i64,
     pub outcome: String,
     pub outcome_error_code: Option<String>,
     pub selected_action: RuntimeRiskActionValue,
@@ -4565,6 +4571,8 @@ impl Default for RuntimeHostcallTelemetryEvent {
             marshalling_superinstruction_expected_cost_delta: 0,
             marshalling_superinstruction_observed_cost_delta: 0,
             marshalling_superinstruction_deopt_reason: None,
+            marshalling_superinstruction_jit_hit: false,
+            marshalling_superinstruction_jit_cost_delta: 0,
             outcome: "success".to_string(),
             outcome_error_code: None,
             selected_action: RuntimeRiskActionValue::Allow,
@@ -9413,6 +9421,10 @@ struct HostcallSuperinstructionTelemetry {
     expected_cost_delta: i64,
     observed_cost_delta: i64,
     deopt_reason: Option<String>,
+    /// Whether the trace-JIT tier dispatched this call.
+    jit_hit: bool,
+    /// JIT tier improvement delta over tier-1 fused cost.
+    jit_cost_delta: i64,
 }
 
 fn hostcall_superinstruction_state() -> &'static Mutex<HostcallSuperinstructionRuntimeState> {
@@ -9484,12 +9496,33 @@ fn hostcall_superinstruction_telemetry(
                         candidate.selection.expected_cost_delta > current.expected_cost_delta
                     });
             if replace {
+                // Attempt JIT promotion and dispatch for this plan.
+                let (jit_hit, jit_cost_delta) = if let Some(ref pid) = candidate.selection.selected_plan_id {
+                    // Find the matching plan to record execution.
+                    let matched_plan = state.plans.iter().find(|p| p.plan_id == *pid);
+                    if let Some(plan) = matched_plan {
+                        TRACE_JIT.with(|cell| {
+                            let mut jit = cell.borrow_mut();
+                            jit.record_plan_execution(plan);
+                            let ctx = GuardContext::default();
+                            let result = jit.try_jit_dispatch(pid, &recent_window[start..], &ctx);
+                            (result.jit_hit, result.cost_delta)
+                        })
+                    } else {
+                        (false, 0)
+                    }
+                } else {
+                    (false, 0)
+                };
+
                 best_hit = Some(HostcallSuperinstructionTelemetry {
                     trace_signature: Some(candidate.selection.trace_signature),
                     plan_id: candidate.selection.selected_plan_id,
                     expected_cost_delta: candidate.selection.expected_cost_delta,
                     observed_cost_delta: candidate.selection.expected_cost_delta,
                     deopt_reason: None,
+                    jit_hit,
+                    jit_cost_delta,
                 });
             }
         }
@@ -9505,6 +9538,8 @@ fn hostcall_superinstruction_telemetry(
         expected_cost_delta: 0,
         observed_cost_delta: 0,
         deopt_reason: fallback.selection.deopt_reason.map(str::to_string),
+        jit_hit: false,
+        jit_cost_delta: 0,
     }
 }
 
@@ -9530,6 +9565,8 @@ struct HostcallMarshallingTelemetry {
     superinstruction_expected_cost_delta: i64,
     superinstruction_observed_cost_delta: i64,
     superinstruction_deopt_reason: Option<String>,
+    superinstruction_jit_hit: bool,
+    superinstruction_jit_cost_delta: i64,
 }
 
 impl Default for HostcallMarshallingTelemetry {
@@ -9548,6 +9585,8 @@ impl Default for HostcallMarshallingTelemetry {
             superinstruction_expected_cost_delta: 0,
             superinstruction_observed_cost_delta: 0,
             superinstruction_deopt_reason: None,
+            superinstruction_jit_hit: false,
+            superinstruction_jit_cost_delta: 0,
         }
     }
 }
@@ -9685,6 +9724,8 @@ impl<'a> HostcallPayloadArena<'a> {
                 superinstruction_expected_cost_delta: superinstruction.expected_cost_delta,
                 superinstruction_observed_cost_delta: superinstruction.observed_cost_delta,
                 superinstruction_deopt_reason: superinstruction.deopt_reason,
+                superinstruction_jit_hit: superinstruction.jit_hit,
+                superinstruction_jit_cost_delta: superinstruction.jit_cost_delta,
             },
         }
     }
@@ -14220,6 +14261,29 @@ pub fn amac_telemetry_snapshot() -> Option<crate::hostcall_amac::AmacStallTeleme
             None
         } else {
             Some(snap)
+        }
+    })
+}
+
+thread_local! {
+    /// Per-thread trace-JIT compiler for tier-2 superinstruction dispatch.
+    /// Persists compiled traces and profiling data across pump cycles.
+    static TRACE_JIT: RefCell<TraceJitCompiler> =
+        RefCell::new(TraceJitCompiler::default());
+}
+
+/// Query the trace-JIT compiler telemetry for the current thread.
+///
+/// Returns `None` if no plans have been evaluated yet.
+#[must_use]
+pub fn trace_jit_telemetry_snapshot() -> Option<crate::hostcall_trace_jit::TraceJitTelemetry> {
+    TRACE_JIT.with(|cell| {
+        let jit = cell.borrow();
+        let t = jit.telemetry().clone();
+        if t.plans_evaluated == 0 {
+            None
+        } else {
+            Some(t)
         }
     })
 }
@@ -20392,9 +20456,141 @@ impl ExtensionManager {
     pub fn set_budget_controller_config(&self, config: ExtensionBudgetControllerConfig) {
         if let Ok(mut guard) = self.inner.lock() {
             let mut clamped = config;
+            let default_regime_shift = RegimeShiftConfig::for_tier(clamped.tier);
+            let default_safety = SafetyEnvelopeConfig::for_tier(clamped.tier);
+            let default_oco = OcoTunerConfig::for_tier(clamped.tier);
+
             clamped.overload_window_ms = clamped.overload_window_ms.max(100);
             clamped.overload_signals_to_fallback = clamped.overload_signals_to_fallback.max(1);
             clamped.recovery_successes_to_exit = clamped.recovery_successes_to_exit.max(1);
+
+            if !clamped.regime_shift.cusum_k.is_finite() || clamped.regime_shift.cusum_k <= 0.0 {
+                clamped.regime_shift.cusum_k = default_regime_shift.cusum_k;
+            }
+            if !clamped.regime_shift.cusum_h.is_finite() || clamped.regime_shift.cusum_h <= 0.0 {
+                clamped.regime_shift.cusum_h = default_regime_shift.cusum_h;
+            }
+            if !clamped.regime_shift.bocpd_lambda.is_finite()
+                || clamped.regime_shift.bocpd_lambda <= 0.0
+            {
+                clamped.regime_shift.bocpd_lambda = default_regime_shift.bocpd_lambda;
+            }
+            clamped.regime_shift.bocpd_threshold = if clamped.regime_shift.bocpd_threshold.is_finite()
+            {
+                clamped.regime_shift.bocpd_threshold.clamp(0.01, 0.99)
+            } else {
+                default_regime_shift.bocpd_threshold
+            };
+            clamped.regime_shift.bocpd_max_run_length =
+                clamped.regime_shift.bocpd_max_run_length.clamp(8, 10_000);
+
+            clamped.safety_envelope.conformal_confidence =
+                if clamped.safety_envelope.conformal_confidence.is_finite() {
+                    clamped.safety_envelope.conformal_confidence.clamp(0.5, 0.999)
+                } else {
+                    default_safety.conformal_confidence
+                };
+            clamped.safety_envelope.conformal_calibration_size =
+                clamped.safety_envelope.conformal_calibration_size.clamp(16, 10_000);
+            clamped.safety_envelope.pac_bayes_delta = if clamped.safety_envelope.pac_bayes_delta.is_finite()
+            {
+                clamped.safety_envelope.pac_bayes_delta.clamp(1.0e-6, 0.5)
+            } else {
+                default_safety.pac_bayes_delta
+            };
+            clamped.safety_envelope.pac_bayes_prior_weight =
+                if clamped.safety_envelope.pac_bayes_prior_weight.is_finite() {
+                    clamped.safety_envelope.pac_bayes_prior_weight.clamp(0.01, 100.0)
+                } else {
+                    default_safety.pac_bayes_prior_weight
+                };
+            clamped.safety_envelope.safety_error_threshold =
+                if clamped.safety_envelope.safety_error_threshold.is_finite() {
+                    clamped.safety_envelope.safety_error_threshold.clamp(0.0, 1.0)
+                } else {
+                    default_safety.safety_error_threshold
+                };
+            clamped.safety_envelope.min_observations =
+                clamped.safety_envelope.min_observations.max(1);
+
+            if !clamped.oco_tuner.learning_rate.is_finite() || clamped.oco_tuner.learning_rate <= 0.0 {
+                clamped.oco_tuner.learning_rate = default_oco.learning_rate;
+            }
+            clamped.oco_tuner.learning_rate = clamped.oco_tuner.learning_rate.clamp(1.0e-4, 1.0);
+
+            if !clamped.oco_tuner.min_queue_budget.is_finite() {
+                clamped.oco_tuner.min_queue_budget = default_oco.min_queue_budget;
+            }
+            if !clamped.oco_tuner.max_queue_budget.is_finite() {
+                clamped.oco_tuner.max_queue_budget = default_oco.max_queue_budget;
+            }
+            if clamped.oco_tuner.min_queue_budget <= 0.0 {
+                clamped.oco_tuner.min_queue_budget = default_oco.min_queue_budget;
+            }
+            if clamped.oco_tuner.max_queue_budget < clamped.oco_tuner.min_queue_budget {
+                clamped.oco_tuner.max_queue_budget = clamped.oco_tuner.min_queue_budget;
+            }
+
+            if !clamped.oco_tuner.min_batch_budget.is_finite() {
+                clamped.oco_tuner.min_batch_budget = default_oco.min_batch_budget;
+            }
+            if !clamped.oco_tuner.max_batch_budget.is_finite() {
+                clamped.oco_tuner.max_batch_budget = default_oco.max_batch_budget;
+            }
+            if clamped.oco_tuner.min_batch_budget <= 0.0 {
+                clamped.oco_tuner.min_batch_budget = default_oco.min_batch_budget;
+            }
+            if clamped.oco_tuner.max_batch_budget < clamped.oco_tuner.min_batch_budget {
+                clamped.oco_tuner.max_batch_budget = clamped.oco_tuner.min_batch_budget;
+            }
+
+            if !clamped.oco_tuner.min_time_slice_ms.is_finite() {
+                clamped.oco_tuner.min_time_slice_ms = default_oco.min_time_slice_ms;
+            }
+            if !clamped.oco_tuner.max_time_slice_ms.is_finite() {
+                clamped.oco_tuner.max_time_slice_ms = default_oco.max_time_slice_ms;
+            }
+            if clamped.oco_tuner.min_time_slice_ms <= 0.0 {
+                clamped.oco_tuner.min_time_slice_ms = default_oco.min_time_slice_ms;
+            }
+            if clamped.oco_tuner.max_time_slice_ms < clamped.oco_tuner.min_time_slice_ms {
+                clamped.oco_tuner.max_time_slice_ms = clamped.oco_tuner.min_time_slice_ms;
+            }
+
+            clamped.oco_tuner.initial_queue_budget = if clamped.oco_tuner.initial_queue_budget.is_finite() {
+                clamped.oco_tuner.initial_queue_budget
+            } else {
+                default_oco.initial_queue_budget
+            }
+            .clamp(
+                clamped.oco_tuner.min_queue_budget,
+                clamped.oco_tuner.max_queue_budget,
+            );
+            clamped.oco_tuner.initial_batch_budget = if clamped.oco_tuner.initial_batch_budget.is_finite() {
+                clamped.oco_tuner.initial_batch_budget
+            } else {
+                default_oco.initial_batch_budget
+            }
+            .clamp(
+                clamped.oco_tuner.min_batch_budget,
+                clamped.oco_tuner.max_batch_budget,
+            );
+            clamped.oco_tuner.initial_time_slice_ms = if clamped.oco_tuner.initial_time_slice_ms.is_finite() {
+                clamped.oco_tuner.initial_time_slice_ms
+            } else {
+                default_oco.initial_time_slice_ms
+            }
+            .clamp(
+                clamped.oco_tuner.min_time_slice_ms,
+                clamped.oco_tuner.max_time_slice_ms,
+            );
+            clamped.oco_tuner.rollback_loss_threshold =
+                if clamped.oco_tuner.rollback_loss_threshold.is_finite() {
+                    clamped.oco_tuner.rollback_loss_threshold.clamp(0.1, 10.0)
+                } else {
+                    default_oco.rollback_loss_threshold
+                };
+
             guard.budget_controller_config = clamped;
         }
     }
@@ -20560,6 +20756,7 @@ impl ExtensionManager {
                 oco_time_slice_ms = ?oco_snapshot.as_ref().map(|s| s.time_slice_ms),
                 oco_cumulative_regret = ?oco_snapshot.as_ref().map(|s| s.cumulative_regret),
                 oco_instantaneous_loss = ?oco_update.as_ref().map(|u| u.instantaneous_loss),
+                oco_update_cumulative_regret = ?oco_update.as_ref().map(|u| u.cumulative_regret),
                 oco_guardrail_rollbacks = ?oco_snapshot.as_ref().map(|s| s.guardrail_rollbacks),
                 fallback_lane = "compat",
                 "Budget controller entered compatibility fallback mode"
@@ -20589,6 +20786,7 @@ impl ExtensionManager {
             oco_time_slice_ms = ?oco_snapshot.as_ref().map(|s| s.time_slice_ms),
             oco_cumulative_regret = ?oco_snapshot.as_ref().map(|s| s.cumulative_regret),
             oco_instantaneous_loss = ?oco_update.as_ref().map(|u| u.instantaneous_loss),
+            oco_update_cumulative_regret = ?oco_update.as_ref().map(|u| u.cumulative_regret),
             oco_guardrail_rollbacks = ?oco_snapshot.as_ref().map(|s| s.guardrail_rollbacks),
             "Budget controller recorded overload/anomaly signal"
         );
@@ -20655,6 +20853,7 @@ impl ExtensionManager {
             oco_time_slice_ms = ?oco_snapshot.as_ref().map(|s| s.time_slice_ms),
             oco_cumulative_regret = ?oco_snapshot.as_ref().map(|s| s.cumulative_regret),
             oco_instantaneous_loss = ?oco_update.as_ref().map(|u| u.instantaneous_loss),
+            oco_update_cumulative_regret = ?oco_update.as_ref().map(|u| u.cumulative_regret),
             fallback_lane = "fast",
             "Budget controller exited compatibility fallback mode"
         );
@@ -21202,6 +21401,9 @@ impl ExtensionManager {
                 marshalling_superinstruction_deopt_reason: marshalling
                     .superinstruction_deopt_reason
                     .clone(),
+                marshalling_superinstruction_jit_hit: marshalling.superinstruction_jit_hit,
+                marshalling_superinstruction_jit_cost_delta: marshalling
+                    .superinstruction_jit_cost_delta,
                 outcome: if is_error {
                     "error".to_string()
                 } else {
@@ -34230,6 +34432,137 @@ mod tests {
         assert!((snapshot.queue_budget - 8.0).abs() < f64::EPSILON);
         assert!((snapshot.batch_budget - 4.0).abs() < f64::EPSILON);
         assert!((snapshot.time_slice_ms - 8.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn budget_controller_config_sanitizes_oco_inputs() {
+        let manager = ExtensionManager::new();
+        manager.set_budget_controller_config(ExtensionBudgetControllerConfig {
+            enabled: true,
+            tier: ExtensionBudgetTier::Balanced,
+            overload_window_ms: 0,
+            overload_signals_to_fallback: 0,
+            recovery_successes_to_exit: 0,
+            regime_shift: RegimeShiftConfig {
+                enabled: true,
+                cusum_k: f64::NAN,
+                cusum_h: -3.0,
+                bocpd_lambda: f64::INFINITY,
+                bocpd_threshold: f64::NAN,
+                bocpd_max_run_length: 0,
+            },
+            safety_envelope: SafetyEnvelopeConfig {
+                enabled: true,
+                conformal_confidence: f64::NAN,
+                conformal_calibration_size: 0,
+                pac_bayes_delta: f64::INFINITY,
+                pac_bayes_prior_weight: f64::NAN,
+                safety_error_threshold: f64::NAN,
+                min_observations: 0,
+            },
+            oco_tuner: OcoTunerConfig {
+                enabled: true,
+                learning_rate: f64::NAN,
+                min_queue_budget: -8.0,
+                max_queue_budget: f64::NAN,
+                min_batch_budget: 16.0,
+                max_batch_budget: 4.0,
+                min_time_slice_ms: 32.0,
+                max_time_slice_ms: 8.0,
+                initial_queue_budget: f64::NEG_INFINITY,
+                initial_batch_budget: f64::NAN,
+                initial_time_slice_ms: f64::INFINITY,
+                rollback_loss_threshold: f64::NAN,
+            },
+        });
+
+        let config = manager.budget_controller_config();
+        assert!(config.overload_window_ms >= 100);
+        assert!(config.overload_signals_to_fallback >= 1);
+        assert!(config.recovery_successes_to_exit >= 1);
+        assert!(config.regime_shift.cusum_k.is_finite() && config.regime_shift.cusum_k > 0.0);
+        assert!(config.regime_shift.cusum_h.is_finite() && config.regime_shift.cusum_h > 0.0);
+        assert!(
+            config.regime_shift.bocpd_lambda.is_finite() && config.regime_shift.bocpd_lambda > 0.0
+        );
+        assert!(
+            config.regime_shift.bocpd_threshold >= 0.01
+                && config.regime_shift.bocpd_threshold <= 0.99
+        );
+        assert!(config.regime_shift.bocpd_max_run_length >= 8);
+        assert!(
+            config.safety_envelope.conformal_confidence >= 0.5
+                && config.safety_envelope.conformal_confidence <= 0.999
+        );
+        assert!(config.safety_envelope.conformal_calibration_size >= 16);
+        assert!(
+            config.safety_envelope.pac_bayes_delta >= 1.0e-6
+                && config.safety_envelope.pac_bayes_delta <= 0.5
+        );
+        assert!(
+            config.safety_envelope.pac_bayes_prior_weight >= 0.01
+                && config.safety_envelope.pac_bayes_prior_weight <= 100.0
+        );
+        assert!(
+            config.safety_envelope.safety_error_threshold >= 0.0
+                && config.safety_envelope.safety_error_threshold <= 1.0
+        );
+        assert!(config.safety_envelope.min_observations >= 1);
+        assert!(config.oco_tuner.learning_rate.is_finite());
+        assert!(config.oco_tuner.learning_rate >= 1.0e-4 && config.oco_tuner.learning_rate <= 1.0);
+        assert!(config.oco_tuner.min_queue_budget > 0.0);
+        assert!(config.oco_tuner.max_queue_budget >= config.oco_tuner.min_queue_budget);
+        assert!(config.oco_tuner.max_batch_budget >= config.oco_tuner.min_batch_budget);
+        assert!(config.oco_tuner.max_time_slice_ms >= config.oco_tuner.min_time_slice_ms);
+        assert!(config.oco_tuner.initial_queue_budget >= config.oco_tuner.min_queue_budget);
+        assert!(config.oco_tuner.initial_queue_budget <= config.oco_tuner.max_queue_budget);
+        assert!(config.oco_tuner.initial_batch_budget >= config.oco_tuner.min_batch_budget);
+        assert!(config.oco_tuner.initial_batch_budget <= config.oco_tuner.max_batch_budget);
+        assert!(config.oco_tuner.initial_time_slice_ms >= config.oco_tuner.min_time_slice_ms);
+        assert!(config.oco_tuner.initial_time_slice_ms <= config.oco_tuner.max_time_slice_ms);
+        assert!(config.oco_tuner.rollback_loss_threshold >= 0.1);
+    }
+
+    #[test]
+    fn budget_controller_oco_zero_capacity_signal_is_finite() {
+        let manager = ExtensionManager::new();
+        manager.set_budget_controller_config(ExtensionBudgetControllerConfig {
+            enabled: true,
+            tier: ExtensionBudgetTier::Balanced,
+            overload_window_ms: 60_000,
+            overload_signals_to_fallback: 50,
+            recovery_successes_to_exit: 4,
+            regime_shift: RegimeShiftConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            safety_envelope: SafetyEnvelopeConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            oco_tuner: OcoTunerConfig {
+                enabled: true,
+                rollback_loss_threshold: 8.0,
+                ..Default::default()
+            },
+        });
+
+        manager.record_budget_overload_signal(
+            Some("ext.oco.zero-capacity"),
+            "reactor_lane_overflow",
+            Some(12),
+            Some(0),
+        );
+
+        let snapshot = manager
+            .oco_tuner_snapshot("ext.oco.zero-capacity")
+            .expect("expected OCO snapshot");
+        assert!(snapshot.rounds >= 1);
+        assert!(snapshot.queue_budget.is_finite());
+        assert!(snapshot.batch_budget.is_finite());
+        assert!(snapshot.time_slice_ms.is_finite());
+        assert!(snapshot.cumulative_loss.is_finite());
+        assert!(snapshot.cumulative_regret.is_finite());
     }
 
     #[test]
