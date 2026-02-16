@@ -1466,6 +1466,16 @@ fn binary_size_candidate_builder_ignores_debug_profile() {
 }
 
 #[test]
+fn binary_size_candidate_builder_ignores_debug_profile_case_insensitive() {
+    let target_dir = Path::new("/tmp/pi-agent-target");
+    let candidates = build_binary_size_candidate_paths(target_dir, "DeBuG");
+    assert_eq!(
+        candidates,
+        vec![target_dir.join("release/pi"), target_dir.join("perf/pi")]
+    );
+}
+
+#[test]
 fn binary_size_candidate_builder_dedups_perf_profile() {
     let target_dir = Path::new("/tmp/pi-agent-target");
     let candidates = build_binary_size_candidate_paths(target_dir, "perf");
