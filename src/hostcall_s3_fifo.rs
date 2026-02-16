@@ -774,4 +774,196 @@ mod tests {
         let decision = policy.access("ext-a", "k4".to_string());
         assert_ne!(decision.kind, S3FifoDecisionKind::FallbackBypass);
     }
+
+    // ── Property tests ──
+
+    mod proptest_s3fifo {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn arb_access() -> impl Strategy<Value = (String, String)> {
+            let owner = prop::sample::select(vec![
+                "ext-a".to_string(),
+                "ext-b".to_string(),
+                "ext-c".to_string(),
+            ]);
+            let key = prop::sample::select(vec![
+                "k0".to_string(),
+                "k1".to_string(),
+                "k2".to_string(),
+                "k3".to_string(),
+                "k4".to_string(),
+                "k5".to_string(),
+                "k6".to_string(),
+                "k7".to_string(),
+            ]);
+            (owner, key)
+        }
+
+        fn arb_config() -> impl Strategy<Value = S3FifoConfig> {
+            (2..32usize, 1..16usize, 1..64usize, 1..8usize, 2..16usize).prop_map(
+                |(live, small, ghost, per_owner, window)| S3FifoConfig {
+                    live_capacity: live,
+                    small_capacity: small,
+                    ghost_capacity: ghost,
+                    max_entries_per_owner: per_owner,
+                    fallback_window: window,
+                    min_ghost_hits_in_window: 0,
+                    max_budget_rejections_in_window: window,
+                },
+            )
+        }
+
+        proptest! {
+            #[test]
+            fn queues_always_disjoint_after_access_sequence(
+                cfg in arb_config(),
+                accesses in prop::collection::vec(arb_access(), 1..50),
+            ) {
+                let mut policy = S3FifoPolicy::new(cfg);
+                for (owner, key) in &accesses {
+                    let _ = policy.access(owner, key.clone());
+                }
+
+                let small: BTreeSet<_> = policy.small.iter().cloned().collect();
+                let main: BTreeSet<_> = policy.main.iter().cloned().collect();
+                let ghost: BTreeSet<_> = policy.ghost.iter().cloned().collect();
+
+                assert!(small.is_disjoint(&main), "small and main must be disjoint");
+                assert!(small.is_disjoint(&ghost), "small and ghost must be disjoint");
+                assert!(main.is_disjoint(&ghost), "main and ghost must be disjoint");
+            }
+
+            #[test]
+            fn live_depth_never_exceeds_capacity(
+                cfg in arb_config(),
+                accesses in prop::collection::vec(arb_access(), 1..50),
+            ) {
+                let mut policy = S3FifoPolicy::new(cfg);
+                for (owner, key) in &accesses {
+                    let _ = policy.access(owner, key.clone());
+                }
+                let effective_cap = policy.config().live_capacity;
+                assert!(
+                    policy.live_depth() <= effective_cap,
+                    "live_depth {} exceeded capacity {}",
+                    policy.live_depth(),
+                    effective_cap,
+                );
+            }
+
+            #[test]
+            fn ghost_depth_never_exceeds_capacity(
+                cfg in arb_config(),
+                accesses in prop::collection::vec(arb_access(), 1..50),
+            ) {
+                let mut policy = S3FifoPolicy::new(cfg);
+                for (owner, key) in &accesses {
+                    let _ = policy.access(owner, key.clone());
+                }
+                let ghost_cap = policy.config().ghost_capacity;
+                assert!(
+                    policy.telemetry().ghost_depth <= ghost_cap,
+                    "ghost_depth {} exceeded capacity {}",
+                    policy.telemetry().ghost_depth,
+                    ghost_cap,
+                );
+            }
+
+            #[test]
+            fn live_depth_equals_small_plus_main(
+                cfg in arb_config(),
+                accesses in prop::collection::vec(arb_access(), 1..50),
+            ) {
+                let mut policy = S3FifoPolicy::new(cfg);
+                for (owner, key) in &accesses {
+                    let decision = policy.access(owner, key.clone());
+                    assert_eq!(
+                        decision.live_depth,
+                        decision.small_depth + decision.main_depth,
+                        "live_depth must equal small + main at every step"
+                    );
+                }
+            }
+
+            #[test]
+            fn counters_monotonically_nondecreasing(
+                cfg in arb_config(),
+                accesses in prop::collection::vec(arb_access(), 1..50),
+            ) {
+                let mut policy = S3FifoPolicy::new(cfg);
+                let mut prev_admissions = 0u64;
+                let mut prev_promotions = 0u64;
+                let mut prev_ghost_hits = 0u64;
+                let mut prev_rejections = 0u64;
+
+                for (owner, key) in &accesses {
+                    let _ = policy.access(owner, key.clone());
+                    let tel = policy.telemetry();
+                    assert!(tel.admissions_total >= prev_admissions);
+                    assert!(tel.promotions_total >= prev_promotions);
+                    assert!(tel.ghost_hits_total >= prev_ghost_hits);
+                    assert!(tel.budget_rejections_total >= prev_rejections);
+                    prev_admissions = tel.admissions_total;
+                    prev_promotions = tel.promotions_total;
+                    prev_ghost_hits = tel.ghost_hits_total;
+                    prev_rejections = tel.budget_rejections_total;
+                }
+            }
+
+            #[test]
+            fn owner_counts_match_live_keys(
+                cfg in arb_config(),
+                accesses in prop::collection::vec(arb_access(), 1..50),
+            ) {
+                let mut policy = S3FifoPolicy::new(cfg);
+                for (owner, key) in &accesses {
+                    let _ = policy.access(owner, key.clone());
+                }
+
+                // Verify owner counts by manually counting live_owners
+                let mut expected: BTreeMap<String, usize> = BTreeMap::new();
+                for owner_val in policy.live_owners.values() {
+                    *expected.entry(owner_val.clone()).or_insert(0) += 1;
+                }
+                assert_eq!(
+                    policy.owner_live_counts, expected,
+                    "owner_live_counts must match actual live key distribution"
+                );
+            }
+
+            #[test]
+            fn live_tier_map_consistent_with_queues(
+                cfg in arb_config(),
+                accesses in prop::collection::vec(arb_access(), 1..50),
+            ) {
+                let mut policy = S3FifoPolicy::new(cfg);
+                for (owner, key) in &accesses {
+                    let _ = policy.access(owner, key.clone());
+                }
+
+                // Every key in small must be in live_tiers as Small
+                for key in &policy.small {
+                    assert_eq!(
+                        policy.live_tiers.get(key),
+                        Some(&LiveTier::Small),
+                        "key in small queue must be tracked as Small"
+                    );
+                }
+                // Every key in main must be in live_tiers as Main
+                for key in &policy.main {
+                    assert_eq!(
+                        policy.live_tiers.get(key),
+                        Some(&LiveTier::Main),
+                        "key in main queue must be tracked as Main"
+                    );
+                }
+                // live_tiers count must match small + main
+                assert_eq!(
+                    policy.live_tiers.len(),
+                    policy.small.len() + policy.main.len(),
+                );
+            }
+        }
+    }
 }

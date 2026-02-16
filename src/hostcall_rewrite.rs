@@ -277,4 +277,98 @@ mod tests {
             i64::from(BASELINE.estimated_cost) - i64::from(FAST_FUSION.estimated_cost)
         );
     }
+
+    // ── Property tests ──
+
+    mod proptest_rewrite {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn arb_kind() -> impl Strategy<Value = HostcallRewritePlanKind> {
+            prop::sample::select(vec![
+                HostcallRewritePlanKind::BaselineCanonical,
+                HostcallRewritePlanKind::FastOpcodeFusion,
+            ])
+        }
+
+        fn arb_plan() -> impl Strategy<Value = HostcallRewritePlan> {
+            (arb_kind(), 0..1000u32).prop_map(|(kind, cost)| HostcallRewritePlan {
+                kind,
+                estimated_cost: cost,
+                rule_id: "arb_rule",
+            })
+        }
+
+        proptest! {
+            #[test]
+            fn selected_cost_never_exceeds_baseline(
+                baseline in arb_plan(),
+                candidates in prop::collection::vec(arb_plan(), 0..10),
+            ) {
+                let engine = HostcallRewriteEngine::new(true);
+                let decision = engine.select_plan(baseline, &candidates);
+                assert!(
+                    decision.selected.estimated_cost <= baseline.estimated_cost,
+                    "selected cost {} must not exceed baseline {}",
+                    decision.selected.estimated_cost,
+                    baseline.estimated_cost,
+                );
+            }
+
+            #[test]
+            fn cost_delta_is_nonnegative(
+                baseline in arb_plan(),
+                candidates in prop::collection::vec(arb_plan(), 0..10),
+            ) {
+                let engine = HostcallRewriteEngine::new(true);
+                let decision = engine.select_plan(baseline, &candidates);
+                assert!(
+                    decision.expected_cost_delta >= 0,
+                    "cost delta must be non-negative, got {}",
+                    decision.expected_cost_delta,
+                );
+            }
+
+            #[test]
+            fn cost_delta_equals_baseline_minus_selected(
+                baseline in arb_plan(),
+                candidates in prop::collection::vec(arb_plan(), 0..10),
+            ) {
+                let engine = HostcallRewriteEngine::new(true);
+                let decision = engine.select_plan(baseline, &candidates);
+                let expected_delta = i64::from(baseline.estimated_cost)
+                    - i64::from(decision.selected.estimated_cost);
+                assert_eq!(
+                    decision.expected_cost_delta, expected_delta,
+                    "delta must equal baseline - selected"
+                );
+            }
+
+            #[test]
+            fn disabled_engine_always_returns_baseline(
+                baseline in arb_plan(),
+                candidates in prop::collection::vec(arb_plan(), 0..10),
+            ) {
+                let engine = HostcallRewriteEngine::new(false);
+                let decision = engine.select_plan(baseline, &candidates);
+                assert_eq!(decision.selected, baseline);
+                assert_eq!(decision.expected_cost_delta, 0);
+                assert_eq!(decision.fallback_reason, Some("rewrite_disabled"));
+            }
+
+            #[test]
+            fn select_plan_is_deterministic(
+                baseline in arb_plan(),
+                candidates in prop::collection::vec(arb_plan(), 0..10),
+                enabled in any::<bool>(),
+            ) {
+                let engine = HostcallRewriteEngine::new(enabled);
+                let d1 = engine.select_plan(baseline, &candidates);
+                let d2 = engine.select_plan(baseline, &candidates);
+                assert_eq!(d1.selected, d2.selected);
+                assert_eq!(d1.expected_cost_delta, d2.expected_cost_delta);
+                assert_eq!(d1.fallback_reason, d2.fallback_reason);
+            }
+        }
+    }
 }

@@ -858,4 +858,171 @@ mod tests {
         assert_eq!(telemetry.fallback_reason, expected.fallback_reason);
         assert_eq!(telemetry.fallback_code.as_deref(), expected.fallback_code());
     }
+
+    // ── Property tests ──
+
+    mod proptest_io_uring_lane {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn arb_capability() -> impl Strategy<Value = HostcallCapabilityClass> {
+            prop::sample::select(vec![
+                HostcallCapabilityClass::Filesystem,
+                HostcallCapabilityClass::Network,
+                HostcallCapabilityClass::Execution,
+                HostcallCapabilityClass::Session,
+                HostcallCapabilityClass::Events,
+                HostcallCapabilityClass::Environment,
+                HostcallCapabilityClass::Tool,
+                HostcallCapabilityClass::Ui,
+                HostcallCapabilityClass::Telemetry,
+                HostcallCapabilityClass::Unknown,
+            ])
+        }
+
+        fn arb_io_hint() -> impl Strategy<Value = HostcallIoHint> {
+            prop::sample::select(vec![
+                HostcallIoHint::Unknown,
+                HostcallIoHint::IoHeavy,
+                HostcallIoHint::CpuBound,
+            ])
+        }
+
+        fn arb_config() -> impl Strategy<Value = IoUringLanePolicyConfig> {
+            (any::<bool>(), any::<bool>(), 1..512usize, any::<bool>(), any::<bool>()).prop_map(
+                |(enabled, ring_available, max_queue_depth, allow_fs, allow_net)| {
+                    IoUringLanePolicyConfig {
+                        enabled,
+                        ring_available,
+                        max_queue_depth,
+                        allow_filesystem: allow_fs,
+                        allow_network: allow_net,
+                    }
+                },
+            )
+        }
+
+        fn arb_input() -> impl Strategy<Value = IoUringLaneDecisionInput> {
+            (arb_capability(), arb_io_hint(), 0..1024usize, any::<bool>()).prop_map(
+                |(capability, io_hint, queue_depth, force_compat_lane)| {
+                    IoUringLaneDecisionInput {
+                        capability,
+                        io_hint,
+                        queue_depth,
+                        force_compat_lane,
+                    }
+                },
+            )
+        }
+
+        proptest! {
+            #[test]
+            fn force_compat_always_returns_compat_lane(
+                cfg in arb_config(),
+                capability in arb_capability(),
+                io_hint in arb_io_hint(),
+                queue_depth in 0..1024usize,
+            ) {
+                let input = IoUringLaneDecisionInput {
+                    capability,
+                    io_hint,
+                    queue_depth,
+                    force_compat_lane: true,
+                };
+                let decision = decide_io_uring_lane(cfg, input);
+                assert_eq!(decision.lane, HostcallDispatchLane::Compat);
+                assert_eq!(
+                    decision.fallback_reason,
+                    Some(IoUringFallbackReason::CompatKillSwitch)
+                );
+            }
+
+            #[test]
+            fn disabled_never_returns_io_uring(
+                cfg_base in arb_config(),
+                input in arb_input(),
+            ) {
+                let cfg = IoUringLanePolicyConfig {
+                    enabled: false,
+                    ..cfg_base
+                };
+                let input = IoUringLaneDecisionInput {
+                    force_compat_lane: false,
+                    ..input
+                };
+                let decision = decide_io_uring_lane(cfg, input);
+                assert_ne!(
+                    decision.lane,
+                    HostcallDispatchLane::IoUring,
+                    "disabled config must never select io_uring"
+                );
+            }
+
+            #[test]
+            fn io_uring_only_when_all_preconditions_met(
+                cfg in arb_config(),
+                input in arb_input(),
+            ) {
+                let decision = decide_io_uring_lane(cfg, input);
+                if decision.lane == HostcallDispatchLane::IoUring {
+                    assert!(!input.force_compat_lane, "compat kill-switch must be off");
+                    assert!(cfg.enabled, "policy must be enabled");
+                    assert!(cfg.ring_available, "ring must be available");
+                    assert!(input.io_hint.is_io_heavy(), "must be IO-heavy");
+                    assert!(
+                        cfg.allow_for_capability(input.capability),
+                        "capability must be allowed"
+                    );
+                    assert!(
+                        input.queue_depth < cfg.max_queue_depth,
+                        "queue depth must be within budget"
+                    );
+                }
+            }
+
+            #[test]
+            fn decision_always_has_fallback_reason_unless_io_uring(
+                cfg in arb_config(),
+                input in arb_input(),
+            ) {
+                let decision = decide_io_uring_lane(cfg, input);
+                if decision.lane == HostcallDispatchLane::IoUring {
+                    assert!(
+                        decision.fallback_reason.is_none(),
+                        "io_uring lane must have no fallback reason"
+                    );
+                } else {
+                    assert!(
+                        decision.fallback_reason.is_some(),
+                        "non-io_uring lane must have a fallback reason"
+                    );
+                }
+            }
+
+            #[test]
+            fn telemetry_consistent_with_decision(
+                cfg in arb_config(),
+                input in arb_input(),
+            ) {
+                let (decision, telemetry) = decide_io_uring_lane_with_telemetry(cfg, input);
+                assert_eq!(telemetry.lane, decision.lane);
+                assert_eq!(telemetry.fallback_reason, decision.fallback_reason);
+                assert_eq!(telemetry.policy_enabled, cfg.enabled);
+                assert_eq!(telemetry.ring_available, cfg.ring_available);
+                assert_eq!(telemetry.force_compat_lane, input.force_compat_lane);
+                assert_eq!(telemetry.queue_depth, input.queue_depth);
+                assert_eq!(telemetry.queue_depth_budget, cfg.max_queue_depth);
+            }
+
+            #[test]
+            fn decide_is_deterministic(
+                cfg in arb_config(),
+                input in arb_input(),
+            ) {
+                let d1 = decide_io_uring_lane(cfg, input);
+                let d2 = decide_io_uring_lane(cfg, input);
+                assert_eq!(d1, d2, "same inputs must produce same decision");
+            }
+        }
+    }
 }
