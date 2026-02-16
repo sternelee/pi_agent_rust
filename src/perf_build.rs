@@ -11,6 +11,9 @@ pub const BENCH_BUILD_PROFILE_ENV: &str = "PI_BENCH_BUILD_PROFILE";
 /// Environment variable that requests an allocator label for benchmark runs.
 pub const BENCH_ALLOCATOR_ENV: &str = "PI_BENCH_ALLOCATOR";
 
+/// Release binary-size budget (MB) shared by perf regression and budget gates.
+pub const BINARY_SIZE_RELEASE_BUDGET_MB: f64 = 22.0;
+
 /// Effective allocator compiled into the current binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllocatorKind {

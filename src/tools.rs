@@ -1895,41 +1895,60 @@ fn build_normalized_content(content: &str) -> String {
     normalized
 }
 
-fn normalize_for_fuzzy_match_text(text: &str) -> String {
-    build_normalized_content(text)
+fn fuzzy_find_text(content: &str, old_text: &str) -> FuzzyMatchResult {
+    let (result, _) = fuzzy_find_text_with_normalized(content, old_text, None, None);
+    result
 }
 
-fn fuzzy_find_text(content: &str, old_text: &str) -> FuzzyMatchResult {
+/// Like [`fuzzy_find_text`], but accepts optional pre-computed normalized
+/// versions and returns the normalized strings it used (if any) so the caller
+/// can reuse them for occurrence counting.
+fn fuzzy_find_text_with_normalized(
+    content: &str,
+    old_text: &str,
+    precomputed_content: Option<String>,
+    precomputed_old: Option<String>,
+) -> (FuzzyMatchResult, Option<(String, String)>) {
     // First, try exact match (fastest path)
     if let Some(index) = content.find(old_text) {
-        return FuzzyMatchResult {
-            found: true,
-            index,
-            match_length: old_text.len(),
-        };
+        return (
+            FuzzyMatchResult {
+                found: true,
+                index,
+                match_length: old_text.len(),
+            },
+            precomputed_content.zip(precomputed_old),
+        );
     }
 
-    // Build normalized versions
-    let normalized_content = build_normalized_content(content);
-    let normalized_old_text = build_normalized_content(old_text);
+    // Build normalized versions (reuse pre-computed if available)
+    let normalized_content =
+        precomputed_content.unwrap_or_else(|| build_normalized_content(content));
+    let normalized_old_text = precomputed_old.unwrap_or_else(|| build_normalized_content(old_text));
 
     // Try to find the normalized old_text in normalized content
     if let Some(normalized_index) = normalized_content.find(&normalized_old_text) {
         let (original_start, original_match_len) =
             map_normalized_range_to_original(content, normalized_index, normalized_old_text.len());
 
-        return FuzzyMatchResult {
-            found: true,
-            index: original_start,
-            match_length: original_match_len,
-        };
+        return (
+            FuzzyMatchResult {
+                found: true,
+                index: original_start,
+                match_length: original_match_len,
+            },
+            Some((normalized_content, normalized_old_text)),
+        );
     }
 
-    FuzzyMatchResult {
-        found: false,
-        index: 0,
-        match_length: 0,
-    }
+    (
+        FuzzyMatchResult {
+            found: false,
+            index: 0,
+            match_length: 0,
+        },
+        Some((normalized_content, normalized_old_text)),
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2189,7 +2208,17 @@ impl Tool for EditTool {
             ));
         }
 
-        let match_result = fuzzy_find_text(&normalized_content, &normalized_old_text);
+        // Pre-compute normalized versions once and reuse for both matching and
+        // occurrence counting (avoids 2x redundant O(n) normalization).
+        let precomputed_content = build_normalized_content(&normalized_content);
+        let precomputed_old = build_normalized_content(&normalized_old_text);
+
+        let (match_result, normalized_pair) = fuzzy_find_text_with_normalized(
+            &normalized_content,
+            &normalized_old_text,
+            Some(precomputed_content),
+            Some(precomputed_old),
+        );
         if !match_result.found {
             return Err(Error::tool(
                 "edit",
@@ -2200,16 +2229,28 @@ impl Tool for EditTool {
             ));
         }
 
-        // Count occurrences using fuzzy-normalized content (legacy behavior).
-        let fuzzy_content = normalize_for_fuzzy_match_text(&normalized_content);
-        let fuzzy_old_text = normalize_for_fuzzy_match_text(&normalized_old_text);
-        let occurrences = if fuzzy_old_text.is_empty() {
-            0
+        // Count occurrences reusing pre-computed normalized versions.
+        let occurrences = if let Some((fuzzy_content, fuzzy_old_text)) = &normalized_pair {
+            if fuzzy_old_text.is_empty() {
+                0
+            } else {
+                fuzzy_content
+                    .split(fuzzy_old_text.as_str())
+                    .count()
+                    .saturating_sub(1)
+            }
         } else {
-            fuzzy_content
-                .split(&fuzzy_old_text)
-                .count()
-                .saturating_sub(1)
+            // Exact match path — still need to normalize for occurrence counting.
+            let fuzzy_content = build_normalized_content(&normalized_content);
+            let fuzzy_old_text = build_normalized_content(&normalized_old_text);
+            if fuzzy_old_text.is_empty() {
+                0
+            } else {
+                fuzzy_content
+                    .split(&fuzzy_old_text)
+                    .count()
+                    .saturating_sub(1)
+            }
         };
 
         if occurrences > 1 {

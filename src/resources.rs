@@ -1374,18 +1374,30 @@ pub fn parse_command_args(args: &str) -> Vec<String> {
     out
 }
 
+/// Cached regex for positional `$1`, `$2`, … substitution.
+fn positional_arg_regex() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"\$(\d+)").expect("positional arg regex"))
+}
+
+/// Cached regex for `${@:start}` or `${@:start:length}` substitution.
+fn slice_arg_regex() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"\$\{@:(\d+)(?::(\d+))?\}").expect("slice arg regex"))
+}
+
 #[allow(clippy::option_if_let_else)] // Clearer with if-let than map_or_else in the closure
 pub fn substitute_args(content: &str, args: &[String]) -> String {
     let mut result = content.to_string();
 
     // Positional $1, $2, ...
-    result = replace_regex(&result, r"\$(\d+)", |caps| {
+    result = replace_regex(&result, positional_arg_regex(), |caps| {
         let idx = caps[1].parse::<usize>().unwrap_or(0);
         args.get(idx.saturating_sub(1)).cloned().unwrap_or_default()
     });
 
     // ${@:start} or ${@:start:length}
-    result = replace_regex(&result, r"\$\{@:(\d+)(?::(\d+))?\}", |caps| {
+    result = replace_regex(&result, slice_arg_regex(), |caps| {
         let mut start = caps[1].parse::<usize>().unwrap_or(1);
         if start == 0 {
             start = 1;
@@ -1592,11 +1604,10 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     out
 }
 
-fn replace_regex<F>(input: &str, pattern: &str, mut replacer: F) -> String
+fn replace_regex<F>(input: &str, regex: &regex::Regex, mut replacer: F) -> String
 where
     F: FnMut(&regex::Captures<'_>) -> String,
 {
-    let regex = regex::Regex::new(pattern).unwrap_or_else(|_| regex::Regex::new("$^").unwrap());
     regex
         .replace_all(input, |caps: &regex::Captures<'_>| replacer(caps))
         .to_string()
@@ -2183,13 +2194,15 @@ still frontmatter",
 
     #[test]
     fn test_replace_regex_no_match_returns_input() {
-        let result = replace_regex("hello world", r"\d+", |_| "num".to_string());
+        let re = regex::Regex::new(r"\d+").unwrap();
+        let result = replace_regex("hello world", &re, |_| "num".to_string());
         assert_eq!(result, "hello world");
     }
 
     #[test]
     fn test_replace_regex_replaces_all_matches() {
-        let result = replace_regex("a1b2c3", r"\d", |caps| format!("[{}]", &caps[0]));
+        let re = regex::Regex::new(r"\d").unwrap();
+        let result = replace_regex("a1b2c3", &re, |caps| format!("[{}]", &caps[0]));
         assert_eq!(result, "a[1]b[2]c[3]");
     }
 
