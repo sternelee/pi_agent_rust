@@ -136,6 +136,10 @@ const SCHEMAS: &[(&str, &str)] = &[
         "pi.perf.extension_benchmark_stratification.v1",
         "Layered extension benchmark artifact linking cold-load, per-call, and full E2E evidence with claim-integrity guards",
     ),
+    (
+        "pi.perf.phase1_matrix_validation.v1",
+        "Phase-1 realistic/matched-state matrix validation with stage attribution and release-gate readiness",
+    ),
 ];
 
 /// Required fields for each schema (field name, description).
@@ -179,6 +183,7 @@ const CONFIDENCE_HIGH: &str = "high";
 const CONFIDENCE_MEDIUM: &str = "medium";
 const CONFIDENCE_LOW: &str = "low";
 const EXT_STRATIFICATION_SCHEMA: &str = "pi.perf.extension_benchmark_stratification.v1";
+const PHASE1_MATRIX_SCHEMA: &str = "pi.perf.phase1_matrix_validation.v1";
 const REALISTIC_SESSION_SIZES: &[u64] = &[100_000, 200_000, 500_000, 1_000_000, 5_000_000];
 const USER_PERCEIVED_SLI_IDS: &[&str] = &[
     "interactive_turn_p95_ms",
@@ -256,6 +261,16 @@ case "$test_name" in
     cat >"$target_dir/perf/scenario_runner.jsonl" <<'JSON'
 {"schema":"pi.ext.rust_bench.v1","runtime":"pi_agent_rust","scenario":"cold_start","extension":"hello","stats":{"p95_ms":18.0},"protocol_schema":"pi.bench.protocol.v1","protocol_version":"1.0.0","partition":"matched-state","evidence_class":"measured","confidence":"high","correlation_id":"stub-correlation","scenario_metadata":{"runtime":"pi_agent_rust","build_profile":"perf","host":{"os":"linux","arch":"x86_64","cpu_model":"stub","cpu_cores":8},"scenario_id":"matched-state/cold_start","replay_input":{"runs":5}}}
 {"schema":"pi.ext.rust_bench.v1","runtime":"pi_agent_rust","scenario":"tool_call","extension":"hello","per_call_us":33.0,"protocol_schema":"pi.bench.protocol.v1","protocol_version":"1.0.0","partition":"matched-state","evidence_class":"measured","confidence":"high","correlation_id":"stub-correlation","scenario_metadata":{"runtime":"pi_agent_rust","build_profile":"perf","host":{"os":"linux","arch":"x86_64","cpu_model":"stub","cpu_cores":8},"scenario_id":"matched-state/tool_call","replay_input":{"iterations":500}}}
+{"schema":"pi.ext.rust_bench.v1","runtime":"pi_agent_rust","scenario":"session_workload_matrix","extension":"core","partition":"matched-state","open_ms":48.0,"append_ms":36.0,"save_ms":22.0,"index_ms":11.0,"total_ms":117.0,"protocol_schema":"pi.bench.protocol.v1","protocol_version":"1.0.0","evidence_class":"measured","confidence":"high","correlation_id":"stub-correlation","scenario_metadata":{"runtime":"pi_agent_rust","build_profile":"perf","host":{"os":"linux","arch":"x86_64","cpu_model":"stub","cpu_cores":8},"scenario_id":"matched-state/session_100000","replay_input":{"session_messages":100000}}}
+{"schema":"pi.ext.rust_bench.v1","runtime":"pi_agent_rust","scenario":"session_workload_matrix","extension":"core","partition":"matched-state","open_ms":62.0,"append_ms":45.0,"save_ms":29.0,"index_ms":13.0,"total_ms":149.0,"protocol_schema":"pi.bench.protocol.v1","protocol_version":"1.0.0","evidence_class":"measured","confidence":"high","correlation_id":"stub-correlation","scenario_metadata":{"runtime":"pi_agent_rust","build_profile":"perf","host":{"os":"linux","arch":"x86_64","cpu_model":"stub","cpu_cores":8},"scenario_id":"matched-state/session_200000","replay_input":{"session_messages":200000}}}
+{"schema":"pi.ext.rust_bench.v1","runtime":"pi_agent_rust","scenario":"session_workload_matrix","extension":"core","partition":"matched-state","open_ms":91.0,"append_ms":68.0,"save_ms":43.0,"index_ms":18.0,"total_ms":220.0,"protocol_schema":"pi.bench.protocol.v1","protocol_version":"1.0.0","evidence_class":"measured","confidence":"high","correlation_id":"stub-correlation","scenario_metadata":{"runtime":"pi_agent_rust","build_profile":"perf","host":{"os":"linux","arch":"x86_64","cpu_model":"stub","cpu_cores":8},"scenario_id":"matched-state/session_500000","replay_input":{"session_messages":500000}}}
+{"schema":"pi.ext.rust_bench.v1","runtime":"pi_agent_rust","scenario":"session_workload_matrix","extension":"core","partition":"matched-state","open_ms":136.0,"append_ms":101.0,"save_ms":64.0,"index_ms":24.0,"total_ms":325.0,"protocol_schema":"pi.bench.protocol.v1","protocol_version":"1.0.0","evidence_class":"measured","confidence":"high","correlation_id":"stub-correlation","scenario_metadata":{"runtime":"pi_agent_rust","build_profile":"perf","host":{"os":"linux","arch":"x86_64","cpu_model":"stub","cpu_cores":8},"scenario_id":"matched-state/session_1000000","replay_input":{"session_messages":1000000}}}
+{"schema":"pi.ext.rust_bench.v1","runtime":"pi_agent_rust","scenario":"session_workload_matrix","extension":"core","partition":"matched-state","open_ms":212.0,"append_ms":158.0,"save_ms":97.0,"index_ms":35.0,"total_ms":502.0,"protocol_schema":"pi.bench.protocol.v1","protocol_version":"1.0.0","evidence_class":"measured","confidence":"high","correlation_id":"stub-correlation","scenario_metadata":{"runtime":"pi_agent_rust","build_profile":"perf","host":{"os":"linux","arch":"x86_64","cpu_model":"stub","cpu_cores":8},"scenario_id":"matched-state/session_5000000","replay_input":{"session_messages":5000000}}}
+{"schema":"pi.ext.rust_bench.v1","runtime":"pi_agent_rust","scenario":"session_workload_matrix","extension":"core","partition":"realistic","open_ms":44.0,"append_ms":32.0,"save_ms":19.0,"index_ms":10.0,"total_ms":105.0,"protocol_schema":"pi.bench.protocol.v1","protocol_version":"1.0.0","evidence_class":"measured","confidence":"high","correlation_id":"stub-correlation","scenario_metadata":{"runtime":"pi_agent_rust","build_profile":"perf","host":{"os":"linux","arch":"x86_64","cpu_model":"stub","cpu_cores":8},"scenario_id":"realistic/session_100000","replay_input":{"session_messages":100000}}}
+{"schema":"pi.ext.rust_bench.v1","runtime":"pi_agent_rust","scenario":"session_workload_matrix","extension":"core","partition":"realistic","open_ms":57.0,"append_ms":41.0,"save_ms":25.0,"index_ms":12.0,"total_ms":135.0,"protocol_schema":"pi.bench.protocol.v1","protocol_version":"1.0.0","evidence_class":"measured","confidence":"high","correlation_id":"stub-correlation","scenario_metadata":{"runtime":"pi_agent_rust","build_profile":"perf","host":{"os":"linux","arch":"x86_64","cpu_model":"stub","cpu_cores":8},"scenario_id":"realistic/session_200000","replay_input":{"session_messages":200000}}}
+{"schema":"pi.ext.rust_bench.v1","runtime":"pi_agent_rust","scenario":"session_workload_matrix","extension":"core","partition":"realistic","open_ms":84.0,"append_ms":61.0,"save_ms":37.0,"index_ms":16.0,"total_ms":198.0,"protocol_schema":"pi.bench.protocol.v1","protocol_version":"1.0.0","evidence_class":"measured","confidence":"high","correlation_id":"stub-correlation","scenario_metadata":{"runtime":"pi_agent_rust","build_profile":"perf","host":{"os":"linux","arch":"x86_64","cpu_model":"stub","cpu_cores":8},"scenario_id":"realistic/session_500000","replay_input":{"session_messages":500000}}}
+{"schema":"pi.ext.rust_bench.v1","runtime":"pi_agent_rust","scenario":"session_workload_matrix","extension":"core","partition":"realistic","open_ms":124.0,"append_ms":90.0,"save_ms":54.0,"index_ms":21.0,"total_ms":289.0,"protocol_schema":"pi.bench.protocol.v1","protocol_version":"1.0.0","evidence_class":"measured","confidence":"high","correlation_id":"stub-correlation","scenario_metadata":{"runtime":"pi_agent_rust","build_profile":"perf","host":{"os":"linux","arch":"x86_64","cpu_model":"stub","cpu_cores":8},"scenario_id":"realistic/session_1000000","replay_input":{"session_messages":1000000}}}
+{"schema":"pi.ext.rust_bench.v1","runtime":"pi_agent_rust","scenario":"session_workload_matrix","extension":"core","partition":"realistic","open_ms":198.0,"append_ms":146.0,"save_ms":88.0,"index_ms":33.0,"total_ms":465.0,"protocol_schema":"pi.bench.protocol.v1","protocol_version":"1.0.0","evidence_class":"measured","confidence":"high","correlation_id":"stub-correlation","scenario_metadata":{"runtime":"pi_agent_rust","build_profile":"perf","host":{"os":"linux","arch":"x86_64","cpu_model":"stub","cpu_cores":8},"scenario_id":"realistic/session_5000000","replay_input":{"session_messages":5000000}}}
 JSON
     cat >"$target_dir/perf/legacy_extension_workloads.jsonl" <<'JSON'
 {"schema":"pi.ext.legacy_bench.v1","scenario":"ext_load_init/load_init_cold","extension":"hello","summary":{"p50_ms":10.0}}
@@ -745,6 +760,167 @@ fn validate_extension_stratification_record(record: &Value) -> Result<(), String
         .and_then(Value::as_array)
         .ok_or_else(|| "lineage.run_id_lineage must be an array".to_string())?;
     if top_level_run_id_lineage.len() < 2 {
+        return Err("lineage.run_id_lineage must include run_id + correlation_id".to_string());
+    }
+
+    Ok(())
+}
+
+fn validate_phase1_matrix_validation_record(record: &Value) -> Result<(), String> {
+    let required_top_level = [
+        "schema",
+        "run_id",
+        "correlation_id",
+        "matrix_requirements",
+        "matrix_cells",
+        "stage_summary",
+        "primary_outcomes",
+        "regression_guards",
+        "evidence_links",
+        "consumption_contract",
+        "lineage",
+    ];
+    let missing = has_required_fields(record, &required_top_level);
+    if !missing.is_empty() {
+        return Err(format!("missing required fields: {missing:?}"));
+    }
+
+    let schema = record
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if schema != PHASE1_MATRIX_SCHEMA {
+        return Err(format!("unexpected schema: {schema}"));
+    }
+
+    let matrix_requirements = record
+        .get("matrix_requirements")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "matrix_requirements must be an object".to_string())?;
+    for field in &[
+        "required_partition_tags",
+        "required_session_message_sizes",
+        "required_cell_count",
+    ] {
+        if !matrix_requirements.contains_key(*field) {
+            return Err(format!("matrix_requirements missing {field}"));
+        }
+    }
+
+    let matrix_cells = record
+        .get("matrix_cells")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "matrix_cells must be an array".to_string())?;
+    if matrix_cells.is_empty() {
+        return Err("matrix_cells must not be empty".to_string());
+    }
+    for cell in matrix_cells {
+        let cell_obj = cell
+            .as_object()
+            .ok_or_else(|| "matrix cell must be an object".to_string())?;
+        for field in &[
+            "workload_partition",
+            "session_messages",
+            "scenario_id",
+            "status",
+            "stage_attribution",
+            "primary_e2e",
+            "lineage",
+        ] {
+            if !cell_obj.contains_key(*field) {
+                return Err(format!("matrix cell missing {field}"));
+            }
+        }
+
+        let status = cell_obj
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !matches!(status, "pass" | "fail") {
+            return Err(format!("matrix cell has invalid status: {status}"));
+        }
+
+        let stage = cell_obj
+            .get("stage_attribution")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "matrix cell stage_attribution must be object".to_string())?;
+        for field in &["open_ms", "append_ms", "save_ms", "index_ms", "total_stage_ms"] {
+            if !stage.contains_key(*field) {
+                return Err(format!("matrix cell stage_attribution missing {field}"));
+            }
+        }
+
+        let primary = cell_obj
+            .get("primary_e2e")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "matrix cell primary_e2e must be object".to_string())?;
+        for field in &["wall_clock_ms", "rust_vs_node_ratio", "rust_vs_bun_ratio"] {
+            if !primary.contains_key(*field) {
+                return Err(format!("matrix cell primary_e2e missing {field}"));
+            }
+        }
+    }
+
+    let stage_summary = record
+        .get("stage_summary")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "stage_summary must be an object".to_string())?;
+    for field in &[
+        "required_stage_keys",
+        "operation_stage_coverage",
+        "cells_with_complete_stage_breakdown",
+        "cells_missing_stage_breakdown",
+        "covered_cells",
+        "missing_cells",
+    ] {
+        if !stage_summary.contains_key(*field) {
+            return Err(format!("stage_summary missing {field}"));
+        }
+    }
+
+    let primary_outcomes = record
+        .get("primary_outcomes")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "primary_outcomes must be an object".to_string())?;
+    for field in &[
+        "status",
+        "wall_clock_ms",
+        "rust_vs_node_ratio",
+        "rust_vs_bun_ratio",
+        "ordering_policy",
+    ] {
+        if !primary_outcomes.contains_key(*field) {
+            return Err(format!("primary_outcomes missing {field}"));
+        }
+    }
+
+    let regression_guards = record
+        .get("regression_guards")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "regression_guards must be an object".to_string())?;
+    for field in &["memory", "correctness", "security"] {
+        if !regression_guards.contains_key(*field) {
+            return Err(format!("regression_guards missing {field}"));
+        }
+    }
+
+    let consumption_contract = record
+        .get("consumption_contract")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "consumption_contract must be an object".to_string())?;
+    if !consumption_contract.contains_key("artifact_ready_for_phase5") {
+        return Err("consumption_contract missing artifact_ready_for_phase5".to_string());
+    }
+
+    let lineage = record
+        .get("lineage")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "lineage must be an object".to_string())?;
+    let run_id_lineage = lineage
+        .get("run_id_lineage")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "lineage.run_id_lineage must be an array".to_string())?;
+    if run_id_lineage.len() < 2 {
         return Err("lineage.run_id_lineage must include run_id + correlation_id".to_string());
     }
 
@@ -1275,6 +1451,195 @@ fn extension_stratification_validator_rejects_missing_claim_integrity() {
 }
 
 #[test]
+fn phase1_matrix_validator_accepts_golden_fixture() {
+    let golden = json!({
+        "schema": PHASE1_MATRIX_SCHEMA,
+        "run_id": "20260216T010101Z",
+        "correlation_id": "abc123def456",
+        "matrix_requirements": {
+            "required_partition_tags": ["matched-state", "realistic"],
+            "required_session_message_sizes": [100000, 200000, 500000, 1000000, 5000000],
+            "required_cell_count": 10
+        },
+        "matrix_cells": [
+            {
+                "workload_partition": "matched-state",
+                "session_messages": 100000,
+                "scenario_id": "matched-state/session_100000",
+                "status": "pass",
+                "missing_reasons": [],
+                "stage_attribution": {
+                    "open_ms": 48.0,
+                    "append_ms": 36.0,
+                    "save_ms": 22.0,
+                    "index_ms": 11.0,
+                    "total_stage_ms": 117.0
+                },
+                "primary_e2e": {
+                    "wall_clock_ms": 1200.0,
+                    "rust_vs_node_ratio": 2.2,
+                    "rust_vs_bun_ratio": 2.2
+                },
+                "microbench_context": {
+                    "cold_load_ms": 18.0,
+                    "per_call_us": 33.0
+                },
+                "lineage": {
+                    "source_record_index": 2,
+                    "source_artifacts": ["target/perf/scenario_runner.jsonl"]
+                }
+            },
+            {
+                "workload_partition": "realistic",
+                "session_messages": 100000,
+                "scenario_id": "realistic/session_100000",
+                "status": "pass",
+                "missing_reasons": [],
+                "stage_attribution": {
+                    "open_ms": 44.0,
+                    "append_ms": 32.0,
+                    "save_ms": 19.0,
+                    "index_ms": 10.0,
+                    "total_stage_ms": 105.0
+                },
+                "primary_e2e": {
+                    "wall_clock_ms": 1200.0,
+                    "rust_vs_node_ratio": 2.2,
+                    "rust_vs_bun_ratio": 2.2
+                },
+                "microbench_context": {
+                    "cold_load_ms": 18.0,
+                    "per_call_us": 33.0
+                },
+                "lineage": {
+                    "source_record_index": 7,
+                    "source_artifacts": ["target/perf/scenario_runner.jsonl"]
+                }
+            }
+        ],
+        "stage_summary": {
+            "required_stage_keys": ["open_ms", "append_ms", "save_ms", "index_ms"],
+            "operation_stage_coverage": {
+                "open_ms": 2,
+                "append_ms": 2,
+                "save_ms": 2,
+                "index_ms": 2
+            },
+            "cells_with_complete_stage_breakdown": 2,
+            "cells_missing_stage_breakdown": 0,
+            "covered_cells": 2,
+            "missing_cells": []
+        },
+        "primary_outcomes": {
+            "status": "pass",
+            "wall_clock_ms": 1200.0,
+            "rust_vs_node_ratio": 2.2,
+            "rust_vs_bun_ratio": 2.2,
+            "ordering_policy": "primary_e2e_before_microbench"
+        },
+        "regression_guards": {
+            "memory": "pass",
+            "correctness": "pass",
+            "security": "pass",
+            "failure_or_gap_reasons": []
+        },
+        "evidence_links": {
+            "phase1_unit_and_fault_injection": {
+                "suite_logs": {},
+                "fault_injection_script": "scripts/e2e/run_persistence_fault_injection.sh",
+                "fault_injection_summary_path": null
+            },
+            "required_artifacts": {
+                "scenario_runner": "target/perf/scenario_runner.jsonl",
+                "stratification": "target/perf/extension_benchmark_stratification.json",
+                "baseline_variance_confidence": "target/perf/baseline_variance_confidence.json"
+            }
+        },
+        "consumption_contract": {
+            "downstream_beads": ["bd-3ar8v.2.12"],
+            "artifact_ready_for_phase5": true,
+            "fail_closed_conditions": ["missing_stage_metrics"]
+        },
+        "lineage": {
+            "run_id_lineage": ["20260216T010101Z", "abc123def456"],
+            "source_manifest_path": "target/perf/runs/20260216T010101Z/manifest.json"
+        }
+    });
+
+    assert!(
+        validate_phase1_matrix_validation_record(&golden).is_ok(),
+        "golden phase1 matrix fixture should pass validation"
+    );
+}
+
+#[test]
+fn phase1_matrix_validator_rejects_missing_stage_attribution() {
+    let malformed = json!({
+        "schema": PHASE1_MATRIX_SCHEMA,
+        "run_id": "20260216T010101Z",
+        "correlation_id": "abc123def456",
+        "matrix_requirements": {
+            "required_partition_tags": ["matched-state", "realistic"],
+            "required_session_message_sizes": [100000],
+            "required_cell_count": 2
+        },
+        "matrix_cells": [
+            {
+                "workload_partition": "matched-state",
+                "session_messages": 100000,
+                "scenario_id": "matched-state/session_100000",
+                "status": "pass",
+                "primary_e2e": {
+                    "wall_clock_ms": 1200.0,
+                    "rust_vs_node_ratio": 2.2,
+                    "rust_vs_bun_ratio": 2.2
+                },
+                "lineage": {
+                    "source_record_index": 0,
+                    "source_artifacts": []
+                }
+            }
+        ],
+        "stage_summary": {
+            "required_stage_keys": ["open_ms", "append_ms", "save_ms", "index_ms"],
+            "operation_stage_coverage": {"open_ms": 1, "append_ms": 1, "save_ms": 1, "index_ms": 1},
+            "cells_with_complete_stage_breakdown": 1,
+            "cells_missing_stage_breakdown": 0,
+            "covered_cells": 1,
+            "missing_cells": []
+        },
+        "primary_outcomes": {
+            "status": "pass",
+            "wall_clock_ms": 1200.0,
+            "rust_vs_node_ratio": 2.2,
+            "rust_vs_bun_ratio": 2.2,
+            "ordering_policy": "primary_e2e_before_microbench"
+        },
+        "regression_guards": {
+            "memory": "pass",
+            "correctness": "pass",
+            "security": "pass"
+        },
+        "evidence_links": {
+            "phase1_unit_and_fault_injection": {},
+            "required_artifacts": {}
+        },
+        "consumption_contract": {
+            "artifact_ready_for_phase5": false
+        },
+        "lineage": {
+            "run_id_lineage": ["20260216T010101Z", "abc123def456"]
+        }
+    });
+
+    let err = validate_phase1_matrix_validation_record(&malformed).expect_err("fixture must fail");
+    assert!(
+        err.contains("stage_attribution"),
+        "expected stage_attribution validation failure, got: {err}"
+    );
+}
+
+#[test]
 fn evidence_contract_schema_includes_benchmark_protocol_definition() {
     let schema_path = project_root().join("docs/evidence-contract-schema.json");
     let content = std::fs::read_to_string(&schema_path)
@@ -1381,6 +1746,27 @@ fn orchestrate_script_emits_extension_stratification_contract() {
         assert!(
             content.contains(token),
             "orchestrate stratification phase must include token: {token}"
+        );
+    }
+}
+
+#[test]
+fn orchestrate_script_emits_phase1_matrix_validation_contract() {
+    let script_path = project_root().join("scripts/perf/orchestrate.sh");
+    let content = fs::read_to_string(&script_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", script_path.display()));
+
+    for token in &[
+        "phase1_matrix_validation.json",
+        PHASE1_MATRIX_SCHEMA,
+        "\"required_session_message_sizes\"",
+        "\"cells_with_complete_stage_breakdown\"",
+        "\"primary_e2e_before_microbench\"",
+        "\"artifact_ready_for_phase5\"",
+    ] {
+        assert!(
+            content.contains(token),
+            "orchestrate phase-1 matrix phase must include token: {token}"
         );
     }
 }
@@ -1493,6 +1879,95 @@ fn orchestrate_generates_extension_stratification_artifact() {
             .as_bool()
             .is_some_and(|v| v),
         "anti-conflation guardrail must be explicit in claim_integrity"
+    );
+
+    let _ = fs::remove_dir_all(temp_root);
+}
+
+#[cfg(unix)]
+#[test]
+fn orchestrate_generates_phase1_matrix_validation_artifact() {
+    let (output, temp_root) = run_orchestrate_with_fake_toolchain();
+    assert!(
+        output.status.success(),
+        "orchestrate.sh should succeed with stub toolchain. stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output_dir = temp_root.join("run");
+    let manifest_path = output_dir.join("manifest.json");
+    let matrix_path = output_dir
+        .join("results")
+        .join("phase1_matrix_validation.json");
+
+    assert!(
+        matrix_path.exists(),
+        "phase-1 matrix artifact must be written: {}",
+        matrix_path.display()
+    );
+
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).expect("read manifest.json"))
+            .expect("parse manifest.json");
+    let matrix: Value =
+        serde_json::from_str(&fs::read_to_string(&matrix_path).expect("read matrix artifact"))
+            .expect("parse matrix artifact");
+
+    if let Err(err) = validate_phase1_matrix_validation_record(&matrix) {
+        panic!("phase1 matrix artifact violates schema contract: {err}");
+    }
+
+    assert_eq!(
+        matrix.get("schema").and_then(Value::as_str),
+        Some(PHASE1_MATRIX_SCHEMA)
+    );
+    assert_eq!(
+        matrix.get("run_id").and_then(Value::as_str),
+        manifest.get("timestamp").and_then(Value::as_str),
+        "phase1 run_id must match manifest timestamp"
+    );
+    assert_eq!(
+        matrix.get("correlation_id").and_then(Value::as_str),
+        manifest.get("correlation_id").and_then(Value::as_str),
+        "phase1 correlation_id must match manifest"
+    );
+
+    assert_eq!(
+        manifest["phase1_matrix_validation"]["schema"].as_str(),
+        Some(PHASE1_MATRIX_SCHEMA),
+        "manifest must reference phase1 matrix schema"
+    );
+    assert_eq!(
+        matrix["matrix_requirements"]["required_cell_count"].as_u64(),
+        Some(10),
+        "phase1 matrix should require 10 partition/size cells"
+    );
+    assert_eq!(
+        matrix["stage_summary"]["cells_with_complete_stage_breakdown"].as_u64(),
+        Some(10),
+        "stub matrix should provide complete open/append/save attribution for every cell"
+    );
+
+    let cells = matrix["matrix_cells"]
+        .as_array()
+        .expect("matrix_cells array");
+    assert_eq!(cells.len(), 10, "matrix artifact should contain one cell per requirement");
+
+    let seen_partitions: HashSet<&str> = cells
+        .iter()
+        .filter_map(|cell| cell.get("workload_partition").and_then(Value::as_str))
+        .collect();
+    assert!(seen_partitions.contains("matched-state"));
+    assert!(seen_partitions.contains("realistic"));
+
+    let seen_sizes: HashSet<u64> = cells
+        .iter()
+        .filter_map(|cell| cell.get("session_messages").and_then(Value::as_u64))
+        .collect();
+    assert_eq!(
+        seen_sizes,
+        REALISTIC_SESSION_SIZES.iter().copied().collect(),
+        "phase1 matrix must cover canonical 100k..5M sizes"
     );
 
     let _ = fs::remove_dir_all(temp_root);

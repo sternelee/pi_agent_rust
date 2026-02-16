@@ -20,7 +20,7 @@
 )]
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -508,7 +508,10 @@ fn cross_env_breakdown_classifies_noise_when_spread_within_noise_floor() {
         matches!(stats.dominant_source.as_str(), "noise" | "runtime"),
         "dominant source should indicate noise-like variance"
     );
-    assert!(!stats.alert_triggered, "small spread should not trigger alert");
+    assert!(
+        !stats.alert_triggered,
+        "small spread should not trigger alert"
+    );
 }
 
 #[test]

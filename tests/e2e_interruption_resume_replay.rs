@@ -42,6 +42,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 // ─── Shared helpers ─────────────────────────────────────────────────────────
 
@@ -59,6 +60,9 @@ fn assistant_text(message: &AssistantMessage) -> String {
         })
         .collect::<String>()
 }
+
+/// `sli_resume_ready_p95_ms` fail threshold from docs/perf_sli_matrix.json.
+const RESUME_READY_FAIL_BUDGET_MS: u128 = 900;
 
 fn make_assistant(
     provider_name: &str,
@@ -472,11 +476,17 @@ fn resume_after_abort_continues_from_persisted_state() {
     harness.record_artifact("session.jsonl", &session_path);
 
     // Step 2: Reload session and verify messages survived
+    let reload_start = Instant::now();
     let (reloaded, diagnostics) = run_async({
         let path = session_path.display().to_string();
         async move { Session::open_with_diagnostics(&path).await.expect("reload") }
     });
+    let resume_ready_ms = reload_start.elapsed().as_millis();
     assert!(diagnostics.skipped_entries.is_empty(), "No corruption");
+    assert!(
+        resume_ready_ms <= RESUME_READY_FAIL_BUDGET_MS,
+        "resume reload exceeded UX fail threshold ({resume_ready_ms}ms > {RESUME_READY_FAIL_BUDGET_MS}ms)"
+    );
 
     let messages = reloaded.to_messages_for_current_path();
     assert!(
@@ -493,6 +503,8 @@ fn resume_after_abort_continues_from_persisted_state() {
                 messages.len().to_string(),
             ));
             ctx.push(("session_path".into(), session_path.display().to_string()));
+            ctx.push(("resume_ready_ms".into(), resume_ready_ms.to_string()));
+            ctx.push(("resume_sli_id".into(), "sli_resume_ready_p95_ms".into()));
         });
     write_jsonl_artifacts(&harness, test_name);
 }
@@ -539,24 +551,54 @@ fn resume_multi_turn_conversation_intact() {
         }
     });
 
-    // Verify all messages persisted
-    let messages = run_async({
+    // Persisted session must exist and remain reloadable within resume UX budget.
+    let session_path = run_async({
         let session = Arc::clone(&session);
         async move {
             let cx = asupersync::Cx::for_testing();
             let guard = session.lock(&cx).await.expect("lock");
-            guard.to_messages_for_current_path()
+            guard
+                .path
+                .clone()
+                .expect("session path after persisted turns")
         }
     });
+    assert!(
+        session_path.exists(),
+        "session file must exist after persists"
+    );
+    harness.record_artifact("session_multiturn.jsonl", &session_path);
 
-    // Should have: user1, assistant1, user2, assistant2 = 4 messages
+    let reload_start = Instant::now();
+    let (reloaded, diagnostics) = run_async({
+        let path = session_path.display().to_string();
+        async move {
+            Session::open_with_diagnostics(&path)
+                .await
+                .expect("reload multi-turn")
+        }
+    });
+    let resume_ready_ms = reload_start.elapsed().as_millis();
+    assert!(
+        diagnostics.skipped_entries.is_empty(),
+        "multi-turn reload should not skip entries"
+    );
+    assert!(
+        resume_ready_ms <= RESUME_READY_FAIL_BUDGET_MS,
+        "multi-turn resume exceeded UX fail threshold ({resume_ready_ms}ms > {RESUME_READY_FAIL_BUDGET_MS}ms)"
+    );
+
+    // Verify all messages persisted and survived reload.
+    let messages = reloaded.to_messages_for_current_path();
+
+    // Should have: user1, assistant1, user2, assistant2 = 4 messages.
     assert!(
         messages.len() >= 4,
-        "Multi-turn should have >= 4 messages, got {}",
+        "Multi-turn should have >= 4 messages after reload, got {}",
         messages.len()
     );
 
-    // Verify ordering
+    // Verify ordering by role counts.
     let user_count = messages
         .iter()
         .filter(|m| matches!(m, Message::User(_)))
@@ -574,6 +616,9 @@ fn resume_multi_turn_conversation_intact() {
             ctx.push(("total_messages".into(), messages.len().to_string()));
             ctx.push(("user_messages".into(), user_count.to_string()));
             ctx.push(("assistant_messages".into(), assistant_count.to_string()));
+            ctx.push(("session_path".into(), session_path.display().to_string()));
+            ctx.push(("resume_ready_ms".into(), resume_ready_ms.to_string()));
+            ctx.push(("resume_sli_id".into(), "sli_resume_ready_p95_ms".into()));
         });
     write_jsonl_artifacts(&harness, test_name);
 }

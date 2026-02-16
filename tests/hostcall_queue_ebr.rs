@@ -57,3 +57,23 @@ fn safe_fallback_mode_remains_operational_and_fifo() {
     let drained = queue.drain_all();
     assert_eq!(drained.into_iter().collect::<Vec<_>>(), vec![10, 11]);
 }
+
+#[test]
+fn ebr_stress_run_reclaims_without_backlog_growth() {
+    let mut queue = HostcallRequestQueue::with_mode(8, 32, HostcallQueueMode::Ebr);
+
+    for value in 0..20_000_u32 {
+        let _ = queue.push_back(value);
+        let drained = queue.drain_all();
+        assert_eq!(drained.len(), 1);
+        if value % 128 == 0 {
+            queue.force_reclaim();
+        }
+    }
+
+    queue.force_reclaim();
+    let snapshot = queue.snapshot();
+    assert_eq!(snapshot.reclamation_mode, HostcallQueueMode::Ebr);
+    assert_eq!(snapshot.retired_backlog, 0);
+    assert!(snapshot.reclaimed_total >= 20_000);
+}

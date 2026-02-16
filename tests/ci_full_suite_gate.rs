@@ -33,6 +33,9 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+const CI_WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
+const RUN_ALL_SCRIPT_PATH: &str = "scripts/e2e/run_all.sh";
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -1825,4 +1828,47 @@ fn parse_waivers_empty_is_ok() {
         validations.len()
     );
     // This test just verifies parsing doesn't panic
+}
+
+#[test]
+fn ci_workflow_publishes_scenario_cell_gate_artifacts() {
+    let workflow = std::fs::read_to_string(CI_WORKFLOW_PATH)
+        .unwrap_or_else(|err| panic!("failed to read {CI_WORKFLOW_PATH}: {err}"));
+
+    for token in [
+        "PERF_SCENARIO_CELL_STATUS_JSON",
+        "PERF_SCENARIO_CELL_STATUS_MD",
+        "Publish scenario-cell gate status [linux]",
+        "Upload scenario-cell gate artifacts [linux]",
+        "scenario-cell-gate-${{ github.run_id }}-${{ github.run_attempt }}",
+        "## Scenario Cell Gate Status",
+    ] {
+        assert!(
+            workflow.contains(token),
+            "workflow must include scenario-cell gate token: {token}"
+        );
+    }
+}
+
+#[test]
+fn run_all_wires_scenario_cell_status_artifacts_into_evidence_contract() {
+    let script = std::fs::read_to_string(RUN_ALL_SCRIPT_PATH)
+        .unwrap_or_else(|err| panic!("failed to read {RUN_ALL_SCRIPT_PATH}: {err}"));
+
+    for token in [
+        "claim_integrity_scenario_cell_status.json",
+        "claim_integrity_scenario_cell_status.md",
+        "pi.claim_integrity.scenario_cell_status.v1",
+        "\"claim_integrity_scenario_cells\"",
+        "claim_integrity.realistic_session_shape_coverage",
+        "benchmark_partitions",
+        "realistic_long_session",
+        "realistic_session_shape",
+        "missing required realistic_session_shape coverage",
+    ] {
+        assert!(
+            script.contains(token),
+            "run_all.sh must include scenario-cell status token: {token}"
+        );
+    }
 }

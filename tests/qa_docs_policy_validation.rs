@@ -1374,6 +1374,47 @@ fn ci_workflow_runs_perf_claim_integrity_bundle_before_run_all_gate() {
     }
 }
 
+#[test]
+fn run_all_emits_scenario_cell_status_artifacts() {
+    let run_all = load_text("scripts/e2e/run_all.sh");
+
+    for token in [
+        "pi.claim_integrity.scenario_cell_status.v1",
+        "claim_integrity_scenario_cell_status.json",
+        "claim_integrity_scenario_cell_status.md",
+        "claim_integrity.scenario_cell_status_json",
+        "claim_integrity.scenario_cell_status_markdown",
+        "\"total_cells\"",
+        "\"passing_cells\"",
+        "\"failing_cells\"",
+        "\"overall_status\"",
+    ] {
+        assert!(
+            run_all.contains(token),
+            "scripts/e2e/run_all.sh must include scenario-cell status token: {token}"
+        );
+    }
+}
+
+#[test]
+fn ci_workflow_publishes_scenario_cell_gate_artifacts() {
+    let ci = load_text(CI_WORKFLOW_PATH);
+
+    for token in [
+        "PERF_SCENARIO_CELL_STATUS_JSON",
+        "PERF_SCENARIO_CELL_STATUS_MD",
+        "Publish scenario-cell gate status [linux]",
+        "Upload scenario-cell gate artifacts [linux]",
+        "scenario-cell-gate-${{ github.run_id }}-${{ github.run_attempt }}",
+        "## Scenario Cell Gate Status",
+    ] {
+        assert!(
+            ci.contains(token),
+            "CI workflow must include scenario-cell publish token: {token}"
+        );
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Section 6: CI gate remediation guidance
 // ═══════════════════════════════════════════════════════════════════════════
@@ -3053,8 +3094,7 @@ fn capture_baseline_cross_env_diagnosis_emits_structured_report_and_log() {
     .expect("write ci baseline fixture");
     std::fs::write(
         &baseline_canary,
-        serde_json::to_string_pretty(&baseline_canary_payload)
-            .expect("serialize canary baseline"),
+        serde_json::to_string_pretty(&baseline_canary_payload).expect("serialize canary baseline"),
     )
     .expect("write canary baseline fixture");
 
