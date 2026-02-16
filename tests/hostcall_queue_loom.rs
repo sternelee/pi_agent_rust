@@ -5,7 +5,7 @@ use pi::hostcall_queue::{
     BravoBiasMode, ContentionSample, ContentionSignature, HostcallQueueMode, HostcallRequestQueue,
 };
 
-fn starvation_sample() -> ContentionSample {
+const fn starvation_sample() -> ContentionSample {
     ContentionSample {
         read_acquires: 80,
         write_acquires: 20,
@@ -15,7 +15,7 @@ fn starvation_sample() -> ContentionSample {
     }
 }
 
-fn mixed_sample() -> ContentionSample {
+const fn mixed_sample() -> ContentionSample {
     ContentionSample {
         read_acquires: 45,
         write_acquires: 55,

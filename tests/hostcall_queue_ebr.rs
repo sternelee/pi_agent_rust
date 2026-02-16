@@ -15,7 +15,7 @@ impl QueueTenant for TenantRequest {
     }
 }
 
-fn starvation_sample() -> ContentionSample {
+const fn starvation_sample() -> ContentionSample {
     ContentionSample {
         read_acquires: 80,
         write_acquires: 20,
@@ -25,7 +25,7 @@ fn starvation_sample() -> ContentionSample {
     }
 }
 
-fn write_dominant_sample() -> ContentionSample {
+const fn write_dominant_sample() -> ContentionSample {
     ContentionSample {
         read_acquires: 20,
         write_acquires: 80,
@@ -542,6 +542,9 @@ fn ebr_bravo_writer_recovery_window_stays_bounded_and_exits_without_stale_counte
     let stable = queue.snapshot();
     assert_eq!(stable.bravo_mode, BravoBiasMode::Balanced);
     assert_eq!(stable.bravo_writer_recovery_remaining, 0);
-    assert_eq!(stable.bravo_last_signature, ContentionSignature::WriteDominant);
-    assert!(stable.bravo_transitions >= after_second.bravo_transitions + 1);
+    assert_eq!(
+        stable.bravo_last_signature,
+        ContentionSignature::WriteDominant
+    );
+    assert!(stable.bravo_transitions > after_second.bravo_transitions);
 }

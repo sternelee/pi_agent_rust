@@ -525,3 +525,144 @@ fn latched_fairness_fallback_reason_does_not_flip_under_low_signal_sequence() {
         "latched fallback should keep ghost-hit counter stable during bypass"
     );
 }
+
+#[test]
+fn config_clamps_zero_inputs_to_safe_minima() {
+    let policy: S3FifoPolicy<String> = S3FifoPolicy::new(S3FifoConfig {
+        live_capacity: 0,
+        small_capacity: 0,
+        ghost_capacity: 0,
+        max_entries_per_owner: 0,
+        fallback_window: 0,
+        min_ghost_hits_in_window: usize::MAX,
+        max_budget_rejections_in_window: usize::MAX,
+    });
+
+    let cfg = policy.config();
+    assert_eq!(cfg.live_capacity, 2);
+    assert_eq!(cfg.small_capacity, 1);
+    assert_eq!(cfg.ghost_capacity, 1);
+    assert_eq!(cfg.max_entries_per_owner, 1);
+    assert_eq!(cfg.fallback_window, 1);
+    assert_eq!(cfg.min_ghost_hits_in_window, 1);
+    assert_eq!(cfg.max_budget_rejections_in_window, 1);
+}
+
+#[test]
+fn fairness_fallback_never_triggers_when_budget_threshold_clamps_to_window_size() {
+    let mut policy = S3FifoPolicy::new(S3FifoConfig {
+        live_capacity: 8,
+        small_capacity: 4,
+        ghost_capacity: 8,
+        max_entries_per_owner: 1,
+        fallback_window: 3,
+        min_ghost_hits_in_window: 0,
+        max_budget_rejections_in_window: usize::MAX,
+    });
+
+    let cfg = policy.config();
+    assert_eq!(cfg.max_budget_rejections_in_window, cfg.fallback_window);
+
+    let seed = policy.access("ext-a", "seed".to_string());
+    assert_eq!(seed.kind, S3FifoDecisionKind::AdmitSmall);
+
+    for idx in 0..8 {
+        let decision = policy.access("ext-a", format!("overflow-{idx}"));
+        assert_eq!(decision.kind, S3FifoDecisionKind::RejectFairnessBudget);
+        assert_eq!(
+            policy.telemetry().fallback_reason,
+            None,
+            "strictly-greater fairness threshold cannot trip when clamped to window length"
+        );
+    }
+}
+
+#[test]
+fn repeated_clear_fallback_cycles_require_new_full_windows() {
+    let mut policy = S3FifoPolicy::new(S3FifoConfig {
+        live_capacity: 8,
+        small_capacity: 4,
+        ghost_capacity: 8,
+        max_entries_per_owner: 8,
+        fallback_window: 2,
+        min_ghost_hits_in_window: 2,
+        max_budget_rejections_in_window: 2,
+    });
+
+    let _ = policy.access("ext-a", "cold-1".to_string());
+    let _ = policy.access("ext-b", "cold-2".to_string());
+    assert_eq!(
+        policy.telemetry().fallback_reason,
+        Some(S3FifoFallbackReason::SignalQualityInsufficient)
+    );
+
+    let bypass_1 = policy.access("ext-c", "while-1".to_string());
+    assert_eq!(bypass_1.kind, S3FifoDecisionKind::FallbackBypass);
+
+    policy.clear_fallback();
+    assert!(policy.telemetry().fallback_reason.is_none());
+
+    let after_clear_1 = policy.access("ext-d", "cold-3".to_string());
+    assert_ne!(after_clear_1.kind, S3FifoDecisionKind::FallbackBypass);
+    assert!(
+        policy.telemetry().fallback_reason.is_none(),
+        "window should restart after clear; one event cannot retrigger with fallback_window=2"
+    );
+
+    let _ = policy.access("ext-e", "cold-4".to_string());
+    assert_eq!(
+        policy.telemetry().fallback_reason,
+        Some(S3FifoFallbackReason::SignalQualityInsufficient)
+    );
+
+    let bypass_2 = policy.access("ext-f", "while-2".to_string());
+    assert_eq!(bypass_2.kind, S3FifoDecisionKind::FallbackBypass);
+
+    policy.clear_fallback();
+    assert!(policy.telemetry().fallback_reason.is_none());
+
+    let after_clear_2 = policy.access("ext-g", "cold-5".to_string());
+    assert_ne!(after_clear_2.kind, S3FifoDecisionKind::FallbackBypass);
+    assert!(
+        policy.telemetry().fallback_reason.is_none(),
+        "each clear should force a fresh full-window evidence cycle"
+    );
+}
+
+#[test]
+fn single_window_fairness_retrigger_requires_new_rejection_after_clear() {
+    let mut policy = S3FifoPolicy::new(S3FifoConfig {
+        live_capacity: 8,
+        small_capacity: 4,
+        ghost_capacity: 8,
+        max_entries_per_owner: 1,
+        fallback_window: 1,
+        min_ghost_hits_in_window: 0,
+        max_budget_rejections_in_window: 0,
+    });
+
+    let seed = policy.access("ext-a", "seed".to_string());
+    assert_eq!(seed.kind, S3FifoDecisionKind::AdmitSmall);
+    assert_eq!(policy.telemetry().fallback_reason, None);
+
+    let trigger = policy.access("ext-a", "overflow-1".to_string());
+    assert_eq!(trigger.kind, S3FifoDecisionKind::RejectFairnessBudget);
+    assert_eq!(
+        policy.telemetry().fallback_reason,
+        Some(S3FifoFallbackReason::FairnessInstability)
+    );
+
+    policy.clear_fallback();
+    assert_eq!(policy.telemetry().fallback_reason, None);
+
+    let post_clear_admit = policy.access("ext-b", "fresh".to_string());
+    assert_ne!(post_clear_admit.kind, S3FifoDecisionKind::FallbackBypass);
+    assert_eq!(policy.telemetry().fallback_reason, None);
+
+    let retrigger = policy.access("ext-a", "overflow-2".to_string());
+    assert_eq!(retrigger.kind, S3FifoDecisionKind::RejectFairnessBudget);
+    assert_eq!(
+        policy.telemetry().fallback_reason,
+        Some(S3FifoFallbackReason::FairnessInstability)
+    );
+}

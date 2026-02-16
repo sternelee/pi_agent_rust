@@ -711,6 +711,69 @@ mod tests {
         assert_eq!(low_signal_bypass.fallback_reason, low_signal_reason);
     }
 
+    #[test]
+    fn single_window_clear_cycles_preserve_reason_precedence_and_bypass_counters() {
+        let mut policy = S3FifoPolicy::new(S3FifoConfig {
+            live_capacity: 4,
+            small_capacity: 2,
+            ghost_capacity: 4,
+            max_entries_per_owner: 1,
+            fallback_window: 1,
+            min_ghost_hits_in_window: 1,
+            max_budget_rejections_in_window: 0,
+        });
+
+        // Epoch 1: one low-signal admission should trip fallback immediately.
+        let first = policy.access("ext-a", "cold-1".to_string());
+        assert_eq!(first.kind, S3FifoDecisionKind::AdmitSmall);
+        let low_signal_reason = Some(S3FifoFallbackReason::SignalQualityInsufficient);
+        assert_eq!(policy.telemetry().fallback_reason, low_signal_reason);
+
+        // Bypass while latched should not mutate accumulated counters.
+        let low_baseline = policy.telemetry();
+        let low_bypass = policy.access("ext-a", "low-bypass".to_string());
+        assert_eq!(low_bypass.kind, S3FifoDecisionKind::FallbackBypass);
+        let low_after = policy.telemetry();
+        assert_eq!(low_after.ghost_hits_total, low_baseline.ghost_hits_total);
+        assert_eq!(
+            low_after.budget_rejections_total,
+            low_baseline.budget_rejections_total
+        );
+
+        policy.clear_fallback();
+        assert_eq!(policy.telemetry().fallback_reason, None);
+
+        // Epoch 2: force a one-event ghost-hit budget rejection and verify fairness reason wins.
+        policy.push_ghost("ghost-hot".to_string());
+        policy
+            .owner_live_counts
+            .insert("ext-a".to_string(), policy.config().max_entries_per_owner);
+
+        let fairness_trigger = policy.access("ext-a", "ghost-hot".to_string());
+        assert_eq!(
+            fairness_trigger.kind,
+            S3FifoDecisionKind::RejectFairnessBudget
+        );
+        assert!(fairness_trigger.ghost_hit);
+
+        let fairness_reason = Some(S3FifoFallbackReason::FairnessInstability);
+        assert_eq!(policy.telemetry().fallback_reason, fairness_reason);
+
+        // Bypass while fairness-latched should also keep counters stable.
+        let fairness_baseline = policy.telemetry();
+        let fairness_bypass = policy.access("ext-a", "fair-bypass".to_string());
+        assert_eq!(fairness_bypass.kind, S3FifoDecisionKind::FallbackBypass);
+        let fairness_after = policy.telemetry();
+        assert_eq!(
+            fairness_after.ghost_hits_total,
+            fairness_baseline.ghost_hits_total
+        );
+        assert_eq!(
+            fairness_after.budget_rejections_total,
+            fairness_baseline.budget_rejections_total
+        );
+    }
+
     // ── Additional public API coverage ──
 
     #[test]
