@@ -1777,7 +1777,18 @@ mod tests {
         fs::create_dir_all(path.parent().expect("parent dir")).expect("create parent directory");
         fs::write(&path, "retry").expect("write session payload");
 
-        // Force-drain pending retries; now the update should succeed.
+        // Re-enqueue because the background dispatcher may have exhausted
+        // retries (MAX_RETRIES=3, ~175ms total) before we created the file.
+        let header = make_header("id-retry", "cwd-retry");
+        enqueue_session_index_snapshot_update(
+            index.sessions_root().to_path_buf(),
+            path,
+            header,
+            2,
+            None,
+        );
+
+        // Force-drain; now the update should succeed because the file exists.
         index.flush_pending_updates(Duration::from_secs(1));
         let listed = index
             .list_sessions(Some("cwd-retry"))

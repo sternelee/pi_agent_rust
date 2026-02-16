@@ -576,8 +576,8 @@ mod tests {
             #[test]
             fn kitty_chunk_count_lower_bound(data in proptest::collection::vec(any::<u8>(), 1..8192)) {
                 let result = encode_kitty(&data, 80);
-                let b64_len = (data.len() * 4 + 2) / 3; // ceil(n * 4/3)
-                let expected_chunks = (b64_len + 4095) / 4096;
+                let b64_len = (data.len() * 4).div_ceil(3); // ceil(n * 4/3)
+                let expected_chunks = b64_len.div_ceil(4096);
                 let actual_chunks = result.matches("\x1b_G").count();
                 assert!(actual_chunks >= expected_chunks.min(1));
             }

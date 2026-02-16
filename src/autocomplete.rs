@@ -1878,11 +1878,8 @@ mod tests {
             #[test]
             fn clamp_usize_saturates(val in 0..usize::MAX) {
                 let result = clamp_usize_to_i32(val);
-                if val <= i32::MAX as usize {
-                    assert_eq!(result, val as i32);
-                } else {
-                    assert_eq!(result, i32::MAX);
-                }
+                let expected = i32::try_from(val).unwrap_or(i32::MAX);
+                assert_eq!(result, expected);
             }
 
             /// `clamp_to_char_boundary` always returns a valid char boundary.
@@ -2013,7 +2010,8 @@ mod tests {
                     AutocompleteItemKind::File,
                     AutocompleteItemKind::Path,
                 ];
-                assert_eq!(kind_rank(kinds[idx]), idx as u8);
+                let expected = [0_u8, 1, 2, 3, 4, 5][idx];
+                assert_eq!(kind_rank(kinds[idx]), expected);
             }
 
             /// `resolve_dir_path` with absolute path returns it unchanged.

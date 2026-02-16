@@ -1099,7 +1099,7 @@ mod tests {
                 has_range in proptest::bool::ANY
             ) {
                 let dec = PersistedDecision {
-                    capability: cap.clone(),
+                    capability: cap,
                     allow,
                     decided_at: "2025-01-01T00:00:00Z".to_string(),
                     expires_at: if has_expiry { Some("2030-01-01T00:00:00Z".to_string()) } else { None },

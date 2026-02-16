@@ -1474,8 +1474,12 @@ mod tests {
         use super::*;
         use proptest::prelude::*;
 
-        const ALL_SEVERITIES: &[Severity] =
-            &[Severity::Pass, Severity::Info, Severity::Warn, Severity::Fail];
+        const ALL_SEVERITIES: &[Severity] = &[
+            Severity::Pass,
+            Severity::Info,
+            Severity::Warn,
+            Severity::Fail,
+        ];
 
         const CATEGORY_ALIASES: &[&str] = &[
             "config",
@@ -1495,12 +1499,10 @@ mod tests {
             fn severity_ordering_total(a in 0..4usize, b in 0..4usize) {
                 let sa = ALL_SEVERITIES[a];
                 let sb = ALL_SEVERITIES[b];
-                if a < b {
-                    assert!(sa < sb);
-                } else if a > b {
-                    assert!(sa > sb);
-                } else {
-                    assert!(sa == sb);
+                match a.cmp(&b) {
+                    std::cmp::Ordering::Less => assert!(sa < sb),
+                    std::cmp::Ordering::Equal => assert!(sa == sb),
+                    std::cmp::Ordering::Greater => assert!(sa > sb),
                 }
             }
 
