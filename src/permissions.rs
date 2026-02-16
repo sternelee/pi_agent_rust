@@ -1039,4 +1039,142 @@ mod tests {
         let year: u32 = dec.decided_at[0..4].parse().unwrap();
         assert!(year >= 2024);
     }
+
+    mod proptest_permissions {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// `days_to_ymd` produces valid month/day ranges.
+            #[test]
+            fn days_to_ymd_valid_ranges(days in 0..100_000u64) {
+                let (y, m, d) = days_to_ymd(days);
+                assert!(y >= 1970, "year {y} too small for days={days}");
+                assert!((1..=12).contains(&m), "month {m} out of range");
+                assert!((1..=31).contains(&d), "day {d} out of range");
+            }
+
+            /// `days_to_ymd(0)` is 1970-01-01.
+            #[test]
+            fn days_to_ymd_epoch(_dummy in 0..1u8) {
+                let (y, m, d) = days_to_ymd(0);
+                assert_eq!((y, m, d), (1970, 1, 1));
+            }
+
+            /// Consecutive days increment the day or roll the month/year.
+            #[test]
+            fn days_to_ymd_consecutive(days in 0..99_999u64) {
+                let (y1, m1, d1) = days_to_ymd(days);
+                let (y2, m2, d2) = days_to_ymd(days + 1);
+                // Either same date with day+1, or month/year rollover
+                if d2 == d1 + 1 && m2 == m1 && y2 == y1 {
+                    // Normal day increment
+                } else if d2 == 1 {
+                    // Day rolled over to 1 — month or year changed
+                    assert!(m2 != m1 || y2 != y1);
+                } else {
+                    panic!("unexpected day sequence: {y1}-{m1}-{d1} -> {y2}-{m2}-{d2}");
+                }
+            }
+
+            /// `now_iso8601` produces valid ISO-8601 format.
+            #[test]
+            fn now_iso8601_format(_dummy in 0..1u8) {
+                let ts = now_iso8601();
+                assert_eq!(ts.len(), 20, "expected YYYY-MM-DDThh:mm:ssZ, got {ts}");
+                assert!(ts.ends_with('Z'));
+                assert_eq!(&ts[4..5], "-");
+                assert_eq!(&ts[7..8], "-");
+                assert_eq!(&ts[10..11], "T");
+                assert_eq!(&ts[13..14], ":");
+                assert_eq!(&ts[16..17], ":");
+            }
+
+            /// `PersistedDecision` serde roundtrip preserves all fields.
+            #[test]
+            fn decision_serde_roundtrip(
+                cap in "[a-z]{1,10}",
+                allow in proptest::bool::ANY,
+                has_expiry in proptest::bool::ANY,
+                has_range in proptest::bool::ANY
+            ) {
+                let dec = PersistedDecision {
+                    capability: cap.clone(),
+                    allow,
+                    decided_at: "2025-01-01T00:00:00Z".to_string(),
+                    expires_at: if has_expiry { Some("2030-01-01T00:00:00Z".to_string()) } else { None },
+                    version_range: if has_range { Some(">=1.0.0".to_string()) } else { None },
+                };
+                let json = serde_json::to_string(&dec).unwrap();
+                let back: PersistedDecision = serde_json::from_str(&json).unwrap();
+                assert_eq!(dec, back);
+            }
+
+            /// Record then lookup returns the correct allow/deny value.
+            #[test]
+            fn record_lookup_roundtrip(
+                ext_id in "[a-z]{1,8}",
+                cap in "[a-z]{1,8}",
+                allow in proptest::bool::ANY
+            ) {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("perm.json");
+                let mut store = PermissionStore::open(&path).unwrap();
+                store.record(&ext_id, &cap, allow).unwrap();
+                assert_eq!(store.lookup(&ext_id, &cap), Some(allow));
+            }
+
+            /// Lookup for unknown extension returns None.
+            #[test]
+            fn lookup_unknown_extension(ext in "[a-z]{1,10}", cap in "[a-z]{1,5}") {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("perm.json");
+                let store = PermissionStore::open(&path).unwrap();
+                assert_eq!(store.lookup(&ext, &cap), None);
+            }
+
+            /// Record overwrites previous decision for same (ext, cap).
+            #[test]
+            fn record_overwrites(ext in "[a-z]{1,8}", cap in "[a-z]{1,8}") {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("perm.json");
+                let mut store = PermissionStore::open(&path).unwrap();
+                store.record(&ext, &cap, true).unwrap();
+                assert_eq!(store.lookup(&ext, &cap), Some(true));
+                store.record(&ext, &cap, false).unwrap();
+                assert_eq!(store.lookup(&ext, &cap), Some(false));
+            }
+
+            /// Revoke removes all decisions for an extension.
+            #[test]
+            fn revoke_removes_all(ext in "[a-z]{1,8}", cap1 in "[a-z]{1,5}", cap2 in "[a-z]{1,5}") {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("perm.json");
+                let mut store = PermissionStore::open(&path).unwrap();
+                store.record(&ext, &cap1, true).unwrap();
+                store.record(&ext, &cap2, false).unwrap();
+                store.revoke_extension(&ext).unwrap();
+                assert_eq!(store.lookup(&ext, &cap1), None);
+                assert_eq!(store.lookup(&ext, &cap2), None);
+            }
+
+            /// Days 365 is in 1971 (non-leap year 1970).
+            #[test]
+            fn days_to_ymd_year_boundary(_dummy in 0..1u8) {
+                let (y, m, d) = days_to_ymd(365);
+                assert_eq!(y, 1971);
+                assert_eq!(m, 1);
+                assert_eq!(d, 1);
+            }
+
+            /// Leap day 2000 (day 10957 from epoch) is Feb 29.
+            #[test]
+            fn days_to_ymd_leap_day_2000(_dummy in 0..1u8) {
+                // 2000-02-29 is day 11016 from epoch
+                // 1970-01-01 + 11016 days
+                let (y, m, d) = days_to_ymd(11016);
+                assert_eq!((y, m, d), (2000, 2, 29));
+            }
+        }
+    }
 }

@@ -1868,4 +1868,168 @@ mod tests {
         let b = a.clone();
         assert_eq!(a, b);
     }
+
+    mod proptest_autocomplete {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// `clamp_usize_to_i32` saturates at `i32::MAX`.
+            #[test]
+            fn clamp_usize_saturates(val in 0..usize::MAX) {
+                let result = clamp_usize_to_i32(val);
+                if val <= i32::MAX as usize {
+                    assert_eq!(result, val as i32);
+                } else {
+                    assert_eq!(result, i32::MAX);
+                }
+            }
+
+            /// `clamp_to_char_boundary` always returns a valid char boundary.
+            #[test]
+            fn clamp_to_char_boundary_valid(s in "\\PC{1,30}", idx in 0..60usize) {
+                let clamped = clamp_to_char_boundary(&s, idx);
+                assert!(s.is_char_boundary(clamped));
+                assert!(clamped <= s.len());
+            }
+
+            /// `clamp_cursor` always returns a valid char boundary <= len.
+            #[test]
+            fn clamp_cursor_valid(s in "\\PC{1,30}", cursor in 0..100usize) {
+                let clamped = clamp_cursor(&s, cursor);
+                assert!(s.is_char_boundary(clamped));
+                assert!(clamped <= s.len());
+            }
+
+            /// `fuzzy_match_score` with empty query always returns `Some((true, 0))`.
+            #[test]
+            fn fuzzy_empty_query_matches_all(cand in "[a-z]{1,20}") {
+                assert_eq!(fuzzy_match_score(&cand, ""), Some((true, 0)));
+                assert_eq!(fuzzy_match_score(&cand, "  "), Some((true, 0)));
+            }
+
+            /// Prefix matches report `is_prefix=true` and score >= 900.
+            #[test]
+            fn fuzzy_prefix_match(base in "[a-z]{2,10}", suffix in "[a-z]{0,5}") {
+                let candidate = format!("{base}{suffix}");
+                let result = fuzzy_match_score(&candidate, &base);
+                assert!(result.is_some());
+                let (is_prefix, score) = result.unwrap();
+                assert!(is_prefix, "prefix match should be flagged");
+                assert!(score >= 900, "prefix score should be high, got {score}");
+            }
+
+            /// `fuzzy_match_score` is case-insensitive.
+            #[test]
+            fn fuzzy_case_insensitive(cand in "[a-z]{2,10}", query in "[a-z]{1,5}") {
+                let lower = fuzzy_match_score(&cand, &query);
+                let upper = fuzzy_match_score(&cand, &query.to_uppercase());
+                assert_eq!(lower.is_some(), upper.is_some());
+                if let (Some((lp, ls)), Some((up, us))) = (lower, upper) {
+                    assert_eq!(lp, up);
+                    assert_eq!(ls, us);
+                }
+            }
+
+            /// `is_path_like` recognizes paths starting with ./ ../ ~/ or /
+            #[test]
+            fn is_path_like_common_prefixes(name in "[a-z]{1,10}") {
+                assert!(is_path_like(&format!("./{name}")));
+                assert!(is_path_like(&format!("../{name}")));
+                assert!(is_path_like(&format!("~/{name}")));
+                assert!(is_path_like(&format!("/{name}")));
+            }
+
+            /// `is_path_like` returns false for simple words without slashes.
+            #[test]
+            fn is_path_like_false_for_words(word in "[a-z]{1,10}") {
+                assert!(!is_path_like(word.trim()));
+            }
+
+            /// `is_path_like` empty or whitespace returns false.
+            #[test]
+            fn is_path_like_empty_false(ws in "[ \\t]{0,5}") {
+                assert!(!is_path_like(&ws));
+            }
+
+            /// `split_path_prefix` reconstructs the original path.
+            #[test]
+            fn split_path_prefix_reconstructs(dir in "[a-z]{1,5}", file in "[a-z]{1,5}") {
+                let path = format!("{dir}/{file}");
+                let (d, f) = split_path_prefix(&path);
+                assert_eq!(d, dir);
+                assert_eq!(f, file);
+            }
+
+            /// `split_path_prefix("~")` returns `("~", "")`.
+            #[test]
+            fn split_path_prefix_tilde(_dummy in 0..1u8) {
+                let (d, f) = split_path_prefix("~");
+                assert_eq!(d, "~");
+                assert!(f.is_empty());
+            }
+
+            /// `split_path_prefix` with trailing slash returns dir=path, file="".
+            #[test]
+            fn split_path_prefix_trailing_slash(dir in "[a-z]{1,10}") {
+                let path = format!("{dir}/");
+                let (d, f) = split_path_prefix(&path);
+                assert_eq!(d, path);
+                assert!(f.is_empty());
+            }
+
+            /// `split_path_prefix` with no slash returns dir=".", file=path.
+            #[test]
+            fn split_path_prefix_no_slash(word in "[a-z]{1,10}") {
+                let (d, f) = split_path_prefix(&word);
+                assert_eq!(d, ".");
+                assert_eq!(f, word);
+            }
+
+            /// `token_at_cursor` result range is within text bounds.
+            #[test]
+            fn token_at_cursor_bounds(text in "[a-z ]{1,30}", cursor in 0..40usize) {
+                let tok = token_at_cursor(&text, cursor);
+                assert!(tok.range.start <= tok.range.end);
+                assert!(tok.range.end <= text.len());
+                assert_eq!(&text[tok.range.clone()], tok.text);
+            }
+
+            /// `token_at_cursor` result text contains no whitespace.
+            #[test]
+            fn token_at_cursor_no_whitespace(text in "[a-z ]{1,20}", cursor in 0..30usize) {
+                let tok = token_at_cursor(&text, cursor);
+                assert!(!tok.text.contains(char::is_whitespace) || tok.text.is_empty());
+            }
+
+            /// `kind_rank` covers all variants with distinct ranks 0..=5.
+            #[test]
+            fn kind_rank_distinct(idx in 0..6usize) {
+                let kinds = [
+                    AutocompleteItemKind::SlashCommand,
+                    AutocompleteItemKind::ExtensionCommand,
+                    AutocompleteItemKind::PromptTemplate,
+                    AutocompleteItemKind::Skill,
+                    AutocompleteItemKind::File,
+                    AutocompleteItemKind::Path,
+                ];
+                assert_eq!(kind_rank(kinds[idx]), idx as u8);
+            }
+
+            /// `resolve_dir_path` with absolute path returns it unchanged.
+            #[test]
+            fn resolve_dir_absolute(dir in "[a-z]{1,10}") {
+                let abs = format!("/{dir}");
+                let result = resolve_dir_path(Path::new("/cwd"), &abs, None);
+                assert_eq!(result, Some(PathBuf::from(&abs)));
+            }
+
+            /// `resolve_dir_path` with relative path joins to cwd.
+            #[test]
+            fn resolve_dir_relative(dir in "[a-z]{1,10}") {
+                let result = resolve_dir_path(Path::new("/cwd"), &dir, None);
+                assert_eq!(result, Some(PathBuf::from(format!("/cwd/{dir}"))));
+            }
+        }
+    }
 }

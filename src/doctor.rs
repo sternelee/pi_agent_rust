@@ -1469,4 +1469,214 @@ mod tests {
             "extensions-only mode without a path should emit a clear failure finding"
         );
     }
+
+    mod proptest_doctor {
+        use super::*;
+        use proptest::prelude::*;
+
+        const ALL_SEVERITIES: &[Severity] =
+            &[Severity::Pass, Severity::Info, Severity::Warn, Severity::Fail];
+
+        const CATEGORY_ALIASES: &[&str] = &[
+            "config",
+            "dirs",
+            "directories",
+            "auth",
+            "authentication",
+            "shell",
+            "sessions",
+            "extensions",
+            "ext",
+        ];
+
+        proptest! {
+            /// Severity ordering is total: Pass < Info < Warn < Fail.
+            #[test]
+            fn severity_ordering_total(a in 0..4usize, b in 0..4usize) {
+                let sa = ALL_SEVERITIES[a];
+                let sb = ALL_SEVERITIES[b];
+                if a < b {
+                    assert!(sa < sb);
+                } else if a > b {
+                    assert!(sa > sb);
+                } else {
+                    assert!(sa == sb);
+                }
+            }
+
+            /// Severity display produces uppercase 4-char labels.
+            #[test]
+            fn severity_display_uppercase(idx in 0..4usize) {
+                let s = ALL_SEVERITIES[idx];
+                let display = s.to_string();
+                assert_eq!(display.len(), 4);
+                assert!(display.chars().all(|c| c.is_ascii_uppercase()));
+            }
+
+            /// `CheckCategory::from_str` accepts all known aliases.
+            #[test]
+            fn check_category_known_aliases(idx in 0..CATEGORY_ALIASES.len()) {
+                let alias = CATEGORY_ALIASES[idx];
+                assert!(alias.parse::<CheckCategory>().is_ok());
+            }
+
+            /// `CheckCategory::from_str` is case-insensitive.
+            #[test]
+            fn check_category_case_insensitive(idx in 0..CATEGORY_ALIASES.len()) {
+                let alias = CATEGORY_ALIASES[idx];
+                let upper = alias.to_uppercase();
+                let lower_result = alias.parse::<CheckCategory>();
+                let upper_result = upper.parse::<CheckCategory>();
+                assert_eq!(lower_result, upper_result);
+            }
+
+            /// Unknown category names are rejected.
+            #[test]
+            fn check_category_unknown_rejected(s in "[a-z]{10,20}") {
+                assert!(s.parse::<CheckCategory>().is_err());
+            }
+
+            /// `CheckCategory::label` returns non-empty strings.
+            #[test]
+            fn check_category_label_non_empty(idx in 0..6usize) {
+                let cats = [
+                    CheckCategory::Config,
+                    CheckCategory::Dirs,
+                    CheckCategory::Auth,
+                    CheckCategory::Shell,
+                    CheckCategory::Sessions,
+                    CheckCategory::Extensions,
+                ];
+                let label = cats[idx].label();
+                assert!(!label.is_empty());
+                // Label starts with uppercase
+                assert!(label.starts_with(|c: char| c.is_uppercase()));
+            }
+
+            /// `DoctorReport::from_findings` summary counts match input.
+            #[test]
+            fn from_findings_counts_match(
+                pass in 0..5usize,
+                info in 0..5usize,
+                warn in 0..5usize,
+                fail in 0..5usize
+            ) {
+                let mut findings = Vec::new();
+                for _ in 0..pass {
+                    findings.push(Finding::pass(CheckCategory::Config, "test"));
+                }
+                for _ in 0..info {
+                    findings.push(Finding::info(CheckCategory::Config, "test"));
+                }
+                for _ in 0..warn {
+                    findings.push(Finding::warn(CheckCategory::Config, "test"));
+                }
+                for _ in 0..fail {
+                    findings.push(Finding::fail(CheckCategory::Config, "test"));
+                }
+
+                let report = DoctorReport::from_findings(findings);
+                assert_eq!(report.summary.pass, pass);
+                assert_eq!(report.summary.info, info);
+                assert_eq!(report.summary.warn, warn);
+                assert_eq!(report.summary.fail, fail);
+            }
+
+            /// `DoctorReport::from_findings` overall severity is max of inputs.
+            #[test]
+            fn from_findings_overall_severity(
+                pass in 0..3usize,
+                info in 0..3usize,
+                warn in 0..3usize,
+                fail in 0..3usize
+            ) {
+                let mut findings = Vec::new();
+                for _ in 0..pass {
+                    findings.push(Finding::pass(CheckCategory::Config, "test"));
+                }
+                for _ in 0..info {
+                    findings.push(Finding::info(CheckCategory::Config, "test"));
+                }
+                for _ in 0..warn {
+                    findings.push(Finding::warn(CheckCategory::Config, "test"));
+                }
+                for _ in 0..fail {
+                    findings.push(Finding::fail(CheckCategory::Config, "test"));
+                }
+
+                let report = DoctorReport::from_findings(findings);
+
+                if fail > 0 {
+                    assert_eq!(report.overall, Severity::Fail);
+                } else if warn > 0 {
+                    assert_eq!(report.overall, Severity::Warn);
+                } else {
+                    assert_eq!(report.overall, Severity::Pass);
+                }
+            }
+
+            /// `is_known_config_key` accepts both camelCase and snake_case forms.
+            #[test]
+            fn config_key_pairs(idx in 0..10usize) {
+                let pairs = [
+                    ("hideThinkingBlock", "hide_thinking_block"),
+                    ("showHardwareCursor", "show_hardware_cursor"),
+                    ("defaultProvider", "default_provider"),
+                    ("defaultModel", "default_model"),
+                    ("defaultThinkingLevel", "default_thinking_level"),
+                    ("enabledModels", "enabled_models"),
+                    ("steeringMode", "steering_mode"),
+                    ("followUpMode", "follow_up_mode"),
+                    ("quietStartup", "quiet_startup"),
+                    ("collapseChangelog", "collapse_changelog"),
+                ];
+                let (camel, snake) = pairs[idx];
+                assert!(is_known_config_key(camel), "camelCase key {camel} should be known");
+                assert!(is_known_config_key(snake), "snake_case key {snake} should be known");
+            }
+
+            /// `is_known_config_key` rejects garbage keys.
+            #[test]
+            fn config_key_rejects_garbage(s in "[A-Z]{20,30}") {
+                assert!(!is_known_config_key(&s));
+            }
+
+            /// Severity serde roundtrip is lowercase.
+            #[test]
+            fn severity_serde_lowercase(idx in 0..4usize) {
+                let s = ALL_SEVERITIES[idx];
+                let json = serde_json::to_string(&s).unwrap();
+                let expected = format!("\"{}\"", s.to_string().to_lowercase());
+                assert_eq!(json, expected);
+            }
+
+            /// Finding builder chain preserves fields.
+            #[test]
+            fn finding_builder_chain(title in "[a-z ]{1,20}", detail in "[a-z ]{1,20}") {
+                let f = Finding::warn(CheckCategory::Shell, title.clone())
+                    .with_detail(detail.clone())
+                    .with_remediation("fix it")
+                    .auto_fixable();
+                assert_eq!(f.title, title);
+                assert_eq!(f.detail.as_deref(), Some(detail.as_str()));
+                assert_eq!(f.remediation.as_deref(), Some("fix it"));
+                assert_eq!(f.fixability, Fixability::AutoFixable);
+                assert_eq!(f.severity, Severity::Warn);
+            }
+
+            /// `fixed()` resets severity to Pass.
+            #[test]
+            fn finding_fixed_resets_severity(idx in 0..4usize) {
+                let builders = [
+                    Finding::pass(CheckCategory::Config, "t"),
+                    Finding::info(CheckCategory::Config, "t"),
+                    Finding::warn(CheckCategory::Config, "t"),
+                    Finding::fail(CheckCategory::Config, "t"),
+                ];
+                let fixed = builders[idx].clone().fixed();
+                assert_eq!(fixed.severity, Severity::Pass);
+                assert_eq!(fixed.fixability, Fixability::Fixed);
+            }
+        }
+    }
 }
