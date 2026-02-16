@@ -967,4 +967,143 @@ mod tests {
         assert!(dark_config.document.style.color.is_some());
         assert!(light_config.document.style.color.is_some());
     }
+
+    mod proptest_theme {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// `parse_hex_color` never panics.
+            #[test]
+            fn parse_hex_never_panics(s in ".{0,20}") {
+                let _ = parse_hex_color(&s);
+            }
+
+            /// Valid 6-digit hex colors parse successfully.
+            #[test]
+            fn parse_hex_valid(r in 0u8..=255, g in 0u8..=255, b in 0u8..=255) {
+                let hex = format!("#{r:02x}{g:02x}{b:02x}");
+                let parsed = parse_hex_color(&hex);
+                assert_eq!(parsed, Some((r, g, b)));
+            }
+
+            /// Uppercase hex also parses.
+            #[test]
+            fn parse_hex_case_insensitive(r in 0u8..=255, g in 0u8..=255, b in 0u8..=255) {
+                let upper = format!("#{r:02X}{g:02X}{b:02X}");
+                let lower = format!("#{r:02x}{g:02x}{b:02x}");
+                assert_eq!(parse_hex_color(&upper), parse_hex_color(&lower));
+            }
+
+            /// Missing `#` prefix returns None.
+            #[test]
+            fn parse_hex_missing_hash(hex in "[0-9a-f]{6}") {
+                assert!(parse_hex_color(&hex).is_none());
+            }
+
+            /// Wrong-length hex (not 6 digits) returns None.
+            #[test]
+            fn parse_hex_wrong_length(n in 1..10usize) {
+                if n == 6 { return Ok(()); }
+                let hex = format!("#{}", "a".repeat(n));
+                assert!(parse_hex_color(&hex).is_none());
+            }
+
+            /// Whitespace-padded hex parses correctly.
+            #[test]
+            fn parse_hex_trims(r in 0u8..=255, g in 0u8..=255, b in 0u8..=255, ws in "[ \\t]{0,3}") {
+                let hex = format!("{ws}#{r:02x}{g:02x}{b:02x}{ws}");
+                assert_eq!(parse_hex_color(&hex), Some((r, g, b)));
+            }
+
+            /// `looks_like_theme_path` returns true for tilde paths.
+            #[test]
+            fn theme_path_tilde(suffix in "[a-z/]{0,20}") {
+                assert!(looks_like_theme_path(&format!("~{suffix}")));
+            }
+
+            /// `looks_like_theme_path` returns true for .json extension.
+            #[test]
+            fn theme_path_json_ext(name in "[a-z]{1,10}") {
+                assert!(looks_like_theme_path(&format!("{name}.json")));
+            }
+
+            /// `looks_like_theme_path` returns true for paths with slashes.
+            #[test]
+            fn theme_path_with_slash(a in "[a-z]{1,10}", b in "[a-z]{1,10}") {
+                assert!(looks_like_theme_path(&format!("{a}/{b}")));
+            }
+
+            /// `looks_like_theme_path` returns false for plain names.
+            #[test]
+            fn theme_path_plain_name(name in "[a-z]{1,10}") {
+                assert!(!looks_like_theme_path(&name));
+            }
+
+            /// `is_light` — black is dark, white is light.
+            #[test]
+            fn is_light_boundary(_dummy in 0..1u8) {
+                let mut dark = Theme::dark();
+                dark.colors.background = "#000000".to_string();
+                assert!(!dark.is_light());
+
+                dark.colors.background = "#ffffff".to_string();
+                assert!(dark.is_light());
+            }
+
+            /// `is_light` — luminance threshold at ~128.
+            #[test]
+            fn is_light_luminance(r in 0u8..=255, g in 0u8..=255, b in 0u8..=255) {
+                let mut theme = Theme::dark();
+                theme.colors.background = format!("#{r:02x}{g:02x}{b:02x}");
+                let luma =
+                    0.0722_f64.mul_add(f64::from(b), 0.2126_f64.mul_add(f64::from(r), 0.7152 * f64::from(g)));
+                assert_eq!(theme.is_light(), luma >= 128.0);
+            }
+
+            /// `is_light` returns false for invalid background color.
+            #[test]
+            fn is_light_invalid_color(s in "[a-z]{3,10}") {
+                let mut theme = Theme::dark();
+                theme.colors.background = s;
+                assert!(!theme.is_light());
+            }
+
+            /// `Theme::dark()` serde roundtrip.
+            #[test]
+            fn theme_dark_serde_roundtrip(_dummy in 0..1u8) {
+                let theme = Theme::dark();
+                let json = serde_json::to_string(&theme).unwrap();
+                let back: Theme = serde_json::from_str(&json).unwrap();
+                assert_eq!(back.name, theme.name);
+                assert_eq!(back.colors.background, theme.colors.background);
+            }
+
+            /// `Theme::light()` serde roundtrip.
+            #[test]
+            fn theme_light_serde_roundtrip(_dummy in 0..1u8) {
+                let theme = Theme::light();
+                let json = serde_json::to_string(&theme).unwrap();
+                let back: Theme = serde_json::from_str(&json).unwrap();
+                assert_eq!(back.name, theme.name);
+                assert_eq!(back.colors.background, theme.colors.background);
+            }
+
+            /// `resolve_theme_path` — absolute paths are returned as-is.
+            #[test]
+            fn resolve_absolute_path(suffix in "[a-z]{1,20}") {
+                let abs = format!("/tmp/{suffix}.json");
+                let resolved = resolve_theme_path(&abs, Path::new("/cwd"));
+                assert_eq!(resolved, PathBuf::from(&abs));
+            }
+
+            /// `resolve_theme_path` — relative paths are joined with cwd.
+            #[test]
+            fn resolve_relative_path(name in "[a-z]{1,10}") {
+                let cwd = Path::new("/some/dir");
+                let resolved = resolve_theme_path(&name, cwd);
+                assert_eq!(resolved, cwd.join(&name));
+            }
+        }
+    }
 }

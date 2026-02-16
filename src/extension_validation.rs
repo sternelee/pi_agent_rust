@@ -1165,4 +1165,190 @@ export default (api: ExtensionAPI) => { api.registerCommand({ name: "/test" }); 
     fn normalize_trims_whitespace() {
         assert_eq!(normalize_github_repo("  owner/repo  "), "owner/repo");
     }
+
+    mod proptest_extension_validation {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// `normalize_github_repo` never panics.
+            #[test]
+            fn normalize_never_panics(s in ".{0,100}") {
+                let _ = normalize_github_repo(&s);
+            }
+
+            /// `normalize_github_repo` output is always lowercase.
+            #[test]
+            fn normalize_is_lowercase(s in "[a-zA-Z0-9_/-]{1,30}") {
+                let out = normalize_github_repo(&s);
+                assert_eq!(out, out.to_lowercase());
+            }
+
+            /// `normalize_github_repo` is idempotent.
+            #[test]
+            fn normalize_idempotent(s in "[a-zA-Z0-9_/-]{1,30}") {
+                let once = normalize_github_repo(&s);
+                let twice = normalize_github_repo(&once);
+                assert_eq!(once, twice);
+            }
+
+            /// `normalize_github_repo` strips `.git` suffix.
+            #[test]
+            fn normalize_strips_git_suffix(s in "[a-z]{1,10}/[a-z]{1,10}") {
+                let with_git = format!("{s}.git");
+                assert_eq!(normalize_github_repo(&with_git), normalize_github_repo(&s));
+            }
+
+            /// `normalize_github_repo` trims whitespace.
+            #[test]
+            fn normalize_trims(s in "[a-z]{1,10}/[a-z]{1,10}", ws in "[ \\t]{0,5}") {
+                let padded = format!("{ws}{s}{ws}");
+                assert_eq!(normalize_github_repo(&padded), normalize_github_repo(&s));
+            }
+
+            /// `canonical_id_from_npm` always starts with "npm:".
+            #[test]
+            fn npm_canonical_prefix(pkg in "[a-zA-Z@/-]{1,30}") {
+                let id = canonical_id_from_npm(&pkg);
+                assert!(id.starts_with("npm:"));
+            }
+
+            /// `canonical_id_from_npm` output after prefix is lowercase.
+            #[test]
+            fn npm_canonical_lowercase(pkg in "[a-zA-Z]{1,20}") {
+                let id = canonical_id_from_npm(&pkg);
+                let after_prefix = &id[4..];
+                assert_eq!(after_prefix, after_prefix.to_lowercase());
+            }
+
+            /// `canonical_id_from_repo_url` returns lowercase when Some.
+            #[test]
+            fn repo_url_canonical_lowercase(
+                owner in "[a-zA-Z0-9]{1,10}",
+                repo in "[a-zA-Z0-9]{1,10}"
+            ) {
+                let url = format!("https://github.com/{owner}/{repo}");
+                if let Some(id) = canonical_id_from_repo_url(&url) {
+                    assert_eq!(id, id.to_lowercase());
+                }
+            }
+
+            /// `classify_from_evidence` — full signals → `TrueExtension`.
+            #[test]
+            fn classify_true_extension(
+                has_export in proptest::bool::ANY,
+                reg_count in 0..3usize
+            ) {
+                let evidence = ValidationEvidence {
+                    has_api_import: true,
+                    has_export_default: has_export || reg_count == 0,
+                    registrations: (0..reg_count).map(|i| format!("reg{i}")).collect(),
+                    sources: vec![],
+                    reason: String::new(),
+                };
+                // api_import + (export_default OR registrations) → TrueExtension
+                if evidence.has_export_default || !evidence.registrations.is_empty() {
+                    assert_eq!(classify_from_evidence(&evidence), ValidationStatus::TrueExtension);
+                }
+            }
+
+            /// `classify_from_evidence` — no signals → Unknown.
+            #[test]
+            fn classify_no_signals_unknown(_dummy in 0..1u8) {
+                let evidence = ValidationEvidence::default();
+                assert_eq!(classify_from_evidence(&evidence), ValidationStatus::Unknown);
+            }
+
+            /// `classify_source_content` never panics.
+            #[test]
+            fn classify_content_never_panics(content in "(?s).{0,200}") {
+                let _ = classify_source_content(&content);
+            }
+
+            /// `classify_source_content` always includes "source_content" in sources.
+            #[test]
+            fn classify_content_has_source(content in ".{0,100}") {
+                let (_, evidence) = classify_source_content(&content);
+                assert!(evidence.sources.contains(&"source_content".to_string()));
+            }
+
+            /// Content with API import + export default → `TrueExtension`.
+            #[test]
+            fn classify_content_true_ext(prefix in "[a-z ]{0,20}") {
+                let content = format!(
+                    r#"{prefix}import {{ ExtensionAPI }} from "@mariozechner/pi-coding-agent"; export default"#
+                );
+                let (status, _) = classify_source_content(&content);
+                assert_eq!(status, ValidationStatus::TrueExtension);
+            }
+
+            /// `build_classification_reason` — no signals → specific message.
+            #[test]
+            fn reason_no_signals(_dummy in 0..1u8) {
+                let reason = build_classification_reason(false, false, &[]);
+                assert_eq!(reason, "no Pi extension signals detected");
+            }
+
+            /// `build_classification_reason` includes "import" when has_api_import.
+            #[test]
+            fn reason_mentions_import(_dummy in 0..1u8) {
+                let reason = build_classification_reason(true, false, &[]);
+                assert!(reason.contains("import"));
+            }
+
+            /// `build_classification_reason` includes "export" when has_export_default.
+            #[test]
+            fn reason_mentions_export(_dummy in 0..1u8) {
+                let reason = build_classification_reason(false, true, &[]);
+                assert!(reason.contains("export"));
+            }
+
+            /// `build_classification_reason` mentions registrations when present.
+            #[test]
+            fn reason_mentions_registrations(n in 1..5usize) {
+                let regs: Vec<String> = (0..n).map(|i| format!("reg{i}")).collect();
+                let reason = build_classification_reason(false, false, &regs);
+                assert!(reason.contains("registration"));
+            }
+
+            /// `ValidationStatus` serde roundtrip.
+            #[test]
+            fn validation_status_serde(idx in 0..3usize) {
+                let statuses = [
+                    ValidationStatus::TrueExtension,
+                    ValidationStatus::MentionOnly,
+                    ValidationStatus::Unknown,
+                ];
+                let s = statuses[idx];
+                let json = serde_json::to_string(&s).unwrap();
+                let back: ValidationStatus = serde_json::from_str(&json).unwrap();
+                assert_eq!(s, back);
+            }
+
+            /// `days_to_ymd` produces valid month/day ranges.
+            #[test]
+            fn days_to_ymd_valid_ranges(days in 0u64..40000) {
+                let (y, m, d) = days_to_ymd(days);
+                assert!(y >= 1970);
+                assert!((1..=12).contains(&m), "month {m} out of range");
+                assert!((1..=31).contains(&d), "day {d} out of range");
+            }
+
+            /// `is_leap` follows standard rules.
+            #[test]
+            fn leap_year_rules(y in 1900u64..2200) {
+                let expected = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+                assert_eq!(is_leap(y), expected);
+            }
+
+            /// `chrono_now_iso` format matches ISO 8601 pattern.
+            #[test]
+            fn chrono_now_format(_dummy in 0..1u8) {
+                let ts = chrono_now_iso();
+                assert!(ts.ends_with('Z'));
+                assert!(ts.contains('T'));
+                assert_eq!(ts.len(), 20); // YYYY-MM-DDTHH:MM:SSZ
+            }
+        }
+    }
 }
