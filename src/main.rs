@@ -94,15 +94,15 @@ fn main_impl() -> Result<()> {
         return Ok(());
     };
 
+    // Validate theme file paths before --version so invalid paths always error.
+    // Named themes (without .json, /, ~) are validated later after resource loading.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    validate_theme_path_spec(cli.theme.as_deref(), &cwd)?;
+
     if cli.version {
         print_version();
         return Ok(());
     }
-
-    // Early-validate theme file paths so invalid paths error before --version.
-    // Named themes (without .json, /, ~) are validated later after resource loading.
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    validate_theme_path_spec(cli.theme.as_deref(), &cwd)?;
 
     // Ultra-fast paths that don't need tracing or the async runtime.
     if let Some(command) = &cli.command {
@@ -690,6 +690,24 @@ async fn run(
             ResourceLoader::empty(config.enable_skill_commands())
         }
     };
+
+    // Fail early when extension flags were extracted from the CLI but no extensions
+    // are available.  Without this check the binary proceeds to model selection which
+    // may fail for an unrelated reason (e.g. "No models available") and mask the real
+    // usage error.
+    if !extension_flags.is_empty() && resources.extensions().is_empty() {
+        let rendered = extension_flags
+            .iter()
+            .map(cli::ExtensionCliFlag::display_name)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(pi::error::Error::validation(format!(
+            "Extension flags were provided ({rendered}), but no extensions are loaded. \
+             Add extensions via --extension or remove the flags."
+        ))
+        .into());
+    }
+
     let mut auth = AuthStorage::load_async(Config::auth_path()).await?;
     auth.refresh_expired_oauth_tokens().await?;
     let global_dir = Config::global_dir();
