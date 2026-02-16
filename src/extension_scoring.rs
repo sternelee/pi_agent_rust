@@ -763,6 +763,218 @@ fn build_histogram(items: &[ScoredCandidate]) -> Vec<ScoreHistogramBucket> {
         .collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiSkipReason {
+    Disabled,
+    MissingTelemetry,
+    StaleEvidence,
+    BudgetExceeded,
+    BelowUtilityFloor,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiCandidate {
+    pub id: String,
+    pub utility_score: f64,
+    pub estimated_overhead_ms: u32,
+    #[serde(default)]
+    pub last_seen_at: Option<String>,
+    #[serde(default = "default_voi_candidate_enabled")]
+    pub enabled: bool,
+}
+
+const fn default_voi_candidate_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiPlannerConfig {
+    pub enabled: bool,
+    pub overhead_budget_ms: u32,
+    #[serde(default)]
+    pub max_candidates: Option<usize>,
+    #[serde(default)]
+    pub stale_after_minutes: Option<i64>,
+    #[serde(default)]
+    pub min_utility_score: Option<f64>,
+}
+
+impl Default for VoiPlannerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            overhead_budget_ms: 100,
+            max_candidates: None,
+            stale_after_minutes: Some(120),
+            min_utility_score: Some(0.0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiPlannedCandidate {
+    pub id: String,
+    pub utility_score: f64,
+    pub estimated_overhead_ms: u32,
+    pub utility_per_ms: f64,
+    pub cumulative_overhead_ms: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiSkippedCandidate {
+    pub id: String,
+    pub reason: VoiSkipReason,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiPlan {
+    pub selected: Vec<VoiPlannedCandidate>,
+    pub skipped: Vec<VoiSkippedCandidate>,
+    pub used_overhead_ms: u32,
+    pub remaining_overhead_ms: u32,
+}
+
+pub fn plan_voi_candidates(
+    candidates: &[VoiCandidate],
+    now: DateTime<Utc>,
+    config: &VoiPlannerConfig,
+) -> VoiPlan {
+    let mut selected = Vec::new();
+    let mut skipped = Vec::new();
+    if !config.enabled {
+        skipped.extend(candidates.iter().map(|candidate| VoiSkippedCandidate {
+            id: candidate.id.clone(),
+            reason: VoiSkipReason::Disabled,
+        }));
+        return VoiPlan {
+            selected,
+            skipped,
+            used_overhead_ms: 0,
+            remaining_overhead_ms: config.overhead_budget_ms,
+        };
+    }
+
+    let mut ranked = candidates.to_vec();
+    ranked.sort_by(compare_voi_candidates_desc);
+
+    let max_candidates = config.max_candidates.unwrap_or(usize::MAX);
+    let stale_after_minutes = config.stale_after_minutes.unwrap_or(120).max(0);
+    let min_utility_score = config.min_utility_score.unwrap_or(0.0).max(0.0);
+    let mut used_overhead_ms = 0_u32;
+
+    for candidate in ranked {
+        if !candidate.enabled {
+            skipped.push(VoiSkippedCandidate {
+                id: candidate.id,
+                reason: VoiSkipReason::Disabled,
+            });
+            continue;
+        }
+        if normalized_utility(candidate.utility_score) < min_utility_score {
+            skipped.push(VoiSkippedCandidate {
+                id: candidate.id,
+                reason: VoiSkipReason::BelowUtilityFloor,
+            });
+            continue;
+        }
+        if let Some(reason) = evaluate_candidate_freshness(
+            candidate.last_seen_at.as_deref(),
+            now,
+            stale_after_minutes,
+        ) {
+            skipped.push(VoiSkippedCandidate {
+                id: candidate.id,
+                reason,
+            });
+            continue;
+        }
+        if selected.len() >= max_candidates
+            || used_overhead_ms.saturating_add(candidate.estimated_overhead_ms)
+                > config.overhead_budget_ms
+        {
+            skipped.push(VoiSkippedCandidate {
+                id: candidate.id,
+                reason: VoiSkipReason::BudgetExceeded,
+            });
+            continue;
+        }
+        used_overhead_ms = used_overhead_ms.saturating_add(candidate.estimated_overhead_ms);
+        let upm = utility_per_ms(&candidate);
+        let score = normalized_utility(candidate.utility_score);
+        let id = candidate.id;
+        selected.push(VoiPlannedCandidate {
+            id,
+            utility_score: score,
+            estimated_overhead_ms: candidate.estimated_overhead_ms,
+            utility_per_ms: upm,
+            cumulative_overhead_ms: used_overhead_ms,
+        });
+    }
+
+    VoiPlan {
+        selected,
+        skipped,
+        used_overhead_ms,
+        remaining_overhead_ms: config.overhead_budget_ms.saturating_sub(used_overhead_ms),
+    }
+}
+
+fn compare_voi_candidates_desc(left: &VoiCandidate, right: &VoiCandidate) -> std::cmp::Ordering {
+    utility_per_ms(right)
+        .partial_cmp(&utility_per_ms(left))
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| {
+            normalized_utility(right.utility_score)
+                .partial_cmp(&normalized_utility(left.utility_score))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| left.estimated_overhead_ms.cmp(&right.estimated_overhead_ms))
+        .then_with(|| left.id.cmp(&right.id))
+}
+
+fn evaluate_candidate_freshness(
+    last_seen_at: Option<&str>,
+    now: DateTime<Utc>,
+    stale_after_minutes: i64,
+) -> Option<VoiSkipReason> {
+    let Some(raw) = last_seen_at else {
+        return Some(VoiSkipReason::MissingTelemetry);
+    };
+    let Ok(parsed) = DateTime::parse_from_rfc3339(raw) else {
+        return Some(VoiSkipReason::MissingTelemetry);
+    };
+    let minutes = now
+        .signed_duration_since(parsed.with_timezone(&Utc))
+        .num_minutes();
+    if minutes > stale_after_minutes {
+        Some(VoiSkipReason::StaleEvidence)
+    } else {
+        None
+    }
+}
+
+const fn normalized_utility(value: f64) -> f64 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+fn utility_per_ms(candidate: &VoiCandidate) -> f64 {
+    if candidate.estimated_overhead_ms == 0 {
+        0.0
+    } else {
+        normalized_utility(candidate.utility_score) / f64::from(candidate.estimated_overhead_ms)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1732,5 +1944,138 @@ mod tests {
                 .missing_signals
                 .contains(&"recency.updated_at".to_string())
         );
+    }
+
+    // =========================================================================
+    // VOI planner
+    // =========================================================================
+
+    fn voi_candidate(
+        id: &str,
+        utility_score: f64,
+        estimated_overhead_ms: u32,
+        last_seen_at: Option<&str>,
+    ) -> VoiCandidate {
+        VoiCandidate {
+            id: id.to_string(),
+            utility_score,
+            estimated_overhead_ms,
+            last_seen_at: last_seen_at.map(std::string::ToString::to_string),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn voi_planner_budget_feasible_selection_and_skip_reason() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 10, 0, 0, 0).unwrap();
+        let config = VoiPlannerConfig {
+            enabled: true,
+            overhead_budget_ms: 9,
+            max_candidates: None,
+            stale_after_minutes: Some(180),
+            min_utility_score: Some(0.0),
+        };
+        let candidates = vec![
+            voi_candidate("fast-high", 9.0, 3, Some("2026-01-09T23:00:00Z")),
+            voi_candidate("expensive", 12.0, 7, Some("2026-01-09T23:00:00Z")),
+            voi_candidate("small", 4.0, 2, Some("2026-01-09T23:00:00Z")),
+        ];
+
+        let plan = plan_voi_candidates(&candidates, now, &config);
+        assert_eq!(
+            plan.selected
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fast-high", "small"]
+        );
+        assert_eq!(plan.used_overhead_ms, 5);
+        assert_eq!(plan.remaining_overhead_ms, 4);
+        assert_eq!(plan.skipped.len(), 1);
+        assert_eq!(plan.skipped[0].id, "expensive");
+        assert_eq!(plan.skipped[0].reason, VoiSkipReason::BudgetExceeded);
+    }
+
+    #[test]
+    fn voi_planner_is_deterministic_across_input_order() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 10, 0, 0, 0).unwrap();
+        let config = VoiPlannerConfig {
+            enabled: true,
+            overhead_budget_ms: 20,
+            max_candidates: Some(3),
+            stale_after_minutes: Some(180),
+            min_utility_score: Some(0.0),
+        };
+        let a = voi_candidate("a", 8.0, 2, Some("2026-01-09T23:00:00Z"));
+        let b = voi_candidate("b", 8.0, 2, Some("2026-01-09T23:00:00Z"));
+        let c = voi_candidate("c", 8.0, 2, Some("2026-01-09T23:00:00Z"));
+
+        let plan_1 = plan_voi_candidates(&[a.clone(), b.clone(), c.clone()], now, &config);
+        let plan_2 = plan_voi_candidates(&[c, a, b], now, &config);
+
+        let ids_1 = plan_1
+            .selected
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>();
+        let ids_2 = plan_2
+            .selected
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(ids_1, ids_2);
+    }
+
+    #[test]
+    fn voi_planner_rejects_stale_and_below_floor_candidates() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 10, 0, 0, 0).unwrap();
+        let config = VoiPlannerConfig {
+            enabled: true,
+            overhead_budget_ms: 20,
+            max_candidates: None,
+            stale_after_minutes: Some(60),
+            min_utility_score: Some(5.0),
+        };
+        let candidates = vec![
+            voi_candidate("fresh-good", 6.0, 2, Some("2026-01-09T23:30:00Z")),
+            voi_candidate("stale", 7.0, 2, Some("2026-01-08T00:00:00Z")),
+            voi_candidate("low-utility", 2.0, 1, Some("2026-01-09T23:30:00Z")),
+            voi_candidate("missing-telemetry", 7.0, 1, None),
+        ];
+
+        let plan = plan_voi_candidates(&candidates, now, &config);
+        assert_eq!(plan.selected.len(), 1);
+        assert_eq!(plan.selected[0].id, "fresh-good");
+        assert_eq!(plan.skipped.len(), 3);
+        assert!(
+            plan.skipped
+                .iter()
+                .any(|entry| entry.id == "stale" && entry.reason == VoiSkipReason::StaleEvidence)
+        );
+        assert!(plan.skipped.iter().any(|entry| {
+            entry.id == "low-utility" && entry.reason == VoiSkipReason::BelowUtilityFloor
+        }));
+        assert!(plan.skipped.iter().any(|entry| {
+            entry.id == "missing-telemetry" && entry.reason == VoiSkipReason::MissingTelemetry
+        }));
+    }
+
+    #[test]
+    fn voi_planner_disabled_returns_no_selection() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 10, 0, 0, 0).unwrap();
+        let config = VoiPlannerConfig {
+            enabled: false,
+            overhead_budget_ms: 20,
+            max_candidates: None,
+            stale_after_minutes: Some(120),
+            min_utility_score: Some(0.0),
+        };
+        let candidates = vec![voi_candidate("a", 8.0, 2, Some("2026-01-09T23:00:00Z"))];
+        let plan = plan_voi_candidates(&candidates, now, &config);
+        assert!(plan.selected.is_empty());
+        assert_eq!(plan.used_overhead_ms, 0);
+        assert_eq!(plan.remaining_overhead_ms, 20);
+        assert_eq!(plan.skipped.len(), 1);
+        assert_eq!(plan.skipped[0].reason, VoiSkipReason::Disabled);
     }
 }
