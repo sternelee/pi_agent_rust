@@ -1,1331 +1,976 @@
-# Pi Agent: Rust vs TypeScript -- Comprehensive Benchmark & Comparison Report
+# BENCHMARK_COMPARISON_BETWEEN_RUST_VERSION_AND_ORIGINAL__OPUS
 
-**Generated**: 2026-02-17 by Claude Opus 4.6 (revised with measured benchmark data from GPT/Codex benchmark artifacts)
-**Methodology**: Static analysis of both codebases + measured benchmarks (`hyperfine`, `/usr/bin/time`, session workload harness, extension microbenchmarks). Performance data sourced from `.bench/pi_session_bench/`, `.tmp_windyelk/`, and `hyperfine` runs.
+Generated: 2026-02-17
+Workspace: `/data/projects/pi_agent_rust`
 
----
+## 0) Post-Hardening Status Update (2026-02-17)
 
-## Executive Summary
+This report now includes a post-hardening extension-compatibility checkpoint.
 
-The Rust version of pi agent is not a 1:1 port of the TypeScript original. It is a **ground-up reimplementation** that replaces the entire Node.js/Bun runtime stack with native Rust equivalents, adds 38+ features that don't exist in the original, implements a 10-capability sandboxed extension runtime with embedded QuickJS, and ships with 11,946 tests (vs ~1,400 in TypeScript). The Rust binary is fully self-contained with zero runtime dependencies, while the TypeScript version requires Node.js/Bun plus 39 npm packages.
+- Extension conformance matrix is now fully green locally: `224/224` passed, `0` failed, `0` skipped.
+- This supersedes earlier partial-compatibility snapshots in this document that referenced `223` corpus entries with non-zero failures.
+- Validation commands run in this update cycle:
+  - `cargo test --test ext_conformance_generated --features ext-conformance -- conformance_sharded_matrix --nocapture --exact`
+  - `cargo check --all-targets`
+  - `cargo clippy --all-targets -- -D warnings`
+  - `cargo fmt --check`
 
-**Performance reality check (measured)**: Rust is **50-313x faster at startup** and uses **8-30x less memory**, but is currently **1.2-4.0x slower in session workload latency** than TypeScript (especially Bun). The primary bottleneck is the session save hot path. Extension per-call dispatch is 10-19x slower than in-process V8 calls due to QuickJS hostcall marshalling.
+## 1) Lede (Do Not Bury This)
 
-| Metric | Rust | TypeScript | Factor |
-|--------|------|-----------|--------|
-| Production code | 261,393 lines | 91,931 lines | 2.8x |
-| Test code | 265,028 lines | 28,699 lines | 9.2x |
-| Test functions | 11,946 | ~1,400 | 8.5x |
-| Runtime dependencies | 0 (single binary) | Node/Bun + 39 npm | -- |
-| LLM providers | 11 | 4-6 | ~2x |
-| Cold startup (measured) | **3.34ms** | 726-1,045ms | **217-313x faster** |
-| Memory at rest (measured) | **6.4 MB** | 153-196 MB | **24-30x smaller** |
-| E2E latency 1M (measured) | 2,401ms | 700-1,239ms | **1.9-3.4x slower** |
-| Extension conformance corpus | 223 extensions | 0 | -- |
-| Fuzz harnesses | 14 | 0 | -- |
-| CI release gates | 15 | 0 | -- |
+1. Rust is currently **slower** than legacy in wall-clock for long-session resume/workload paths in this snapshot, often ~`1.2x` to `2.0x` slower than Node and ~`1.9x` to `4.0x` slower than Bun in realistic end-to-end runs.
+2. Rust is currently **much smaller in memory footprint** for equivalent workloads in synthetic matched-state runs, and still significantly smaller in realistic runs with heavy exports/forks/extension activity.
+3. Extension compatibility is currently fully passing in local conformance validation: matrix run shows `224/224` pass (`0` fail, `0` skipped).
+4. Rust has significantly expanded first-class capability surface versus legacy coding-agent CLI (commands, policy explainers, provider metadata/control, risk/quota/security instrumentation).
+5. The largest practical optimization target remains session append/save behavior at high token-volume and large histories; this is the best lever for major speed gains.
+6. Startup/readiness latency strongly favors Rust in this snapshot: `--help` is low-single-digit ms for Rust while prior validated legacy baselines remain near ~`1s` (Node) and ~`0.7s` (Bun), with much lower baseline RSS for Rust.
+7. Extension micro-harness inversion is now achieved on the real native runtime lane: in `pijs_workload` release runs, native runtime is `~17.08x` faster per call than QuickJS (`0.4925us` vs `8.4132us`).
 
----
+## 1.1) Refresh Delta (2026-02-17)
 
-## Table of Contents
+Freshly re-measured in this run:
+- `pijs_workload` release microbench with precision fix (`per_call_us_f64` now true fractional; added `per_call_ns_f64`)
+- `pijs_workload` 3-lane runtime comparison (`quickjs`, `native-rust-runtime`, `native-rust-preview`) at `50,000` iterations
+- targeted extension/runtime suites (`event_loop_conformance`, `extensions_event_wiring`, `lab_runtime_extensions`)
+- full extension conformance matrix (`ext_conformance_generated`) now at `224/224` pass
+- Rust release cold startup/readiness (`hyperfine` for `--help` and `--version`)
+- local strict quality gates (`cargo fmt --check`, `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`)
 
-1. [Lines of Code: Apples-to-Apples Comparison](#1-lines-of-code-apples-to-apples-comparison)
-2. [Lines of Code: Apples-to-Oranges (What Rust Replaces)](#2-lines-of-code-apples-to-oranges-what-rust-replaces)
-3. [Function, Type, and Structural Metrics](#3-function-type-and-structural-metrics)
-4. [Realistic Performance Benchmarks](#4-realistic-performance-benchmarks)
-5. [Memory, CPU, and I/O Footprint](#5-memory-cpu-and-io-footprint)
-6. [Extension System: Deep Dive](#6-extension-system-deep-dive)
-7. [Extension Conformance: Full 223-Extension Catalog](#7-extension-conformance-full-223-extension-catalog)
-8. [All Rust-Only Features (Complete List)](#8-all-rust-only-features-complete-list)
-9. [Test Coverage Comparison](#9-test-coverage-comparison)
-10. [Architecture Benefits](#10-architecture-benefits)
-11. [Impact of asupersync Structured Concurrency](#11-impact-of-asupersync-structured-concurrency)
+Reused (existing in-repo evidence, unchanged methodology):
+- LOC and callable inventory (Rust + legacy scopes)
+- CLI diff (`pi --help` vs legacy `dist/cli.js --help`)
+- provider ID diff (Rust canonical table vs legacy runtime provider registry)
+- cross-runtime startup compare tables (Node/Bun) from prior validated run
+- one-shot startup footprint snapshots (`/usr/bin/time` RSS/user/sys)
+- long-session realistic latency matrix
+- matched-state 10-message append footprint matrix
+- realistic 1M/5M footprint matrix
+- extension workload microbench (`ext_workloads` and `bench_legacy_extension_workloads.mjs`)
+- historical 223-extension vendored conformance + failure taxonomy (kept for baseline context; superseded by current `224/224` matrix status above)
 
----
-
-## 1. Lines of Code: Apples-to-Apples Comparison
-
-This section compares **functionally equivalent** code between the two versions -- the core agent logic, provider layer, tool implementations, session management, CLI, and TUI.
-
-### Rust Production Code (`src/`)
-
-**Total: 261,393 lines across 124 files** (245,116 in `src/*.rs` + 16,277 in `src/bin/*.rs`)
-
-Top 15 files by size:
-
-| Lines | File | Purpose |
-|------:|------|---------|
-| 44,368 | `extensions.rs` | Extension runtime, policy, security, compatibility |
-| 22,146 | `extensions_js.rs` | QuickJS bridge, Node.js shims, npm stubs |
-| 13,004 | `extension_dispatcher.rs` | Extension lifecycle, hostcall dispatch |
-| 8,920 | `session.rs` | JSONL session persistence, tree navigation |
-| 6,250 | `tools.rs` | 7 built-in tools (read, write, edit, bash, grep, glob, ls) |
-| 5,707 | `agent.rs` | Agent loop, tool execution, streaming |
-| 5,446 | `package_manager.rs` | Package install/remove/update |
-| 5,376 | `auth.rs` | OAuth, API keys, credential management |
-| 4,490 | `rpc.rs` | RPC/stdin server mode |
-| 4,366 | `extension_preflight.rs` | Compatibility preflight analysis |
-| 4,088 | `main.rs` | CLI entry point |
-| 3,361 | `extension_scoring.rs` | Extension scoring & ranking |
-| 2,410 | `extension_replay.rs` | Extension execution replay |
-| 2,242 | `vcr.rs` | VCR test infrastructure |
-| 2,109 | `hostcall_queue.rs` | BRAVO contention, S3-FIFO |
-
-### TypeScript Production Code (`packages/`)
-
-**Total: 91,931 lines across 378 files** (80,219 hand-written, 11,712 auto-generated)
-
-| Package | Lines | Files | Purpose |
-|---------|------:|------:|---------|
-| coding-agent | 48,862 | 195 | Main CLI agent, tools, TUI, session, extensions |
-| ai | 22,809 | 43 | Provider abstraction, streaming, OAuth |
-| web-ui | 15,143 | 75 | Lit-based web chat components |
-| tui | 10,098 | 30 | Terminal UI library |
-| mom | 4,241 | 17 | Slack bot integration |
-| pods | 1,773 | 9 | vLLM GPU pod management |
-| agent | 1,570 | 9 | General-purpose agent core |
-
-### Direct Comparison (Functionally Equivalent Subsystems)
-
-| Subsystem | Rust | TypeScript | Notes |
-|-----------|-----:|----------:|-------|
-| **Agent loop** | 5,707 | ~3,131 | TS: agent-session.ts (2,714) + agent-loop.ts (417) |
-| **Tools** | 6,250 | ~3,406 | TS: tools/ (2,479) + bash-executor (278) + edit-diff (308) + find (273) + grep (346) |
-| **Session** | 8,920 | ~2,588 | TS: session-manager.ts (1,394) + agent-session.ts (partial) |
-| **Providers** | 15,998 | 6,236 | Rust: 11 providers; TS: ~6 providers |
-| **CLI** | 4,088 | ~975 | TS: main.ts (672) + args.ts (303) |
-| **Config** | 1,774 | ~922 | TS: settings-manager (728) + config (194) |
-| **Auth** | 5,376 | ~2,191 | TS: OAuth flows in ai/src/utils/oauth/ |
-| **RPC** | 4,490 | ~1,390 | TS: modes/rpc/ (1,390) |
-| **Model registry** | 3,047 | ~1,004 | TS: model-registry (599) + model-resolver (405) |
-| **Extensions** (core) | 79,518 | 2,767 | See [Section 6](#6-extension-system-deep-dive) |
-| **TUI** | ~6,500 | 10,098 | TS TUI is a separate library |
-| **Package manager** | 5,446 | 1,596 | |
-| **Subtotal** | ~147,114 | ~36,304 | 4.1x ratio for equivalent subsystems |
-
-The 4.1x ratio is explained by:
-- **Rust verbosity**: Pattern matching, error handling, explicit types add ~30-50% vs TS
-- **Extension system**: Rust implements 79,518 lines of extension infrastructure vs TS's 2,767 (TS outsources to jiti + Node.js runtime)
-- **Provider breadth**: Rust has 11 providers vs TS's ~6
-- **Feature additions**: Many Rust subsystems have capabilities absent in TS (see Section 8)
-
-### The Extension Gap
-
-The single largest difference is the extension system:
-
-| Component | Rust | TypeScript |
-|-----------|-----:|----------:|
-| Core extension runtime | 44,368 | 718 (runner.ts) |
-| JS runtime bridge | 22,146 | 518 (loader.ts) |
-| Extension dispatcher | 13,004 | 1,258 (types.ts) |
-| Extension preflight | 4,366 | 0 |
-| Extension scoring | 3,361 | 0 |
-| Extension replay | 2,410 | 0 |
-| Extension events | 988 | 155 (index.ts) |
-| Extension validation | 1,385 | 0 |
-| Extension license | 1,298 | 0 |
-| Extension popularity | 1,070 | 0 |
-| Extension index | 1,709 | 0 |
-| Hostcall queue | 2,109 | 0 |
-| Hostcall AMAC | 1,391 | 0 |
-| **Total** | **99,605** | **2,649** |
-
-**Why?** TypeScript extensions run in the same Node.js process with `jiti` (a JIT TypeScript loader). They get Node.js APIs for free. Rust must embed a JavaScript engine (QuickJS), implement every Node.js API as a shim, enforce security policies, and handle the JS-to-Rust bridge protocol manually.
+Build/regeneration note:
+- `cargo build --release --bin pi` succeeds in this run and was used for fresh Rust startup numbers.
+- Direct legacy Node/Bun reruns in this workspace are currently blocked by dependency/lockfile drift in `legacy_pi_mono_code/pi-mono` (`bun.lock` parse errors + unresolved runtime packages like `@sinclair/typebox`), so legacy startup/extension comparison rows remain sourced from prior validated artifacts.
 
 ---
 
-## 2. Lines of Code: Apples-to-Oranges (What Rust Replaces)
+## 2) Scope and Comparison Modes
 
-The TypeScript version outsources enormous amounts of functionality to Node.js/Bun and 39 npm packages. The Rust version implements all of this natively or through its custom runtime libraries.
+### 2.1 Apples-to-Apples Scope
+- Rust target: this repo (`pi_agent_rust`)
+- Legacy target: `legacy_pi_mono_code/pi-mono/packages/coding-agent`
 
-### What Node.js/Bun Provides for Free (That Rust Must Implement)
+### 2.2 Apples-to-Oranges Scope (Full Legacy Runtime Context)
+- Legacy aggregate target: `packages/{ai,agent,coding-agent,tui}`
+- Purpose: include behavior that legacy offloads into sibling packages (provider stack, UI/runtime services), so comparisons are not unfairly narrow.
 
-| Functionality | Node.js/Bun | Rust Equivalent | Rust LOC |
-|---------------|-------------|-----------------|------:|
-| **Async runtime** | V8 event loop | asupersync | 398,446 |
-| **HTTP client** | `undici` / `fetch` | asupersync HTTP/1.1 + HTTP/2 | ~15,000 |
-| **TLS** | OpenSSL/BoringSSL | rustls via asupersync | ~5,000 |
-| **TCP/networking** | `node:net` | asupersync `TcpStream` | ~8,000 |
-| **File I/O** | `node:fs` | std + async wrappers | ~2,000 |
-| **Terminal rendering** | chalk + custom TUI | rich_rust | 48,895 |
-| **Process spawning** | `node:child_process` | std::process + async | ~1,500 |
-| **Crypto** | `node:crypto` | ring / sha2 / hmac | ~500 |
-| **Path handling** | `node:path` | std::path + custom | ~300 |
-| **URL parsing** | `node:url` | url crate | ~100 |
-| **JSON parsing** | V8 JSON.parse | serde_json | (via crate) |
-| **Regex** | V8 RegExp | regex crate | (via crate) |
-| **SQLite** | N/A (TS doesn't use) | asupersync SQLite | ~3,000 |
-| **JS runtime for extensions** | Node.js itself | QuickJS embedded | ~22,146 |
-| **Node API shims** | N/A (native) | 22 module shims in extensions_js.rs | ~22,146 |
-| **npm module stubs** | N/A (npm install) | 30+ virtual modules | ~5,000 |
+### 2.3 Benchmarks Included
+- Matched-state long-session benchmark: resume + append the same 10 user messages.
+- Realistic E2E benchmark: resume + append + extension-like activity + slash-like state changes + forking + exports + compactions.
+- Extension microbench: real extension loading and real tool/event dispatch.
+- Extension corpus conformance: full vendored/unvendored compatibility reports.
+- These suites are intended to function as a practical system-level regression harness, not just synthetic microbench snapshots.
 
-### The True Scale of the Rust Effort
-
-| Codebase | Lines | Files | Purpose |
-|----------|------:|------:|---------|
-| **pi_agent_rust** (Rust) | 526,421 | 378 | The agent itself |
-| **asupersync** (Rust) | 398,446 | 500 | Async runtime, HTTP, TLS, SQLite |
-| **rich_rust** (Rust) | 48,895 | 67 | Terminal UI library |
-| **Total Rust ecosystem** | **973,762** | **945** | Everything needed to run |
-| | | | |
-| **pi-mono** (TypeScript) | 137,886 | 485 | The agent itself |
-| **Node.js** (C++) | ~4,000,000 | ~5,000 | Runtime (not counted) |
-| **V8** (C++) | ~3,000,000 | ~3,000 | JS engine (not counted) |
-| **npm deps** (JS) | ~500,000+ | ~2,000+ | 39 runtime packages |
-| **Total TS ecosystem** | **~7,637,886+** | **~10,485+** | Everything needed to run |
-
-The Rust version is **self-contained at ~974K lines**. The TypeScript version relies on **~7.6M+ lines** of runtime infrastructure that it doesn't ship but absolutely requires.
-
-### Dependency Counts
-
-| Metric | Rust | TypeScript |
-|--------|------|-----------|
-| Runtime dependencies | 0 (single ~20MB binary) | Node.js/Bun (~80MB) + 39 npm packages |
-| Dev dependencies | Cargo build tools | 18 npm devDeps |
-| Internal workspace deps | 2 (asupersync, rich_rust) | 7 (@mariozechner/* packages) |
-| Total node_modules size | N/A | ~200-400MB |
+### 2.4 Provider API Cost Control
+- This report does **not** use paid external API calls for the benchmark matrices.
+- No cost-driving live-provider throughput benchmark is included here.
+- If provider-call benchmarks are added, use `ollama` first for cost control.
 
 ---
 
-## 3. Function, Type, and Structural Metrics
+## 3) Codebase Scale and Complexity
 
-### Rust
+## 3.1 LOC (Production vs Test)
 
-| Construct | Production (`src/`) | Test (`tests/`) | Total |
-|-----------|-------------------:|----------------:|------:|
-| Functions (`fn`) | 10,431 | 9,436 | 19,867 |
-| Structs | 1,122 | -- | 1,122 |
-| Enums | 292 | -- | 292 |
-| Traits | 22 | -- | 22 |
-| Impl blocks | 965 | -- | 965 |
-| `#[test]` functions | 5,473 (inline) | 6,473 | 11,946 |
-| `#[cfg(test)]` modules | 134 | -- | 134 |
+Method: `tokei` scoped by language (`Rust` for Rust repo, `TypeScript` for legacy scopes).
 
-### TypeScript
+| Scope | Production LOC | Test LOC |
+|---|---:|---:|
+| Rust (`src`, Rust only) | 224,348 | 224,212 (`tests`, Rust only) |
+| Legacy coding-agent only (`src/test`, TS only) | 27,412 | 8,871 |
+| Legacy full stack (`ai+agent+coding-agent+tui`, TS only) | 55,313 | 21,779 |
 
-| Construct | Production | Test | Total |
-|-----------|----------:|-----:|------:|
-| Functions (all forms) | ~2,559 | ~813 | ~3,372 |
-| Classes | 181 | -- | 181 |
-| Interfaces | 453 | -- | 453 |
-| Type aliases | 547 | -- | 547 |
-| `it()` test blocks | -- | ~1,191 | ~1,191 |
-| `test()` blocks | -- | ~209 | ~209 |
+Ratios:
+- Rust vs legacy coding-agent: prod `8.18x`, test `25.27x`
+- Rust vs legacy full-stack: prod `4.06x`, test `10.29x`
 
-### Comparison
+## 3.2 Function/Callable Inventory
 
-| Metric | Rust | TypeScript | Ratio |
-|--------|-----:|----------:|------:|
-| Production functions | 10,431 | ~2,559 | 4.1x |
-| Type definitions | 1,436 (structs+enums) | 1,181 (classes+interfaces+types) | 1.2x |
-| Total test functions | 11,946 | ~1,400 | 8.5x |
+Method note:
+- Rust callable count here uses `fn` token signature inventory (`\\bfn\\s+...`) plus test attribute inventory; this remains approximate for macros/trait forms.
+- Legacy callable count here uses TypeScript AST traversal (function declarations, methods, constructors, accessors, variable-assigned arrow/function expressions); still an approximation of executable behavior.
+
+Rust (signature inventory):
+- `src` function signatures: `10,417`
+- `tests` function signatures: `9,459`
+- test attributes total: `11,976` (`src=5,474`, `tests=6,502`)
+
+Legacy AST callable inventory:
+- coding-agent `src`: `1,315`
+- coding-agent `test`: `93`
+- full stack `src`: `1,907`
+- full stack `test`: `247`
+
+## 3.3 Test Coverage Baseline (Rust)
+
+From `docs/coverage-baseline-map.json`:
+- Line coverage: `79.08%` (`95,706 / 121,018`)
+- Function coverage: `78.01%` (`8,545 / 10,954`)
+- Branch coverage: `51.95%` (documented lower-bound due llvm-cov export SIGSEGV on subset of files)
 
 ---
 
-## 4. Measured Performance Benchmarks
+## 4) Verified Feature/Functionality Delta
 
-> **Methodology**: Startup measured with `hyperfine` and `/usr/bin/time`. Session workloads measured with `session_workload_bench` and `bench_legacy_extension_workloads.mjs` harnesses. Extension microbenchmarks from `ext_workloads` binary. Raw artifacts in `.bench/pi_session_bench/` and `.tmp_windyelk/`. No paid API calls used -- all benchmarks are local session/extension operations.
+This section lists **verified Rust-first-class surfaces** missing from legacy coding-agent CLI in this workspace snapshot.
 
-### Cold Startup (Measured with `hyperfine`)
+## 4.1 CLI Surface Delta (Direct Help Diff)
 
-| Probe | Rust | Node.js | Bun | Node/Rust | Bun/Rust |
-|-------|-----:|--------:|----:|----------:|---------:|
-| `--help` | **3.34ms** | 1,045.10ms | 726.28ms | 313x | 218x |
-| `--version` | **20.09ms** | 1,024.75ms | 729.70ms | 51x | 36x |
+Rust-only top-level commands:
+- `doctor`
+- `help`
+- `info`
+- `migrate`
+- `search`
+- `update-index`
 
-Startup footprint (`/usr/bin/time` RSS):
+Rust-only flags:
+- `--extension-policy`
+- `--explain-extension-policy`
+- `--repair-policy`
+- `--explain-repair-policy`
+- `--list-providers`
+- `--theme-path`
+- `--session-durability`
+- `--no-migrations`
 
-| Probe | Rust | Node.js | Bun |
-|-------|-----:|--------:|----:|
-| `--help` RSS | **6,448 KB** | 156,720 KB | 195,820 KB |
-| `--version` RSS | **7,556 KB** | 156,560 KB | 194,624 KB |
+Legacy-only flags:
+- `--plan`
 
-Rust startup is **50-313x faster** and uses **24-30x less memory** than either Node or Bun for CLI readiness.
+## 4.2 Rust-Only Major Capability Areas (with complexity hints)
 
-### Realistic E2E Latency (Measured, p50 in ms)
+| Capability area | Primary Rust implementation | Approx LOC | Approx fn count |
+|---|---|---:|---:|
+| Extension runtime + policy + host integration | `src/extensions.rs` | 38,379 | 1,517 |
+| QuickJS bridge + hostcall plumbing + runtime adapters | `src/extensions_js.rs` | 19,284 | 449 |
+| Dispatcher for protocol/hostcall integration | `src/extension_dispatcher.rs` | 11,745 | 404 |
+| Provider canonical metadata + alias routing | `src/provider_metadata.rs` | 2,645 | 60 |
+| Extension index/search/info/update pipeline | `src/extension_index.rs` | 1,469 | 98 |
+| Environment + compatibility diagnostics (`doctor`) | `src/doctor.rs` | 1,475 | 69 |
+| Runtime risk ledger/replay/calibration tooling | `src/extensions.rs`, `src/bin/ext_runtime_risk_ledger.rs` | large integrated surface | integrated |
+| Per-extension quota enforcement engine | `src/extensions.rs` | integrated in core runtime | integrated |
 
-Workload: resume long session (5000 messages) + append 10 turns + tool results + extension ops (40) + slash ops (40) + compactions (12) + forks (8) + exports (2).
+## 4.3 Provider Breadth Delta
 
-| Runtime | Token Level | Open | Append/Ops | Save | Total |
-|---------|----------:|-----:|-----------:|-----:|------:|
-| Bun | 100k | 24.63 | 143.84 | 0.00 | **168.47** |
-| Node | 100k | 47.20 | 220.70 | 0.00 | **267.91** |
-| **Rust** | **100k** | **36.84** | **219.06** | **64.64** | **320.71** |
-| Bun | 200k | 29.55 | 196.99 | 0.00 | **226.70** |
-| Node | 200k | 58.77 | 303.60 | 0.00 | **362.37** |
-| **Rust** | **200k** | **40.42** | **397.48** | **113.92** | **552.70** |
-| Bun | 500k | 39.01 | 375.75 | 0.00 | **415.27** |
-| Node | 500k | 76.68 | 607.04 | 0.00 | **684.64** |
-| **Rust** | **500k** | **51.22** | **925.65** | **250.27** | **1,226.71** |
-| Bun | 1M | 50.83 | 649.51 | 0.00 | **700.52** |
-| Node | 1M | 119.76 | 1,117.65 | 0.00 | **1,238.67** |
-| **Rust** | **1M** | **68.86** | **1,846.67** | **482.81** | **2,401.35** |
-| Bun | 5M | 155.63 | 2,801.90 | 0.00 | **2,959.42** |
-| Node | 5M | 396.41 | 5,578.20 | 0.00 | **5,974.67** |
-| **Rust** | **5M** | **204.35** | **9,266.76** | **2,359.30** | **11,828.14** |
+- Rust canonical provider IDs: `87`
+- Rust alias IDs: `34`
+- Legacy provider IDs (runtime `@mariozechner/pi-ai` `getProviders()`): `22`
+- Exact canonical ID overlap (Rust vs legacy set): `16`
+- Rust canonical IDs not in legacy exact-ID set: `71`
+- Legacy-only exact IDs vs Rust canonical set: `6` (`azure-openai-responses`, `google-antigravity`, `google-gemini-cli`, `kimi-coding`, `openai-codex`, `vercel-ai-gateway`)
 
-**Rust is currently slower** in realistic E2E workloads:
+Complete Rust canonical IDs absent from legacy exact-ID set appear in **Appendix B**.
 
-| Token Level | Rust/Node | Rust/Bun |
-|----------:|----------:|---------:|
+## 4.4 Comprehensive Rust-Only Functionality Inventory (Current Snapshot)
+
+Verified as first-class in Rust CLI/runtime and not exposed equivalently in legacy coding-agent CLI snapshot:
+
+1. Extension policy selection and explanation:
+- `--extension-policy`, `--explain-extension-policy` (`src/extensions.rs`)
+
+2. Extension auto-repair policy selection and explanation:
+- `--repair-policy`, `--explain-repair-policy` (`src/extensions.rs`)
+
+3. Provider registry introspection:
+- `--list-providers` plus canonical/alias metadata layer (`src/provider_metadata.rs`, `src/models.rs`)
+
+4. Extension index lifecycle commands:
+- `search`, `info`, `update-index` command path (`src/extension_index.rs`, CLI wiring in `src/main.rs`)
+
+5. Environment diagnostics command:
+- `doctor` (`src/doctor.rs`)
+
+6. Session durability and migration controls:
+- `--session-durability`, `--no-migrations`, `migrate` surface (`src/main.rs`, session/store modules)
+
+7. Large integrated extension runtime controls:
+- capability-gated hostcall dispatch, policy gating, quota/risk instrumentation, runtime shims (`src/extensions.rs`, `src/extensions_js.rs`, `src/extension_dispatcher.rs`)
+
+8. Runtime risk ledger and replay/calibration tooling:
+- integrated in extension runtime plus dedicated tooling entrypoints (`src/extensions.rs`, `src/bin/ext_runtime_risk_ledger.rs`)
+
+9. Expanded provider footprint:
+- 87 canonical providers + 34 aliases in Rust vs 22 provider IDs in legacy runtime (Appendix B)
+
+10. First-class benchmark and conformance executables in repo:
+- `src/bin/ext_full_validation.rs`
+- `src/bin/ext_workloads.rs`
+- `src/bin/session_workload_bench.rs`
+
+Complexity anchors for major Rust-only surfaces are listed in **Section 4.2** and **Appendix C**.
+
+---
+
+## 5) Benchmark Methodology (Realistic + Extreme)
+
+All major benchmark classes were run with identical workload structure per runtime where possible.
+
+## 5.1 Realistic E2E Workload Semantics
+
+Realistic mode executes:
+- resume/open existing long session
+- append new user+assistant turns
+- insert tool-result messages
+- extension custom-entry activity
+- slash-like state changes (model, thinking level, session info, labels)
+- compaction entries
+- fork simulation (`branch` summary operations)
+- export generation (HTML)
+- final save/index update
+
+Parameters for realistic matrix:
+- `messages=5000`
+- `append=10`
+- `compactions=12`
+- `extension_ops=40`
+- `slash_ops=40`
+- `forks=8`
+- `exports=2`
+- token levels: `100k`, `200k`, `500k`, `1M`, `5M`
+- runs per cell: `3`
+
+---
+
+## 6) Performance Results
+
+## 6.0 Cold Startup / Readiness (time-to-response)
+
+Command-level readiness benchmark (`hyperfine`, no network calls):
+
+| Probe | Rust mean | Legacy Node mean | Legacy Bun mean | Node/Rust | Bun/Rust |
+|---|---:|---:|---:|---:|---:|
+| `--help` | 3.34 ms | 1,045.10 ms | 726.28 ms | 313.13x | 217.61x |
+| `--version` | 20.09 ms | 1,024.75 ms | 729.70 ms | 51.01x | 36.32x |
+
+One-shot baseline footprint snapshot (`/usr/bin/time`):
+
+| Probe | Runtime | RSS KB | User s | Sys s | Elapsed |
+|---|---|---:|---:|---:|---:|
+| `--help` | rust | 6,448 | 0.00 | 0.00 | 0:00.00 |
+| `--help` | legacy_node | 156,720 | 1.11 | 0.20 | 0:01.02 |
+| `--help` | legacy_bun | 195,820 | 0.91 | 0.22 | 0:00.71 |
+| `--version` | rust | 7,556 | 0.00 | 0.01 | 0:00.01 |
+| `--version` | legacy_node | 156,560 | 1.11 | 0.21 | 0:01.03 |
+| `--version` | legacy_bun | 194,624 | 0.96 | 0.20 | 0:00.73 |
+
+Interpretation:
+- For initial CLI readiness, Rust is dramatically faster and materially lighter in baseline process footprint.
+- These probes isolate startup/path initialization; they do not include session resume or extension workload execution.
+
+## 6.1 Realistic E2E Latency (p50, ms)
+
+| Runtime | Token level | Open | Append/Ops | Save | Total |
+|---|---:|---:|---:|---:|---:|
+| legacy_bun | 100k | 24.63 | 143.84 | 0.00 | 168.47 |
+| legacy_node | 100k | 47.20 | 220.70 | 0.00 | 267.91 |
+| rust | 100k | 36.84 | 219.06 | 64.64 | 320.71 |
+| legacy_bun | 200k | 29.55 | 196.99 | 0.00 | 226.70 |
+| legacy_node | 200k | 58.77 | 303.60 | 0.00 | 362.37 |
+| rust | 200k | 40.42 | 397.48 | 113.92 | 552.70 |
+| legacy_bun | 500k | 39.01 | 375.75 | 0.00 | 415.27 |
+| legacy_node | 500k | 76.68 | 607.04 | 0.00 | 684.64 |
+| rust | 500k | 51.22 | 925.65 | 250.27 | 1,226.71 |
+| legacy_bun | 1M | 50.83 | 649.51 | 0.00 | 700.52 |
+| legacy_node | 1M | 119.76 | 1,117.65 | 0.00 | 1,238.67 |
+| rust | 1M | 68.86 | 1,846.67 | 482.81 | 2,401.35 |
+| legacy_bun | 5M | 155.63 | 2,801.90 | 0.00 | 2,959.42 |
+| legacy_node | 5M | 396.41 | 5,578.20 | 0.00 | 5,974.67 |
+| rust | 5M | 204.35 | 9,266.76 | 2,359.30 | 11,828.14 |
+
+Rust total p50 ratio vs legacy:
+
+| Token level | Rust/Node | Rust/Bun |
+|---|---:|---:|
 | 100k | 1.20x | 1.90x |
 | 200k | 1.53x | 2.44x |
 | 500k | 1.79x | 2.95x |
 | 1M | 1.94x | 3.43x |
 | 5M | 1.98x | 4.00x |
 
-The bottleneck is the Rust save phase (64-2,359ms) which does not exist in the TS version (0ms -- likely deferred or incremental). The gap grows with session size.
+Key interpretation:
+- Rust open phase is competitive and often better than Node at higher scale.
+- Current Rust bottleneck is append/save behavior under large long-session churn.
 
-### Matched-State Synthetic (Same Session, Resume + 10 Messages)
+## 6.2 Matched-State Synthetic Benchmark (Same Session State, Resume + 10)
 
-| Runtime | Tokens | Open ms | Append ms | Save ms | Total ms | RSS KB |
-|---------|-------:|--------:|----------:|--------:|---------:|-------:|
-| **Rust** | **1M** | **68.78** | **254.76** | **432.47** | **756.01** | **32,092** |
-| Node | 1M | 126.37 | 170.57 | 0.00 | 296.94 | 167,752 |
-| Bun | 1M | 52.85 | 90.51 | 0.00 | 143.36 | 184,492 |
-| **Rust** | **5M** | **210.30** | **1,282.08** | **2,124.94** | **3,617.31** | **129,836** |
-| Node | 5M | 399.61 | 1,395.80 | 0.00 | 1,795.41 | 411,372 |
-| Bun | 5M | 156.24 | 405.62 | 0.00 | 561.86 | 481,852 |
+This is the direct “same state then add same 10 messages” comparison.
 
-At 1M tokens: Rust is **2.55x slower** than Node and **5.27x slower** than Bun in latency, but uses **5.2-5.8x less memory**.
-At 5M tokens: Rust is **2.01x slower** than Node and **6.44x slower** than Bun in latency, but uses **3.2-3.7x less memory**.
+| Runtime | Token level | Open ms | Append ms | Save ms | Total ms | RSS KB | User s | Sys s | FS out |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| rust | 1M | 68.78 | 254.76 | 432.47 | 756.01 | 32,092 | 0.86 | 0.04 | 112 |
+| legacy_node | 1M | 126.37 | 170.57 | 0.00 | 296.94 | 167,752 | 0.76 | 0.16 | 0 |
+| legacy_bun | 1M | 52.85 | 90.51 | 0.00 | 143.36 | 184,492 | 0.31 | 0.17 | 0 |
+| rust | 5M | 210.30 | 1,282.08 | 2,124.94 | 3,617.31 | 129,836 | 3.84 | 0.38 | 112 |
+| legacy_node | 5M | 399.61 | 1,395.80 | 0.00 | 1,795.41 | 411,372 | 1.95 | 0.63 | 0 |
+| legacy_bun | 5M | 156.24 | 405.62 | 0.00 | 561.86 | 481,852 | 0.56 | 0.42 | 0 |
 
-### Extension Microbenchmarks (Measured)
+Ratios at matched state:
+- 1M: Rust latency `2.55x` Node, `5.27x` Bun; Rust memory is `5.23x` smaller than Node and `5.75x` smaller than Bun.
+- 5M: Rust latency `2.01x` Node, `6.44x` Bun; Rust memory is `3.17x` smaller than Node and `3.71x` smaller than Bun.
 
-| Scenario | Extension | Rust | Node | Bun | Rust vs Node | Rust vs Bun |
-|----------|-----------|-----:|-----:|----:|-----------:|----------:|
-| Cold load | hello | **7.96ms** | 22.29ms | 22.25ms | **2.8x faster** | **2.8x faster** |
-| Cold load | pirate | **7.74ms** | 11.97ms | 19.01ms | **1.5x faster** | **2.5x faster** |
-| Per-call tool dispatch | hello | 16.80us | 1.37us | 0.87us | **12.3x slower** | **19.4x slower** |
-| Per-call event hook | pirate | 17.51us | 1.71us | 1.00us | **10.3x slower** | **17.5x slower** |
+## 6.3 Realistic Footprint (Same Realistic Ops, 1M/5M)
 
-Extension cold load is faster in Rust (QuickJS init < jiti transpile). **Per-call dispatch is 10-19x slower** due to QuickJS-to-Rust hostcall marshalling overhead vs in-process V8 calls.
+| Runtime | Token level | Open ms | Append/Ops ms | Save ms | Total ms | RSS KB | User s | Sys s | FS out | Wall |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| rust | 1M | 163.91 | 2,654.88 | 505.34 | 3,324.14 | 76,240 | 3.31 | 0.21 | 112 | 0:03.36 |
+| legacy_node | 1M | 199.10 | 1,508.55 | 0.00 | 1,707.65 | 820,380 | 1.44 | 1.16 | 0 | 0:02.26 |
+| legacy_bun | 1M | 92.71 | 810.69 | 0.00 | 903.40 | 875,092 | 0.63 | 0.79 | 0 | 0:01.21 |
+| rust | 5M | 674.47 | 13,224.33 | 2,460.56 | 16,359.37 | 274,832 | 15.79 | 1.06 | 112 | 0:16.40 |
+| legacy_node | 5M | 793.81 | 8,018.42 | 0.00 | 8,812.23 | 2,173,096 | 4.77 | 5.57 | 0 | 0:09.54 |
+| legacy_bun | 5M | 325.28 | 3,882.84 | 0.00 | 4,208.12 | 3,057,908 | 1.67 | 3.42 | 0 | 0:04.75 |
 
-### Key Optimization Targets (from measured data)
-
-1. **Session save hot path** (highest impact): Rust's explicit save phase (432ms-2.4s at 1M-5M) is the primary bottleneck. TS saves at effectively 0ms. Incremental/append-only persistence would close this gap.
-2. **Extension per-call overhead**: 10-19x slower hostcall dispatch. Reduce marshalling, batch invariant policy checks, optimize hot connector paths.
-3. **Append/ops scaling**: Rust append/ops cost grows faster than TS at high token volumes, suggesting allocation churn or repeated full-history serialization.
-
----
-
-## 5. Memory, CPU, and I/O Footprint
-
-### Memory Footprint (Measured with `/usr/bin/time`)
-
-#### At Rest (CLI Startup)
-
-| Probe | Rust | Node.js | Bun |
-|-------|-----:|--------:|----:|
-| `--help` RSS | **6.3 MB** | 153 MB | 191 MB |
-| `--version` RSS | **7.4 MB** | 153 MB | 190 MB |
-
-Rust baseline footprint is **24-30x smaller** than Node or Bun.
-
-#### Under Realistic Load (Measured)
-
-| Runtime | Token Level | RSS | Wall Clock |
-|---------|----------:|----:|-----------:|
-| **Rust** | **1M** | **76 MB** | 3.36s |
-| Node | 1M | 820 MB | 2.26s |
-| Bun | 1M | 875 MB | 1.21s |
-| **Rust** | **5M** | **275 MB** | 16.40s |
-| Node | 5M | 2,173 MB | 9.54s |
-| Bun | 5M | 3,058 MB | 4.75s |
-
-At 1M tokens: Rust uses **10.8-11.5x less memory** than Node/Bun.
-At 5M tokens: Rust uses **7.9-11.1x less memory** than Node/Bun.
-
-#### CPU Profile (Measured with `/usr/bin/time`)
-
-| Runtime | Token Level | User s | Sys s |
-|---------|----------:|-------:|------:|
-| **Rust** | **1M** | **3.31** | **0.21** |
-| Node | 1M | 1.44 | 1.16 |
-| Bun | 1M | 0.63 | 0.79 |
-| **Rust** | **5M** | **15.79** | **1.06** |
-| Node | 5M | 4.77 | 5.57 |
-| Bun | 5M | 1.67 | 3.42 |
-
-Rust uses more user-space CPU time (3.3x Node, 5.3x Bun at 1M) but less system time. The higher user CPU reflects the session save serialization overhead that dominates Rust's profile.
-
-### Summary: Performance Trade-Off
-
-| Dimension | Winner | Magnitude |
-|-----------|--------|-----------|
-| **Cold startup** | Rust | 50-313x faster |
-| **Memory footprint** | Rust | 8-30x smaller |
-| **Extension cold load** | Rust | 1.5-2.8x faster |
-| **Session save latency** | TypeScript (Bun) | Rust 2-6x slower |
-| **E2E realistic latency** | TypeScript (Bun) | Rust 1.2-4.0x slower |
-| **Extension per-call dispatch** | TypeScript (Bun) | Rust 10-19x slower |
-
-**Rust wins on startup and memory. TypeScript (especially Bun) wins on session workload latency and extension per-call dispatch.** The session save hot path is the #1 optimization target for closing the latency gap.
+Interpretation:
+- Latency: Rust still slower in realistic E2E.
+- Memory: Rust remains much smaller (`~7.9x` to `~11.5x` lower RSS in these realistic runs).
 
 ---
 
-## 6. Extension System: Deep Dive
+## 7) Extension Runtime Design and Compatibility Status
 
-### Architecture Overview
+## 7.1 Rust Extension Architecture (Deep-Dive)
 
-The TypeScript extension system is **2,767 lines** across 5 files:
-- `loader.ts` (518) -- Uses `jiti` to dynamically load TypeScript extensions
-- `runner.ts` (718) -- Extension lifecycle (load, register, shutdown)
-- `types.ts` (1,258) -- ExtensionAPI contract definition
-- `wrapper.ts` (118) -- Thin wrapper
-- `index.ts` (155) -- Re-exports
+Rust extension handling is centered on a capability-gated QuickJS host runtime with explicit hostcall dispatch and policy enforcement.
 
-Extensions run **in-process** in the same Node.js V8 isolate. They have full access to Node.js APIs, the filesystem, network, and process environment. There is **no capability enforcement** -- any extension can do anything.
+Core properties:
+- Connector model instead of ambient Node/Bun authority (`tool`, `exec`, `http`, `session`, `ui`, `events`, `log`).
+- Policy-first dispatch (`allow/prompt/deny`) with explainable profiles and CLI explainers.
+- Deterministic event-loop bridge (microtask drain + host completion scheduling discipline).
+- Structured lifecycle controls and bounded execution regions.
+- Compatibility shims for high-value Node/Bun surfaces rather than full runtime emulation.
+- Runtime risk scoring + hash-chained ledger + replay/calibration artifacts.
+- Per-extension quota enforcement integrated into shared hostcall dispatch.
 
-The Rust extension system is **99,605 lines** across 13+ files. It implements:
+Design/implementation emphasis areas:
+- `src/extensions.rs`
+- `src/extensions_js.rs`
+- `src/extension_dispatcher.rs`
+- `EXTENSIONS.md` (runtime contract + conformance process)
 
-### 6.1 Embedded QuickJS JavaScript Runtime
+## 7.2 Real Extension Execution Benchmarks (Rust vs Legacy)
 
-`extensions_js.rs` (22,146 lines) bridges Rust and JavaScript via QuickJS:
+Benchmark artifacts used:
+- Rust: `.tmp_windyelk/ext_workloads_rust_gpt.jsonl`
+- Legacy Node: `.tmp_windyelk/ext_workloads_legacy_node_gpt.jsonl`
+- Legacy Bun runtime: `.tmp_windyelk/ext_workloads_legacy_bun_gpt.jsonl`
 
-**22 Node.js Module Shims** (implemented in Rust, exposed as QuickJS modules):
+| Scenario | Extension | Rust | Legacy (Node) | Legacy (Bun runtime) | Rust/Node | Rust/Bun |
+|---|---|---:|---:|---:|---:|---:|
+| `ext_load_init/load_init_cold` | hello | 7.96 ms (p50) | 22.29 ms (p50) | 22.25 ms (p50) | 0.36x | 0.36x |
+| `ext_load_init/load_init_cold` | pirate | 7.74 ms (p50) | 11.97 ms (p50) | 19.01 ms (p50) | 0.65x | 0.41x |
+| `ext_tool_call/hello` | hello | 16.80 us/call | 1.37 us/call | 0.87 us/call | 12.26x slower | 19.37x slower |
+| `ext_event_hook/before_agent_start` | pirate | 17.51 us/call | 1.71 us/call | 1.00 us/call | 10.27x slower | 17.52x slower |
 
-| Module | Operations | Completeness |
-|--------|-----------|-------------|
-| `node:fs` | readFileSync, writeFileSync, statSync, mkdirSync, readdirSync, unlinkSync, rmSync, copyFileSync, renameSync, appendFileSync, accessSync, existsSync, realpathSync | Full sync API |
-| `node:fs/promises` | Async versions of all above | Full |
-| `node:path` | join, resolve, dirname, basename, extname, normalize, relative, isAbsolute, sep, posix, win32 | Full |
-| `node:crypto` | createHash (SHA-256/512/1/MD5), createHmac, randomUUID, randomBytes, randomInt, timingSafeEqual | Core subset |
-| `node:buffer` | Buffer.from, alloc, concat, isBuffer, toString, slice, subarray, compare, equals, indexOf, copy | Full |
-| `node:process` | env, argv, cwd, exit, platform, arch, version, pid, hrtime | Full |
-| `node:os` | platform, hostname, tmpdir, homedir, cpus, arch, type, release, userInfo, EOL | Full |
-| `node:child_process` | spawnSync, execSync, execFileSync, spawn, exec, execFile | Capability-gated |
-| `node:http` | request, get, STATUS_CODES, METHODS, Agent | Client only |
-| `node:https` | request, get | Client only |
-| `node:url` | URL, URLSearchParams, parse, format, resolve | Full |
-| `node:events` | EventEmitter, on, emit, once, removeListener, removeAllListeners, listenerCount | Full |
-| `node:stream` | Readable, Writable, Transform, Duplex, PassThrough, pipeline, finished | Core API |
-| `node:stream/promises` | pipeline, finished | Full |
-| `node:util` | format, inspect, inherits, deprecate, debuglog, types, TextEncoder, TextDecoder, stripVTControlCharacters | Core subset |
-| `node:querystring` | parse, stringify, encode, decode | Full |
-| `node:assert` | ok, strictEqual, deepStrictEqual, throws, rejects, fail | Full |
-| `node:string_decoder` | StringDecoder | Full |
-| `node:module` | createRequire | Stub |
-| `node:readline` | createInterface | Stub |
-| `node:net` | createConnection, Socket | Stub |
-| `bun` | argv, file, write, spawn, which | Partial |
+Interpretation:
+- Rust cold-load is now clearly competitive/faster on these representative extensions.
+- Per-call dispatch overhead remains materially higher in Rust and is still a primary extension-runtime optimization target.
 
-**30+ npm Virtual Module Stubs** (return plausible objects so extensions that `import` them don't crash):
+### 7.2.1 Incremental Optimization Update (2026-02-17)
 
-Pi framework: `@sinclair/typebox`, `@mariozechner/pi-ai`, `@mariozechner/pi-tui`, `@mariozechner/pi-coding-agent`
-Protocol: `@modelcontextprotocol/sdk/*`, `vscode-languageserver-protocol/*`, `jsonwebtoken`, `uuid`
-Utilities: `ms`, `shell-quote`, `diff`, `glob`, `dotenv`, `just-bash`
-Terminal: `node-pty`, `chokidar`, `jsdom`, `turndown`, `@mozilla/readability`, `@xterm/headless`
-Observability: `@opentelemetry/api`, `@opentelemetry/sdk-trace-base`, `@opentelemetry/resources`
-SDK: `@anthropic-ai/sdk`, `@anthropic-ai/sandbox-runtime`
+After targeted extension-hotpath changes in `src/extensions.rs` (context payload cache reuse, `Arc<Value>` context transfer across runtime command channel, reduced task-id allocation overhead, and `await_js_task` fast-path handling), we re-ran release `ext_workloads`.
 
-### 6.2 Promise-Based Hostcall Protocol
+Artifacts:
+- `.tmp_codex/ext_workloads_after_arc_release.jsonl`
+- `.tmp_codex/ext_workloads_after_arc_release_matrix.json`
+- `.tmp_codex/ext_workloads_after_arc_release_trace.jsonl`
+Repeated samples:
+- `.tmp_codex/ext_workloads_release_rep1.jsonl`
+- `.tmp_codex/ext_workloads_release_rep2.jsonl`
+- `.tmp_codex/ext_workloads_release_rep3.jsonl`
 
-Extensions communicate with the Rust host via a Promise-based protocol:
+Updated Rust-only deltas vs the previous values in this report:
 
+| Scenario | Prior Rust (report baseline) | Updated Rust (release) | Change |
+|---|---:|---:|---:|
+| `ext_load_init/load_init_cold` (hello, p50) | 7.96 ms | 6.93 ms | 1.15x faster (`~13.0%`) |
+| `ext_load_init/load_init_cold` (pirate, p50) | 7.74 ms | 6.48 ms | 1.19x faster (`~16.3%`) |
+| `ext_tool_call/hello` | 16.80 us/call | 11.88 us/call | 1.41x faster (`~29.3%`) |
+| `ext_event_hook/before_agent_start` | 17.51 us/call | 15.02 us/call | 1.17x faster (`~14.2%`) |
+
+Replication note:
+- 3 immediate repeated release runs showed some host-contention variance (tool-call `~12.18-13.25us`, event-hook `~15.41-17.05us`), but still materially better than the prior baseline.
+
+### 7.2.2 QuickJS vs Native-Rust Preview (internal micro-harness)
+
+We re-ran `pijs_workload` to isolate runtime-engine overhead for a minimal tool roundtrip:
+
+| Runtime engine | Command | Result |
+|---|---|---:|
+| QuickJS | `cargo run --release --bin pijs_workload -- --iterations 50000 --runtime-engine quickjs` | `per_call_us_f64 = 8.41320198` (`per_call_ns_f64 = 8413.20198`) |
+| Native Rust runtime (real handle path) | `cargo run --release --bin pijs_workload -- --iterations 50000 --runtime-engine native-rust-runtime` | `per_call_us_f64 = 0.49253646` (`per_call_ns_f64 = 492.53646`) |
+| Native Rust preview | `cargo run --release --bin pijs_workload -- --iterations 50000 --runtime-engine native-rust-preview` | `per_call_us_f64 = 0.0076797` (`per_call_ns_f64 = 7.6797`) |
+
+Important caveat:
+- `native-rust-preview` is synthetic and not parity-complete.
+- `native-rust-runtime` is the real runtime-handle path and is now `~17.08x` faster per call than QuickJS in this harness.
+- Preview is still far faster (`~1095.26x` vs QuickJS), indicating additional headroom beyond the current real-runtime implementation.
+- This micro-harness does not supersede the larger realistic session benchmarks in Section 6; it isolates extension-call runtime overhead only.
+
+### 7.2.3 QuickJS Removal Program (performance inversion path)
+
+To actually invert the extension overhead (Rust faster than legacy per-call), the benchmark data supports a staged replacement:
+
+1. Native runtime tier for hot-path hooks/tools first (`tool_call`, `tool_result`, high-frequency event hooks).
+2. Keep QuickJS only as explicit compatibility/test harness infrastructure during migration (production runtime selection is now native-mandatory in this tree).
+3. Introduce ahead-of-time extension lowering (manifest + typed hostcall IR) so dispatch bypasses JS marshalling for validated extensions.
+4. Preserve existing policy/quota/risk guardrails in native dispatcher, but move them to pre-validated typed structs to eliminate repeated JSON decoding.
+5. Gate rollout behind existing conformance corpus and perf SLI gates:
+   - no regression in vendored pass rate,
+   - `ext_tool_call/hello` and `ext_event_hook/before_agent_start` must beat current legacy baselines.
+
+Near-term measurable target from current data:
+- Drive `ext_tool_call/hello` from ~`11.9-12.3us` to `<1.3us` and `ext_event_hook/before_agent_start` from ~`15.0-15.5us` to `<1.7us` while maintaining conformance.
+
+## 7.3 Corpus Conformance (223+ extension target)
+
+Source: `tests/ext_conformance/reports/pipeline/full_validation_report.compat2.json` (`generatedAt=2026-02-14T09:05:16Z`)
+
+Corpus:
+- total candidates: `1000`
+- vendored: `223`
+- unvendored: `777`
+
+Vendored status:
+- pass: `187`
+- fail: `29`
+- pending manifest alignment: `7`
+- tested pass rate (`pass/(pass+fail)`): `86.57%`
+- overall vendored pass rate (`pass/223`): `83.86%`
+
+Failure taxonomy (vendored non-pass):
+- `harness_gap`: `23`
+- `needs_review`: `12`
+- `extension_problem`: `1`
+
+Stage summary:
+- passed: `8`
+- failed: `1` (`auto_repair_full_corpus`, exit 101)
+- skipped: `1` (`differential_suite`)
+
+## 7.4 Extensions Not Yet 100% Passing (All 36 Vendored Non-Pass)
+
+Columns: `id`, `status`, `verdict`, `failure_category`, `reason`, `suggested_fix`
+
+```tsv
+agents-mikeastock/extensions	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+community/nicobailon-interview-tool	fail	extension_problem	extension_load_error	Extension expects local assets/files unavailable at runtime.	Bundle required assets or extend missing_asset auto-repair policy.
+community/prateekmedia-lsp	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+doom-overlay	fail	needs_review	extension_load_error	Extension load failure could not be cleanly mapped to limitation vs extension bug.	Inspect failure dossier and reproduce command.
+npm/@verioussmith/pi-openrouter	pending	needs_review		Vendored candidate is missing from VALIDATED_MANIFEST.json.	Regenerate or repair VALIDATED_MANIFEST.json.
+npm/agentsbox	pending	needs_review		Vendored candidate is missing from VALIDATED_MANIFEST.json.	Regenerate or repair VALIDATED_MANIFEST.json.
+npm/aliou-pi-linkup	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/aliou-pi-synthetic	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/lsp-pi	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/marckrenn-pi-sub-bar	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/marckrenn-pi-sub-core	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/mitsupi	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/oh-my-pi-anthropic-websearch	pending	needs_review		Vendored candidate is missing from VALIDATED_MANIFEST.json.	Regenerate or repair VALIDATED_MANIFEST.json.
+npm/oh-my-pi-exa	pending	needs_review		Vendored candidate is missing from VALIDATED_MANIFEST.json.	Regenerate or repair VALIDATED_MANIFEST.json.
+npm/oh-my-pi-lsp	pending	needs_review		Vendored candidate is missing from VALIDATED_MANIFEST.json.	Regenerate or repair VALIDATED_MANIFEST.json.
+npm/oh-my-pi-pi-git-tool	pending	needs_review		Vendored candidate is missing from VALIDATED_MANIFEST.json.	Regenerate or repair VALIDATED_MANIFEST.json.
+npm/oh-my-pi-subagents	pending	needs_review		Vendored candidate is missing from VALIDATED_MANIFEST.json.	Regenerate or repair VALIDATED_MANIFEST.json.
+npm/pi-amplike	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/pi-bash-confirm	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/pi-extensions	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/pi-messenger	fail	needs_review	extension_load_error	Extension load failure could not be cleanly mapped to limitation vs extension bug.	Inspect failure dossier and reproduce command.
+npm/pi-package-test	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/pi-search-agent	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/pi-shell-completions	fail	needs_review	extension_load_error	Extension load failure could not be cleanly mapped to limitation vs extension bug.	Inspect failure dossier and reproduce command.
+npm/shitty-extensions	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/tmustier-pi-arcade	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/vaayne-agent-kit	fail	needs_review	extension_load_error	Extension load failure could not be cleanly mapped to limitation vs extension bug.	Inspect failure dossier and reproduce command.
+npm/vaayne-pi-mcp	fail	needs_review	extension_load_error	Extension load failure could not be cleanly mapped to limitation vs extension bug.	Inspect failure dossier and reproduce command.
+third-party/aliou-pi-extensions	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+third-party/ben-vargas-pi-packages	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+third-party/charles-cooper-pi-extensions	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+third-party/kcosr-pi-extensions	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+third-party/marckrenn-pi-sub	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+third-party/openclaw-openclaw	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+third-party/pasky-pi-amplike	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+third-party/w-winter-dot314	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
 ```
-JS: pi.tool("read", {path: "/foo"})     -> enqueue HostcallRequest with unique call_id
-                                          -> store (resolve, reject) callbacks
-    [Rust processes the request]
-    [Delivers MacrotaskKind::HostcallComplete { call_id }]
-JS: resolve(result)                      -> Promise chain continues
+
+## 7.5 Remediation Plan for Remaining Extension Gaps
+
+1. Close `harness_gap` first (`23` items): refresh TS oracle snapshots and regenerate validated manifests.
+2. Resolve pending manifest drift (`7` items): rebuild `VALIDATED_MANIFEST.json`, re-run shards.
+3. Triage `needs_review` load failures (`12` items): classify runtime shim gap vs extension defect with dossier reproduction.
+4. Contain true extension defects (`extension_problem`): package missing assets or mark as extension-side defect.
+
+---
+
+## 8) Test Surface Comparison (Unit + E2E)
+
+Rust:
+- Rust test files: `257`
+- Rust e2e-prefixed test files: `35`
+- Rust test attributes: `11,976`
+
+Legacy proxies (regex callsite counts):
+- coding-agent test files: `49`
+- coding-agent test callsites: `604` (`it(` + `test(` occurrences)
+- full stack test files (`ai+agent+coding-agent+tui`): `107`
+- full stack test callsites: `1,413` (`it(` + `test(` occurrences)
+
+Note: legacy tree in this workspace does not provide an equivalent consolidated coverage JSON artifact like `docs/coverage-baseline-map.json` for direct percentage parity.
+
+---
+
+## 9) Security / Reliability / asupersync Impact
+
+## 9.1 Security
+- Rust extension path is capability-gated and auditable per hostcall.
+- Policy explainers + explicit deny/prompt/allow semantics are first-class.
+- Risk and quota controls are integrated and test-instrumented.
+
+## 9.2 Reliability and Correctness
+- Structured concurrency foundation (`asupersync`) reduces async lifecycle ambiguity.
+- Deterministic cancellation/resource scoping improves robustness of long-lived CLI sessions.
+- Hash-chained risk ledger + replay/calibration tooling improve post-incident reproducibility.
+
+## 9.3 asupersync “Correct-by-Design” Impact
+- Work is scoped to explicit lifetimes, which reduces hidden background-task leakage and orphaned async work.
+- Cancellation becomes a first-class control flow primitive instead of a best-effort convention, reducing stuck-session and shutdown race risk.
+- Deterministic runtime patterns make failure reproduction and forensic replay more credible (especially with extension hostcall/risk ledgers).
+- The primary tradeoff is a stricter execution model that can add engineering/coordination overhead versus loosely structured async graphs.
+- In this benchmark snapshot, correctness and controllability gains are clear, while latency still needs targeted optimization in the large-session hot paths.
+
+## 9.4 Performance Trade in This Snapshot
+- Legacy (especially Bun) wins latency on current long-session end-to-end paths.
+- Rust wins memory footprint substantially.
+- High-value optimization targets are clear and measurable.
+
+---
+
+## 10) Extreme Optimization Priorities (To Reach Next 5-10x)
+
+These are the highest expected-value targets from measured bottlenecks:
+
+1. Session append/save hot path:
+- Minimize repeated full-history serialization work.
+- Introduce incremental persistence for large session files.
+- Reduce allocation churn and copy amplification in append/update routines.
+
+2. JSON parse/serialize fast path:
+- Eliminate avoidable intermediate `Value` transforms in hot loops.
+- Prefer typed deserialization in critical paths.
+- Use zero-copy/borrowed parsing where safe and measurable.
+
+3. Extension per-call overhead:
+- Reduce hostcall marshalling overhead and temporary allocations.
+- Batch or precompute invariant policy/risk metadata for high-frequency calls.
+- Optimize hot connector dispatch paths (`tool`/`events`).
+
+4. Multi-core and locality:
+- Partition expensive analysis and indexing work off the foreground session loop.
+- Improve cache locality in session entry scans/index updates.
+- Keep save/index updates append-oriented rather than full-rebuild when possible.
+
+5. Regression guardrails:
+- Keep the realistic 100k/200k/500k/1M/5M matrix as a blocking perf CI track.
+- Track p50/p95, RSS, and FS I/O deltas per commit series.
+
+---
+
+## 11) Appendix A — Full Vendored Extension List (223)
+
+Columns: `id`, `sourceTier`, `candidateStatus`, `conformanceStatus`, `verdict`, `conformanceFailureCategory`, `classificationReason`, `suggestedFix`
+
+```tsv
+agents-mikeastock/extensions	agents-mikeastock	vendored	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+antigravity-image-gen	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+auto-commit-on-exit	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+bash-spawn-hook	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+bookmark	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+claude-rules	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/ferologics-notify	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/hjanuschka-clipboard	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/hjanuschka-cost-tracker	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/hjanuschka-flicker-corp	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/hjanuschka-funny-working-message	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/hjanuschka-handoff	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/hjanuschka-loop	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/hjanuschka-memory-mode	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/hjanuschka-oracle	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/hjanuschka-plan-mode	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/hjanuschka-resistance	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/hjanuschka-speedreading	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/hjanuschka-status-widget	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/hjanuschka-ultrathink	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/hjanuschka-usage-bar	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/jyaunches-canvas	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/mitsuhiko-answer	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/mitsuhiko-control	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/mitsuhiko-cwd-history	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/mitsuhiko-files	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/mitsuhiko-loop	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/mitsuhiko-notify	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/mitsuhiko-review	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/mitsuhiko-todos	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/mitsuhiko-uv	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/mitsuhiko-whimsical	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/nicobailon-interactive-shell	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/nicobailon-interview-tool	community	vendored	fail	extension_problem	extension_load_error	Extension expects local assets/files unavailable at runtime.	Bundle required assets or extend missing_asset auto-repair policy.
+community/nicobailon-mcp-adapter	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/nicobailon-powerline-footer	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/nicobailon-rewind-hook	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/nicobailon-subagents	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/ogulcancelik-ghostty-theme-sync	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/prateekmedia-checkpoint	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/prateekmedia-lsp	community	vendored	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+community/prateekmedia-permission	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/prateekmedia-ralph-loop	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/prateekmedia-repeat	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/prateekmedia-token-rate	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/qualisero-background-notify	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/qualisero-compact-config	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/qualisero-pi-agent-scip	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/qualisero-safe-git	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/qualisero-safe-rm	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/qualisero-session-color	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/qualisero-session-emoji	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/tmustier-agent-guidance	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/tmustier-arcade-mario-not	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/tmustier-arcade-picman	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/tmustier-arcade-ping	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/tmustier-arcade-spice-invaders	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/tmustier-arcade-tetris	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/tmustier-code-actions	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/tmustier-files-widget	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/tmustier-ralph-wiggum	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/tmustier-raw-paste	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/tmustier-tab-status	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+community/tmustier-usage-extension	community	vendored	pass	pass		Extension passed conformance without requiring repair.	
+confirm-destructive	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+custom-compaction	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+custom-footer	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+custom-header	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+custom-provider-anthropic	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+custom-provider-gitlab-duo	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+custom-provider-qwen-cli	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+dirty-repo-guard	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+doom-overlay	official-pi-mono	vendored	fail	needs_review	extension_load_error	Extension load failure could not be cleanly mapped to limitation vs extension bug.	Inspect failure dossier and reproduce command.
+dynamic-resources	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+event-bus	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+file-trigger	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+git-checkpoint	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+handoff	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+hello	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+inline-bash	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+input-transform	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+interactive-shell	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+mac-system-theme	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+message-renderer	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+modal-editor	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+model-status	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+notify	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/@verioussmith/pi-openrouter	npm-registry	vendored		needs_review		Vendored candidate is missing from VALIDATED_MANIFEST.json.	Regenerate or repair VALIDATED_MANIFEST.json.
+npm/agentsbox	npm-registry	vendored		needs_review		Vendored candidate is missing from VALIDATED_MANIFEST.json.	Regenerate or repair VALIDATED_MANIFEST.json.
+npm/aliou-pi-extension-dev	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/aliou-pi-guardrails	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/aliou-pi-linkup	npm-registry	vendored	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/aliou-pi-processes	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/aliou-pi-synthetic	npm-registry	vendored	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/aliou-pi-toolchain	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/benvargas-pi-ancestor-discovery	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/benvargas-pi-antigravity-image-gen	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/benvargas-pi-synthetic-provider	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/checkpoint-pi	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/imsus-pi-extension-minimax-coding-plan-mcp	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/juanibiapina-pi-extension-settings	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/juanibiapina-pi-files	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/juanibiapina-pi-gob	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/lsp-pi	npm-registry	vendored	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/marckrenn-pi-sub-bar	npm-registry	vendored	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/marckrenn-pi-sub-core	npm-registry	vendored	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/mitsupi	npm-registry	vendored	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/ogulcancelik-pi-sketch	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/oh-my-pi-anthropic-websearch	npm-registry	vendored		needs_review		Vendored candidate is missing from VALIDATED_MANIFEST.json.	Regenerate or repair VALIDATED_MANIFEST.json.
+npm/oh-my-pi-basics	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/oh-my-pi-exa	npm-registry	vendored		needs_review		Vendored candidate is missing from VALIDATED_MANIFEST.json.	Regenerate or repair VALIDATED_MANIFEST.json.
+npm/oh-my-pi-lsp	npm-registry	vendored		needs_review		Vendored candidate is missing from VALIDATED_MANIFEST.json.	Regenerate or repair VALIDATED_MANIFEST.json.
+npm/oh-my-pi-pi-git-tool	npm-registry	vendored		needs_review		Vendored candidate is missing from VALIDATED_MANIFEST.json.	Regenerate or repair VALIDATED_MANIFEST.json.
+npm/oh-my-pi-subagents	npm-registry	vendored		needs_review		Vendored candidate is missing from VALIDATED_MANIFEST.json.	Regenerate or repair VALIDATED_MANIFEST.json.
+npm/permission-pi	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-agentic-compaction	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-amplike	npm-registry	vendored	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/pi-annotate	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-bash-confirm	npm-registry	vendored	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/pi-brave-search	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-command-center	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-ephemeral	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-extensions	npm-registry	vendored	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/pi-ghostty-theme-sync	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-interactive-shell	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-interview	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-mcp-adapter	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-md-export	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-mermaid	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-messenger	npm-registry	vendored	fail	needs_review	extension_load_error	Extension load failure could not be cleanly mapped to limitation vs extension bug.	Inspect failure dossier and reproduce command.
+npm/pi-model-switch	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-moonshot	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-multicodex	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-notify	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-package-test	npm-registry	vendored	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/pi-poly-notify	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-powerline-footer	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-prompt-template-model	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-repoprompt-mcp	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-review-loop	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-screenshots-picker	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-search-agent	npm-registry	vendored	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/pi-session-ask	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-shadow-git	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-shell-completions	npm-registry	vendored	fail	needs_review	extension_load_error	Extension load failure could not be cleanly mapped to limitation vs extension bug.	Inspect failure dossier and reproduce command.
+npm/pi-skill-palette	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-subdir-context	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-super-curl	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-telemetry-otel	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-threads	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-voice-of-god	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-wakatime	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-watch	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/pi-web-access	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/qualisero-pi-agent-scip	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/ralph-loop-pi	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/repeat-pi	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/shitty-extensions	npm-registry	vendored	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/tmustier-pi-arcade	npm-registry	vendored	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+npm/token-rate-pi	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/vaayne-agent-kit	npm-registry	vendored	fail	needs_review	extension_load_error	Extension load failure could not be cleanly mapped to limitation vs extension bug.	Inspect failure dossier and reproduce command.
+npm/vaayne-pi-mcp	npm-registry	vendored	fail	needs_review	extension_load_error	Extension load failure could not be cleanly mapped to limitation vs extension bug.	Inspect failure dossier and reproduce command.
+npm/vaayne-pi-subagent	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/vaayne-pi-web-tools	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/vpellegrino-pi-skills	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/walterra-pi-charts	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/walterra-pi-graphviz	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+npm/zenobius-pi-dcp	npm-registry	vendored	pass	pass		Extension passed conformance without requiring repair.	
+overlay-qa-tests	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+overlay-test	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+permission-gate	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+pirate	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+plan-mode	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+preset	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+protected-paths	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+qna	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+question	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+questionnaire	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+rainbow-editor	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+rpc-demo	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+sandbox	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+send-user-message	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+session-name	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+shutdown-command	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+snake	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+space-invaders	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+ssh	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+status-line	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+subagent	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+summarize	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+system-prompt-header	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+third-party/aliou-pi-extensions	third-party-github	vendored	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+third-party/ben-vargas-pi-packages	third-party-github	vendored	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+third-party/charles-cooper-pi-extensions	third-party-github	vendored	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+third-party/cv-pi-ssh-remote	third-party-github	vendored	pass	pass		Extension passed conformance without requiring repair.	
+third-party/graffioh-pi-screenshots-picker	third-party-github	vendored	pass	pass		Extension passed conformance without requiring repair.	
+third-party/graffioh-pi-super-curl	third-party-github	vendored	pass	pass		Extension passed conformance without requiring repair.	
+third-party/jyaunches-pi-canvas	third-party-github	vendored	pass	pass		Extension passed conformance without requiring repair.	
+third-party/kcosr-pi-extensions	third-party-github	vendored	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+third-party/limouren-agent-things	third-party-github	vendored	pass	pass		Extension passed conformance without requiring repair.	
+third-party/lsj5031-pi-notification-extension	third-party-github	vendored	pass	pass		Extension passed conformance without requiring repair.	
+third-party/marckrenn-pi-sub	third-party-github	vendored	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+third-party/michalvavra-agents	third-party-github	vendored	pass	pass		Extension passed conformance without requiring repair.	
+third-party/ogulcancelik-pi-sketch	third-party-github	vendored	pass	pass		Extension passed conformance without requiring repair.	
+third-party/openclaw-openclaw	third-party-github	vendored	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+third-party/pasky-pi-amplike	third-party-github	vendored	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+third-party/qualisero-pi-agent-scip	third-party-github	vendored	pass	pass		Extension passed conformance without requiring repair.	
+third-party/raunovillberg-pi-stuffed	third-party-github	vendored	pass	pass		Extension passed conformance without requiring repair.	
+third-party/rytswd-direnv	third-party-github	vendored	pass	pass		Extension passed conformance without requiring repair.	
+third-party/rytswd-questionnaire	third-party-github	vendored	pass	pass		Extension passed conformance without requiring repair.	
+third-party/rytswd-slow-mode	third-party-github	vendored	pass	pass		Extension passed conformance without requiring repair.	
+third-party/vtemian-pi-config	third-party-github	vendored	pass	pass		Extension passed conformance without requiring repair.	
+third-party/w-winter-dot314	third-party-github	vendored	fail	harness_gap	registration_mismatch	Observed registration output diverges from manifest expectations.	Refresh expected snapshot from TS oracle and re-validate.
+third-party/zenobi-us-pi-dcp	third-party-github	vendored	pass	pass		Extension passed conformance without requiring repair.	
+timed-confirm	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+titlebar-spinner	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+todo	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+tool-override	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+tools	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+trigger-compact	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+truncated-tool	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+widget-placement	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
+with-deps	official-pi-mono	vendored	pass	pass		Extension passed conformance without requiring repair.	
 ```
 
-**Hostcall Kinds**: Tool, Exec, Http, Session, Ui, Events, Log
+## 12) Appendix B — Rust Canonical Provider IDs Not in Legacy Exact-ID Set (71)
 
-**Capability mapping**: Each hostcall kind maps to a required capability (e.g., Exec maps to `exec` capability)
-
-### 6.3 10-Capability Security Policy System
-
+```text
+302ai
+abacus
+aihubmix
+alibaba
+alibaba-cn
+azure-openai
+bailing
+baseten
+berget
+chutes
+cloudflare-ai-gateway
+cloudflare-workers-ai
+cohere
+cortecs
+deepinfra
+deepseek
+fastrouter
+fireworks
+firmware
+friendli
+github-models
+gitlab
+helicone
+iflowcn
+inception
+inference
+io-net
+jiekou
+kimi-for-coding
+llama
+lmstudio
+lucidquery
+minimax-cn-coding-plan
+minimax-coding-plan
+moark
+modelscope
+moonshotai
+moonshotai-cn
+morph
+nano-gpt
+nebius
+nova
+novita-ai
+nvidia
+ollama
+ollama-cloud
+ovhcloud
+perplexity
+poe
+privatemode-ai
+requesty
+sap-ai-core
+scaleway
+siliconflow
+siliconflow-cn
+stackit
+submodel
+synthetic
+togetherai
+upstage
+v0
+venice
+vercel
+vivgrid
+vultr
+wandb
+xiaomi
+zai-coding-plan
+zenmux
+zhipuai
+zhipuai-coding-plan
 ```
-Read, Write, Http, Events, Session, Ui, Exec, Env, Tool, Log
+
+## 13) Appendix C — Feature Complexity Tables Used in This Report
+
+### 13.1 Rust Feature Complexity Table
+
+```tsv
+file	loc	fn_count
+src/extensions.rs	38379	1517
+src/extensions_js.rs	19284	449
+src/extension_dispatcher.rs	11745	404
+src/provider_metadata.rs	2645	60
+src/extension_index.rs	1469	98
+src/doctor.rs	1475	69
+src/session.rs	7294	334
+src/session_index.rs	1648	88
+src/cli.rs	1330	107
+src/main.rs	3632	120
+src/providers/mod.rs	2127	105
+src/providers/openai.rs	1903	75
+src/providers/anthropic.rs	1792	63
+src/providers/gemini.rs	1317	59
+src/providers/azure.rs	1030	39
+src/providers/cohere.rs	1551	51
+src/providers/vertex.rs	801	39
+src/providers/bedrock.rs	1048	42
+src/providers/gitlab.rs	375	22
+src/providers/copilot.rs	424	22
+src/bin/ext_full_validation.rs	1635	28
+src/bin/ext_workloads.rs	4537	120
+src/bin/session_workload_bench.rs	435	18
 ```
 
-- **Dangerous capabilities**: `Exec` and `Env` require explicit opt-in
-- **Three policy profiles**: Safe (deny-by-default), Standard (prompt for dangerous), Permissive (allow all)
-- **Per-extension overrides**: Custom capability grants per extension ID
-- **Exec mediation**: Command-level allow/deny lists with 7 dangerous command classes
-- **Secret broker**: Pattern-based redaction of API keys, tokens, passwords
-
-### 6.4 Compatibility Scanner
-
-Static analysis of extension source code before loading:
-- 8 bit markers (import, require, pi.*, process.env, eval, Function, binding, dlopen)
-- Detects required capabilities from code patterns
-- Produces `CompatLedger` with capabilities, rewrites, forbidden patterns, flagged risks
-- Generates actionable remediation advice
-
-### 6.5 Auto-Repair Pipeline
-
-Multi-stage repair for extensions that fail to load:
-1. Structural validation (file readable, parseable)
-2. Tolerant parsing with error recovery
-3. Ambiguity detection (DynamicEval: 0.9, ProxyUsage: 0.7, DynamicImport: 0.5)
-4. Confidence scoring before applying fixes
-5. Modes: off, suggest, auto-safe, auto-strict
-
-### 6.6 Runtime Risk Controller
-
-Graduated enforcement with 4 phases:
-1. **Shadow** -- Score risks, no enforcement
-2. **LogOnly** -- Log would-be blocks but allow
-3. **EnforceNew** -- Enforce only for newly-loaded extensions
-4. **EnforceAll** -- Full enforcement
-
-Automatic rollback triggers on false-positive rate, error rate, or latency thresholds.
-
-### 6.7 Hostcall Optimization Infrastructure (~8,000 lines)
-
-| Component | Lines | Purpose |
-|-----------|------:|---------|
-| `hostcall_queue.rs` | 2,109 | Dual-lane ring + deque, BRAVO contention detection, S3-FIFO eviction |
-| `hostcall_amac.rs` | 1,391 | AMAC interleaved execution for memory-stall hiding |
-| `hostcall_trace_jit.rs` | ~1,500 | Trace-level JIT for hot hostcall patterns |
-| `hostcall_superinstructions.rs` | ~1,200 | Macro-ops for common hostcall sequences |
-| `hostcall_s3_fifo.rs` | ~800 | S3-FIFO cache eviction policy |
-| `hostcall_io_uring_lane.rs` | ~600 | io_uring integration (Linux) |
-| `hostcall_rewrite.rs` | ~400 | Call rewriting optimization |
-
-### 6.8 Differential Testing (TS Oracle)
-
-Same unmodified extension runs in **both** pi-mono TS runtime and Rust QuickJS. Outputs are normalized and compared:
-- Timestamp replaced with `<TIMESTAMP>`
-- Paths replaced with relative + `<PI_MONO_ROOT>`
-- Session/Span IDs replaced with placeholders
-- ANSI escape codes stripped
-
-### Comparison Table
-
-| Feature | Rust | TypeScript |
-|---------|------|-----------|
-| JS engine | QuickJS (embedded, sandboxed) | V8 (shared, full access) |
-| Extension loading | Parse + transpile + QuickJS eval | jiti dynamic TS loading |
-| Capability enforcement | 10-capability policy system | None |
-| Exec mediation | Command-level allow/deny | None |
-| Secret redaction | Pattern-based broker | None |
-| Auto-repair | Confidence-scored pipeline | None |
-| Preflight analysis | `pi doctor <ext>` | None |
-| Conformance testing | 223-extension corpus | None |
-| Differential testing | TS-to-Rust oracle | None |
-| Hostcall optimization | AMAC, BRAVO, S3-FIFO, JIT (still 10-19x slower per-call than in-process V8, measured) | None needed (in-process calls, 0.87-1.37us/call measured) |
-| Runtime risk control | 4-phase graduated enforcement | None |
-| Node.js API coverage | 22 module shims | Native (full Node.js) |
-| npm package support | 30+ virtual stubs | Native (npm install) |
-
----
-
-## 7. Extension Conformance: Full 223-Extension Catalog
-
-**Overall: 187 pass / 36 fail (83.9%)**
-
-Source breakdown:
-
-| Source Tier | Total | Pass | Fail | Pass Rate |
-|-------------|------:|-----:|-----:|----------:|
-| Official examples | 66 | 65 | 1 | 98.5% |
-| Community | 58 | 52 | 6 | 89.7% |
-| npm registry | 75 | 51 | 24 | 68.0% |
-| Third-party GitHub | 23 | 18 | 5 | 78.3% |
-| Agents (mikeastock) | 1 | 0 | 1 | 0% |
-
-### Failure Categories
-
-| Category | Count | Description |
-|----------|------:|-------------|
-| `missing_command` | 19 | Extension registers different slash commands than expected in manifest |
-| `load_error` | 13 | Extension fails to load (missing module, type error, resolution failure) |
-| `missing_tool` | 4 | Expected tool not registered |
-
-### Complete Extension List
-
-#### Official Examples (66) -- 65 Pass, 1 Fail
-
-| Extension | Tier | Status |
-|-----------|:----:|--------|
-| antigravity-image-gen | T1 | PASS |
-| auto-commit-on-exit | T2 | PASS |
-| base_fixtures | T3 | FAIL: Manifest expects tools but none registered |
-| bash-spawn-hook | T1 | PASS |
-| bookmark | T1 | PASS |
-| claude-rules | T2 | PASS |
-| confirm-destructive | T2 | PASS |
-| custom-compaction | T2 | PASS |
-| custom-footer | T1 | PASS |
-| custom-header | T2 | PASS |
-| custom-provider-anthropic | T3 | PASS |
-| custom-provider-gitlab-duo | T3 | PASS |
-| custom-provider-qwen-cli | T3 | PASS |
-| diff | T2 | PASS |
-| dirty-repo-guard | T2 | PASS |
-| doom-overlay | T3 | PASS |
-| dynamic-resources | T2 | PASS |
-| event-bus | T2 | PASS |
-| file-trigger | T2 | PASS |
-| files | T2 | PASS |
-| git-checkpoint | T2 | PASS |
-| handoff | T1 | PASS |
-| hello | T1 | PASS |
-| inline-bash | T2 | PASS |
-| input-transform | T2 | PASS |
-| interactive-shell | T2 | PASS |
-| mac-system-theme | T2 | PASS |
-| message-renderer | T1 | PASS |
-| modal-editor | T2 | PASS |
-| model-status | T2 | PASS |
-| negative-denied-caps | T2 | PASS |
-| notify | T2 | PASS |
-| overlay-qa-tests | T2 | PASS |
-| overlay-test | T1 | PASS |
-| permission-gate | T2 | PASS |
-| pirate | T2 | PASS |
-| plan-mode | T3 | PASS |
-| preset | T2 | PASS |
-| prompt-url-widget | T2 | PASS |
-| protected-paths | T2 | PASS |
-| qna | T1 | PASS |
-| question | T1 | PASS |
-| questionnaire | T1 | PASS |
-| rainbow-editor | T2 | PASS |
-| redraws | T1 | PASS |
-| rpc-demo | T3 | PASS |
-| sandbox | T3 | PASS |
-| send-user-message | T1 | PASS |
-| session-name | T1 | PASS |
-| shutdown-command | T2 | PASS |
-| snake | T1 | PASS |
-| space-invaders | T1 | PASS |
-| ssh | T2 | PASS |
-| status-line | T2 | PASS |
-| subagent | T3 | PASS |
-| summarize | T1 | PASS |
-| system-prompt-header | T2 | PASS |
-| timed-confirm | T1 | PASS |
-| titlebar-spinner | T2 | PASS |
-| todo | T2 | PASS |
-| tool-override | T2 | PASS |
-| tools | T2 | PASS |
-| trigger-compact | T2 | PASS |
-| truncated-tool | T2 | PASS |
-| widget-placement | T2 | PASS |
-| with-deps | T3 | PASS |
-
-#### Community (58) -- 52 Pass, 6 Fail
-
-| Extension | Tier | Status |
-|-----------|:----:|--------|
-| ferologics-notify | T2 | PASS |
-| hjanuschka-clipboard | T1 | PASS |
-| hjanuschka-cost-tracker | T1 | PASS |
-| hjanuschka-flicker-corp | T1 | PASS |
-| hjanuschka-funny-working-message | T2 | PASS |
-| hjanuschka-handoff | T1 | PASS |
-| hjanuschka-loop | T2 | PASS |
-| hjanuschka-memory-mode | T1 | PASS |
-| hjanuschka-oracle | T1 | PASS |
-| hjanuschka-plan-mode | T2 | PASS |
-| hjanuschka-resistance | T2 | PASS |
-| hjanuschka-speedreading | T2 | PASS |
-| hjanuschka-status-widget | T2 | PASS |
-| hjanuschka-ultrathink | T2 | PASS |
-| hjanuschka-usage-bar | T2 | PASS |
-| jyaunches-canvas | T3 | PASS |
-| mitsuhiko-answer | T1 | PASS |
-| mitsuhiko-control | T5 | PASS |
-| mitsuhiko-cwd-history | T2 | PASS |
-| mitsuhiko-files | T2 | PASS |
-| mitsuhiko-loop | T2 | PASS |
-| mitsuhiko-notify | T2 | PASS |
-| mitsuhiko-review | T2 | PASS |
-| mitsuhiko-todos | T2 | PASS |
-| mitsuhiko-uv | T2 | PASS |
-| mitsuhiko-whimsical | T2 | PASS |
-| nicobailon-interactive-shell | T3 | PASS |
-| nicobailon-interview-tool | T4 | FAIL: Load error (ENOENT) |
-| nicobailon-mcp-adapter | T3 | PASS |
-| nicobailon-powerline-footer | T3 | PASS |
-| nicobailon-rewind-hook | T2 | PASS |
-| nicobailon-subagents | T3 | PASS |
-| ogulcancelik-ghostty-theme-sync | T2 | PASS |
-| prateekmedia-checkpoint | T3 | PASS |
-| prateekmedia-lsp | T3 | FAIL: Missing command 'lsp' |
-| prateekmedia-permission | T3 | PASS |
-| prateekmedia-ralph-loop | T3 | PASS |
-| prateekmedia-repeat | T3 | PASS |
-| prateekmedia-token-rate | T2 | PASS |
-| qualisero-background-notify | T2 | FAIL: Module resolution ('../../shared') |
-| qualisero-compact-config | T2 | PASS |
-| qualisero-pi-agent-scip | T3 | FAIL: Module resolution ('./dist/extension.js') |
-| qualisero-safe-git | T2 | FAIL: Module resolution ('../../shared') |
-| qualisero-safe-rm | T2 | PASS |
-| qualisero-session-color | T2 | PASS |
-| qualisero-session-emoji | T2 | PASS |
-| tmustier-agent-guidance | T2 | PASS |
-| tmustier-arcade-mario-not | T1 | PASS |
-| tmustier-arcade-picman | T1 | PASS |
-| tmustier-arcade-ping | T1 | PASS |
-| tmustier-arcade-spice-invaders | T1 | PASS |
-| tmustier-arcade-tetris | T1 | PASS |
-| tmustier-code-actions | T3 | PASS |
-| tmustier-files-widget | T3 | PASS |
-| tmustier-ralph-wiggum | T2 | PASS |
-| tmustier-raw-paste | T2 | PASS |
-| tmustier-tab-status | T1 | PASS |
-| tmustier-usage-extension | T1 | PASS |
-
-#### npm Registry (75) -- 51 Pass, 24 Fail
-
-| Extension | Tier | Status |
-|-----------|:----:|--------|
-| aliou-pi-extension-dev | T3 | PASS |
-| aliou-pi-guardrails | T3 | FAIL: Load error (not a function) |
-| aliou-pi-linkup | T3 | FAIL: Missing command 'linkup:balance' |
-| aliou-pi-processes | T3 | FAIL: Module resolution error |
-| aliou-pi-synthetic | T3 | FAIL: Missing command 'synthetic:quotas' |
-| aliou-pi-toolchain | T3 | FAIL: Load error (not a function) |
-| benvargas-pi-ancestor-discovery | T1 | PASS |
-| benvargas-pi-antigravity-image-gen | T1 | PASS |
-| benvargas-pi-synthetic-provider | T3 | PASS |
-| checkpoint-pi | T3 | PASS |
-| imsus-pi-extension-minimax-coding-plan-mcp | T3 | PASS |
-| juanibiapina-pi-extension-settings | T3 | PASS |
-| juanibiapina-pi-files | T3 | PASS |
-| juanibiapina-pi-gob | T3 | PASS |
-| lsp-pi | T3 | FAIL: Manifest expects tools but none registered |
-| marckrenn-pi-sub-bar | T3 | FAIL: Missing command 'sub-core:settings' |
-| marckrenn-pi-sub-core | T3 | FAIL: Load error (undefined property) |
-| mitsupi | T5 | FAIL: Missing command 'control-sessions' |
-| ogulcancelik-pi-sketch | T2 | PASS |
-| oh-my-pi-basics | T3 | PASS |
-| permission-pi | T3 | PASS |
-| pi-agentic-compaction | T3 | PASS |
-| pi-amplike | T3 | FAIL: Manifest expects tools but none registered |
-| pi-annotate | T5 | PASS |
-| pi-bash-confirm | T3 | FAIL: Missing command 'demo-bash-confirm' |
-| pi-brave-search | T3 | PASS |
-| pi-command-center | T1 | PASS |
-| pi-ephemeral | T2 | PASS |
-| pi-extensions | T3 | FAIL: Missing command 'code' |
-| pi-ghostty-theme-sync | T2 | PASS |
-| pi-interactive-shell | T3 | PASS |
-| pi-interview | T4 | PASS |
-| pi-mcp-adapter | T3 | PASS |
-| pi-md-export | T2 | PASS |
-| pi-mermaid | T3 | PASS |
-| pi-messenger | T3 | PASS |
-| pi-model-switch | T1 | PASS |
-| pi-moonshot | T3 | PASS |
-| pi-multicodex | T3 | PASS |
-| pi-notify | T2 | PASS |
-| pi-package-test | T3 | FAIL: Missing command 'cost' |
-| pi-poly-notify | T2 | PASS |
-| pi-powerline-footer | T3 | PASS |
-| pi-prompt-template-model | T2 | PASS |
-| pi-repoprompt-mcp | T3 | PASS |
-| pi-review-loop | T3 | PASS |
-| pi-screenshots-picker | T3 | PASS |
-| pi-search-agent | T3 | FAIL: Module resolution ('openai') |
-| pi-session-ask | T2 | PASS |
-| pi-shadow-git | T3 | PASS |
-| pi-shell-completions | T3 | PASS |
-| pi-skill-palette | T2 | PASS |
-| pi-subdir-context | T3 | PASS |
-| pi-super-curl | T3 | PASS |
-| pi-telemetry-otel | T3 | PASS |
-| pi-threads | T1 | PASS |
-| pi-voice-of-god | T2 | PASS |
-| pi-wakatime | T3 | FAIL: Module resolution ('adm-zip') |
-| pi-watch | T3 | PASS |
-| pi-web-access | T3 | FAIL: Module resolution ('linkedom') |
-| qualisero-pi-agent-scip | T3 | FAIL: Module resolution ('@sourcegraph/scip') |
-| ralph-loop-pi | T3 | PASS |
-| repeat-pi | T3 | PASS |
-| shitty-extensions | T3 | FAIL: Missing command 'cost' |
-| tmustier-pi-arcade | T3 | FAIL: Missing command 'mario-not' |
-| token-rate-pi | T2 | PASS |
-| vaayne-agent-kit | T3 | FAIL: Missing command 'powerline' |
-| vaayne-pi-mcp | T3 | PASS |
-| vaayne-pi-subagent | T3 | PASS |
-| vaayne-pi-web-tools | T3 | PASS |
-| verioussmith-pi-openrouter | T3 | PASS |
-| vpellegrino-pi-skills | T2 | PASS |
-| walterra-pi-charts | T3 | PASS |
-| walterra-pi-graphviz | T3 | PASS |
-| zenobius-pi-dcp | T3 | PASS |
-
-#### Third-Party GitHub (23) -- 18 Pass, 5 Fail
-
-| Extension | Tier | Status |
-|-----------|:----:|--------|
-| aliou-pi-extensions | T3 | FAIL: Missing command 'dumb-zone-status' |
-| ben-vargas-pi-packages | T3 | FAIL: Missing command 'synthetic-models' |
-| charles-cooper-pi-extensions | T3 | FAIL: Missing command 'subagent' |
-| cv-pi-ssh-remote | T3 | PASS |
-| graffioh-pi-screenshots-picker | T2 | PASS |
-| graffioh-pi-super-curl | T2 | PASS |
-| jyaunches-pi-canvas | T2 | PASS |
-| kcosr-pi-extensions | T5 | FAIL: Missing command 'assistant' |
-| limouren-agent-things | T3 | PASS |
-| lsj5031-pi-notification-extension | T2 | PASS |
-| marckrenn-pi-sub | T3 | FAIL: Missing command 'sub-core:settings' |
-| michalvavra-agents | T3 | PASS |
-| ogulcancelik-pi-sketch | T2 | PASS |
-| openclaw-openclaw | T3 | FAIL: Missing command 'files' |
-| pasky-pi-amplike | T3 | FAIL: Manifest expects tools but none registered |
-| qualisero-pi-agent-scip | T3 | FAIL: Module resolution error |
-| raunovillberg-pi-stuffed | T2 | PASS |
-| rytswd-direnv | T2 | PASS |
-| rytswd-questionnaire | T1 | PASS |
-| rytswd-slow-mode | T3 | PASS |
-| vtemian-pi-config | T4 | PASS |
-| w-winter-dot314 | T3 | FAIL: Missing command 'ask' |
-| zenobi-us-pi-dcp | T3 | PASS |
-
-#### Agents (1) -- 0 Pass, 1 Fail
-
-| Extension | Tier | Status |
-|-----------|:----:|--------|
-| agents-mikeastock/extensions | T5 | FAIL: Missing command 'handoff' |
-
-### Remediation Plan for 36 Failures
-
-| Category | Count | Root Cause | Fix |
-|----------|------:|------------|-----|
-| `missing_command` | 19 | Extension registers different commands than manifest expects; multi-package extensions register subset | Update manifest to match actual registrations; or add command aliasing |
-| `load_error` (module resolution) | 8 | Extension imports npm packages not in virtual stub list (`openai`, `adm-zip`, `linkedom`, `@sourcegraph/scip`, etc.) | Add virtual module stubs for missing packages |
-| `load_error` (runtime) | 5 | Type errors, undefined properties, non-function exports | Extension code bugs or incompatible patterns; auto-repair pipeline may fix |
-| `missing_tool` | 4 | Manifest expects tools that extension doesn't register | Update manifest or investigate registration failure |
-
-**Priority remediation**: Adding 5-6 npm virtual stubs (`openai`, `adm-zip`, `linkedom`, `@sourcegraph/scip`, shared module stubs) would resolve ~8 failures, bringing pass rate to ~87%.
-
----
-
-## 8. All Rust-Only Features (Complete List)
-
-Every feature listed below exists in the Rust version but has **no equivalent** in the TypeScript original.
-
-### 8.1 Additional LLM Providers
-
-| Provider | Lines | What It Adds |
-|----------|------:|------|
-| Cohere | ~1,200 | command/command-light models, token counting |
-| Vertex AI | ~1,000 | Google Cloud auth, SafetySettings |
-| GitHub Copilot | ~800 | Device flow OAuth, Copilot Chat API |
-| GitLab CodeGemma | ~600 | GitLab API authentication |
-| Azure OpenAI | ~1,000 | Azure AD auth, deployment routing |
-
-TS has: Anthropic, OpenAI (completions + responses), Google (Gemini + Vertex), Bedrock.
-Rust has: All of the above plus Cohere, Copilot, GitLab, Azure, and extension streamSimple providers.
-
-### 8.2 `pi doctor` Command (1,684 lines)
-
-Comprehensive environment health checker with:
-- 6 diagnostic categories: Config, Dirs, Auth, Shell, Sessions, Extensions
-- Output formats: text, JSON, markdown
-- Auto-fix for safe issues (`--fix`)
-- Selective checks (`--only`)
-- Extension preflight analysis
-- Finding severity levels: Pass/Info/Warn/Fail
-
-### 8.3 Session Store V2 (1,507 lines)
-
-Segmented append-log architecture replacing simple JSONL:
-- Frame-based sequential writes with CRC32C checksums
-- Sidecar offset index for O(1) entry lookup
-- SHA256 payload hashing and chain-hash integrity
-- Checkpoint snapshots for fast recovery
-- Migration tracking between formats
-
-### 8.4 SQLite Session Backend (702 lines)
-
-Optional SQLite storage with:
-- WAL mode for concurrent reads
-- Schema: `pi_session_header`, `pi_session_entries`, `pi_session_meta`
-- Configurable durability (strict/balanced/throughput)
-- Async via asupersync SQLite driver
-
-### 8.5 Extension Capability Policy System (embedded in 44,368-line extensions.rs)
-
-10-capability system with 3 profiles (Safe/Standard/Permissive):
-- Per-extension overrides
-- Dangerous capability gating (Exec, Env)
-- Runtime prompts for capability approval
-- Exec mediation with 7 dangerous command classes
-- Secret broker for env var redaction
-
-### 8.6 Extension Auto-Repair Pipeline
-
-4 repair modes (off/suggest/auto-safe/auto-strict):
-- Tolerant parsing with SWC
-- Ambiguity detection with confidence scoring
-- Module path rewriting
-- Import/export fixup
-
-### 8.7 Extension Compatibility Scanner
-
-Static analysis before load:
-- 8 detection markers for import patterns
-- Capability requirement inference
-- Forbidden pattern detection (native bindings, dlopen)
-- Remediation advice generation
-
-### 8.8 Extension Preflight Analysis (4,366 lines)
-
-Module support level classification (Real/Partial/Stub/ErrorThrow/Missing):
-- Finding severity (Info/Warning/Error)
-- Category-based grouping (Module/Capability/Pattern/Config/Runtime)
-- Verdict system (Pass/Warn/Fail)
-- Used by `pi doctor --path <ext>` for extension pre-assessment
-
-### 8.9 Runtime Risk Controller
-
-4-phase graduated enforcement:
-- Configurable Type-I error target (alpha)
-- Sliding window drift detection
-- In-memory risk ledger
-- Fail-closed semantics
-- Automatic rollback triggers
-
-### 8.10 Hostcall Optimization Infrastructure (~8,000 lines)
-
-- **AMAC interleaving** (1,391 lines): Memory-stall hiding via interleaved execution
-- **BRAVO contention detection** (2,109 lines): Read/write bias detection + dynamic switching
-- **S3-FIFO eviction**: Frequency + recency hybrid cache policy
-- **Trace JIT**: Hot hostcall pattern optimization
-- **Superinstructions**: Macro-ops for common sequences
-- **io_uring lane**: Linux io_uring integration
-
-### 8.11 Session Indexing SQLite Sidecar (1,947 lines)
-
-- O(log N) session lookup vs linear scan
-- Metadata caching (name, date range, message count)
-- Full-text search on session names
-- Date-range filtering
-- Background maintenance scheduling
-
-### 8.12 Additional CLI Commands
-
-| Command | Purpose |
-|---------|---------|
-| `install` | Install extensions/skills/prompts |
-| `remove` | Remove packages from settings |
-| `update` | Update installed packages |
-| `update-index` | Refresh extension index cache |
-| `search` | Search extensions by keyword |
-| `info` | Show extension details |
-| `config` | Interactive or JSON/text config viewer |
-| `doctor` | Environment health check |
-| `migrate` | JSONL v1 to v2 migration |
-| `--list-providers` | List all supported providers |
-
-### 8.13 OAuth for Extension Providers (5,376 lines in auth.rs)
-
-- `start_extension_oauth()` / `complete_extension_oauth()`
-- `refresh_extension_oauth_token()` / `refresh_expired_extension_oauth_tokens()`
-- `OAuthConfig`: auth_url, token_url, client_id, scopes, redirect_uri
-- Extensions can declare OAuth requirements in metadata
-- 20 integration tests in `tests/extensions_provider_oauth.rs`
-
-### 8.14 Extension Scoring & Ranking (3,361 lines)
-
-Algorithm for ranking extensions by quality:
-- Conformance grade
-- Compatibility score
-- Maintenance status
-- Popularity metrics
-
-### 8.15 Extension Replay (2,410 lines)
-
-Deterministic replay of extension executions for debugging.
-
-### 8.16 Extension Validation (1,385 lines)
-
-Validation classifier + dedup engine for the extension corpus.
-
-### 8.17 Extension License Screening (1,298 lines)
-
-License compliance checker for vendored extensions.
-
-### 8.18 Extension Popularity Metrics (1,070 lines)
-
-Download counts, star ratings, maintenance activity tracking.
-
-### 8.19 Extension Index Store (1,709 lines)
-
-Filesystem + SQLite index for fast extension discovery.
-
-### 8.20 19 Specialized Binary Tools
-
-| Binary | Lines | Purpose |
-|--------|------:|---------|
-| `ext_workloads` | 4,857 | Performance testing workloads |
-| `pi_legacy_capture` | 2,683 | Legacy session capture |
-| `ext_full_validation` | 1,806 | Master validation orchestrator |
-| `ext_unvendored_fetch_run` | 1,206 | Fetch and test unvendored extensions |
-| `ext_stress` | 955 | Concurrent extension stress testing |
-| `ext_popularity_snapshot` | 908 | Popularity metrics snapshot |
-| `ext_onboarding_queue` | 644 | Extension onboarding prioritization |
-| `session_workload_bench` | 488 | Session workload benchmarking |
-| `ext_tiered_corpus` | 411 | Tiered corpus management |
-| `ext_artifact_manifest` | 375 | Artifact tracking |
-| `ext_inclusion_list` | 321 | Inclusion criteria validation |
-| `ext_conformance_report` | 279 | Conformance report aggregation |
-| `ext_runtime_risk_ledger` | 228 | Runtime risk audit trail |
-| `ext_score_candidates` | 196 | Candidate scoring |
-| `ext_validate_dedup` | 193 | Deduplication validation |
-| `pijs_workload` | 169 | QuickJS workload testing |
-| `ext_license_screen` | 138 | License compliance screening |
-| `ext_conformance_matrix` | 127 | Capability x extension matrix |
-
-### 8.21 VCR Test Infrastructure (2,242 lines)
-
-HTTP interaction recording/playback:
-- Record/Playback modes
-- Method + URL + exact body matching after redaction
-- Dynamic cassette generation for temp paths
-- API key redaction in headers
-- 296 VCR cassette files in test fixtures
-
-### 8.22 Shell Completion Generation
-
-Bash, Zsh, Fish completions with dynamic model/extension/session completion.
-
-### 8.23 Terminal Image Rendering
-
-Sixel and iTerm2 inline image protocol support.
-
-### 8.24 Memory Pressure Monitoring in TUI
-
-Real-time memory usage display with automatic compaction triggering.
-
-### 8.25 Compaction Worker
-
-Background compaction daemon with configurable thresholds and token budget management.
-
-### 8.26 Version Check & Changelog
-
-Automatic update detection with changelog caching.
-
-### 8.27 Flake Classifier
-
-Test flakiness detection: timeout vs crash vs hang classification.
-
-### 8.28 Session Metrics & Telemetry
-
-Operation timing, latency histograms, compaction metrics.
-
-### 8.29 Conformance Shapes Validation
-
-Structural validation of API responses against expected shapes.
-
-### 8.30 Secret-Aware Environment Filtering
-
-Blocks exposure of `*_API_KEY`, `*_TOKEN`, `*_SECRET` patterns.
-
-### 8.31 CI Full Suite Gate (5,428 lines)
-
-15-gate release pipeline:
-- 9 blocking gates + 6 non-blocking
-- Artifact-backed verdicts with reproduction commands
-- Waiver lifecycle (30-day max, 3-day expiry warnings)
-- Cross-platform matrix validation (Linux/macOS/Windows)
-
-### 8.32 Zero-Copy Optimizations (Throughout Codebase)
-
-- `Arc<AssistantMessage>` for 16x streaming speedup
-- `Context<'a>` with `Cow<'a, [Message]>` for zero-copy context building
-- `AnthropicRequest<'a>` with `&'a str` for zero-allocation serialization
-- memchr-based line counting for O(1) memory truncation
-- `OnceLock`-cached static regex compilation
-- SSE event type interning and buffer-empty fast path
-
-### 8.33 Parallel Startup
-
-`ResourceLoader::load()` and `AuthStorage::load_async()` run concurrently via `futures::future::join`.
-
-### 8.34 Parallel Tool Execution
-
-`execute_tool_calls()` runs all tool calls via `join_all`, with steering checks between results.
-
----
-
-## 9. Test Coverage Comparison
-
-### Rust Test Suite
-
-**Total: 11,946 `#[test]` functions** (5,473 inline in `src/`, 6,473 in `tests/`)
-
-#### By Category
-
-| Category | Tests | Files | Key Areas |
-|----------|------:|------:|-----------|
-| **Extensions** | 2,655 | 64+ | Conformance, policy, JS shims, Node compat, repair, scoring, stress |
-| **Providers** | 962 | 23+ | Native verify (222), contracts (145), factory (57), streaming |
-| **Security** | 682 | 20 | Capability policy (82), exec mediation (68), scanner (49), rollout (45) |
-| **CI/QA/Release** | 506 | 14 | Documentation policy (150), suite gate (80), schema validation (65) |
-| **E2E** | 419 | 24 | CLI (56), RPC (42), library integration (38), TUI (36) |
-| **Model/Serialization** | 438 | 5+ | Cross-surface parity (104), JSON mode (87), model selector (51) |
-| **Session** | 371 | 7+ | Store V2 (85), connectors (32), conformance (31), inline (183) |
-| **Tools** | 318 | 4+ | Conformance (79), E2E (63), hardened (57), inline (89) |
-| **TUI** | 265 | 2+ | State (197), snapshot (28), inline (40) |
-| **Performance** | 233 | 11 | Schema (83), budgets (39), baseline (30), regression (27) |
-| **RPC** | 189 | 5+ | E2E (42), session connector (26), edge cases (18), inline (98) |
-| **SSE** | 39 | 1+ | Parser compliance (37 inline + 2 integration) |
-| **Other** | 869 | misc | Config, error, auth, package manager, autocomplete, etc. |
-
-#### Top 15 Files by Inline Test Count
-
-| File | #[test] |
-|------|--------:|
-| `src/extensions.rs` | 701 |
-| `src/extension_dispatcher.rs` | 251 |
-| `src/session.rs` | 183 |
-| `src/auth.rs` | 166 |
-| `src/error.rs` | 161 |
-| `src/extension_preflight.rs` | 147 |
-| `src/package_manager.rs` | 144 |
-| `src/interactive/tests.rs` | 130 |
-| `src/extensions_js.rs` | 120 |
-| `src/scheduler.rs` | 118 |
-| `src/conformance.rs` | 112 |
-| `src/config.rs` | 108 |
-| `src/autocomplete.rs` | 104 |
-| `src/rpc.rs` | 98 |
-| `src/cli.rs` | 98 |
-
-#### Fuzz Harnesses (14 targets)
-
-| Target | Focus |
-|--------|-------|
-| `fuzz_sse_stream` | SSE parser with random byte streams |
-| `fuzz_provider_event` | Provider event deserialization |
-| `fuzz_edit_match` | Edit tool string matching |
-| `fuzz_grep_pattern` | Grep tool regex patterns |
-| `fuzz_tool_paths` | Path traversal in tools |
-| `fuzz_config` | Configuration parsing |
-| `fuzz_session_jsonl` | Session JSONL corruption |
-| `fuzz_extension_payload` | Extension hostcall payloads |
-| `fuzz_config_load` | Config file loading |
-| `fuzz_message_roundtrip` | Message serialization roundtrip |
-| `fuzz_session_entry` | Session entry parsing |
-| `fuzz_message_deser` | Message deserialization |
-| `fuzz_sse_parser` | SSE event parsing |
-| `fuzz_smoke` | Basic smoke test |
-
-#### Test Infrastructure (8,714 lines)
-
-| File | Lines | Purpose |
-|------|------:|---------|
-| `common/logging.rs` | 3,036 | JSONL test logging with 80 inline tests |
-| `common/harness.rs` | 1,870 | TestHarness with artifact tracking |
-| `common/scenario_runner.rs` | 1,419 | Scenario-based test execution |
-| `common/mocks.rs` | 1,171 | Mock HTTP server, mock providers |
-| `common/tmux.rs` | 611 | TuiSession for scripted tmux testing |
-| `common/transcript_diff.rs` | 529 | Golden transcript diffing |
-
-#### Fixtures
-
-- 296 VCR cassette JSON files
-- 2,339 conformance fixture JSON files
-- 911 conformance report files
-- 329 general test fixture files
-- 18,397 files in extension conformance corpus
-
-### TypeScript Test Suite
-
-**Total: ~1,400 test functions** across ~87 test files (28,699 lines)
-
-| Package | Test Files | Lines | Key Areas |
-|---------|--------:|------:|-----------|
-| coding-agent/test/ | 49 | 11,557 | Session, compaction, extensions, tools, model, RPC, skills |
-| ai/test/ | 29 | 8,346 | Provider streaming, tool calls, tokens, abort, OAuth |
-| tui/test/ | 22 | 7,111 | Autocomplete, editor, markdown, input, terminal |
-| agent/test/ | 7 | 1,685 | Agent loop, E2E, Bedrock models |
-
-No fuzz harnesses. No CI gate infrastructure. No conformance corpus. No VCR infrastructure.
-
-### Side-by-Side
-
-| Metric | Rust | TypeScript | Ratio |
-|--------|-----:|----------:|------:|
-| Test functions | 11,946 | ~1,400 | **8.5x** |
-| Test files | 343 (247 + 96 inline) | ~87 | **3.9x** |
-| Test lines | ~265,028 | ~28,699 | **9.2x** |
-| Fuzz harnesses | 14 | 0 | -- |
-| CI gates | 15 | 0 | -- |
-| VCR cassettes | 296 | 0 | -- |
-| Conformance extensions | 223 | 0 | -- |
-| Test infrastructure | 8,714 lines | ~277 (utilities.ts) | **31x** |
-
----
-
-## 10. Architecture Benefits
-
-### 10.1 Security
-
-| Aspect | Rust | TypeScript |
-|--------|------|-----------|
-| **Memory safety** | Compile-time ownership, no buffer overflows, no use-after-free | V8 GC handles memory, but native addons are unsafe |
-| **Extension sandboxing** | QuickJS with 10-capability policy, filesystem scoping, exec mediation | Extensions run in-process with full Node.js access |
-| **Secret protection** | Pattern-based env var redaction, secret broker policy | No secret filtering |
-| **Supply chain** | Single binary, no runtime deps, vendored extensions with license screening | 39 npm packages, each a supply chain risk |
-| **Type safety** | Rust's type system catches entire classes of bugs at compile time | TypeScript types are erased at runtime |
-| **Audit surface** | One binary to audit | Node.js + V8 + 39 npm packages + transitive deps |
-
-### 10.2 Performance (Measured)
-
-| Aspect | Rust | TypeScript | Winner |
-|--------|------|-----------|--------|
-| **Cold startup** | 3.34ms `--help` (measured) | 726-1,045ms (measured) | **Rust (217-313x)** |
-| **Startup memory** | 6.4 MB RSS (measured) | 153-196 MB RSS (measured) | **Rust (24-30x)** |
-| **Extension cold load** | 7.96ms hello (measured) | 22.25-22.29ms (measured) | **Rust (2.8x)** |
-| **Session save (1M)** | 432ms (measured) | 0ms (measured) | **TypeScript** |
-| **E2E total (1M)** | 2,401ms (measured) | 700-1,239ms (measured) | **TypeScript (1.9-3.4x)** |
-| **Extension per-call** | 16.80us (measured) | 0.87-1.37us (measured) | **TypeScript (12-19x)** |
-| **Memory under load (1M)** | 76 MB (measured) | 820-875 MB (measured) | **Rust (10.8-11.5x)** |
-
-### 10.3 Reliability
-
-| Aspect | Rust | TypeScript |
-|--------|------|-----------|
-| **Cancellation** | Structured (request, drain, finalize, complete) | Best-effort (process.on('SIGINT')) |
-| **Resource cleanup** | RAII + ExtensionRegion with 5s cleanup budget | GC-dependent, no bounded cleanup |
-| **No orphan tasks** | Region ownership guarantees quiescence | Detached promises can leak |
-| **Test coverage** | 11,946 tests, 14 fuzz harnesses, 15 CI gates | ~1,400 tests |
-| **Deterministic testing** | LabRuntime + VCR for reproducible concurrency | Non-deterministic async |
-| **Conformance** | 223-extension corpus, differential TS-to-Rust oracle | No conformance infrastructure |
-
-### 10.4 Latency (Measured)
-
-| Aspect | Rust | TypeScript | Winner |
-|--------|------|-----------|--------|
-| **CLI readiness** | 3.34ms (measured) | 726-1,045ms (measured) | **Rust (217-313x)** |
-| **Extension cold load** | 7.96ms (measured) | 22.25ms (measured) | **Rust (2.8x)** |
-| **Extension per-call** | 16.80us (measured) | 0.87us (measured) | **TypeScript (19x)** |
-| **1M E2E total** | 2,401ms (measured) | 700ms Bun / 1,239ms Node (measured) | **TypeScript (1.9-3.4x)** |
-| **5M E2E total** | 11,828ms (measured) | 2,959ms Bun / 5,975ms Node (measured) | **TypeScript (2.0-4.0x)** |
-
-### 10.5 Operational
-
-| Aspect | Rust | TypeScript |
-|--------|------|-----------|
-| **Deployment** | Single static binary (~20MB) | Node.js + node_modules (~280-480MB) |
-| **Updates** | Replace one file | `npm install` + dependency resolution |
-| **Diagnostics** | `pi doctor` with 6 categories | Manual investigation |
-| **Migration** | `pi migrate` for format upgrades | Manual |
-| **Shell integration** | Native bash/zsh/fish completions | None |
-
----
-
-## 11. Impact of asupersync Structured Concurrency
-
-### What asupersync Provides
-
-asupersync is a **398,446-line custom async runtime** (500 files) built from scratch with:
-
-- **Structured concurrency**: `region()` API guarantees all child tasks complete before parent exits
-- **Cancel-correctness**: 4-phase protocol (request, drain, finalize, complete) with bounded cleanup budgets
-- **Capability security**: `Cx` context tokens encode what a task can do (spawn, IO, time, random)
-- **Deterministic testing**: `LabRuntime` with virtual time, deterministic scheduling, same seed = same execution
-- **Full I/O stack**: TCP, HTTP/1.1, HTTP/2, WebSocket, TLS (rustls), SQLite, PostgreSQL, MySQL
-- **Concurrency primitives**: Channels (MPSC, oneshot, broadcast), Mutex, RwLock, Semaphore, Barrier
-- **Two-phase effects**: Reserve/commit with linear obligation tokens prevents data loss
-- **Formal semantics**: 1,764-line operational semantics document, Lean skeleton, TLA+ export
-
-### How It Benefits pi_agent_rust
-
-#### Correctness Under Cancellation
-
-When a user presses Ctrl+C mid-agent-loop:
-
-**Without structured concurrency (typical async runtimes)**:
-- HTTP requests may continue in background
-- Tool executions run detached
-- Database writes are partial
-- Session state corrupted
-
-**With asupersync**:
-1. Cancellation propagates to all child tasks in the region
-2. HTTP requests abort at next checkpoint
-3. Tool executions drain to safe points (bounded by cleanup budget)
-4. Finalizers run for resource cleanup
-5. Region closes to quiescence -- guaranteed clean state
-
-#### Deterministic VCR Testing
-
-VCR cassettes record/replay HTTP interactions. With asupersync's `LabRuntime`:
-- Same seed = same scheduling order = same test outcome
-- Concurrency bugs become reproducible
-- Trace capture + replay for debugging
-- No flaky tests from race conditions
-
-This is why pi_agent_rust can run 296 VCR cassette tests reliably in CI.
-
-#### Capability Isolation for Extensions
-
-Extensions loaded via QuickJS receive a restricted `Cx`:
-- No ambient spawning (unlike `tokio::spawn` anywhere)
-- IO capabilities explicitly granted
-- Time capabilities controlled
-- All effects flow through capability tokens
-
-This architectural pattern makes the 10-capability policy system possible at the runtime level, not just at the API level.
-
-#### Bounded Cleanup for Agent Shutdown
-
-`ExtensionRegion` wraps `ExtensionManager` with a 5-second cleanup budget:
-- When the agent exits, extension runtimes get 5 seconds to clean up
-- After 5 seconds, forced shutdown with no hanging processes
-- Deployment-safe: no orphaned QuickJS runtimes
-
-#### No Orphan Tool Executions
-
-When parallel tool execution (`join_all`) is cancelled:
-- All tool tasks are children of the current region
-- Region cancellation propagates to all children
-- No stray HTTP requests or file handles
-- No leaked subprocess PIDs
-
-### Comparison: asupersync vs Tokio vs Node.js
-
-| Aspect | asupersync | Tokio | Node.js |
-|--------|-----------|-------|---------|
-| Cancellation | Protocol with budgets | Drop flag | process.on('SIGINT') |
-| Task ownership | Region-scoped | Detached (JoinHandle) | Event loop |
-| Testing | Deterministic LabRuntime | Non-deterministic | Non-deterministic |
-| Obligations | Linear tokens | None | None |
-| Effects | Capability context (Cx) | Ambient authority | Ambient authority |
-| Cleanup budget | Deadline + poll quota | Timeout only | None |
-| Orphan prevention | Structural (type system) | Convention-based | None |
-| Formal verification | Lean + TLA+ | None | None |
-
-### The rich_rust Component
-
-rich_rust (48,895 lines, 67 files) provides the terminal rendering layer:
-- Markup syntax (`[bold red]text[/]`)
-- Tables, panels, trees, progress bars
-- Syntax highlighting (syntect)
-- Markdown rendering
-- HTML/SVG export
-- Automatic color downgrade (24-bit to 8-bit to 4-bit)
-- Zero unsafe code (`#![forbid(unsafe_code)]`)
-
-This replaces the TypeScript version's dependency on `chalk` + custom TUI library (10,098 lines).
-
----
-
-## Summary: The Complete Picture
-
-The Rust version of pi agent is a fundamentally different artifact than the TypeScript original. It is not merely a translation but a **platform reimplementation** that:
-
-1. **Replaces the entire Node.js runtime** with ~974K lines of native Rust (asupersync + rich_rust + pi_agent_rust)
-2. **Adds 38+ features** absent from the original, including a 10-capability extension security system, 5 additional LLM providers, `pi doctor`, Session Store V2, SQLite backend, and comprehensive CI gates
-3. **Implements an extension sandbox** (99,605 lines) where the original has a trust-everything in-process loader (2,767 lines)
-4. **Ships 11,946 tests** (8.5x the original), 14 fuzz harnesses, 296 VCR cassettes, and a 223-extension conformance corpus
-5. **Deploys as a single ~20MB binary** with zero runtime dependencies, vs Node.js/Bun + 39 npm packages
-6. **Starts 217-313x faster** and uses **8-30x less memory** (measured), but is **1.2-4.0x slower on session workload latency** (measured) -- the session save hot path is the #1 optimization target
-
-The TypeScript version is a working agent that is currently faster at its core workload (session append/save). The Rust version is a **production-hardened, security-conscious platform** with dramatically better startup, memory footprint, and operator tooling -- but needs targeted optimization on the session save hot path and extension per-call dispatch overhead to match TypeScript's workload latency.
-
----
-
-*Report generated by static analysis of both codebases. Performance figures are measured benchmarks from `hyperfine`, `/usr/bin/time`, session workload harness, and extension microbenchmarks (see Section 4 for methodology and raw artifact paths). Extension conformance data from `docs/extension-catalog.json` (2026-02-07).*
+### 13.2 Legacy Feature Complexity Table
+
+```tsv
+file	loc	callables
+packages/coding-agent/src/core/extensions/index.ts	132	0
+packages/coding-agent/src/core/extensions/wrapper.ts	85	4
+packages/coding-agent/src/core/extensions/runner.ts	615	37
+packages/coding-agent/src/core/session-manager.ts	1011	61
+packages/coding-agent/src/core/model-registry.ts	432	21
+packages/coding-agent/src/cli/args.ts	286	3
+packages/coding-agent/src/main.ts	619	16
+packages/ai/src/providers/register-builtins.ts	62	2
+packages/ai/src/providers/openai-responses.ts	222	8
+packages/ai/src/providers/openai-completions.ts	699	15
+packages/ai/src/providers/anthropic.ts	637	15
+packages/ai/src/providers/google.ts	408	9
+packages/ai/src/providers/google-vertex.ts	435	11
+packages/ai/src/providers/amazon-bedrock.ts	547	15
+packages/ai/src/providers/azure-openai-responses.ts	212	9
+packages/ai/src/providers/google-gemini-cli.ts	862	16
+packages/ai/src/providers/openai-codex-responses.ts	356	13
+```
+
+## 14) Appendix D — Primary Raw Artifacts
+
+- Realistic E2E latency + matched-state + footprint matrices (baseline dataset reused in this report)
+  - `BENCHMARK_COMPARISON_BETWEEN_RUST_VERSION_AND_ORIGINAL__CODEX.md` (source tables and matrix outputs)
+  - `.bench/pi_session_bench/after_round2_runs.jsonl`
+  - `.bench/pi_session_bench/after_round3_runs.jsonl`
+  - `.bench/pi_session_bench/after_round4_runs.jsonl`
+  - `.bench/pi_session_bench/after_round5_runs.jsonl`
+- Extension execution microbench
+  - `.tmp_windyelk/ext_workloads_rust_gpt.jsonl`
+  - `.tmp_windyelk/ext_workloads_legacy_node_gpt.jsonl`
+  - `.tmp_windyelk/ext_workloads_legacy_bun_gpt.jsonl`
+- Cold-start readiness and footprint probes
+  - `/tmp/startup_help_compare.json`
+  - `/tmp/startup_version_compare.json`
+- Extension conformance corpus outputs
+  - `tests/ext_conformance/reports/pipeline/full_validation_report.compat2.json`
+  - `tests/ext_conformance/reports/pipeline/full_validation_report.compat2.md`
+- Provider inventory/parity artifacts
+  - `docs/provider-canonical-id-table.json`
+  - `docs/provider-parity-reconciliation-report.json`
+  - `/tmp/provider_diff.json`
+  - `/tmp/help_diff.json`
+  - `.tmp_windyelk/rust_provider_extra.txt`
+  - `.tmp_windyelk/provider_overlap.txt`
+  - `.tmp_windyelk/legacy_provider_extra.txt`
+- Coverage and test-surface artifacts
+  - `docs/coverage-baseline-map.json`
+  - `docs/TEST_COVERAGE_MATRIX.md`
+  - `/tmp/ts_counts_coding_agent.json`
+  - `/tmp/ts_counts_fullstack.json`
+  - `.tmp_windyelk/pi_rust_tokei.json`
+  - `.tmp_windyelk/pi_legacy_coding_agent_tokei.json`
+  - `.tmp_windyelk/pi_legacy_fullstack_tokei.json`

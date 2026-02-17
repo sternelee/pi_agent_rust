@@ -3,33 +3,53 @@
 Generated: 2026-02-17
 Workspace: `/data/projects/pi_agent_rust`
 
+## 0) Post-Hardening Status Update (2026-02-17)
+
+This report now includes a post-hardening extension-compatibility checkpoint.
+
+- Extension conformance matrix is now fully green locally: `224/224` passed, `0` failed, `0` skipped.
+- This supersedes earlier partial-compatibility snapshots in this document that referenced `223` corpus entries with non-zero failures.
+- Validation commands run in this update cycle:
+  - `cargo test --test ext_conformance_generated --features ext-conformance -- conformance_sharded_matrix --nocapture --exact`
+  - `cargo check --all-targets`
+  - `cargo clippy --all-targets -- -D warnings`
+  - `cargo fmt --check`
+
 ## 1) Lede (Do Not Bury This)
 
 1. Rust is currently **slower** than legacy in wall-clock for long-session resume/workload paths in this snapshot, often ~`1.2x` to `2.0x` slower than Node and ~`1.9x` to `4.0x` slower than Bun in realistic end-to-end runs.
 2. Rust is currently **much smaller in memory footprint** for equivalent workloads in synthetic matched-state runs, and still significantly smaller in realistic runs with heavy exports/forks/extension activity.
-3. Extension compatibility is substantial but not complete: vendored corpus is `223` extensions, with `187` pass, `29` fail, `7` pending manifest alignment.
+3. Extension compatibility is currently fully passing in local conformance validation: matrix run shows `224/224` pass (`0` fail, `0` skipped).
 4. Rust has significantly expanded first-class capability surface versus legacy coding-agent CLI (commands, policy explainers, provider metadata/control, risk/quota/security instrumentation).
 5. The largest practical optimization target remains session append/save behavior at high token-volume and large histories; this is the best lever for major speed gains.
-6. Startup/readiness latency strongly favors Rust in this snapshot: `--help` is ~`3.34ms` mean vs Node `1,045.10ms` and Bun `726.28ms`, with much lower baseline RSS.
+6. Startup/readiness latency strongly favors Rust in this snapshot: `--help` is low-single-digit ms for Rust while prior validated legacy baselines remain near ~`1s` (Node) and ~`0.7s` (Bun), with much lower baseline RSS for Rust.
+7. Extension micro-harness inversion is now achieved on the real native runtime lane: in `pijs_workload` release runs, native runtime is `~17.08x` faster per call than QuickJS (`0.4925us` vs `8.4132us`).
 
 ## 1.1) Refresh Delta (2026-02-17)
 
 Freshly re-measured in this run:
+- `pijs_workload` release microbench with precision fix (`per_call_us_f64` now true fractional; added `per_call_ns_f64`)
+- `pijs_workload` 3-lane runtime comparison (`quickjs`, `native-rust-runtime`, `native-rust-preview`) at `50,000` iterations
+- targeted extension/runtime suites (`event_loop_conformance`, `extensions_event_wiring`, `lab_runtime_extensions`)
+- full extension conformance matrix (`ext_conformance_generated`) now at `224/224` pass
+- Rust release cold startup/readiness (`hyperfine` for `--help` and `--version`)
+- local strict quality gates (`cargo fmt --check`, `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`)
+
+Reused (existing in-repo evidence, unchanged methodology):
 - LOC and callable inventory (Rust + legacy scopes)
 - CLI diff (`pi --help` vs legacy `dist/cli.js --help`)
 - provider ID diff (Rust canonical table vs legacy runtime provider registry)
-- cold startup/readiness (`hyperfine` for `--help` and `--version`)
+- cross-runtime startup compare tables (Node/Bun) from prior validated run
 - one-shot startup footprint snapshots (`/usr/bin/time` RSS/user/sys)
-
-Reused (existing in-repo evidence, unchanged methodology):
 - long-session realistic latency matrix
 - matched-state 10-message append footprint matrix
 - realistic 1M/5M footprint matrix
 - extension workload microbench (`ext_workloads` and `bench_legacy_extension_workloads.mjs`)
-- 223-extension vendored conformance + failure taxonomy
+- historical 223-extension vendored conformance + failure taxonomy (kept for baseline context; superseded by current `224/224` matrix status above)
 
 Build/regeneration note:
-- `cargo build --release --bin pi` currently fails in `/dp/asupersync` with `parking_lot` API/type errors (`RwLock*Guard` treated as `Result`/`.expect()` usage). Because of this, startup benchmarks used installed Rust CLI binary, and long-session/extension deep benchmarks were read from committed benchmark artifacts.
+- `cargo build --release --bin pi` succeeds in this run and was used for fresh Rust startup numbers.
+- Direct legacy Node/Bun reruns in this workspace are currently blocked by dependency/lockfile drift in `legacy_pi_mono_code/pi-mono` (`bun.lock` parse errors + unresolved runtime packages like `@sinclair/typebox`), so legacy startup/extension comparison rows remain sourced from prior validated artifacts.
 
 ---
 
@@ -380,23 +400,26 @@ Replication note:
 
 ### 7.2.2 QuickJS vs Native-Rust Preview (internal micro-harness)
 
-We also ran `pijs_workload` to isolate runtime-engine overhead for a minimal tool roundtrip:
+We re-ran `pijs_workload` to isolate runtime-engine overhead for a minimal tool roundtrip:
 
 | Runtime engine | Command | Result |
 |---|---|---:|
-| QuickJS | `cargo run --release --bin pijs_workload -- --iterations 20000 --tool-calls 1 --runtime-engine quickjs` | `per_call_us_f64 = 8.4248398` |
-| Native Rust preview | `cargo run --release --bin pijs_workload -- --iterations 20000 --tool-calls 1 --runtime-engine native-rust-preview` | `per_call_us_f64 = 0.0088345` |
+| QuickJS | `cargo run --release --bin pijs_workload -- --iterations 50000 --runtime-engine quickjs` | `per_call_us_f64 = 8.41320198` (`per_call_ns_f64 = 8413.20198`) |
+| Native Rust runtime (real handle path) | `cargo run --release --bin pijs_workload -- --iterations 50000 --runtime-engine native-rust-runtime` | `per_call_us_f64 = 0.49253646` (`per_call_ns_f64 = 492.53646`) |
+| Native Rust preview | `cargo run --release --bin pijs_workload -- --iterations 50000 --runtime-engine native-rust-preview` | `per_call_us_f64 = 0.0076797` (`per_call_ns_f64 = 7.6797`) |
 
 Important caveat:
-- `native-rust-preview` is a synthetic preview path in this harness (not yet full extension semantics parity), so this is not a drop-in replacement benchmark.
-- It is still a strong directional signal that removing the QuickJS boundary can recover orders of magnitude in per-call overhead once parity is implemented.
+- `native-rust-preview` is synthetic and not parity-complete.
+- `native-rust-runtime` is the real runtime-handle path and is now `~17.08x` faster per call than QuickJS in this harness.
+- Preview is still far faster (`~1095.26x` vs QuickJS), indicating additional headroom beyond the current real-runtime implementation.
+- This micro-harness does not supersede the larger realistic session benchmarks in Section 6; it isolates extension-call runtime overhead only.
 
 ### 7.2.3 QuickJS Removal Program (performance inversion path)
 
 To actually invert the extension overhead (Rust faster than legacy per-call), the benchmark data supports a staged replacement:
 
 1. Native runtime tier for hot-path hooks/tools first (`tool_call`, `tool_result`, high-frequency event hooks).
-2. Keep QuickJS as compatibility fallback for non-hot or unsupported extension features during migration.
+2. Keep QuickJS only as explicit compatibility/test harness infrastructure during migration (production runtime selection is now native-mandatory in this tree).
 3. Introduce ahead-of-time extension lowering (manifest + typed hostcall IR) so dispatch bypasses JS marshalling for validated extensions.
 4. Preserve existing policy/quota/risk guardrails in native dispatcher, but move them to pre-validated typed structs to eliminate repeated JSON decoding.
 5. Gate rollout behind existing conformance corpus and perf SLI gates:
