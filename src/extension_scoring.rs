@@ -1632,6 +1632,112 @@ fn positive_finite_or(value: f64, fallback: f64) -> f64 {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InterferenceMatrixCompletenessReport {
+    pub expected_pairs: usize,
+    pub observed_pairs: usize,
+    pub missing_pairs: Vec<String>,
+    pub duplicate_pairs: Vec<String>,
+    pub unknown_pairs: Vec<String>,
+    pub complete: bool,
+}
+
+fn normalize_interference_lever(raw: &str) -> Option<String> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn canonicalize_interference_pair(first: &str, second: &str) -> Option<(String, String)> {
+    let left = normalize_interference_lever(first)?;
+    let right = normalize_interference_lever(second)?;
+    if left <= right {
+        Some((left, right))
+    } else {
+        Some((right, left))
+    }
+}
+
+pub fn parse_interference_pair_key(key: &str) -> Option<(String, String)> {
+    let mut parts = key.split('+');
+    let first = parts.next()?;
+    let second = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    canonicalize_interference_pair(first, second)
+}
+
+pub fn format_interference_pair_key(first: &str, second: &str) -> Option<String> {
+    let (left, right) = canonicalize_interference_pair(first, second)?;
+    Some(format!("{left}+{right}"))
+}
+
+pub fn evaluate_interference_matrix_completeness(
+    levers: &[String],
+    observed_pair_keys: &[String],
+) -> InterferenceMatrixCompletenessReport {
+    let ordered_levers: Vec<String> = levers
+        .iter()
+        .filter_map(|lever| normalize_interference_lever(lever))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    let mut expected_pairs = BTreeSet::new();
+    for (idx, left) in ordered_levers.iter().enumerate() {
+        for right in ordered_levers.iter().skip(idx + 1) {
+            expected_pairs.insert(format!("{left}+{right}"));
+        }
+    }
+
+    let mut seen_pairs = BTreeSet::new();
+    let mut duplicate_pairs = BTreeSet::new();
+    let mut unknown_pairs = BTreeSet::new();
+    let mut observed_pairs = BTreeSet::new();
+
+    for raw_key in observed_pair_keys {
+        let Some((left, right)) = parse_interference_pair_key(raw_key) else {
+            unknown_pairs.insert(raw_key.clone());
+            continue;
+        };
+
+        let key = format!("{left}+{right}");
+        if !seen_pairs.insert(key.clone()) {
+            duplicate_pairs.insert(key.clone());
+            continue;
+        }
+
+        if expected_pairs.contains(&key) {
+            observed_pairs.insert(key);
+        } else {
+            unknown_pairs.insert(key);
+        }
+    }
+
+    let missing_pairs = expected_pairs
+        .difference(&observed_pairs)
+        .cloned()
+        .collect::<Vec<_>>();
+    let duplicate_pairs = duplicate_pairs.into_iter().collect::<Vec<_>>();
+    let unknown_pairs = unknown_pairs.into_iter().collect::<Vec<_>>();
+
+    InterferenceMatrixCompletenessReport {
+        expected_pairs: expected_pairs.len(),
+        observed_pairs: observed_pairs.len(),
+        missing_pairs: missing_pairs.clone(),
+        duplicate_pairs: duplicate_pairs.clone(),
+        unknown_pairs: unknown_pairs.clone(),
+        complete: missing_pairs.is_empty()
+            && duplicate_pairs.is_empty()
+            && unknown_pairs.is_empty(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1659,6 +1765,80 @@ mod tests {
             risk: RiskInfo::default(),
             manual_override: None,
         }
+    }
+
+    #[test]
+    fn parse_interference_pair_key_normalizes_order_and_case() {
+        let parsed = parse_interference_pair_key("Queue+marshal").expect("pair must parse");
+        assert_eq!(parsed.0, "marshal");
+        assert_eq!(parsed.1, "queue");
+
+        let formatted =
+            format_interference_pair_key(" Queue ", "marshal ").expect("pair must format");
+        assert_eq!(formatted, "marshal+queue");
+    }
+
+    #[test]
+    fn parse_interference_pair_key_rejects_invalid_shapes() {
+        assert!(parse_interference_pair_key("").is_none());
+        assert!(parse_interference_pair_key("queue").is_none());
+        assert!(parse_interference_pair_key("a+b+c").is_none());
+        assert!(parse_interference_pair_key(" + ").is_none());
+    }
+
+    #[test]
+    fn interference_matrix_completeness_detects_missing_duplicate_and_unknown_pairs() {
+        let levers = vec![
+            "queue".to_string(),
+            "policy".to_string(),
+            "execute".to_string(),
+        ];
+        let observed = vec![
+            "queue+policy".to_string(),
+            "policy+queue".to_string(),  // duplicate (canonicalized)
+            "queue+marshal".to_string(), // unknown pair
+            "broken".to_string(),        // malformed key
+        ];
+
+        let report = evaluate_interference_matrix_completeness(&levers, &observed);
+        assert_eq!(report.expected_pairs, 3);
+        assert_eq!(report.observed_pairs, 1);
+        assert_eq!(
+            report.missing_pairs,
+            vec!["execute+policy".to_string(), "execute+queue".to_string()]
+        );
+        assert_eq!(report.duplicate_pairs, vec!["policy+queue".to_string()]);
+        assert_eq!(
+            report.unknown_pairs,
+            vec!["broken".to_string(), "marshal+queue".to_string()]
+        );
+        assert!(!report.complete);
+    }
+
+    #[test]
+    fn interference_matrix_completeness_passes_with_full_unique_matrix() {
+        let levers = vec![
+            "marshal".to_string(),
+            "queue".to_string(),
+            "schedule".to_string(),
+            "policy".to_string(),
+        ];
+        let observed = vec![
+            "marshal+queue".to_string(),
+            "marshal+schedule".to_string(),
+            "marshal+policy".to_string(),
+            "queue+schedule".to_string(),
+            "queue+policy".to_string(),
+            "schedule+policy".to_string(),
+        ];
+
+        let report = evaluate_interference_matrix_completeness(&levers, &observed);
+        assert_eq!(report.expected_pairs, 6);
+        assert_eq!(report.observed_pairs, 6);
+        assert!(report.missing_pairs.is_empty());
+        assert!(report.duplicate_pairs.is_empty());
+        assert!(report.unknown_pairs.is_empty());
+        assert!(report.complete);
     }
 
     // =========================================================================
