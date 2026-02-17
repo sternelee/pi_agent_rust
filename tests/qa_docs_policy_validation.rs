@@ -1427,7 +1427,12 @@ fn franken_node_mission_contract_tier_mapping_declares_required_checks_and_phase
         .iter()
         .filter_map(|entry| entry.as_str().map(ToOwned::to_owned))
         .collect();
-    for bead in ["bd-3ar8v.7.2", "bd-3ar8v.7.3", "bd-3ar8v.7.4"] {
+    for bead in [
+        "bd-3ar8v.7.2",
+        "bd-3ar8v.7.3",
+        "bd-3ar8v.7.4",
+        "bd-3ar8v.7.5",
+    ] {
         assert!(
             strict_beads.contains(bead),
             "full_runtime_replacement.required_beads must include {bead}"
