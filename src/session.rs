@@ -1451,10 +1451,7 @@ impl Session {
         if persisted_count > self.entries.len() {
             return true;
         }
-        // Any new entry is a Compaction (dead entries before marker need rewriting).
-        self.entries[persisted_count..]
-            .iter()
-            .any(|e| matches!(e, SessionEntry::Compaction(_)))
+        false
     }
 
     /// Save the session to disk.
@@ -1535,7 +1532,7 @@ impl Session {
 
                 if self.should_full_rewrite() {
                     let session_name = self.cached_name.clone();
-                    // === Full rewrite path (first save, header change, compaction, checkpoint) ===
+                    // === Full rewrite path (first save, header change, checkpoint) ===
                     let (tx, rx) = oneshot::channel::<JsonlSaveResult>();
 
                     let header_snapshot = self.header.clone();
@@ -1673,7 +1670,7 @@ impl Session {
                 let session_name = self.cached_name.clone();
 
                 if self.should_full_rewrite() {
-                    // === Full rewrite path (first save, header change, compaction, checkpoint) ===
+                    // === Full rewrite path (first save, header change, checkpoint) ===
                     crate::session_sqlite::save_session(&path_clone, &self.header, &self.entries)
                         .await?;
                     self.persisted_entry_count
@@ -2006,15 +2003,22 @@ impl Session {
         let leaf_id = message_entry.base.parent_id.clone();
 
         let entries = if let Some(ref leaf_id) = leaf_id {
-            let path_ids = self.get_path_to_entry(leaf_id);
-            let mut entries = Vec::new();
-            for path_id in path_ids {
-                let entry = self.get_entry(&path_id).ok_or_else(|| {
-                    Error::session(format!("Failed to build fork: missing entry {path_id}"))
+            if self.is_linear {
+                let idx = self.entry_index.get(leaf_id).copied().ok_or_else(|| {
+                    Error::session(format!("Failed to build fork: missing entry {leaf_id}"))
                 })?;
-                entries.push(entry.clone());
+                self.entries[..=idx].to_vec()
+            } else {
+                let path_ids = self.get_path_to_entry(leaf_id);
+                let mut entries = Vec::new();
+                for path_id in path_ids {
+                    let entry = self.get_entry(&path_id).ok_or_else(|| {
+                        Error::session(format!("Failed to build fork: missing entry {path_id}"))
+                    })?;
+                    entries.push(entry.clone());
+                }
+                entries
             }
-            entries
         } else {
             Vec::new()
         };
@@ -2055,20 +2059,10 @@ impl Session {
     // Tree Navigation
     // ========================================================================
 
-    /// Build a map from entry ID to its parent ID.
-    fn build_parent_map(&self) -> HashMap<String, Option<String>> {
-        self.entries
-            .iter()
-            .filter_map(|e| {
-                e.base_id()
-                    .map(|id| (id.clone(), e.base().parent_id.clone()))
-            })
-            .collect()
-    }
-
     /// Build a map from parent ID to children IDs.
     fn build_children_map(&self) -> HashMap<Option<String>, Vec<String>> {
-        let mut children: HashMap<Option<String>, Vec<String>> = HashMap::new();
+        let mut children: HashMap<Option<String>, Vec<String>> =
+            HashMap::with_capacity(self.entries.len());
         for entry in &self.entries {
             if let Some(id) = entry.base_id() {
                 children
@@ -2083,9 +2077,21 @@ impl Session {
     /// Get the path from an entry back to the root (inclusive).
     /// Returns entry IDs in order from root to the specified entry.
     pub fn get_path_to_entry(&self, entry_id: &str) -> Vec<String> {
-        let parent_map = self.build_parent_map();
+        // Fast path: in linear sessions, every ancestor chain is a prefix of `entries`.
+        if self.is_linear {
+            if let Some(&idx) = self.entry_index.get(entry_id) {
+                let mut path = Vec::with_capacity(idx + 1);
+                for entry in &self.entries[..=idx] {
+                    if let Some(id) = entry.base_id() {
+                        path.push(id.clone());
+                    }
+                }
+                return path;
+            }
+        }
+
         let mut path = Vec::new();
-        let mut visited = std::collections::HashSet::new();
+        let mut visited = std::collections::HashSet::with_capacity(self.entries.len().min(128));
         let mut current = Some(entry_id.to_string());
 
         while let Some(id) = current {
@@ -2093,7 +2099,9 @@ impl Session {
                 break; // cycle detected
             }
             path.push(id.clone());
-            current = parent_map.get(&id).and_then(Clone::clone);
+            current = self
+                .get_entry(&id)
+                .and_then(|entry| entry.base().parent_id.clone());
         }
 
         path.reverse();
@@ -2102,23 +2110,33 @@ impl Session {
 
     /// Get direct children of an entry.
     pub fn get_children(&self, entry_id: Option<&str>) -> Vec<String> {
-        let children_map = self.build_children_map();
-        let key = entry_id.map(String::from);
-        children_map.get(&key).cloned().unwrap_or_default()
+        self.entries
+            .iter()
+            .filter_map(|entry| {
+                let id = entry.base_id()?;
+                if entry.base().parent_id.as_deref() == entry_id {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// List all leaf nodes (entries with no children).
     pub fn list_leaves(&self) -> Vec<String> {
-        let children_map = self.build_children_map();
+        let mut has_children: HashSet<&str> = HashSet::with_capacity(self.entries.len());
+        for entry in &self.entries {
+            if let Some(parent_id) = entry.base().parent_id.as_deref() {
+                has_children.insert(parent_id);
+            }
+        }
+
         self.entries
             .iter()
             .filter_map(|e| {
                 let id = e.base_id()?;
-                // An entry is a leaf if it has no children
-                if children_map
-                    .get(&Some(id.clone()))
-                    .is_none_or(Vec::is_empty)
-                {
+                if !has_children.contains(id.as_str()) {
                     Some(id.clone())
                 } else {
                     None
@@ -2196,25 +2214,80 @@ impl Session {
             return self.entries.iter().collect();
         }
 
-        let path = self.get_path_to_entry(leaf_id);
-        path.iter().filter_map(|id| self.get_entry(id)).collect()
+        let mut path_indices = Vec::with_capacity(16);
+        let mut visited = HashSet::with_capacity(self.entries.len().min(128));
+        let mut current = Some(leaf_id.clone());
+
+        while let Some(id) = current {
+            if !visited.insert(id.clone()) {
+                break; // cycle detected
+            }
+            let Some(&idx) = self.entry_index.get(&id) else {
+                break;
+            };
+            let Some(entry) = self.entries.get(idx) else {
+                break;
+            };
+            path_indices.push(idx);
+            current = entry.base().parent_id.clone();
+        }
+
+        path_indices.reverse();
+        path_indices
+            .into_iter()
+            .filter_map(|idx| self.entries.get(idx))
+            .collect()
     }
 
     /// Convert session entries along the current path to model messages.
     /// This follows parent_id links from leaf_id back to root.
     pub fn to_messages_for_current_path(&self) -> Vec<Message> {
+        if self.leaf_id.is_none() {
+            return Vec::new();
+        }
+
+        if self.is_linear {
+            return Self::to_messages_from_path(self.entries.len(), |idx| &self.entries[idx]);
+        }
+
         let path_entries = self.entries_for_current_path();
+        Self::to_messages_from_path(path_entries.len(), |idx| path_entries[idx])
+    }
 
-        // If the current path contains a compaction entry, omit older messages
-        // and insert the compaction summary before the kept region.
-        let last_compaction = path_entries.iter().rev().find_map(|entry| match entry {
-            SessionEntry::Compaction(compaction) => Some(compaction),
-            _ => None,
-        });
+    fn append_model_message_for_entry(messages: &mut Vec<Message>, entry: &SessionEntry) {
+        match entry {
+            SessionEntry::Message(msg_entry) => {
+                if let Some(message) = session_message_to_model(&msg_entry.message) {
+                    messages.push(message);
+                }
+            }
+            SessionEntry::BranchSummary(summary) => {
+                let summary_message = SessionMessage::BranchSummary {
+                    summary: summary.summary.clone(),
+                    from_id: summary.from_id.clone(),
+                };
+                if let Some(message) = session_message_to_model(&summary_message) {
+                    messages.push(message);
+                }
+            }
+            _ => {}
+        }
+    }
 
-        if let Some(compaction) = last_compaction {
+    fn to_messages_from_path<'a, F>(path_len: usize, entry_at: F) -> Vec<Message>
+    where
+        F: Fn(usize) -> &'a SessionEntry,
+    {
+        let mut last_compaction = None;
+        for idx in (0..path_len).rev() {
+            if let SessionEntry::Compaction(compaction) = entry_at(idx) {
+                last_compaction = Some((idx, compaction));
+                break;
+            }
+        }
+
+        if let Some((compaction_idx, compaction)) = last_compaction {
             let mut messages = Vec::new();
-
             let summary_message = SessionMessage::CompactionSummary {
                 summary: compaction.summary.clone(),
                 tokens_before: compaction.tokens_before,
@@ -2223,28 +2296,21 @@ impl Session {
                 messages.push(message);
             }
 
-            // Find the index of the compaction entry so we can fall back to
-            // including everything after it if first_kept_entry_id is orphaned.
-            let compaction_idx = path_entries.iter().position(
-                |e| matches!(e, SessionEntry::Compaction(c) if std::ptr::eq(c, compaction)),
-            );
-
-            let has_kept_entry = path_entries.iter().any(|e| {
-                e.base_id()
+            let has_kept_entry = (0..path_len).any(|idx| {
+                entry_at(idx)
+                    .base_id()
                     .is_some_and(|id| id == &compaction.first_kept_entry_id)
             });
 
             let mut keep = false;
             let mut past_compaction = false;
-            for (idx, entry) in path_entries.iter().enumerate() {
-                // Track when we pass the compaction entry itself.
-                if compaction_idx == Some(idx) {
+            for idx in 0..path_len {
+                let entry = entry_at(idx);
+                if idx == compaction_idx {
                     past_compaction = true;
                 }
-
                 if !keep {
                     if has_kept_entry {
-                        // Normal path: skip until we find the first kept entry.
                         if entry
                             .base_id()
                             .is_some_and(|id| id == &compaction.first_kept_entry_id)
@@ -2254,8 +2320,6 @@ impl Session {
                             continue;
                         }
                     } else if past_compaction {
-                        // Fallback: first_kept_entry_id is orphaned (session corruption).
-                        // Include all entries after the compaction entry to avoid data loss.
                         tracing::warn!(
                             first_kept_entry_id = %compaction.first_kept_entry_id,
                             "Compaction references missing entry; including all post-compaction entries"
@@ -2265,48 +2329,15 @@ impl Session {
                         continue;
                     }
                 }
-
-                match entry {
-                    SessionEntry::Message(msg_entry) => {
-                        if let Some(message) = session_message_to_model(&msg_entry.message) {
-                            messages.push(message);
-                        }
-                    }
-                    SessionEntry::BranchSummary(summary) => {
-                        let summary_message = SessionMessage::BranchSummary {
-                            summary: summary.summary.clone(),
-                            from_id: summary.from_id.clone(),
-                        };
-                        if let Some(message) = session_message_to_model(&summary_message) {
-                            messages.push(message);
-                        }
-                    }
-                    _ => {}
-                }
+                Self::append_model_message_for_entry(&mut messages, entry);
             }
 
             return messages;
         }
 
         let mut messages = Vec::new();
-        for entry in path_entries {
-            match entry {
-                SessionEntry::Message(msg_entry) => {
-                    if let Some(message) = session_message_to_model(&msg_entry.message) {
-                        messages.push(message);
-                    }
-                }
-                SessionEntry::BranchSummary(summary) => {
-                    let summary_message = SessionMessage::BranchSummary {
-                        summary: summary.summary.clone(),
-                        from_id: summary.from_id.clone(),
-                    };
-                    if let Some(message) = session_message_to_model(&summary_message) {
-                        messages.push(message);
-                    }
-                }
-                _ => {}
-            }
+        for idx in 0..path_len {
+            Self::append_model_message_for_entry(&mut messages, entry_at(idx));
         }
         messages
     }
@@ -2335,19 +2366,19 @@ impl Session {
                 .get_entry(entry_id)
                 .and_then(|e| e.base().parent_id.clone());
 
-            let siblings_at_parent = children_map
-                .get(&parent_of_entry)
-                .cloned()
-                .unwrap_or_default();
+            let Some(siblings_at_parent) = children_map.get(&parent_of_entry) else {
+                continue;
+            };
 
             if siblings_at_parent.len() > 1 {
                 // This is a fork point. Collect all leaves reachable from each sibling.
                 let mut branches = Vec::new();
-                for sibling_root in &siblings_at_parent {
+                let current_branch_ids: HashSet<&str> =
+                    path[idx..].iter().map(String::as_str).collect();
+                for sibling_root in siblings_at_parent {
                     let leaf = Self::deepest_leaf_from(&children_map, sibling_root);
-                    let preview = self.entry_preview(&leaf);
-                    let msg_count = self.count_messages_on_path(&leaf);
-                    let is_current = path[idx..].contains(sibling_root);
+                    let (preview, msg_count) = self.path_preview_and_message_count(&leaf);
+                    let is_current = current_branch_ids.contains(sibling_root.as_str());
                     branches.push(SiblingBranch {
                         root_id: sibling_root.clone(),
                         leaf_id: leaf,
@@ -2383,40 +2414,43 @@ impl Session {
         }
     }
 
-    /// Get a short preview string for an entry (first user message text on
-    /// the path from root to the given leaf).
-    fn entry_preview(&self, leaf_id: &str) -> String {
-        let path = self.get_path_to_entry(leaf_id);
-        for id in &path {
-            if let Some(SessionEntry::Message(msg)) = self.get_entry(id) {
+    /// Compute a short preview (first user message on the path) and the number
+    /// of message entries for a leaf in a single parent-chain walk.
+    fn path_preview_and_message_count(&self, leaf_id: &str) -> (String, usize) {
+        let mut visited = HashSet::with_capacity(self.entries.len().min(128));
+        let mut current = Some(leaf_id.to_string());
+        let mut preview = None;
+        let mut count = 0usize;
+
+        while let Some(id) = current {
+            if !visited.insert(id.clone()) {
+                tracing::warn!("Cycle detected in session tree while collecting path stats: {id}");
+                break;
+            }
+            let Some(entry) = self.get_entry(&id) else {
+                break;
+            };
+            if matches!(entry, SessionEntry::Message(_)) {
+                count = count.saturating_add(1);
+            }
+            if let SessionEntry::Message(msg) = entry {
                 if let SessionMessage::User { content, .. } = &msg.message {
                     let text = user_content_to_text(content);
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
-                        return if trimmed.chars().count() > 60 {
+                        preview = Some(if trimmed.chars().count() > 60 {
                             let truncated: String = trimmed.chars().take(57).collect();
                             format!("{truncated}...")
                         } else {
                             trimmed.to_string()
-                        };
+                        });
                     }
                 }
             }
+            current = entry.base().parent_id.clone();
         }
-        String::from("(empty)")
-    }
 
-    /// Count message entries along the path to a leaf.
-    fn count_messages_on_path(&self, leaf_id: &str) -> usize {
-        let path = self.get_path_to_entry(leaf_id);
-        let path_set: HashSet<&str> = path.iter().map(String::as_str).collect();
-        self.entries
-            .iter()
-            .filter(|e| {
-                matches!(e, SessionEntry::Message(_))
-                    && e.base_id().is_some_and(|id| path_set.contains(id.as_str()))
-            })
-            .count()
+        (preview.unwrap_or_else(|| String::from("(empty)")), count)
     }
 
     /// Get a summary of branches in this session.
@@ -7195,7 +7229,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compaction_entry_forces_full_rewrite() {
+    fn test_compaction_entry_uses_incremental_append() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let mut session = Session::create();
         session.session_dir = Some(temp_dir.path().to_path_buf());
@@ -7204,15 +7238,22 @@ mod tests {
         run_async(async { session.save().await }).unwrap();
         assert_eq!(session.persisted_entry_count.load(Ordering::SeqCst), 1);
 
-        // Append a compaction entry — should force full rewrite.
+        // Append a compaction entry. This should still be eligible for
+        // incremental append; checkpoint rewrite cadence handles periodic
+        // full rewrites for cleanup/corruption recovery.
         session.append_compaction("summary".to_string(), id_a, 100, None, None);
         session.append_message(make_test_message("msg B"));
 
         run_async(async { session.save().await }).unwrap();
 
-        // Full rewrite: counters reset.
+        // Incremental append: persisted count advances and checkpoint counter increments.
         assert_eq!(session.persisted_entry_count.load(Ordering::SeqCst), 3);
-        assert_eq!(session.appends_since_checkpoint, 0);
+        assert_eq!(session.appends_since_checkpoint, 1);
+
+        let path = session.path.clone().unwrap();
+        let lines_after_second = std::fs::read_to_string(&path).unwrap().lines().count();
+        // 1 header + 3 entries = 4 lines
+        assert_eq!(lines_after_second, 4);
     }
 
     #[test]
