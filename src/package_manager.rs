@@ -1569,6 +1569,13 @@ impl PackageManager {
         };
 
         if stats.is_file() {
+            if !is_supported_extension_file(resolved) {
+                warn!(
+                    path = %resolved.display(),
+                    "Ignoring unsupported extension source file; use extension.json, *.native.json, or *.wasm"
+                );
+                return;
+            }
             metadata.base_dir = resolved.parent().map(Path::to_path_buf);
             accumulator
                 .extensions
@@ -2236,6 +2243,13 @@ fn collect_files_from_paths(paths: &[PathBuf], resource_type: ResourceType) -> V
             continue;
         };
         if stats.is_file() {
+            if resource_type == ResourceType::Extensions && !is_supported_extension_file(p) {
+                warn!(
+                    path = %p.display(),
+                    "Ignoring unsupported extension manifest file entry; use extension.json, *.native.json, or *.wasm"
+                );
+                continue;
+            }
             out.push(p.clone());
         } else if stats.is_dir() {
             out.extend(collect_resource_files(p, resource_type));
@@ -2389,6 +2403,20 @@ fn collect_auto_theme_entries(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+fn is_supported_extension_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    if name.eq_ignore_ascii_case("extension.json") || name.ends_with(".native.json") {
+        return true;
+    }
+
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("wasm"))
+}
+
 fn resolve_extension_entries(dir: &Path) -> Option<Vec<PathBuf>> {
     match load_extension_manifest(dir) {
         Ok(Some(_)) => {
@@ -2408,9 +2436,17 @@ fn resolve_extension_entries(dir: &Path) -> Option<Vec<PathBuf>> {
                 let mut entries = Vec::new();
                 for ext_path in exts {
                     let resolved = dir.join(ext_path);
-                    if resolved.exists() {
-                        entries.push(resolved);
+                    if !resolved.exists() {
+                        continue;
                     }
+                    if resolved.is_file() && !is_supported_extension_file(&resolved) {
+                        warn!(
+                            path = %resolved.display(),
+                            "Ignoring unsupported package.json#pi.extensions entry; use extension.json, *.native.json, or *.wasm"
+                        );
+                        continue;
+                    }
+                    entries.push(resolved);
                 }
                 if !entries.is_empty() {
                     return Some(entries);
@@ -3515,8 +3551,10 @@ mod tests {
 
             let package_root = temp_dir.path().join("pkg");
             fs::create_dir_all(package_root.join("extensions")).expect("create extensions dir");
-            fs::write(package_root.join("extensions/a.js"), "a").expect("write a.js");
-            fs::write(package_root.join("extensions/b.js"), "b").expect("write b.js");
+            fs::write(package_root.join("extensions/a.native.json"), "{}")
+                .expect("write a.native.json");
+            fs::write(package_root.join("extensions/b.native.json"), "{}")
+                .expect("write b.native.json");
 
             let global_settings_path = temp_dir.path().join("global-settings.json");
             let project_settings_path = project_root.join(".pi/settings.json");
@@ -3524,7 +3562,7 @@ mod tests {
             let global_settings = json!({
                 "packages": [{
                     "source": package_root.to_string_lossy(),
-                    "extensions": ["extensions/a.js"]
+                    "extensions": ["extensions/a.native.json"]
                 }]
             });
             fs::write(
@@ -3536,7 +3574,7 @@ mod tests {
             let project_settings = json!({
                 "packages": [{
                     "source": package_root.to_string_lossy(),
-                    "extensions": ["extensions/b.js"]
+                    "extensions": ["extensions/b.native.json"]
                 }]
             });
             fs::write(
@@ -3563,15 +3601,15 @@ mod tests {
                 .filter(|entry| entry.enabled)
                 .collect::<Vec<_>>();
             assert_eq!(enabled_extensions.len(), 1);
-            let expected_path = package_root.join("extensions/b.js");
+            let expected_path = package_root.join("extensions/b.native.json");
             assert_eq!(enabled_extensions[0].path, expected_path);
             assert_eq!(enabled_extensions[0].metadata.scope, PackageScope::Project);
 
             let disabled = resolved
                 .extensions
                 .iter()
-                .find(|entry| entry.path == package_root.join("extensions/a.js"))
-                .expect("a.js entry");
+                .find(|entry| entry.path == package_root.join("extensions/a.native.json"))
+                .expect("a.native.json entry");
             assert!(!disabled.enabled);
             assert!(
                 resolved
@@ -3586,8 +3624,8 @@ mod tests {
     fn test_resolve_extension_sources_uses_temporary_scope() {
         run_async(async {
             let temp_dir = tempfile::tempdir().expect("tempdir");
-            let extension_path = temp_dir.path().join("ext.js");
-            fs::write(&extension_path, "export default function() {}").expect("write extension");
+            let extension_path = temp_dir.path().join("ext.native.json");
+            fs::write(&extension_path, "{}").expect("write extension");
 
             let manager = PackageManager::new(temp_dir.path().to_path_buf());
             let sources = vec![extension_path.to_string_lossy().to_string()];
@@ -3623,10 +3661,10 @@ mod tests {
     #[test]
     fn test_resolve_local_extension_source_accepts_symlink() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let extension_path = temp_dir.path().join("ext.js");
-        fs::write(&extension_path, "export default function() {}").expect("write extension");
+        let extension_path = temp_dir.path().join("ext.native.json");
+        fs::write(&extension_path, "{}").expect("write extension");
 
-        let symlink_path = temp_dir.path().join("ext-link.js");
+        let symlink_path = temp_dir.path().join("ext-link.native.json");
         std::os::unix::fs::symlink(&extension_path, &symlink_path).expect("create symlink");
 
         let mut accumulator = ResourceAccumulator::new();
@@ -3655,14 +3693,14 @@ mod tests {
             let package_root = temp_dir.path().join("pkg");
             let extensions_dir = package_root.join("extensions");
             fs::create_dir_all(&extensions_dir).expect("create extensions dir");
-            fs::write(extensions_dir.join("a.js"), "a").expect("write a.js");
-            fs::write(extensions_dir.join("b.js"), "b").expect("write b.js");
+            fs::write(extensions_dir.join("a.native.json"), "{}").expect("write a.native.json");
+            fs::write(extensions_dir.join("b.native.json"), "{}").expect("write b.native.json");
 
             let manifest = json!({
                 "name": "pkg",
                 "version": "1.0.0",
                 "pi": {
-                    "extensions": ["extensions", "!extensions/b.js"]
+                    "extensions": ["extensions", "!extensions/b.native.json"]
                 }
             });
             fs::write(
@@ -3689,8 +3727,8 @@ mod tests {
                 .iter()
                 .map(|entry| entry.path.clone())
                 .collect::<Vec<_>>();
-            assert!(paths.contains(&package_root.join("extensions/a.js")));
-            assert!(!paths.contains(&package_root.join("extensions/b.js")));
+            assert!(paths.contains(&package_root.join("extensions/a.native.json")));
+            assert!(!paths.contains(&package_root.join("extensions/b.native.json")));
         });
     }
 
