@@ -2286,7 +2286,7 @@ fn conformance_must_pass_gate() {
 
     let verdict = MustPassGateVerdict {
         schema: "pi.ext.must_pass_gate.v1".to_string(),
-        generated_at: generated_at.clone(),
+        generated_at,
         run_id: run_id.clone(),
         correlation_id: correlation_id.clone(),
         mode: mode.clone(),

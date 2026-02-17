@@ -891,6 +891,37 @@ fn check_artifact_present(root: &Path, artifact_rel: &str) -> (String, Option<St
     }
 }
 
+fn write_non_empty_artifact(
+    path: &Path,
+    artifact_rel: &str,
+    contents: &str,
+) -> Result<u64, String> {
+    if contents.trim().is_empty() {
+        return Err(format!(
+            "generated empty artifact payload for {artifact_rel}"
+        ));
+    }
+
+    std::fs::write(path, contents).map_err(|err| {
+        format!(
+            "failed to write {artifact_rel} at {}: {err}",
+            path.display()
+        )
+    })?;
+
+    let bytes = std::fs::metadata(path)
+        .map_err(|err| format!("failed to stat {artifact_rel} at {}: {err}", path.display()))?
+        .len();
+    if bytes == 0 {
+        return Err(format!(
+            "zero-byte artifact emitted for {artifact_rel} at {}",
+            path.display()
+        ));
+    }
+
+    Ok(bytes)
+}
+
 /// Convert blocking `skip` states into fail-closed failures.
 fn fail_close_blocking_skips(gates: &mut [SubGate]) {
     for gate in gates {
@@ -2039,7 +2070,12 @@ fn full_certification() {
     md.push('\n');
 
     let cert_md_path = report_dir.join("certification_report.md");
-    let _ = std::fs::write(&cert_md_path, &md);
+    write_non_empty_artifact(
+        &cert_md_path,
+        "tests/full_suite_gate/certification_report.md",
+        &md,
+    )
+    .unwrap_or_else(|detail| panic!("fail-closed certification report emission: {detail}"));
 
     // Print summary
     eprintln!("=== Certification Verdict: {} ===", verdict.to_uppercase());
@@ -2821,6 +2857,39 @@ fn fail_close_blocking_skips_only_converts_blocking_skip_statuses() {
     assert_eq!(gates[2].status, "pass");
 }
 
+#[test]
+fn write_non_empty_artifact_rejects_empty_payload() {
+    let path = repo_root()
+        .join("tests")
+        .join("full_suite_gate")
+        .join("certification_report.md");
+    let err = write_non_empty_artifact(
+        &path,
+        "tests/full_suite_gate/certification_report.md",
+        " \n\t ",
+    )
+    .expect_err("empty payload must fail closed");
+    assert!(
+        err.contains("empty artifact payload"),
+        "expected empty-payload detail, got: {err}"
+    );
+}
+
+#[test]
+fn write_non_empty_artifact_fails_when_write_path_is_not_a_file() {
+    let path = repo_root().join("tests").join("full_suite_gate");
+    let err = write_non_empty_artifact(
+        &path,
+        "tests/full_suite_gate/certification_report.md",
+        "# non-empty markdown",
+    )
+    .expect_err("directory write path must fail closed");
+    assert!(
+        err.contains("failed to write"),
+        "expected write failure detail, got: {err}"
+    );
+}
+
 fn fixed_utc(ts: &str) -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::parse_from_rfc3339(ts)
         .unwrap_or_else(|err| panic!("invalid fixed RFC3339 timestamp {ts}: {err}"))
@@ -2943,11 +3012,17 @@ fn run_all_wires_scenario_cell_status_artifacts_into_evidence_contract() {
         "claim_integrity.phase1_matrix_regression_guard_status_valid",
         "claim_integrity.phase1_matrix_regression_guard_reason_alignment",
         "claim_integrity.phase1_matrix_regression_guard_reason_set_exact",
+        "claim_integrity.phase1_matrix_consumption_contract_object",
+        "claim_integrity.phase1_matrix_downstream_beads_include_phase5",
+        "claim_integrity.phase1_matrix_downstream_consumers_contract",
         "_regression_unverified",
         "failure_or_gap_reasons",
         "expected_regression_guard_reason_set",
         "claim_id=\"phase1_matrix_validation.matrix_cells.status\"",
         "metric_scope=\"matrix_cell_primary_e2e\"",
+        "downstream_consumers",
+        "weighted_bottleneck_attribution.global_ranking",
+        "weighted_bottleneck_attribution.per_scale",
         "primary_e2e_before_microbench",
         "claim_integrity.missing_or_stale_evidence",
         "claim_integrity.missing_required_result_field",

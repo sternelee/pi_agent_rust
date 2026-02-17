@@ -181,7 +181,7 @@ const ARTIFACT_SOURCES: &[ArtifactSource] = &[
         path: "tests/ext_conformance/reports/health_delta",
         expected_schema: None,
         is_directory: true,
-        required: false,
+        required: true,
     },
     ArtifactSource {
         id: "provider_compat",
@@ -208,7 +208,7 @@ const ARTIFACT_SOURCES: &[ArtifactSource] = &[
         path: "tests/ext_conformance/reports/journeys",
         expected_schema: None,
         is_directory: true,
-        required: false,
+        required: true,
     },
     ArtifactSource {
         id: "auto_repair_summary",
@@ -405,6 +405,7 @@ fn validate_must_pass_gate_payload(val: &Value) -> Result<Value, String> {
 }
 
 /// Collect a section from an artifact source.
+#[allow(clippy::too_many_lines)]
 fn collect_section(root: &Path, source: &ArtifactSource) -> BundleSection {
     let full_path = root.join(source.path);
 
@@ -456,46 +457,43 @@ fn collect_section(root: &Path, source: &ArtifactSource) -> BundleSection {
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
         {
-            match load_json(&full_path) {
-                Some(val) => {
-                    schema_found = val.get("schema").and_then(Value::as_str).map(String::from);
+            if let Some(val) = load_json(&full_path) {
+                schema_found = val.get("schema").and_then(Value::as_str).map(String::from);
 
-                    // Validate schema prefix if expected.
-                    if let Some(expected) = source.expected_schema {
-                        if let Some(ref actual) = schema_found {
-                            if !actual.starts_with(expected) {
-                                status = "invalid".to_string();
-                                diagnostics = Some(format!(
-                                    "Schema mismatch: expected prefix '{expected}', found '{actual}'"
-                                ));
-                            }
-                        } else {
+                // Validate schema prefix if expected.
+                if let Some(expected) = source.expected_schema {
+                    if let Some(ref actual) = schema_found {
+                        if !actual.starts_with(expected) {
                             status = "invalid".to_string();
                             diagnostics = Some(format!(
-                                "Missing schema field (expected prefix '{expected}')"
+                                "Schema mismatch: expected prefix '{expected}', found '{actual}'"
                             ));
                         }
-                    }
-
-                    // Extract lightweight summary for index.
-                    if source.id == "must_pass_gate" {
-                        match validate_must_pass_gate_payload(&val) {
-                            Ok(payload) => {
-                                summary = Some(payload);
-                            }
-                            Err(err) => {
-                                status = "invalid".to_string();
-                                diagnostics = Some(err);
-                            }
-                        }
                     } else {
-                        summary = extract_summary(&val, source.id);
+                        status = "invalid".to_string();
+                        diagnostics = Some(format!(
+                            "Missing schema field (expected prefix '{expected}')"
+                        ));
                     }
                 }
-                None => {
-                    status = "invalid".to_string();
-                    diagnostics = Some("Failed to parse JSON".to_string());
+
+                // Extract lightweight summary for index.
+                if source.id == "must_pass_gate" {
+                    match validate_must_pass_gate_payload(&val) {
+                        Ok(payload) => {
+                            summary = Some(payload);
+                        }
+                        Err(err) => {
+                            status = "invalid".to_string();
+                            diagnostics = Some(err);
+                        }
+                    }
+                } else {
+                    summary = extract_summary(&val, source.id);
                 }
+            } else {
+                status = "invalid".to_string();
+                diagnostics = Some("Failed to parse JSON".to_string());
             }
         }
 
@@ -900,6 +898,27 @@ fn must_pass_gate_source_is_required_json_verdict_file() {
     assert!(
         source.required,
         "must_pass_gate should be required for complete evidence bundles"
+    );
+}
+
+#[test]
+fn full_cert_diagnostics_are_required_for_complete_verdict() {
+    let health_delta = ARTIFACT_SOURCES
+        .iter()
+        .find(|source| source.id == "health_delta")
+        .expect("health_delta source must exist");
+    assert!(
+        health_delta.required,
+        "health_delta should be required for complete evidence bundles"
+    );
+
+    let journey_reports = ARTIFACT_SOURCES
+        .iter()
+        .find(|source| source.id == "journey_reports")
+        .expect("journey_reports source must exist");
+    assert!(
+        journey_reports.required,
+        "journey_reports should be required for complete evidence bundles"
     );
 }
 

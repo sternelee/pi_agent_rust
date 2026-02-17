@@ -8,6 +8,7 @@ use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 const REPORT_SCHEMA: &str = "pi.release_readiness.v1";
+const MUST_PASS_GATE_SCHEMA: &str = "pi.ext.must_pass_gate.v1";
 
 // ── Data models ─────────────────────────────────────────────────────────────
 
@@ -116,6 +117,29 @@ fn parse_must_pass_gate_verdict(v: &V) -> (String, u64, u64) {
     };
 
     (status, passed, total)
+}
+
+fn validate_must_pass_gate_metadata(v: &V) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    let schema = get_str(v, "/schema");
+    if schema != MUST_PASS_GATE_SCHEMA {
+        errors.push(format!(
+            "schema must be {MUST_PASS_GATE_SCHEMA}, found {schema}"
+        ));
+    }
+
+    for field in ["/generated_at", "/run_id", "/correlation_id"] {
+        if get_str(v, field) == "unknown" {
+            errors.push(format!("missing required field: {field}"));
+        }
+    }
+
+    if v.pointer("/observed").is_none() {
+        errors.push("missing required object: /observed".to_string());
+    }
+
+    errors
 }
 
 // ── Evidence collectors ─────────────────────────────────────────────────────
@@ -654,6 +678,17 @@ fn generate_certification() -> FinalCertification {
         "bd-1f42.4",
         "tests/ext_conformance/reports/gate/must_pass_gate_verdict.json",
         |v| {
+            let metadata_errors = validate_must_pass_gate_metadata(v);
+            if !metadata_errors.is_empty() {
+                return (
+                    Signal::Fail,
+                    format!(
+                        "Must-pass gate metadata invalid: {}",
+                        metadata_errors.join("; ")
+                    ),
+                );
+            }
+
             let (verdict, passed, total) = parse_must_pass_gate_verdict(v);
             if verdict == "pass" && passed >= 208 {
                 (Signal::Pass, format!("{passed}/{total} must-pass: PASS"))
@@ -681,13 +716,18 @@ fn generate_certification() -> FinalCertification {
         |v| {
             let schema = get_str(v, "/schema");
             let total = get_u64(v, "/summary/total_artifacts");
-            if schema.starts_with("pi.ci.evidence_bundle") && total > 0 {
+            let verdict = get_str(v, "/summary/verdict");
+            if schema.starts_with("pi.ci.evidence_bundle") && total > 0 && verdict == "complete"
+            {
                 (
                     Signal::Pass,
-                    format!("Evidence bundle: {total} artifacts collected"),
+                    format!("Evidence bundle: {total} artifacts collected ({verdict})"),
                 )
             } else {
-                (Signal::Fail, "Evidence bundle missing or empty".to_string())
+                (
+                    Signal::Fail,
+                    format!("Evidence bundle incomplete or missing ({verdict}, artifacts={total})"),
+                )
             }
         },
     ));
@@ -998,18 +1038,14 @@ fn certification_report_schema_valid() {
     assert!(parsed.get("certification_verdict").is_some());
     assert!(parsed.get("evidence").and_then(V::as_array).is_some());
     assert!(parsed.get("risk_register").and_then(V::as_array).is_some());
-    assert!(
-        parsed
-            .get("reproduce_commands")
-            .and_then(V::as_array)
-            .is_some()
-    );
-    assert!(
-        parsed
-            .get("ci_run_link_template")
-            .and_then(V::as_str)
-            .is_some()
-    );
+    assert!(parsed
+        .get("reproduce_commands")
+        .and_then(V::as_array)
+        .is_some());
+    assert!(parsed
+        .get("ci_run_link_template")
+        .and_then(V::as_str)
+        .is_some());
 }
 
 #[test]
@@ -1040,4 +1076,47 @@ fn parse_must_pass_gate_verdict_falls_back_to_legacy_schema() {
     assert_eq!(status, "warn");
     assert_eq!(passed, 203);
     assert_eq!(total, 208);
+}
+
+#[test]
+fn validate_must_pass_gate_metadata_accepts_current_schema() {
+    let gate = serde_json::json!({
+        "schema": "pi.ext.must_pass_gate.v1",
+        "generated_at": "2026-02-17T03:06:08.928Z",
+        "run_id": "local-20260217T030608928Z",
+        "correlation_id": "must-pass-gate-local-20260217T030608928Z",
+        "observed": {
+            "must_pass_total": 208,
+            "must_pass_passed": 208
+        }
+    });
+
+    let errors = validate_must_pass_gate_metadata(&gate);
+    assert!(
+        errors.is_empty(),
+        "current-schema must-pass gate should be metadata-valid, got: {errors:?}"
+    );
+}
+
+#[test]
+fn validate_must_pass_gate_metadata_rejects_legacy_payload() {
+    let gate = serde_json::json!({
+        "verdict": "warn",
+        "total": 208,
+        "passed": 203
+    });
+
+    let errors = validate_must_pass_gate_metadata(&gate);
+    assert!(
+        !errors.is_empty(),
+        "legacy payload without metadata should fail validation"
+    );
+    assert!(
+        errors.iter().any(|msg| msg.contains("schema")),
+        "expected schema validation error, got: {errors:?}"
+    );
+    assert!(
+        errors.iter().any(|msg| msg.contains("/run_id")),
+        "expected run_id validation error, got: {errors:?}"
+    );
 }
