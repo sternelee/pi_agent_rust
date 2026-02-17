@@ -495,9 +495,7 @@ fn bun_killer_ratio_release_gate_failure(
     let bun_ratio_value = full_e2e
         .and_then(|row| row.pointer("/relative_metrics/rust_vs_bun_ratio"))
         .and_then(Value::as_f64);
-    let Some(bun_ratio_value) = bun_ratio_value else {
-        return None;
-    };
+    let bun_ratio_value = bun_ratio_value?;
     if !is_positive_finite_metric(Some(bun_ratio_value)) {
         // Non-positive/non-finite values are handled by required_e2e_metric_failure.
         return None;
@@ -511,8 +509,7 @@ fn bun_killer_ratio_release_gate_failure(
             path.display()
         ),
         remediation: format!(
-            "Reduce full_e2e_long_session rust_vs_bun_ratio to <= {:.2} before release promotion.",
-            BUN_KILLER_MAX_RUST_VS_BUN_RATIO
+            "Reduce full_e2e_long_session rust_vs_bun_ratio to <= {BUN_KILLER_MAX_RUST_VS_BUN_RATIO:.2} before release promotion."
         ),
     })
 }
@@ -616,7 +613,9 @@ fn evaluate_required_e2e_ratio_contract(
     if let Some(failure) = required_e2e_metric_failure(&path, full_e2e_rows.first().copied()) {
         failures.push(failure);
     }
-    if let Some(failure) = bun_killer_ratio_release_gate_failure(&path, full_e2e_rows.first().copied()) {
+    if let Some(failure) =
+        bun_killer_ratio_release_gate_failure(&path, full_e2e_rows.first().copied())
+    {
         failures.push(failure);
     }
     if let Some(failure) = claim_integrity_guard_failure(&path, &payload) {

@@ -1660,14 +1660,12 @@ fn validate_phase1_matrix_validation_record(record: &Value) -> Result<(), String
         }
         if seen_weighted_scales != required_sizes {
             return Err(format!(
-                "weighted_bottleneck_attribution.per_scale must cover all required session sizes; observed {:?}, required {:?}",
-                seen_weighted_scales, required_sizes
+                "weighted_bottleneck_attribution.per_scale must cover all required session sizes; observed {seen_weighted_scales:?}, required {required_sizes:?}"
             ));
         }
         if observed_weighted_present_keys_from_per_scale != observed_weighted_present_cell_keys {
             return Err(format!(
-                "weighted_bottleneck_attribution.per_scale present keys {:?} must match observed pass-cell keys {:?}",
-                observed_weighted_present_keys_from_per_scale, observed_weighted_present_cell_keys
+                "weighted_bottleneck_attribution.per_scale present keys {observed_weighted_present_keys_from_per_scale:?} must match observed pass-cell keys {observed_weighted_present_cell_keys:?}"
             ));
         }
 
@@ -2291,10 +2289,10 @@ fn phase1_matrix_validation_golden_fixture() -> Value {
                             "scenario_id": "matched-state/session_100000",
                             "total_stage_ms": 117.0,
                             "stage_pct": {
-                                "open_ms": 41.02564102564102,
-                                "append_ms": 30.76923076923077,
-                                "save_ms": 18.803418803418804,
-                                "index_ms": 9.401709401709402
+                                "open_ms": 41.025_641_025_641_02,
+                                "append_ms": 30.769_230_769_230_77,
+                                "save_ms": 18.803_418_803_418_804,
+                                "index_ms": 9.401_709_401_709_402
                             }
                         },
                         {
@@ -2303,10 +2301,10 @@ fn phase1_matrix_validation_golden_fixture() -> Value {
                             "scenario_id": "realistic/session_100000",
                             "total_stage_ms": 105.0,
                             "stage_pct": {
-                                "open_ms": 41.904761904761905,
-                                "append_ms": 30.476190476190478,
-                                "save_ms": 18.095238095238095,
-                                "index_ms": 9.523809523809524
+                                "open_ms": 41.904_761_904_761_905,
+                                "append_ms": 30.476_190_476_190_478,
+                                "save_ms": 18.095_238_095_238_095,
+                                "index_ms": 9.523_809_523_809_524
                             }
                         }
                     ]
@@ -2315,38 +2313,38 @@ fn phase1_matrix_validation_golden_fixture() -> Value {
             "global_ranking": [
                 {
                     "stage": "open_ms",
-                    "weighted_stage_ms": 9200000.0,
-                    "weighted_contribution_pct": 41.44144144144144,
-                    "mean_share_pct": 41.46520146520146,
-                    "ci95_lower_pct": 40.856001776794585,
-                    "ci95_upper_pct": 42.074401153608335,
+                    "weighted_stage_ms": 9_200_000.0,
+                    "weighted_contribution_pct": 41.441_441_441_441_44,
+                    "mean_share_pct": 41.465_201_465_201_46,
+                    "ci95_lower_pct": 40.856_001_776_794_585,
+                    "ci95_upper_pct": 42.074_401_153_608_335,
                     "sample_size": 2
                 },
                 {
                     "stage": "append_ms",
-                    "weighted_stage_ms": 6800000.0,
-                    "weighted_contribution_pct": 30.630630630630627,
-                    "mean_share_pct": 30.622710622710624,
-                    "ci95_lower_pct": 30.419644059908336,
-                    "ci95_upper_pct": 30.825777185512916,
+                    "weighted_stage_ms": 6_800_000.0,
+                    "weighted_contribution_pct": 30.630_630_630_630_627,
+                    "mean_share_pct": 30.622_710_622_710_624,
+                    "ci95_lower_pct": 30.419_644_059_908_336,
+                    "ci95_upper_pct": 30.825_777_185_512_916,
                     "sample_size": 2
                 },
                 {
                     "stage": "save_ms",
-                    "weighted_stage_ms": 4100000.0,
-                    "weighted_contribution_pct": 18.46846846846847,
-                    "mean_share_pct": 18.449328449328455,
-                    "ci95_lower_pct": 17.958584255889583,
-                    "ci95_upper_pct": 18.940072642767323,
+                    "weighted_stage_ms": 4_100_000.0,
+                    "weighted_contribution_pct": 18.468_468_468_468_47,
+                    "mean_share_pct": 18.449_328_449_328_455,
+                    "ci95_lower_pct": 17.958_584_255_889_583,
+                    "ci95_upper_pct": 18.940_072_642_767_323,
                     "sample_size": 2
                 },
                 {
                     "stage": "index_ms",
-                    "weighted_stage_ms": 2100000.0,
-                    "weighted_contribution_pct": 9.45945945945946,
-                    "mean_share_pct": 9.462759462759463,
-                    "ci95_lower_pct": 9.378148394925175,
-                    "ci95_upper_pct": 9.547370530593751,
+                    "weighted_stage_ms": 2_100_000.0,
+                    "weighted_contribution_pct": 9.459_459_459_459_46,
+                    "mean_share_pct": 9.462_759_462_759_463,
+                    "ci95_lower_pct": 9.378_148_394_925_175,
+                    "ci95_upper_pct": 9.547_370_530_593_751,
                     "sample_size": 2
                 }
             ],
@@ -3044,7 +3042,7 @@ fn phase1_matrix_validator_rejects_weighted_global_ranking_ci_inversion() {
 
     let err = validate_phase1_matrix_validation_record(&malformed).expect_err("fixture must fail");
     assert!(
-        err.contains("ci95_lower_pct") && err.contains("ci95_upper_pct") && err.contains(">"),
+        err.contains("ci95_lower_pct") && err.contains("ci95_upper_pct") && err.contains('>'),
         "expected weighted global ranking CI inversion failure, got: {err}"
     );
 }

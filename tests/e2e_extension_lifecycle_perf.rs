@@ -1502,11 +1502,7 @@ fn measure_composed_phase_latencies(
             common::run_async({
                 let mgr = mgr.clone();
                 let s = specs.to_vec();
-                async move {
-                    mgr.load_js_extensions(s)
-                        .await
-                        .map_err(|e| e.to_string())
-                }
+                async move { mgr.load_js_extensions(s).await.map_err(|e| e.to_string()) }
             })?;
             Ok(())
         })();
@@ -1719,10 +1715,7 @@ fn stage_decomposition_composed_vs_isolated() {
                 .get("p50_interference_ratio")
                 .and_then(Value::as_f64)
                 .unwrap_or(1.0);
-            let phase = record
-                .get("phase")
-                .and_then(Value::as_str)
-                .unwrap_or("?");
+            let phase = record.get("phase").and_then(Value::as_str).unwrap_or("?");
             assert!(
                 ratio < 15.0,
                 "{phase} p50 interference ratio {ratio:.2}x exceeds 15x"
@@ -1851,9 +1844,7 @@ fn pairwise_extension_contention_matrix() {
             "hottest_p95_ratio": tail,
             "total_pairs_measured": pair_ratios.len(),
         }));
-        eprintln!(
-            "[contention] hottest pair: {ext_a}+{ext_b} at {ratio:.2}x p50, {tail:.2}x p95"
-        );
+        eprintln!("[contention] hottest pair: {ext_a}+{ext_b} at {ratio:.2}x p50, {tail:.2}x p95");
     }
 
     let output_path = project_root().join("target/perf/e2e_contention.jsonl");
