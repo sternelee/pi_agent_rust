@@ -916,6 +916,7 @@ fn setup_composed_manager(
 fn interference_single_vs_composed() {
     let iterations = 30;
     let mut specs: Vec<JsExtensionLoadSpec> = Vec::new();
+    let mut loaded_extensions: Vec<String> = Vec::new();
     let mut baselines: BTreeMap<String, LatencySamples> = BTreeMap::new();
     let mut records: Vec<Value> = Vec::new();
 
@@ -927,6 +928,7 @@ fn interference_single_vs_composed() {
         }
         let spec = JsExtensionLoadSpec::from_entry_path(&entry).expect("spec");
         specs.push(spec.clone());
+        loaded_extensions.push(ext_name.to_string());
 
         let harness = common::TestHarness::new(format!("interference_single_{ext_name}"));
         let manager = setup_manager_with_extension(&harness, &spec);
@@ -958,6 +960,11 @@ fn interference_single_vs_composed() {
         specs.len() >= 2,
         "need at least 2 extensions for interference measurement"
     );
+    assert_eq!(
+        specs.len(),
+        loaded_extensions.len(),
+        "loaded extension metadata should align with measured specs"
+    );
 
     // Phase B: Measure composed (all extensions loaded together).
     let harness = common::TestHarness::new("interference_composed");
@@ -979,7 +986,7 @@ fn interference_single_vs_composed() {
         "phase": "composed",
         "extension": "composed",
         "extension_count": specs.len(),
-        "extensions_loaded": LIFECYCLE_EXTENSIONS,
+        "extensions_loaded": &loaded_extensions,
         "iterations": iterations,
         "p50_us": composed_rec.p50_us,
         "p95_us": composed_rec.p95_us,
@@ -1036,6 +1043,7 @@ fn interference_single_vs_composed() {
         "phase": "interference_delta",
         "extension": "composed",
         "extension_count": specs.len(),
+        "baseline_extension_count": baselines.len(),
         "baseline_avg_p50_us": avg_baseline_p50,
         "baseline_avg_p95_us": avg_baseline_p95,
         "baseline_avg_p99_us": avg_baseline_p99,
@@ -1069,6 +1077,38 @@ fn interference_single_vs_composed() {
     assert!(
         p95_ratio < 15.0,
         "composed p95 ratio {p95_ratio:.2}x exceeds 15x (severe tail interference)"
+    );
+    assert!(
+        p99_ratio < 20.0,
+        "composed p99 ratio {p99_ratio:.2}x exceeds 20x (severe extreme-tail interference)"
+    );
+
+    let mut phase_counts = BTreeMap::<String, usize>::new();
+    for record in &records {
+        assert_eq!(
+            record.get("schema").and_then(Value::as_str),
+            Some("pi.ext.interference.v1"),
+            "interference record must keep schema contract"
+        );
+        let Some(phase) = record.get("phase").and_then(Value::as_str) else {
+            panic!("interference record missing phase: {record}");
+        };
+        *phase_counts.entry(phase.to_string()).or_insert(0) += 1;
+    }
+    assert_eq!(
+        phase_counts.get("baseline_single").copied().unwrap_or(0),
+        loaded_extensions.len(),
+        "expected one baseline_single row per loaded extension"
+    );
+    assert_eq!(
+        phase_counts.get("composed").copied().unwrap_or(0),
+        1,
+        "expected exactly one composed row"
+    );
+    assert_eq!(
+        phase_counts.get("interference_delta").copied().unwrap_or(0),
+        1,
+        "expected exactly one interference_delta row"
     );
 }
 

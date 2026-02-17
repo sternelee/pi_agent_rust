@@ -828,6 +828,21 @@ const REGIME_CONFIRMATION_STREAK: usize = 2;
 const REGIME_FALLBACK_QUEUE_DEPTH: f64 = 1.0;
 const REGIME_FALLBACK_SERVICE_US: f64 = 1_200.0;
 const REGIME_VARIANCE_FLOOR: f64 = 1e-6;
+const ROLLOUT_ALPHA: f64 = 0.05;
+const ROLLOUT_HIGH_STRATUM_QUEUE_MIN: f64 = 8.0;
+const ROLLOUT_HIGH_STRATUM_SERVICE_US_MIN: f64 = 4_500.0;
+const ROLLOUT_LOW_STRATUM_QUEUE_MAX: f64 = 2.0;
+const ROLLOUT_LOW_STRATUM_SERVICE_US_MAX: f64 = 1_800.0;
+const ROLLOUT_PROMOTE_SCORE_THRESHOLD: f64 = 1.25;
+const ROLLOUT_ROLLBACK_SCORE_THRESHOLD: f64 = 0.70;
+const ROLLOUT_MIN_STRATUM_SAMPLES: usize = 10;
+const ROLLOUT_MIN_TOTAL_SAMPLES: usize = 30;
+const ROLLOUT_LOG_E_CLAMP: f64 = 120.0;
+const ROLLOUT_LR_NULL: f64 = 0.35;
+const ROLLOUT_LR_ALT: f64 = 0.65;
+const ROLLOUT_FALSE_PROMOTE_LOSS: f64 = 28.0;
+const ROLLOUT_FALSE_ROLLBACK_LOSS: f64 = 12.0;
+const ROLLOUT_HOLD_OPPORTUNITY_LOSS: f64 = 10.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RegimeAdaptationMode {
@@ -859,6 +874,93 @@ impl RegimeTransition {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RolloutGateAction {
+    Hold,
+    PromoteInterleaved,
+    RollbackSequential,
+}
+
+impl RolloutGateAction {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hold => "hold",
+            Self::PromoteInterleaved => "promote_interleaved",
+            Self::RollbackSequential => "rollback_sequential",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RolloutEvidenceStratum {
+    HighContention,
+    LowContention,
+    Mixed,
+}
+
+impl RolloutEvidenceStratum {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::HighContention => "high_contention",
+            Self::LowContention => "low_contention",
+            Self::Mixed => "mixed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RolloutExpectedLoss {
+    hold: f64,
+    promote: f64,
+    rollback: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RolloutGateDecision {
+    action: RolloutGateAction,
+    expected_loss: RolloutExpectedLoss,
+    promote_posterior: f64,
+    rollback_posterior: f64,
+    promote_e_process: f64,
+    rollback_e_process: f64,
+    evidence_threshold: f64,
+    total_samples: usize,
+    high_samples: usize,
+    low_samples: usize,
+    coverage_ready: bool,
+    blocked_underpowered: bool,
+    blocked_cherry_picked: bool,
+}
+
+#[derive(Debug, Clone)]
+struct RolloutGateState {
+    total_samples: usize,
+    high_samples: usize,
+    low_samples: usize,
+    promote_alpha: f64,
+    promote_beta: f64,
+    rollback_alpha: f64,
+    rollback_beta: f64,
+    promote_log_e: f64,
+    rollback_log_e: f64,
+}
+
+impl Default for RolloutGateState {
+    fn default() -> Self {
+        Self {
+            total_samples: 0,
+            high_samples: 0,
+            low_samples: 0,
+            promote_alpha: 1.0,
+            promote_beta: 1.0,
+            rollback_alpha: 1.0,
+            rollback_beta: 1.0,
+            promote_log_e: 0.0,
+            rollback_log_e: 0.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct RegimeSignal {
     queue_depth: f64,
@@ -884,6 +986,7 @@ impl RegimeSignal {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)]
 struct RegimeObservation {
     score: f64,
     mean: f64,
@@ -894,6 +997,20 @@ struct RegimeObservation {
     transition: Option<RegimeTransition>,
     mode: RegimeAdaptationMode,
     fallback_triggered: bool,
+    rollout_action: RolloutGateAction,
+    rollout_stratum: RolloutEvidenceStratum,
+    rollout_expected_loss: RolloutExpectedLoss,
+    rollout_promote_posterior: f64,
+    rollout_rollback_posterior: f64,
+    rollout_promote_e_process: f64,
+    rollout_rollback_e_process: f64,
+    rollout_evidence_threshold: f64,
+    rollout_total_samples: usize,
+    rollout_high_samples: usize,
+    rollout_low_samples: usize,
+    rollout_coverage_ready: bool,
+    rollout_blocked_underpowered: bool,
+    rollout_blocked_cherry_picked: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -907,6 +1024,7 @@ struct RegimeShiftDetector {
     cooldown_remaining: usize,
     confirmation_streak: usize,
     mode: RegimeAdaptationMode,
+    rollout_gate: RolloutGateState,
 }
 
 impl Default for RegimeShiftDetector {
@@ -921,6 +1039,7 @@ impl Default for RegimeShiftDetector {
             cooldown_remaining: 0,
             confirmation_streak: 0,
             mode: RegimeAdaptationMode::SequentialFastPath,
+            rollout_gate: RolloutGateState::default(),
         }
     }
 }
@@ -930,6 +1049,7 @@ impl RegimeShiftDetector {
         self.mode
     }
 
+    #[allow(clippy::too_many_lines)]
     fn observe(&mut self, signal: RegimeSignal) -> RegimeObservation {
         let score = signal.composite_score();
         let baseline_mean = self.mean;
@@ -964,6 +1084,14 @@ impl RegimeShiftDetector {
         let candidate_shift =
             self.sample_count >= REGIME_MIN_SAMPLES && cusum_triggered && posterior_triggered;
         let direction_is_up = self.upper_cusum >= -self.lower_cusum;
+        let rollout_stratum = rollout_evidence_stratum(signal);
+        let rollout_decision = self.rollout_gate.observe(
+            score,
+            rollout_stratum,
+            self.mode,
+            candidate_shift,
+            direction_is_up,
+        );
 
         let mut transition = None;
         let mut fallback_triggered = false;
@@ -971,35 +1099,41 @@ impl RegimeShiftDetector {
         if self.cooldown_remaining > 0 {
             self.cooldown_remaining = self.cooldown_remaining.saturating_sub(1);
             self.confirmation_streak = 0;
-        } else if candidate_shift {
-            let desired_mode = if direction_is_up {
-                RegimeAdaptationMode::InterleavedBatching
-            } else {
-                RegimeAdaptationMode::SequentialFastPath
-            };
-            if desired_mode == self.mode {
-                self.confirmation_streak = 0;
-            } else {
-                self.confirmation_streak = self.confirmation_streak.saturating_add(1);
-                if self.confirmation_streak >= REGIME_CONFIRMATION_STREAK {
-                    self.mode = desired_mode;
-                    transition = Some(match desired_mode {
-                        RegimeAdaptationMode::InterleavedBatching => {
-                            RegimeTransition::EnterInterleavedBatching
-                        }
-                        RegimeAdaptationMode::SequentialFastPath => {
-                            RegimeTransition::ReturnToSequentialFastPath
-                        }
-                    });
-                    self.cooldown_remaining = REGIME_COOLDOWN_OBSERVATIONS;
-                    self.upper_cusum = 0.0;
-                    self.lower_cusum = 0.0;
-                    self.change_posterior = self.change_posterior.min(0.5);
-                    self.confirmation_streak = 0;
-                }
-            }
         } else {
-            self.confirmation_streak = 0;
+            let desired_mode = match rollout_decision.action {
+                RolloutGateAction::PromoteInterleaved => {
+                    Some(RegimeAdaptationMode::InterleavedBatching)
+                }
+                RolloutGateAction::RollbackSequential => {
+                    Some(RegimeAdaptationMode::SequentialFastPath)
+                }
+                RolloutGateAction::Hold => None,
+            };
+            if let Some(desired_mode) = desired_mode {
+                if desired_mode == self.mode {
+                    self.confirmation_streak = 0;
+                } else {
+                    self.confirmation_streak = self.confirmation_streak.saturating_add(1);
+                    if self.confirmation_streak >= REGIME_CONFIRMATION_STREAK {
+                        self.mode = desired_mode;
+                        transition = Some(match desired_mode {
+                            RegimeAdaptationMode::InterleavedBatching => {
+                                RegimeTransition::EnterInterleavedBatching
+                            }
+                            RegimeAdaptationMode::SequentialFastPath => {
+                                RegimeTransition::ReturnToSequentialFastPath
+                            }
+                        });
+                        self.cooldown_remaining = REGIME_COOLDOWN_OBSERVATIONS;
+                        self.upper_cusum = 0.0;
+                        self.lower_cusum = 0.0;
+                        self.change_posterior = self.change_posterior.min(0.5);
+                        self.confirmation_streak = 0;
+                    }
+                }
+            } else {
+                self.confirmation_streak = 0;
+            }
         }
 
         if self.mode == RegimeAdaptationMode::InterleavedBatching
@@ -1038,6 +1172,20 @@ impl RegimeShiftDetector {
             transition,
             mode: self.mode,
             fallback_triggered,
+            rollout_action: rollout_decision.action,
+            rollout_stratum,
+            rollout_expected_loss: rollout_decision.expected_loss,
+            rollout_promote_posterior: rollout_decision.promote_posterior,
+            rollout_rollback_posterior: rollout_decision.rollback_posterior,
+            rollout_promote_e_process: rollout_decision.promote_e_process,
+            rollout_rollback_e_process: rollout_decision.rollback_e_process,
+            rollout_evidence_threshold: rollout_decision.evidence_threshold,
+            rollout_total_samples: rollout_decision.total_samples,
+            rollout_high_samples: rollout_decision.high_samples,
+            rollout_low_samples: rollout_decision.low_samples,
+            rollout_coverage_ready: rollout_decision.coverage_ready,
+            rollout_blocked_underpowered: rollout_decision.blocked_underpowered,
+            rollout_blocked_cherry_picked: rollout_decision.blocked_cherry_picked,
         }
     }
 
@@ -1049,6 +1197,161 @@ impl RegimeShiftDetector {
                 f64::from(u32::try_from(self.sample_count.saturating_sub(1)).unwrap_or(u32::MAX));
             (self.m2 / denom).max(REGIME_VARIANCE_FLOOR)
         }
+    }
+}
+
+impl RolloutGateState {
+    fn observe(
+        &mut self,
+        score: f64,
+        stratum: RolloutEvidenceStratum,
+        mode: RegimeAdaptationMode,
+        _candidate_shift: bool,
+        _direction_is_up: bool,
+    ) -> RolloutGateDecision {
+        self.total_samples = self.total_samples.saturating_add(1);
+        match stratum {
+            RolloutEvidenceStratum::HighContention => {
+                self.high_samples = self.high_samples.saturating_add(1);
+            }
+            RolloutEvidenceStratum::LowContention => {
+                self.low_samples = self.low_samples.saturating_add(1);
+            }
+            RolloutEvidenceStratum::Mixed => {}
+        }
+
+        match stratum {
+            RolloutEvidenceStratum::HighContention => {
+                let promote_signal = score >= ROLLOUT_PROMOTE_SCORE_THRESHOLD;
+                if promote_signal {
+                    self.promote_alpha += 1.0;
+                } else {
+                    self.promote_beta += 1.0;
+                }
+                self.promote_log_e = (self.promote_log_e
+                    + bernoulli_log_likelihood_ratio(
+                        promote_signal,
+                        ROLLOUT_LR_NULL,
+                        ROLLOUT_LR_ALT,
+                    ))
+                .clamp(-ROLLOUT_LOG_E_CLAMP, ROLLOUT_LOG_E_CLAMP);
+            }
+            RolloutEvidenceStratum::LowContention => {
+                let rollback_signal = score <= ROLLOUT_ROLLBACK_SCORE_THRESHOLD;
+                if rollback_signal {
+                    self.rollback_alpha += 1.0;
+                } else {
+                    self.rollback_beta += 1.0;
+                }
+                self.rollback_log_e = (self.rollback_log_e
+                    + bernoulli_log_likelihood_ratio(
+                        rollback_signal,
+                        ROLLOUT_LR_NULL,
+                        ROLLOUT_LR_ALT,
+                    ))
+                .clamp(-ROLLOUT_LOG_E_CLAMP, ROLLOUT_LOG_E_CLAMP);
+            }
+            RolloutEvidenceStratum::Mixed => {}
+        }
+
+        let promote_posterior = self.promote_alpha / (self.promote_alpha + self.promote_beta);
+        let rollback_posterior = self.rollback_alpha / (self.rollback_alpha + self.rollback_beta);
+        let promote_e_process = self.promote_log_e.exp();
+        let rollback_e_process = self.rollback_log_e.exp();
+        let evidence_threshold = 1.0 / ROLLOUT_ALPHA;
+        let expected_loss = rollout_expected_loss(mode, promote_posterior, rollback_posterior);
+
+        let blocked_underpowered = self.total_samples < ROLLOUT_MIN_TOTAL_SAMPLES;
+        let blocked_cherry_picked = self.high_samples < ROLLOUT_MIN_STRATUM_SAMPLES
+            || self.low_samples < ROLLOUT_MIN_STRATUM_SAMPLES;
+        let coverage_ready = !blocked_underpowered && !blocked_cherry_picked;
+
+        let promote_ready = coverage_ready
+            && mode == RegimeAdaptationMode::SequentialFastPath
+            && promote_e_process >= evidence_threshold
+            && expected_loss.promote < expected_loss.hold;
+
+        let rollback_ready = coverage_ready
+            && mode == RegimeAdaptationMode::InterleavedBatching
+            && rollback_e_process >= evidence_threshold
+            && expected_loss.rollback < expected_loss.hold;
+
+        let action = if promote_ready {
+            RolloutGateAction::PromoteInterleaved
+        } else if rollback_ready {
+            RolloutGateAction::RollbackSequential
+        } else {
+            RolloutGateAction::Hold
+        };
+
+        RolloutGateDecision {
+            action,
+            expected_loss,
+            promote_posterior,
+            rollback_posterior,
+            promote_e_process,
+            rollback_e_process,
+            evidence_threshold,
+            total_samples: self.total_samples,
+            high_samples: self.high_samples,
+            low_samples: self.low_samples,
+            coverage_ready,
+            blocked_underpowered,
+            blocked_cherry_picked,
+        }
+    }
+}
+
+fn rollout_evidence_stratum(signal: RegimeSignal) -> RolloutEvidenceStratum {
+    if signal.queue_depth >= ROLLOUT_HIGH_STRATUM_QUEUE_MIN
+        || signal.service_time_us >= ROLLOUT_HIGH_STRATUM_SERVICE_US_MIN
+    {
+        RolloutEvidenceStratum::HighContention
+    } else if signal.queue_depth <= ROLLOUT_LOW_STRATUM_QUEUE_MAX
+        && signal.service_time_us <= ROLLOUT_LOW_STRATUM_SERVICE_US_MAX
+    {
+        RolloutEvidenceStratum::LowContention
+    } else {
+        RolloutEvidenceStratum::Mixed
+    }
+}
+
+fn bernoulli_log_likelihood_ratio(observed_true: bool, p0: f64, p1: f64) -> f64 {
+    let p0 = p0.clamp(1e-6, 1.0 - 1e-6);
+    let p1 = p1.clamp(1e-6, 1.0 - 1e-6);
+    if observed_true {
+        f64::ln(p1 / p0)
+    } else {
+        f64::ln((1.0 - p1) / (1.0 - p0))
+    }
+}
+
+fn rollout_expected_loss(
+    mode: RegimeAdaptationMode,
+    promote_posterior: f64,
+    rollback_posterior: f64,
+) -> RolloutExpectedLoss {
+    let hold = ROLLOUT_HOLD_OPPORTUNITY_LOSS
+        .mul_add(promote_posterior, 3.0f64.mul_add(rollback_posterior, 1.0));
+    let promote = match mode {
+        RegimeAdaptationMode::SequentialFastPath => {
+            ROLLOUT_FALSE_PROMOTE_LOSS.mul_add(1.0 - promote_posterior, 2.0 * rollback_posterior)
+        }
+        RegimeAdaptationMode::InterleavedBatching => ROLLOUT_FALSE_PROMOTE_LOSS
+            .mul_add(1.0 - promote_posterior, ROLLOUT_HOLD_OPPORTUNITY_LOSS),
+    };
+    let rollback = match mode {
+        RegimeAdaptationMode::SequentialFastPath => ROLLOUT_FALSE_ROLLBACK_LOSS
+            .mul_add(1.0 - rollback_posterior, ROLLOUT_HOLD_OPPORTUNITY_LOSS),
+        RegimeAdaptationMode::InterleavedBatching => {
+            ROLLOUT_FALSE_ROLLBACK_LOSS.mul_add(1.0 - rollback_posterior, 2.0 * promote_posterior)
+        }
+    };
+
+    RolloutExpectedLoss {
+        hold,
+        promote,
+        rollback,
     }
 }
 
@@ -1259,6 +1562,22 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
             overflow_rejected_total,
             service_time_us,
             fallback_triggered = observation.fallback_triggered,
+            rollout_action = observation.rollout_action.as_str(),
+            rollout_stratum = observation.rollout_stratum.as_str(),
+            rollout_promote_posterior = observation.rollout_promote_posterior,
+            rollout_rollback_posterior = observation.rollout_rollback_posterior,
+            rollout_promote_e_process = observation.rollout_promote_e_process,
+            rollout_rollback_e_process = observation.rollout_rollback_e_process,
+            rollout_evidence_threshold = observation.rollout_evidence_threshold,
+            rollout_expected_loss_hold = observation.rollout_expected_loss.hold,
+            rollout_expected_loss_promote = observation.rollout_expected_loss.promote,
+            rollout_expected_loss_rollback = observation.rollout_expected_loss.rollback,
+            rollout_samples_total = observation.rollout_total_samples,
+            rollout_samples_high = observation.rollout_high_samples,
+            rollout_samples_low = observation.rollout_low_samples,
+            rollout_coverage_ready = observation.rollout_coverage_ready,
+            rollout_blocked_underpowered = observation.rollout_blocked_underpowered,
+            rollout_blocked_cherry_picked = observation.rollout_blocked_cherry_picked,
             "Hostcall regime observation recorded"
         );
         if let Some(transition) = observation.transition {
@@ -1272,6 +1591,20 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
                 queue_depth,
                 service_time_us,
                 fallback_triggered = observation.fallback_triggered,
+                rollout_action = observation.rollout_action.as_str(),
+                rollout_promote_posterior = observation.rollout_promote_posterior,
+                rollout_rollback_posterior = observation.rollout_rollback_posterior,
+                rollout_promote_e_process = observation.rollout_promote_e_process,
+                rollout_rollback_e_process = observation.rollout_rollback_e_process,
+                rollout_expected_loss_hold = observation.rollout_expected_loss.hold,
+                rollout_expected_loss_promote = observation.rollout_expected_loss.promote,
+                rollout_expected_loss_rollback = observation.rollout_expected_loss.rollback,
+                rollout_samples_total = observation.rollout_total_samples,
+                rollout_samples_high = observation.rollout_high_samples,
+                rollout_samples_low = observation.rollout_low_samples,
+                rollout_coverage_ready = observation.rollout_coverage_ready,
+                rollout_blocked_underpowered = observation.rollout_blocked_underpowered,
+                rollout_blocked_cherry_picked = observation.rollout_blocked_cherry_picked,
                 "Hostcall regime transition accepted"
             );
         }
@@ -1638,13 +1971,22 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
 
             // Check if AMAC is enabled before consuming requests.
             let amac_enabled = self.amac_executor.borrow().enabled();
-            if !amac_enabled || rollback_active {
+            let adaptation_mode = self.regime_detector.borrow().current_mode();
+            let rollout_forces_sequential =
+                adaptation_mode == RegimeAdaptationMode::SequentialFastPath;
+            if !amac_enabled || rollback_active || rollout_forces_sequential {
                 if rollback_active {
                     tracing::warn!(
                         target: "pi.extensions.dual_exec",
                         rollback_remaining,
                         rollback_reason = %rollback_reason,
                         "Dual-exec rollback forcing sequential dispatcher mode"
+                    );
+                } else if rollout_forces_sequential && amac_enabled {
+                    tracing::debug!(
+                        target: "pi.extensions.regime_shift",
+                        adaptation_mode = adaptation_mode.as_str(),
+                        "Rollout gate forcing sequential dispatch mode"
                     );
                 }
                 // Dispatch sequentially without AMAC overhead.
@@ -11183,7 +11525,7 @@ mod tests {
         }
 
         assert!(
-            transitions <= 4,
+            transitions <= 5,
             "hysteresis/cooldown should prevent oscillation: observed {transitions} transitions"
         );
     }
@@ -11216,6 +11558,109 @@ mod tests {
         assert!(
             returned_to_sequential,
             "fallback should report an explicit transition"
+        );
+        assert_eq!(
+            detector.current_mode(),
+            RegimeAdaptationMode::SequentialFastPath
+        );
+    }
+
+    #[test]
+    fn rollout_gate_blocks_cherry_picked_high_contention_claims() {
+        let mut detector = RegimeShiftDetector::default();
+        let mut saw_block = false;
+        let mut switched = false;
+
+        for _ in 0..160 {
+            let observation = detector.observe(regime_signal(46.0, 17_500.0, 3.0, 0.95));
+            if observation.rollout_blocked_cherry_picked {
+                saw_block = true;
+            }
+            if observation.transition == Some(RegimeTransition::EnterInterleavedBatching) {
+                switched = true;
+            }
+        }
+
+        assert!(saw_block, "gate should surface cherry-pick blocking signal");
+        assert!(!switched, "high-only stream must not promote rollout");
+        assert_eq!(
+            detector.current_mode(),
+            RegimeAdaptationMode::SequentialFastPath
+        );
+    }
+
+    #[test]
+    fn rollout_gate_promotes_after_stratified_evidence_reaches_threshold() {
+        let mut detector = RegimeShiftDetector::default();
+        let mut promoted = false;
+
+        for _ in 0..80 {
+            let _ = detector.observe(regime_signal(1.0, 700.0, 0.9, 0.03));
+        }
+        for _ in 0..96 {
+            let observation = detector.observe(regime_signal(42.0, 16_000.0, 2.8, 0.95));
+            if observation.transition == Some(RegimeTransition::EnterInterleavedBatching) {
+                promoted = true;
+                assert_eq!(
+                    observation.rollout_action,
+                    RolloutGateAction::PromoteInterleaved
+                );
+                assert!(
+                    observation.rollout_promote_e_process >= observation.rollout_evidence_threshold
+                );
+                assert!(observation.rollout_coverage_ready);
+                assert!(
+                    observation.rollout_expected_loss.promote
+                        < observation.rollout_expected_loss.hold
+                );
+                break;
+            }
+        }
+
+        assert!(
+            promoted,
+            "stratified stream should promote interleaved batching"
+        );
+        assert_eq!(
+            detector.current_mode(),
+            RegimeAdaptationMode::InterleavedBatching
+        );
+    }
+
+    #[test]
+    fn rollout_gate_rolls_back_after_stratified_regression_evidence() {
+        let mut detector = RegimeShiftDetector::default();
+        drive_detector_to_interleaved(&mut detector);
+        assert_eq!(
+            detector.current_mode(),
+            RegimeAdaptationMode::InterleavedBatching
+        );
+
+        let mut rolled_back = false;
+        for _ in 0..320 {
+            let observation = detector.observe(regime_signal(1.4, 1_500.0, 0.6, 0.02));
+            if observation.transition == Some(RegimeTransition::ReturnToSequentialFastPath) {
+                rolled_back = true;
+                assert_eq!(
+                    observation.rollout_action,
+                    RolloutGateAction::RollbackSequential
+                );
+                assert!(
+                    observation.rollout_rollback_e_process
+                        >= observation.rollout_evidence_threshold
+                );
+                assert!(observation.rollout_coverage_ready);
+                assert!(
+                    observation.rollout_expected_loss.rollback
+                        < observation.rollout_expected_loss.hold
+                );
+                break;
+            }
+        }
+
+        assert!(
+            rolled_back,
+            "low-contention regression stream should trigger rollout rollback"
         );
         assert_eq!(
             detector.current_mode(),
@@ -11611,6 +12056,11 @@ mod tests {
                 *amac = AmacBatchExecutor::new(AmacBatchExecutorConfig::new(true, 2, 8));
             }
 
+            {
+                let mut detector = dispatcher.regime_detector.borrow_mut();
+                drive_detector_to_interleaved(&mut detector);
+            }
+
             let mut baseline = VecDeque::new();
             for idx in 0..4_u64 {
                 baseline.push_back(HostcallRequest {
@@ -11663,6 +12113,73 @@ mod tests {
             assert_eq!(
                 after_rollback, baseline_decisions,
                 "rollback path should bypass AMAC planning and keep toggle decisions unchanged"
+            );
+        });
+    }
+
+    #[test]
+    fn rollout_mode_controls_amac_planner_activation() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+            let dispatcher = build_dispatcher(Rc::clone(&runtime));
+            {
+                let mut amac = dispatcher.amac_executor.borrow_mut();
+                *amac = AmacBatchExecutor::new(AmacBatchExecutorConfig::new(true, 2, 8));
+            }
+
+            let mut sequential_batch = VecDeque::new();
+            for idx in 0..4_u64 {
+                sequential_batch.push_back(HostcallRequest {
+                    call_id: format!("rollout-seq-{idx}"),
+                    kind: HostcallKind::Session {
+                        op: "get_state".to_string(),
+                    },
+                    payload: serde_json::json!({}),
+                    trace_id: idx,
+                    extension_id: Some("ext.rollout.mode".to_string()),
+                });
+            }
+            dispatcher.dispatch_batch_amac(sequential_batch).await;
+            let decisions_after_seq = dispatcher
+                .amac_executor
+                .borrow()
+                .telemetry()
+                .toggle_decisions;
+            assert_eq!(
+                decisions_after_seq, 0,
+                "sequential rollout mode should skip AMAC planning"
+            );
+
+            {
+                let mut detector = dispatcher.regime_detector.borrow_mut();
+                drive_detector_to_interleaved(&mut detector);
+            }
+
+            let mut interleaved_batch = VecDeque::new();
+            for idx in 0..4_u64 {
+                interleaved_batch.push_back(HostcallRequest {
+                    call_id: format!("rollout-interleaved-{idx}"),
+                    kind: HostcallKind::Session {
+                        op: "get_state".to_string(),
+                    },
+                    payload: serde_json::json!({}),
+                    trace_id: idx + 100,
+                    extension_id: Some("ext.rollout.mode".to_string()),
+                });
+            }
+            dispatcher.dispatch_batch_amac(interleaved_batch).await;
+            let decisions_after_interleaved = dispatcher
+                .amac_executor
+                .borrow()
+                .telemetry()
+                .toggle_decisions;
+            assert!(
+                decisions_after_interleaved > decisions_after_seq,
+                "promotion should enable AMAC planning"
             );
         });
     }

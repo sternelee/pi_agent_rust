@@ -1104,7 +1104,11 @@ data: {"type":"message_stop"}
 
             // The recovered remainder "\n\n" completes the partial "data: " line,
             // producing an empty-data event before the error surfaces.
-            let second = stream.next().await.expect("second item").expect("second ok");
+            let second = stream
+                .next()
+                .await
+                .expect("second item")
+                .expect("second ok");
             assert_eq!(second.data, "", "{diag}");
 
             let err = stream

@@ -319,6 +319,83 @@ async fn load_extension(runtime: &PiJsRuntime, spec: &JsExtensionLoadSpec) -> Re
     Ok(())
 }
 
+async fn resolve_extension_callable(
+    runtime: &PiJsRuntime,
+    extension_id: &str,
+) -> Result<(String, String)> {
+    let ext_id = js_literal(&extension_id)?;
+    let bench_tool = js_literal(&BENCH_REPORT_TOOL)?;
+    let js = format!(
+        r"
+(async () => {{
+  try {{
+    const extId = {ext_id};
+    let invokeKind = null;
+    let invokeName = null;
+
+    if (typeof __pi_tool_index !== 'undefined' && __pi_tool_index && __pi_tool_index.has(extId)) {{
+      invokeKind = 'tool';
+      invokeName = extId;
+    }} else if (typeof __pi_command_index !== 'undefined' && __pi_command_index && __pi_command_index.has(extId)) {{
+      invokeKind = 'command';
+      invokeName = extId;
+    }}
+
+    if (!invokeKind && typeof __pi_tool_index !== 'undefined' && __pi_tool_index) {{
+      for (const [name, record] of __pi_tool_index.entries()) {{
+        if (record && record.extensionId === extId) {{
+          invokeKind = 'tool';
+          invokeName = name;
+          break;
+        }}
+      }}
+    }}
+
+    if (!invokeKind && typeof __pi_command_index !== 'undefined' && __pi_command_index) {{
+      for (const [name, record] of __pi_command_index.entries()) {{
+        if (record && record.extensionId === extId) {{
+          invokeKind = 'command';
+          invokeName = name;
+          break;
+        }}
+      }}
+    }}
+
+    if (!invokeKind || !invokeName) {{
+      throw new Error(`No callable tool/command registered for extension: ${{extId}}`);
+    }}
+
+    await pi.tool({bench_tool}, {{
+      ok: true,
+      invoke_kind: invokeKind,
+      invoke_name: invokeName
+    }});
+  }} catch (e) {{
+    const msg = (e && e.message) ? String(e.message) : String(e);
+    await pi.tool({bench_tool}, {{ ok: false, error: msg }});
+  }}
+}})();
+"
+    );
+
+    let (report, _unexpected, _elapsed) =
+        run_bench_js(runtime, &js, Duration::from_secs(10)).await?;
+    let invoke_kind = report
+        .get("invoke_kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| pi::error::Error::extension("missing invoke_kind in callable report"))?;
+    let invoke_name = report
+        .get("invoke_name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| pi::error::Error::extension("missing invoke_name in callable report"))?;
+    if invoke_kind != "tool" && invoke_kind != "command" {
+        return Err(pi::error::Error::extension(format!(
+            "unsupported invoke_kind from callable report: {invoke_kind}"
+        )));
+    }
+    Ok((invoke_kind.to_string(), invoke_name.to_string()))
+}
+
 // ─── Scenarios ──────────────────────────────────────────────────────────────
 
 /// Cold start: create a fresh runtime + load extension from scratch each run.
@@ -386,11 +463,14 @@ async fn scenario_tool_call(
     let runtime = new_runtime(js_cwd).await?;
     load_extension(&runtime, spec).await?;
 
-    // Find the first registered tool name from the extension.
-    // For "hello" it's "hello", for "pirate" it's "pirate", for "diff" it's "diff".
-    let tool_name = js_literal(&spec.extension_id)?;
+    // Extensions may expose either a tool or a command with the extension name.
+    let (invoke_kind, invoke_name) =
+        resolve_extension_callable(&runtime, &spec.extension_id).await?;
+    let invoke_kind_js = js_literal(&invoke_kind)?;
+    let invoke_name_js = js_literal(&invoke_name)?;
     let call_id = js_literal(&"bench-call-1")?;
     let input = js_literal(&json!({}))?;
+    let command_args = js_literal(&json!([]))?;
     let ctx = js_literal(&json!({"hasUI": false, "cwd": js_cwd}))?;
     let iterations_js = js_literal(&iterations)?;
     let bench_tool = js_literal(&BENCH_REPORT_TOOL)?;
@@ -399,11 +479,24 @@ async fn scenario_tool_call(
         r"
 (async () => {{
   try {{
+    const invokeKind = {invoke_kind_js};
+    const invokeName = {invoke_name_js};
+    const commandArgs = {command_args};
     const N = {iterations_js};
     for (let i = 0; i < N; i++) {{
-      await __pi_execute_tool({tool_name}, {call_id}, {input}, {ctx});
+      if (invokeKind === 'tool') {{
+        await __pi_execute_tool(invokeName, {call_id}, {input}, {ctx});
+      }} else if (invokeKind === 'command') {{
+        await __pi_execute_command(invokeName, commandArgs, {ctx});
+      }} else {{
+        throw new Error(`Unsupported invoke kind: ${{invokeKind}}`);
+      }}
     }}
-    await pi.tool({bench_tool}, {{ ok: true }});
+    await pi.tool({bench_tool}, {{
+      ok: true,
+      invoke_kind: invokeKind,
+      invoke_name: invokeName
+    }});
   }} catch (e) {{
     const msg = (e && e.message) ? String(e.message) : String(e);
     await pi.tool({bench_tool}, {{ ok: false, error: msg }});
@@ -412,8 +505,16 @@ async fn scenario_tool_call(
 "
     );
 
-    let (_report, unexpected, elapsed) =
+    let (report, unexpected, elapsed) =
         run_bench_js(&runtime, &js, Duration::from_secs(60)).await?;
+    let record_invoke_kind = report
+        .get("invoke_kind")
+        .and_then(Value::as_str)
+        .unwrap_or(invoke_kind.as_str());
+    let record_invoke_name = report
+        .get("invoke_name")
+        .and_then(Value::as_str)
+        .unwrap_or(invoke_name.as_str());
 
     let elapsed_us = elapsed.as_secs_f64() * 1_000_000.0;
     let iters_f = f64::from(iterations.max(1));
@@ -429,6 +530,8 @@ async fn scenario_tool_call(
         "elapsed_ms": elapsed.as_secs_f64() * 1000.0,
         "per_call_us": per_call_us,
         "calls_per_sec": calls_per_sec,
+        "invoke_kind": record_invoke_kind,
+        "invoke_name": record_invoke_name,
         "unexpected_hostcalls": unexpected,
     }))
 }
@@ -693,16 +796,26 @@ fn write_jsonl(records: &[Value], path: &Path) {
 fn run_scenario_suite_and_emit_jsonl() {
     let records = run_all_scenarios().expect("scenario suite should complete");
 
-    // Must have records for >=3 extensions
-    let extensions: std::collections::HashSet<_> = records
+    // Must have benchmark records for configured extensions (excluding matrix seed rows).
+    let benchmarked_extensions: std::collections::HashSet<_> = records
         .iter()
+        .filter(|record| {
+            record.get("scenario").and_then(Value::as_str) != Some(MATRIX_SCENARIO_SESSION_WORKLOAD)
+        })
         .filter_map(|r| r.get("extension").and_then(Value::as_str))
         .collect();
+    for expected_ext in BENCH_EXTENSIONS {
+        assert!(
+            benchmarked_extensions.contains(expected_ext),
+            "missing benchmark records for extension: {expected_ext}; observed={benchmarked_extensions:?}"
+        );
+    }
     assert!(
-        extensions.len() >= 3,
-        "expected >=3 extensions, got {}: {:?}",
-        extensions.len(),
-        extensions
+        benchmarked_extensions.len() >= BENCH_EXTENSIONS.len(),
+        "expected at least {} benchmarked extensions, got {}: {:?}",
+        BENCH_EXTENSIONS.len(),
+        benchmarked_extensions.len(),
+        benchmarked_extensions
     );
 
     // Must have all extension benchmark scenario types + matrix source scenario.
@@ -718,6 +831,21 @@ fn run_scenario_suite_and_emit_jsonl() {
         MATRIX_SCENARIO_SESSION_WORKLOAD,
     ] {
         assert!(scenarios.contains(expected), "missing scenario: {expected}");
+    }
+    // Fail closed on per-extension scenario drift: each benchmarked extension
+    // must emit all core scenario rows.
+    for ext_name in BENCH_EXTENSIONS {
+        let ext_scenarios: std::collections::HashSet<_> = records
+            .iter()
+            .filter(|record| record.get("extension").and_then(Value::as_str) == Some(*ext_name))
+            .filter_map(|record| record.get("scenario").and_then(Value::as_str))
+            .collect();
+        for expected in ["cold_start", "warm_start", "tool_call", "event_dispatch"] {
+            assert!(
+                ext_scenarios.contains(expected),
+                "extension {ext_name} missing scenario {expected}; observed={ext_scenarios:?}"
+            );
+        }
     }
 
     let matrix_rows = records
