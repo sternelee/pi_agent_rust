@@ -77,9 +77,7 @@ fn collect_module_ownership_index(manifest: &Value) -> ValidationResult<HashMap<
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|entry| !entry.is_empty())
-            .ok_or_else(|| {
-                "every boundary domain must include non-empty domain_id".to_string()
-            })?;
+            .ok_or_else(|| "every boundary domain must include non-empty domain_id".to_string())?;
         for module in as_array(domain, "/current_modules") {
             let module_path = module
                 .as_str()
@@ -129,7 +127,9 @@ fn validate_required_core_module_coverage(manifest: &Value) -> ValidationResult<
     Ok(())
 }
 
-fn collect_banned_cross_boundary_pairs(manifest: &Value) -> ValidationResult<HashSet<(String, String)>> {
+fn collect_banned_cross_boundary_pairs(
+    manifest: &Value,
+) -> ValidationResult<HashSet<(String, String)>> {
     let mut pairs = HashSet::new();
     for pair in as_array(manifest, "/ownership_rules/banned_cross_boundary_pairs") {
         let from_domain = pair
@@ -137,13 +137,17 @@ fn collect_banned_cross_boundary_pairs(manifest: &Value) -> ValidationResult<Has
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|entry| !entry.is_empty())
-            .ok_or_else(|| "banned_cross_boundary_pairs entries must include non-empty from_domain".to_string())?;
+            .ok_or_else(|| {
+                "banned_cross_boundary_pairs entries must include non-empty from_domain".to_string()
+            })?;
         let to_domain = pair
             .get("to_domain")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|entry| !entry.is_empty())
-            .ok_or_else(|| "banned_cross_boundary_pairs entries must include non-empty to_domain".to_string())?;
+            .ok_or_else(|| {
+                "banned_cross_boundary_pairs entries must include non-empty to_domain".to_string()
+            })?;
 
         let inserted = pairs.insert((from_domain.to_string(), to_domain.to_string()));
         if !inserted {
@@ -199,7 +203,10 @@ fn remove_banned_pair(manifest: &mut Value, from_domain: &str, to_domain: &str) 
         .expect("ownership_rules.banned_cross_boundary_pairs must be mutable array");
     let before = pairs.len();
     pairs.retain(|pair| {
-        let from = pair.get("from_domain").and_then(Value::as_str).map(str::trim);
+        let from = pair
+            .get("from_domain")
+            .and_then(Value::as_str)
+            .map(str::trim);
         let to = pair.get("to_domain").and_then(Value::as_str).map(str::trim);
         !(from == Some(from_domain) && to == Some(to_domain))
     });
@@ -343,8 +350,7 @@ fn kernel_boundary_manifest_enforces_fail_closed_ownership_rules() {
             );
         }
     }
-    validate_required_banned_cross_boundary_pairs(&manifest)
-        .unwrap_or_else(|err| panic!("{err}"));
+    validate_required_banned_cross_boundary_pairs(&manifest).unwrap_or_else(|err| panic!("{err}"));
 }
 
 #[test]
@@ -486,11 +492,7 @@ fn kernel_boundary_manifest_missing_required_mapping_mutation_fails_closed() {
 fn kernel_boundary_manifest_banned_pair_drift_mutation_fails_closed() {
     let mut manifest = load_manifest();
     assert!(
-        remove_banned_pair(
-            &mut manifest,
-            "extension_runtime_js",
-            "provider_runtime"
-        ),
+        remove_banned_pair(&mut manifest, "extension_runtime_js", "provider_runtime"),
         "mutation setup should remove required banned cross-boundary pair"
     );
 
@@ -499,5 +501,25 @@ fn kernel_boundary_manifest_banned_pair_drift_mutation_fails_closed() {
     assert!(
         err.contains("extension_runtime_js->provider_runtime"),
         "error should reference missing banned pair, got: {err}"
+    );
+}
+
+#[test]
+fn kernel_boundary_manifest_banned_pair_typo_mutation_fails_closed() {
+    let mut manifest = load_manifest();
+    let pairs = manifest
+        .pointer_mut("/ownership_rules/banned_cross_boundary_pairs")
+        .and_then(Value::as_array_mut)
+        .expect("ownership_rules.banned_cross_boundary_pairs must be mutable array");
+    let first_pair = pairs
+        .first_mut()
+        .expect("ownership_rules.banned_cross_boundary_pairs must have at least one pair");
+    first_pair["to_domain"] = Value::String("session_orchestration_typo".to_string());
+
+    let err = validate_required_banned_cross_boundary_pairs(&manifest)
+        .expect_err("drifted banned pair domain typo must fail validation");
+    assert!(
+        err.contains("hostcall_execution->session_orchestration"),
+        "error should reference required banned pair contract, got: {err}"
     );
 }
