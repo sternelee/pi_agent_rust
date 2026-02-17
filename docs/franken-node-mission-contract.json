@@ -54,7 +54,8 @@
         "bd-3ar8v.7.2",
         "bd-3ar8v.7.3",
         "bd-3ar8v.7.4",
-        "bd-3ar8v.7.5"
+        "bd-3ar8v.7.5",
+        "bd-3ar8v.7.6"
       ],
       "required_evidence_artifacts": [
         "docs/dropin-certification-verdict.json",

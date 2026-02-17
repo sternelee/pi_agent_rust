@@ -1,6 +1,6 @@
 # Full Certification Report
 
-> Generated: 2026-02-17T07:07:10Z
+> Generated: 2026-02-17T08:44:46Z
 > Lane: **full**
 > Verdict: **PASS**
 
@@ -34,12 +34,12 @@
 | Canonical E2E scenario matrix | bd-1f42.8.5.1 | no | PASS | - | `docs/e2e_scenario_matrix.json` |
 | Provider gap test matrix coverage | bd-3uqg.11.11.5 | no | PASS | - | `docs/provider-gaps-test-matrix.json` |
 | SEC-6.4 security compatibility conformance | bd-1a2cu | YES | PASS | - | `tests/full_suite_gate/sec_conformance_verdict.json` |
-| PERF-3X bead-to-artifact coverage audit | bd-3ar8v.6.11 | YES | PASS | - | `tests/full_suite_gate/certification_events.jsonl` |
-| Practical-finish checkpoint | bd-3ar8v.6.9 | YES | PASS | - | `tests/full_suite_gate/practical_finish_checkpoint.json` |
+| PERF-3X bead-to-artifact coverage audit | bd-3ar8v.6.11 | YES | PASS | - | `tests/full_suite_gate/perf3x_bead_coverage_audit.json` |
+| Practical-finish checkpoint (docs-only residual filter) | bd-3ar8v.6.9 | YES | PASS | - | `tests/full_suite_gate/practical_finish_checkpoint.json` |
 | Extension remediation backlog artifact integrity | bd-3ar8v.6.8 | YES | PASS | - | `tests/full_suite_gate/extension_remediation_backlog.json` |
 | Opportunity matrix artifact integrity | bd-3ar8v.6.1 | YES | PASS | - | `tests/perf/reports/opportunity_matrix.json` |
 | Parameter sweeps artifact integrity | bd-3ar8v.6.2 | YES | PASS | - | `tests/perf/reports/parameter_sweeps.json` |
-| Conformance+stress lineage coherence | bd-3ar8v.6.3 | YES | PASS | - | `tests/perf/reports/stress_triage.json` |
+| Conformance+stress lineage coherence | bd-3ar8v.6.3 | YES | PASS | - | `tests/ext_conformance/reports/conformance_summary.json` |
 | Waiver lifecycle compliance | bd-1f42.8.8.1 | YES | PASS | - | `tests/full_suite_gate/waiver_audit.json` |
 
 ## Rerun Commands

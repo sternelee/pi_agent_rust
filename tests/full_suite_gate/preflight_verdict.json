@@ -1,7 +1,7 @@
 {
   "schema": "pi.ci.preflight_lane.v1",
   "lane": "preflight",
-  "generated_at": "2026-02-17T03:16:20.860Z",
+  "generated_at": "2026-02-17T08:44:45.252Z",
   "verdict": "pass",
   "policy": "Preflight lane: evaluate blocking gates only, fail-fast on first failure. Waived gates are skipped with audit trail.",
   "gates_evaluated": 14,
@@ -75,12 +75,12 @@
       "bead": "bd-3ar8v.6.11",
       "status": "pass",
       "blocking": true,
-      "artifact_path": "tests/full_suite_gate/certification_events.jsonl",
+      "artifact_path": "tests/full_suite_gate/perf3x_bead_coverage_audit.json",
       "detail": "Validated 7 PERF-3X bead coverage row(s) with complete unit/e2e/log evidence paths",
       "reproduce_command": "cargo test --test ci_full_suite_gate -- perf3x_bead_coverage_contract_is_well_formed --nocapture --exact"
     },
     {
-      "id": "practical_finish",
+      "id": "practical_finish_checkpoint",
       "name": "Practical-finish checkpoint (docs-only residual filter)",
       "bead": "bd-3ar8v.6.9",
       "status": "pass",
@@ -96,25 +96,25 @@
       "status": "pass",
       "blocking": true,
       "artifact_path": "tests/full_suite_gate/extension_remediation_backlog.json",
-      "reproduce_command": "cargo test --test ci_full_suite_gate -- extension_remediation_backlog_gate_passes_on_consistent_summary_shape --nocapture --exact"
+      "reproduce_command": "cargo test --test qa_certification_dossier -- certification_dossier --nocapture --exact"
     },
     {
-      "id": "opportunity_matrix",
+      "id": "opportunity_matrix_integrity",
       "name": "Opportunity matrix artifact integrity",
       "bead": "bd-3ar8v.6.1",
       "status": "pass",
       "blocking": true,
       "artifact_path": "tests/perf/reports/opportunity_matrix.json",
-      "reproduce_command": "cargo test --test ci_full_suite_gate -- opportunity_matrix_gate_passes_on_consistent_contract_shape --nocapture --exact"
+      "reproduce_command": "cargo test --test release_evidence_gate -- phase1_weighted_attribution_contract_links_phase5_consumers --nocapture --exact"
     },
     {
-      "id": "parameter_sweeps",
+      "id": "parameter_sweeps_integrity",
       "name": "Parameter sweeps artifact integrity",
       "bead": "bd-3ar8v.6.2",
       "status": "pass",
       "blocking": true,
       "artifact_path": "tests/perf/reports/parameter_sweeps.json",
-      "reproduce_command": "cargo test --test ci_full_suite_gate -- parameter_sweeps_gate_passes_on_consistent_contract_shape --nocapture --exact"
+      "reproduce_command": "cargo test --test release_evidence_gate -- parameter_sweeps_contract_links_phase1_matrix_and_readiness --nocapture --exact"
     },
     {
       "id": "conformance_stress_lineage",
@@ -122,7 +122,7 @@
       "bead": "bd-3ar8v.6.3",
       "status": "pass",
       "blocking": true,
-      "artifact_path": "tests/perf/reports/stress_triage.json",
+      "artifact_path": "tests/ext_conformance/reports/conformance_summary.json",
       "detail": "Conformance+stress lineage coherence validated: both artifacts carry run_id and correlation_id",
       "reproduce_command": "cargo test --test ci_full_suite_gate -- conformance_stress_lineage_passes_with_valid_artifacts --nocapture --exact"
     },
