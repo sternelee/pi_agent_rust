@@ -1,8 +1,12 @@
 {
   "schema": "pi.frankennode.kernel_extraction_boundary_manifest.v1",
-  "contract_version": "1.0.0",
+  "contract_version": "1.1.0",
   "bead_id": "bd-3ar8v.7.2",
   "support_bead_id": "bd-3ar8v.7.2.1",
+  "support_bead_ids": [
+    "bd-3ar8v.7.2.1",
+    "bd-3ar8v.7.2.3"
+  ],
   "status": "active_blocking_policy",
   "effective_date_utc": "2026-02-17T00:00:00Z",
   "source_project_root": "/data/projects/pi_agent_rust",
@@ -192,7 +196,8 @@
       "kernel_boundary.all_modules_mapped_or_deferred",
       "kernel_boundary.no_duplicate_domain_ownership",
       "kernel_boundary.banned_cross_boundary_pairs_absent",
-      "kernel_boundary.reintegration_target_list_complete"
+      "kernel_boundary.reintegration_target_list_complete",
+      "kernel_boundary.reintegration_module_mappings_complete"
     ],
     "report_artifact": "tests/full_suite_gate/franken_node_kernel_boundary_drift_report.json",
     "failure_policy": "hard_fail"
@@ -207,6 +212,59 @@
       "src/extensions.rs",
       "src/extensions_js.rs",
       "src/session.rs"
+    ],
+    "require_explicit_module_mappings": true,
+    "failure_policy": "hard_fail",
+    "module_mappings": [
+      {
+        "source_module": "src/agent_cx.rs",
+        "source_domain": "context_and_diagnostics",
+        "target_crate": "franken-kernel-context",
+        "target_module": "franken_kernel_context::agent_cx",
+        "replacement_target": "src/agent_cx.rs"
+      },
+      {
+        "source_module": "src/hostcall_queue.rs",
+        "source_domain": "hostcall_queueing",
+        "target_crate": "franken-kernel-hostcall-queue",
+        "target_module": "franken_kernel_hostcall_queue::queue",
+        "replacement_target": "src/hostcall_queue.rs"
+      },
+      {
+        "source_module": "src/hostcall_amac.rs",
+        "source_domain": "hostcall_execution",
+        "target_crate": "franken-kernel-hostcall-exec",
+        "target_module": "franken_kernel_hostcall_exec::amac",
+        "replacement_target": "src/hostcall_amac.rs"
+      },
+      {
+        "source_module": "src/scheduler.rs",
+        "source_domain": "reactor_scheduler",
+        "target_crate": "franken-kernel-reactor",
+        "target_module": "franken_kernel_reactor::scheduler",
+        "replacement_target": "src/scheduler.rs"
+      },
+      {
+        "source_module": "src/extensions.rs",
+        "source_domain": "extension_dispatch",
+        "target_crate": "franken-kernel-extension-bridge",
+        "target_module": "franken_kernel_extension_bridge::policy",
+        "replacement_target": "src/extensions.rs"
+      },
+      {
+        "source_module": "src/extensions_js.rs",
+        "source_domain": "extension_runtime_js",
+        "target_crate": "franken-kernel-runtime-js",
+        "target_module": "franken_kernel_runtime_js::runtime",
+        "replacement_target": "src/extensions_js.rs"
+      },
+      {
+        "source_module": "src/session.rs",
+        "source_domain": "session_orchestration",
+        "target_crate": "franken-kernel-session",
+        "target_module": "franken_kernel_session::store",
+        "replacement_target": "src/session.rs"
+      }
     ]
   },
   "structured_logging_contract": {

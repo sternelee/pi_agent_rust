@@ -17,6 +17,22 @@ const REQUIRED_BANNED_CROSS_BOUNDARY_PAIRS: &[(&str, &str)] = &[
     ("hostcall_execution", "session_orchestration"),
     ("extension_runtime_js", "provider_runtime"),
 ];
+const REQUIRED_REINTEGRATION_MAPPING_MODULES: &[&str] = &[
+    "src/agent_cx.rs",
+    "src/hostcall_queue.rs",
+    "src/hostcall_amac.rs",
+    "src/scheduler.rs",
+    "src/extensions.rs",
+    "src/extensions_js.rs",
+    "src/session.rs",
+];
+
+#[derive(Debug)]
+struct DomainBoundary {
+    target_crate: String,
+    current_modules: HashSet<String>,
+    target_modules: HashSet<String>,
+}
 
 type ValidationResult<T> = std::result::Result<T, String>;
 
@@ -173,6 +189,177 @@ fn validate_required_banned_cross_boundary_pairs(manifest: &Value) -> Validation
     Ok(())
 }
 
+fn collect_domain_boundaries(
+    manifest: &Value,
+) -> ValidationResult<HashMap<String, DomainBoundary>> {
+    let mut out = HashMap::new();
+    for domain in as_array(manifest, "/boundary_domains") {
+        let domain_id = domain
+            .get("domain_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .ok_or_else(|| "every boundary domain must include non-empty domain_id".to_string())?;
+        let target_crate = domain
+            .get("target_crate")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .ok_or_else(|| {
+                format!("boundary domain {domain_id} must define non-empty target_crate")
+            })?
+            .to_string();
+        let current_modules = as_array(domain, "/current_modules")
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<HashSet<_>>();
+        let target_modules = as_array(domain, "/target_modules")
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<HashSet<_>>();
+        if current_modules.is_empty() {
+            return Err(format!(
+                "boundary domain {domain_id} must define at least one current_modules entry"
+            ));
+        }
+        if target_modules.is_empty() {
+            return Err(format!(
+                "boundary domain {domain_id} must define at least one target_modules entry"
+            ));
+        }
+
+        let inserted = out.insert(
+            domain_id.to_string(),
+            DomainBoundary {
+                target_crate,
+                current_modules,
+                target_modules,
+            },
+        );
+        if inserted.is_some() {
+            return Err(format!("duplicate boundary domain detected: {domain_id}"));
+        }
+    }
+    Ok(out)
+}
+
+#[allow(clippy::too_many_lines)]
+fn validate_reintegration_module_mappings(manifest: &Value) -> ValidationResult<()> {
+    let domain_boundaries = collect_domain_boundaries(manifest)?;
+    let replacement_targets =
+        non_empty_string_set(manifest, "/reintegration_linkage/replacement_targets");
+    let mappings = as_array(manifest, "/reintegration_linkage/module_mappings");
+    if mappings.is_empty() {
+        return Err("reintegration_linkage.module_mappings must not be empty".to_string());
+    }
+
+    let mut seen_sources = HashSet::new();
+    let mut seen_replacements = HashSet::new();
+    for mapping in mappings {
+        let source_module = mapping
+            .get("source_module")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .ok_or_else(|| "module mapping must define non-empty source_module".to_string())?;
+        let source_domain = mapping
+            .get("source_domain")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .ok_or_else(|| {
+                format!("module mapping for {source_module} must define source_domain")
+            })?;
+        let target_crate = mapping
+            .get("target_crate")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .ok_or_else(|| {
+                format!("module mapping for {source_module} must define target_crate")
+            })?;
+        let target_module = mapping
+            .get("target_module")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .ok_or_else(|| {
+                format!("module mapping for {source_module} must define target_module")
+            })?;
+        let replacement_target = mapping
+            .get("replacement_target")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .ok_or_else(|| {
+                format!("module mapping for {source_module} must define replacement_target")
+            })?;
+
+        if !seen_sources.insert(source_module.to_string()) {
+            return Err(format!(
+                "duplicate module mapping source_module detected: {source_module}"
+            ));
+        }
+        if !seen_replacements.insert(replacement_target.to_string()) {
+            return Err(format!(
+                "duplicate module mapping replacement_target detected: {replacement_target}"
+            ));
+        }
+        if source_module != replacement_target {
+            return Err(format!(
+                "module mapping must preserve source->replacement identity for deterministic reintegration: source={source_module}, replacement={replacement_target}"
+            ));
+        }
+        if !replacement_targets.contains(replacement_target) {
+            return Err(format!(
+                "module mapping replacement_target not declared in reintegration replacement_targets: {replacement_target}"
+            ));
+        }
+
+        let boundary = domain_boundaries.get(source_domain).ok_or_else(|| {
+            format!("module mapping references unknown source_domain: {source_domain}")
+        })?;
+        if boundary.target_crate != target_crate {
+            return Err(format!(
+                "module mapping target_crate mismatch for {source_module}: expected {}, got {target_crate}",
+                boundary.target_crate
+            ));
+        }
+        if !boundary.current_modules.contains(source_module) {
+            return Err(format!(
+                "module mapping source_module not present in boundary domain {source_domain}: {source_module}"
+            ));
+        }
+        if !boundary.target_modules.contains(target_module) {
+            return Err(format!(
+                "module mapping target_module not declared in boundary domain {source_domain}: {target_module}"
+            ));
+        }
+    }
+
+    for required in REQUIRED_REINTEGRATION_MAPPING_MODULES {
+        if !seen_sources.contains(*required) {
+            return Err(format!(
+                "missing required reintegration module mapping source: {required}"
+            ));
+        }
+    }
+    for target in replacement_targets {
+        if !seen_replacements.contains(target.as_str()) {
+            return Err(format!(
+                "replacement target missing explicit module mapping: {target}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn domain_entry_mut<'a>(manifest: &'a mut Value, domain_id: &str) -> &'a mut Value {
     let domains = manifest
         .get_mut("boundary_domains")
@@ -213,6 +400,39 @@ fn remove_banned_pair(manifest: &mut Value, from_domain: &str, to_domain: &str) 
     before != pairs.len()
 }
 
+fn mapping_entry_mut<'a>(manifest: &'a mut Value, source_module: &str) -> &'a mut Value {
+    let mappings = manifest
+        .pointer_mut("/reintegration_linkage/module_mappings")
+        .and_then(Value::as_array_mut)
+        .expect("reintegration_linkage.module_mappings must be mutable array");
+    mappings
+        .iter_mut()
+        .find(|entry| {
+            entry
+                .get("source_module")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                == Some(source_module)
+        })
+        .unwrap_or_else(|| panic!("missing module mapping for mutation: {source_module}"))
+}
+
+fn remove_module_mapping(manifest: &mut Value, source_module: &str) -> bool {
+    let mappings = manifest
+        .pointer_mut("/reintegration_linkage/module_mappings")
+        .and_then(Value::as_array_mut)
+        .expect("reintegration_linkage.module_mappings must be mutable array");
+    let before = mappings.len();
+    mappings.retain(|entry| {
+        entry
+            .get("source_module")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            != Some(source_module)
+    });
+    before != mappings.len()
+}
+
 #[test]
 fn kernel_boundary_manifest_exists_and_is_valid_json() {
     let path = repo_root().join(MANIFEST_PATH);
@@ -248,6 +468,13 @@ fn kernel_boundary_manifest_has_expected_schema_and_linkage() {
         manifest["support_bead_id"],
         Value::String("bd-3ar8v.7.2.1".to_string())
     );
+    let support_bead_ids = non_empty_string_set(&manifest, "/support_bead_ids");
+    for required in ["bd-3ar8v.7.2.1", "bd-3ar8v.7.2.3"] {
+        assert!(
+            support_bead_ids.contains(required),
+            "support_bead_ids missing required linkage {required}"
+        );
+    }
     assert_eq!(
         manifest["target_project_root"],
         Value::String("/dp/franken_node".to_string())
@@ -404,6 +631,7 @@ fn kernel_boundary_manifest_declares_drift_checks_reintegration_and_logging_fiel
         "kernel_boundary.no_duplicate_domain_ownership",
         "kernel_boundary.banned_cross_boundary_pairs_absent",
         "kernel_boundary.reintegration_target_list_complete",
+        "kernel_boundary.reintegration_module_mappings_complete",
     ] {
         assert!(
             checks.contains(required),
@@ -431,6 +659,17 @@ fn kernel_boundary_manifest_declares_drift_checks_reintegration_and_logging_fiel
             "reintegration replacement_targets missing {required}"
         );
     }
+    assert_eq!(
+        manifest["reintegration_linkage"]["require_explicit_module_mappings"].as_bool(),
+        Some(true),
+        "reintegration_linkage.require_explicit_module_mappings must be true"
+    );
+    assert_eq!(
+        manifest["reintegration_linkage"]["failure_policy"],
+        Value::String("hard_fail".to_string()),
+        "reintegration_linkage.failure_policy must be hard_fail"
+    );
+    validate_reintegration_module_mappings(&manifest).unwrap_or_else(|err| panic!("{err}"));
 
     let logging_fields =
         non_empty_string_set(&manifest, "/structured_logging_contract/required_fields");
@@ -521,5 +760,35 @@ fn kernel_boundary_manifest_banned_pair_typo_mutation_fails_closed() {
     assert!(
         err.contains("hostcall_execution->session_orchestration"),
         "error should reference required banned pair contract, got: {err}"
+    );
+}
+
+#[test]
+fn kernel_boundary_manifest_missing_module_mapping_mutation_fails_closed() {
+    let mut manifest = load_manifest();
+    assert!(
+        remove_module_mapping(&mut manifest, "src/session.rs"),
+        "mutation setup should remove module mapping for src/session.rs"
+    );
+
+    let err = validate_reintegration_module_mappings(&manifest)
+        .expect_err("missing required module mapping must fail validation");
+    assert!(
+        err.contains("src/session.rs"),
+        "error should reference missing required mapping, got: {err}"
+    );
+}
+
+#[test]
+fn kernel_boundary_manifest_mapping_target_crate_drift_mutation_fails_closed() {
+    let mut manifest = load_manifest();
+    let mapping = mapping_entry_mut(&mut manifest, "src/hostcall_queue.rs");
+    mapping["target_crate"] = Value::String("franken-kernel-hostcall-queue-typo".to_string());
+
+    let err = validate_reintegration_module_mappings(&manifest)
+        .expect_err("drifted target crate in mapping must fail validation");
+    assert!(
+        err.contains("target_crate mismatch") && err.contains("src/hostcall_queue.rs"),
+        "error should reference target_crate mismatch for src/hostcall_queue.rs, got: {err}"
     );
 }
