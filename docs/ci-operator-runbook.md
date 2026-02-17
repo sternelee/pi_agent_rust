@@ -113,6 +113,29 @@ cargo test --test ci_evidence_bundle -- build_evidence_bundle --nocapture --exac
 
 ---
 
+### Certification remediation backlog missing or stale
+
+**Signature:** certification/readiness checks fail on missing
+`extension_remediation_backlog.json` or schema mismatch.
+
+**Artifacts:**
+- `tests/full_suite_gate/certification_dossier.json`
+- `tests/full_suite_gate/extension_remediation_backlog.json`
+- `tests/full_suite_gate/extension_remediation_backlog.md`
+
+**Replay:**
+```bash
+cargo test --test qa_certification_dossier -- certification_dossier --nocapture --exact
+```
+
+**Remediation:**
+1. Regenerate certification artifacts and backlog in a single run (command above).
+2. Verify backlog schema is `pi.qa.extension_remediation_backlog.v1`.
+3. Ensure the backlog summary/entries are non-empty when conformance failures exist.
+4. Re-run dependent gates after artifact refresh.
+
+---
+
 ### Suite classification guard failure
 
 **Signature:** `suite_classification` gate fails
@@ -309,6 +332,83 @@ cargo test --test ci_full_suite_gate -- full_suite_gate --nocapture --exact
   parity incident is closed.
 - Use rollback mode (`CI_GATE_PROMOTION_MODE=rollback`) only as a short-lived emergency
   control; record rationale + expiry in the incident bead and restore `strict` after fix.
+
+### PERF-3X Gate Incident Addendum (bd-3ar8v.6.4)
+
+When the incident affects performance certification (not only drop-in wording), also
+apply this fail-closed checklist:
+
+1. Treat missing/stale PERF-3X artifacts as blocking failures:
+   - `tests/full_suite_gate/perf3x_bead_coverage_audit.json`
+   - `tests/full_suite_gate/practical_finish_checkpoint.json`
+   - `tests/perf/reports/budget_summary.json`
+   - `tests/perf/reports/perf_comparison.json`
+   - `tests/perf/reports/stress_triage.json`
+   - `tests/perf/reports/parameter_sweeps.json`
+2. Attach `tests/full_suite_gate/certification_events.jsonl` plus perf event streams:
+   - `tests/perf/reports/budget_events.jsonl`
+   - `tests/perf/reports/perf_comparison_events.jsonl`
+   - `tests/perf/reports/stress_events.jsonl`
+   - `tests/perf/reports/parameter_sweeps_events.jsonl`
+3. Use the log-query playbooks in `docs/qa-runbook.md` under
+   **PERF-3X Regression Triage (bd-3ar8v.6.4)** for attribution and replay targeting.
+4. Do not close the incident until detection, attribution, mitigation, and verification
+   are all recorded in the bead thread with artifact links.
+
+### PERF-3X signature: `parameter_sweeps_integrity` gate failure
+
+**Signature:** `full_suite_verdict.json` contains gate `parameter_sweeps_integrity` with
+`status = "fail"` and detail mentioning `parameter_sweeps.*` schema/readiness/source contract drift.
+
+**Artifacts:**
+- `tests/perf/reports/parameter_sweeps.json`
+- `tests/perf/reports/parameter_sweeps_events.jsonl`
+- `tests/perf/reports/phase1_matrix_validation.json`
+- `tests/full_suite_gate/full_suite_verdict.json`
+
+**Replay:**
+```bash
+rch exec -- cargo test --test release_evidence_gate -- \
+  parameter_sweeps_contract_links_phase1_matrix_and_readiness --nocapture --exact
+rch exec -- cargo test --test ci_full_suite_gate -- full_suite_gate --nocapture --exact
+```
+
+**Remediation:**
+1. Enforce artifact schema `pi.perf.parameter_sweeps.v1`.
+2. Enforce `source_identity` contract (`source_artifact = "phase1_matrix_validation"` and
+   `source_artifact_path` references `phase1_matrix_validation.json`).
+3. Enforce readiness invariants:
+   - `status = ready` -> `ready_for_phase5 = true` and `blocking_reasons = []`
+   - `status = blocked` -> `ready_for_phase5 = false` and non-empty `blocking_reasons`
+4. Ensure `selected_defaults` are positive integers and `sweep_plan.dimensions` includes required knobs.
+5. Re-run full-suite gate and re-attach updated `parameter_sweeps` artifact + event stream.
+
+### PERF-3X signature: `practical_finish_checkpoint` readiness drift
+
+**Signature:** gate `practical_finish_checkpoint` fails with detail like
+`technical PERF-3X issue(s) still open` or `Fail-closed practical-finish source read error`.
+
+**Artifacts:**
+- `tests/full_suite_gate/practical_finish_checkpoint.json`
+- `.beads/issues.jsonl` (or fallback `.beads/beads.base.jsonl`)
+- `tests/full_suite_gate/full_suite_verdict.json`
+- `tests/full_suite_gate/certification_events.jsonl`
+
+**Replay:**
+```bash
+rch exec -- cargo test --test ci_full_suite_gate -- \
+  practical_finish_report_fails_when_technical_open_issues_remain --nocapture --exact
+rch exec -- cargo test --test release_readiness -- practical_finish_checkpoint_ -- --nocapture
+rch exec -- cargo test --test ci_full_suite_gate -- full_suite_gate --nocapture --exact
+```
+
+**Remediation:**
+1. Verify `practical_finish_checkpoint.json` schema is `pi.perf3x.practical_finish_checkpoint.v1`.
+2. Ensure required contract fields are coherent:
+   `status`, non-empty `detail`, `technical_completion_reached`, `residual_open_scope`,
+   and count equality (`open_perf3x_count = technical_open_count + docs_or_report_open_count`).
+3. Close or re-scope remaining technical PERF-3X issues; only docs/report residuals are allowed.
+4. Re-run full-suite gate and attach refreshed checkpoint artifact + certification events before closure.
 
 ---
 

@@ -20,6 +20,7 @@ The contract binds three things together:
 | Evidence contract bundle | `pi.qa.evidence_contract.v1` | `docs/evidence-contract-schema.json` |
 | Per-suite failure digest | `pi.e2e.failure_digest.v1` | `docs/evidence-contract-schema.json` |
 | Replay bundle | `pi.e2e.replay_bundle.v1` | `tests/e2e_replay_bundles.rs` + run artifacts |
+| Extension remediation backlog | `pi.qa.extension_remediation_backlog.v1` | `tests/qa_certification_dossier.rs` + `tests/full_suite_gate/extension_remediation_backlog.json` |
 | User-perceived SLI + UX matrix | `pi.perf.sli_ux_matrix.v1` | `docs/perf_sli_matrix.json` |
 
 ### Correlation Model
@@ -47,6 +48,7 @@ For every failed suite entry in evidence artifacts:
 | `unit` | Must preserve schema-valid JSONL logging when test harness logging is used |
 | `vcr` | Must preserve deterministic replay + schema-valid log/artifact records |
 | `e2e` | Must emit evidence/replay/failure-digest artifacts that satisfy the schema set above, and each workflow must map to one or more user-facing SLIs via `docs/perf_sli_matrix.json` |
+| `certification` | Must emit certification dossier artifacts and extension remediation backlog artifacts in lock-step when certification is regenerated |
 
 ### Schema Evolution Policy
 
@@ -457,6 +459,28 @@ Normative rules:
    - `bd-3ar8v.6.2` parameter-sweep certification
    - `bd-3ar8v.6.3` extension conformance + perf stress certification
    - `bd-3ar8v.6.6` unified certification dossier lane
+
+#### Practical-finish checkpoint policy (bd-3ar8v.6.9)
+
+Release/certification decisions must apply a docs-last contract before final report wrap-up:
+
+1. `practical_finish_checkpoint` must pass before declaring final PERF-3X completion.
+2. `parameter_sweeps_integrity` and `extension_remediation_backlog` are co-required release gates.
+3. Remaining open PERF-3X work is allowed only for docs/report scope (`docs`, `docs-last`,
+   `documentation`, `report`, or `runbook` labels). Any technical open PERF-3X issue is
+   fail-closed and blocks GO.
+
+Required evidence artifacts for this policy:
+
+- `tests/full_suite_gate/practical_finish_checkpoint.json` (`pi.perf3x.practical_finish_checkpoint.v1`)
+- `tests/perf/reports/parameter_sweeps.json` (`pi.perf.parameter_sweeps.v1`)
+- `tests/full_suite_gate/extension_remediation_backlog.json` (`pi.qa.extension_remediation_backlog.v1`)
+
+Primary enforcement surfaces:
+
+- `tests/ci_full_suite_gate.rs` (`practical_finish_checkpoint`, `parameter_sweeps_integrity`, `extension_remediation_backlog`)
+- `tests/release_readiness.rs` final certification gate aggregation
+- `docs/qa-runbook.md` PERF-3X regression triage + replay procedure
 
 ---
 

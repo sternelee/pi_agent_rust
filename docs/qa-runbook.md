@@ -62,6 +62,9 @@ Artifacts: `tests/smoke_results/<timestamp>/smoke_summary.json`
 ./scripts/e2e/run_all.sh                        # full: lint + lib + all targets
 ./scripts/e2e/run_all.sh --profile ci            # CI profile: deterministic
 ./scripts/e2e/run_all.sh --profile quick         # fast: lint + lib + unit only
+
+# Refresh certification dossier + remediation backlog artifacts
+cargo test --test qa_certification_dossier -- certification_dossier --nocapture --exact
 ```
 
 Artifacts: `tests/e2e_results/<timestamp>/summary.json`
@@ -81,6 +84,33 @@ cargo test --test provider_contract
 # Single test function
 cargo test --test non_mock_rubric_gate -- rubric_has_required_top_level_keys
 ```
+
+## Performance Workflow: Fast Loop vs Definitive Benchmarks
+
+Use a two-speed workflow so agents can move quickly without treating partial data as a release claim.
+
+| Mode | Use When | Command Pattern | Claim Strength |
+|------|----------|-----------------|----------------|
+| Fast inner loop | During active edits | File-scoped checks only (`cargo fmt --check -- <file>`, targeted `cargo test --test ...`) | **Non-authoritative**; developer feedback only |
+| Definitive benchmark/certification pass | At integration/decision boundaries | Heavy runs offloaded with `rch exec -- ...` + required evidence artifacts regenerated | **Authoritative** for PERF-3X/release claims |
+
+### Definitive Benchmark Gate (authoritative)
+
+Run heavyweight checks with remote offload:
+
+```bash
+rch exec -- cargo test --test bench_scenario_runner -- --nocapture
+rch exec -- cargo test --test perf_budgets -- --nocapture
+rch exec -- cargo test --test release_evidence_gate -- --nocapture
+rch exec -- cargo test --test ci_full_suite_gate -- full_certification --nocapture --exact
+```
+
+Treat benchmark outcomes as definitive only when all required artifacts are present and schema-valid:
+
+- `tests/perf/reports/phase1_matrix_validation.json` (`pi.perf.phase1_matrix_validation.v1`)
+- `tests/full_suite_gate/full_suite_verdict.json`
+- `tests/full_suite_gate/certification_verdict.json`
+- `tests/full_suite_gate/extension_remediation_backlog.json` (`pi.qa.extension_remediation_backlog.v1`)
 
 ---
 
@@ -114,6 +144,7 @@ Every test file belongs to exactly one suite. See `tests/suite_classification.to
 | CI gate verdict | `tests/full_suite_gate/full_suite_verdict.json` | Full-suite gate result |
 | CI preflight verdict | `tests/full_suite_gate/preflight_verdict.json` | Preflight fast-fail result |
 | CI certification verdict | `tests/full_suite_gate/certification_verdict.json` | Full certification result |
+| Extension remediation backlog | `tests/full_suite_gate/extension_remediation_backlog.json` | Non-pass extension remediation queue (`pi.qa.extension_remediation_backlog.v1`) |
 | CI waiver audit | `tests/full_suite_gate/waiver_audit.json` | Waiver lifecycle audit |
 | CI replay bundle | `tests/full_suite_gate/replay_bundle.json` | Gate failure replay commands |
 | Compliance report | `target/compliance-report.json` | Module compliance (set `COMPLIANCE_REPORT=1`) |
@@ -256,6 +287,22 @@ generates `triage_diff.json` (schema `pi.e2e.triage_diff.v1`) containing:
 - `recommended_commands.ranked_repro_commands`: Prioritized list of per-target commands.
 - `ranked_diagnostics`: Severity-ranked list with recommended replay commands.
 
+### Certification backlog refresh
+
+When certification artifacts are refreshed, regenerate the extension remediation backlog in the same
+run so diagnostics and release gates consume the same evidence set:
+
+```bash
+cargo test --test qa_certification_dossier -- certification_dossier --nocapture --exact
+```
+
+Produced artifacts:
+
+- `tests/full_suite_gate/certification_dossier.json`
+- `tests/full_suite_gate/certification_dossier.md`
+- `tests/full_suite_gate/extension_remediation_backlog.json`
+- `tests/full_suite_gate/extension_remediation_backlog.md`
+
 ---
 
 ## CI Gate Lanes
@@ -287,6 +334,70 @@ Artifacts:
 - `tests/full_suite_gate/certification_events.jsonl`
 - `tests/full_suite_gate/certification_report.md`
 
+### Final >=3x Go/No-Go Decision Workflow (bd-3ar8v.6.5)
+
+Use this workflow only at definitive release-decision boundaries. Treat missing
+or stale evidence as `NO-GO` (fail-closed), never as a warning.
+
+1. Regenerate authoritative certification evidence (offloaded):
+
+```bash
+rch exec -- cargo test --test ci_full_suite_gate -- full_certification --nocapture --exact
+rch exec -- cargo test --test release_evidence_gate -- --nocapture
+rch exec -- cargo test --test qa_certification_dossier -- certification_dossier --nocapture --exact
+```
+
+2. Confirm required artifacts exist and are current:
+- `tests/full_suite_gate/full_suite_verdict.json`
+- `tests/full_suite_gate/certification_verdict.json`
+- `tests/full_suite_gate/practical_finish_checkpoint.json`
+- `tests/full_suite_gate/extension_remediation_backlog.json`
+- `tests/perf/reports/opportunity_matrix.json`
+- `tests/perf/reports/parameter_sweeps.json`
+
+3. Enforce final gate pass criteria from `full_suite_verdict.json`:
+- `perf3x_bead_coverage = pass`
+- `practical_finish_checkpoint = pass`
+- `extension_remediation_backlog = pass`
+- `opportunity_matrix_integrity = pass`
+- `parameter_sweeps_integrity = pass`
+
+4. Verify practical-finish output is docs/report-only residual scope:
+- `status = "pass"`
+- `technical_open_count = 0`
+- `residual_open_scope` is `none` or `docs_or_report_only`
+
+5. Decide:
+- `GO`: all criteria above pass with fresh artifacts.
+- `NO-GO`: any missing artifact, stale/invalid schema, or failed gate.
+
+Quick gate-status extractor:
+
+```bash
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+required = {
+    "perf3x_bead_coverage",
+    "practical_finish_checkpoint",
+    "extension_remediation_backlog",
+    "opportunity_matrix_integrity",
+    "parameter_sweeps_integrity",
+}
+path = Path("tests/full_suite_gate/full_suite_verdict.json")
+if not path.exists():
+    raise SystemExit("NO-GO: missing tests/full_suite_gate/full_suite_verdict.json")
+data = json.loads(path.read_text(encoding="utf-8"))
+statuses = {g["id"]: g.get("status") for g in data.get("gates", []) if g.get("id") in required}
+missing = sorted(required - set(statuses))
+failed = sorted(g for g, s in statuses.items() if s != "pass")
+if missing or failed:
+    raise SystemExit(f"NO-GO: missing={missing} failed={failed}")
+print("GO candidate: all required PERF-3X final gates are pass")
+PY
+```
+
 ### Drop-in certification contract gate (bd-35t7i)
 
 Before release messaging can claim strict drop-in parity, evaluate
@@ -316,6 +427,210 @@ with open('tests/full_suite_gate/full_suite_verdict.json') as f:
             print(f\"{g['id']}: {g.get('reproduce_command', 'N/A')}\")
 "
 ```
+
+---
+
+## PERF-3X Regression Triage (bd-3ar8v.6.4)
+
+Use this flow for permanent performance-gate incidents. Missing or stale evidence
+is a failure condition, not a warning.
+
+### Detection (fail-closed artifact checks)
+
+After running the full certification lane, the following artifacts must exist and
+match expected schemas:
+
+- `tests/full_suite_gate/full_suite_verdict.json` (`pi.ci.full_suite_gate.v1`)
+- `tests/full_suite_gate/certification_verdict.json` (`pi.ci.certification_lane.v1`)
+- `tests/full_suite_gate/perf3x_bead_coverage_audit.json` (`pi.perf3x.bead_coverage.audit.v1`)
+- `tests/full_suite_gate/practical_finish_checkpoint.json` (`pi.perf3x.practical_finish_checkpoint.v1`)
+- `tests/perf/reports/budget_summary.json` (`pi.perf.budget_summary.v1`)
+- `tests/perf/reports/perf_comparison.json` (`pi.ext.perf_comparison.v1`)
+- `tests/perf/reports/stress_triage.json` (`pi.ext.stress_triage.v1`)
+- `tests/perf/reports/parameter_sweeps.json` (`pi.perf.parameter_sweeps.v1`)
+
+```bash
+python3 - <<'PY'
+import json
+import sys
+from pathlib import Path
+
+required = {
+    "tests/full_suite_gate/full_suite_verdict.json": "pi.ci.full_suite_gate.v1",
+    "tests/full_suite_gate/certification_verdict.json": "pi.ci.certification_lane.v1",
+    "tests/full_suite_gate/perf3x_bead_coverage_audit.json": "pi.perf3x.bead_coverage.audit.v1",
+    "tests/full_suite_gate/practical_finish_checkpoint.json": "pi.perf3x.practical_finish_checkpoint.v1",
+    "tests/perf/reports/budget_summary.json": "pi.perf.budget_summary.v1",
+    "tests/perf/reports/perf_comparison.json": "pi.ext.perf_comparison.v1",
+    "tests/perf/reports/stress_triage.json": "pi.ext.stress_triage.v1",
+    "tests/perf/reports/parameter_sweeps.json": "pi.perf.parameter_sweeps.v1",
+}
+
+issues = []
+for rel, expected_schema in required.items():
+    path = Path(rel)
+    if not path.exists():
+        issues.append(f"missing: {rel}")
+        continue
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        issues.append(f"invalid-json: {rel} ({exc})")
+        continue
+    schema = payload.get("schema")
+    generated_at = payload.get("generated_at")
+    if schema != expected_schema:
+        issues.append(
+            f"schema-mismatch: {rel} expected={expected_schema} actual={schema}"
+        )
+    if not isinstance(generated_at, str) or not generated_at.strip():
+        issues.append(f"missing-generated_at: {rel}")
+
+if issues:
+    print("FAIL (fail-closed):")
+    for issue in issues:
+        print(f" - {issue}")
+    sys.exit(1)
+
+print("PASS: PERF-3X gate artifacts are present with expected schema+timestamp fields.")
+PY
+```
+
+### PERF-3X signature quick-reference
+
+Use this quick table for first-response triage before deeper log analysis.
+
+| Gate | Failure signature | Primary artifacts | Replay command | First remediation action |
+|------|-------------------|-------------------|----------------|--------------------------|
+| `parameter_sweeps_integrity` | `full_suite_verdict.json` gate status = `fail` with readiness/source contract drift details | `tests/perf/reports/parameter_sweeps.json`, `tests/perf/reports/parameter_sweeps_events.jsonl`, `tests/perf/reports/phase1_matrix_validation.json` | `rch exec -- cargo test --test release_evidence_gate -- parameter_sweeps_contract_links_phase1_matrix_and_readiness --nocapture --exact` | Rebuild parameter sweep artifact from latest phase1 matrix and restore readiness/source_identity coherence. |
+| `practical_finish_checkpoint` | Gate detail reports technical PERF-3X issues still open or fail-closed checkpoint read error | `tests/full_suite_gate/practical_finish_checkpoint.json`, `.beads/issues.jsonl` | `rch exec -- cargo test --test ci_full_suite_gate -- practical_finish_report_fails_when_technical_open_issues_remain --nocapture --exact` | Close/re-scope technical PERF-3X issues so only docs/report residual scope remains open. |
+
+### Attribution (log-query playbooks)
+
+Unit diagnostics (`test-log.jsonl` for a unit target):
+
+```bash
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+path = Path("tests/e2e_results/<ts>/unit/<target>/test-log.jsonl")
+if not path.exists():
+    raise SystemExit(f"missing unit log: {path}")
+
+for line in path.read_text(encoding="utf-8").splitlines():
+    if not line.strip():
+        continue
+    rec = json.loads(line)
+    if rec.get("status") in {"fail", "error"}:
+        print(
+            rec.get("ts"),
+            rec.get("component", "<component>"),
+            rec.get("scenario_id", "<scenario>"),
+            rec.get("message", "<no-message>"),
+        )
+PY
+```
+
+E2E diagnostics (`test-log.jsonl` for a suite):
+
+```bash
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+path = Path("tests/e2e_results/<ts>/<suite>/test-log.jsonl")
+if not path.exists():
+    raise SystemExit(f"missing e2e log: {path}")
+
+for line in path.read_text(encoding="utf-8").splitlines():
+    if not line.strip():
+        continue
+    rec = json.loads(line)
+    if rec.get("status") in {"fail", "error"} or rec.get("level") in {"warn", "error"}:
+        print(
+            rec.get("ts"),
+            rec.get("level", "<level>"),
+            rec.get("scenario_id", "<scenario>"),
+            rec.get("message", "<no-message>"),
+        )
+PY
+```
+
+Perf diagnostics (budget/comparison/stress/parameter-sweeps event streams):
+
+```bash
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+event_paths = [
+    Path("tests/perf/reports/budget_events.jsonl"),
+    Path("tests/perf/reports/perf_comparison_events.jsonl"),
+    Path("tests/perf/reports/stress_events.jsonl"),
+    Path("tests/perf/reports/parameter_sweeps_events.jsonl"),
+]
+
+for path in event_paths:
+    if not path.exists():
+        print(f"[MISSING] {path}")
+        continue
+    print(f"\n== {path} ==")
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        rec = json.loads(line)
+        status = str(rec.get("status", "")).lower()
+        if status in {"fail", "error", "warn"}:
+            print(
+                rec.get("ts"),
+                status,
+                rec.get("scenario_id", rec.get("name", "<name>")),
+                rec.get("message", "<no-message>"),
+            )
+PY
+```
+
+### User-facing diagnostics workflow (durability/resume/extension/build-profile)
+
+Use this workflow for user-facing "it is slow" incidents. Keep the scenario, replay
+command, and artifact pointers together so triage can be reproduced exactly.
+
+#### Durability troubleshooting
+
+- Replay command:
+  `rch exec -- cargo test --test release_evidence_gate -- parameter_sweeps_contract_links_phase1_matrix_and_readiness --nocapture --exact`
+- Artifact pointers:
+  `tests/perf/reports/parameter_sweeps.json`,
+  `tests/perf/reports/parameter_sweeps_events.jsonl`,
+  `tests/perf/reports/budget_summary.json`
+
+#### Resume troubleshooting
+
+- Replay command:
+  `./scripts/e2e/run_all.sh --rerun-from <scenario-id> --diff-from <baseline-dir>`
+- Artifact pointers:
+  `tests/e2e_results/<ts>/<suite>/summary.json`,
+  `tests/e2e_results/<ts>/<suite>/test-log.jsonl`
+
+#### Extension troubleshooting
+
+- Replay command:
+  `rch exec -- cargo test --test ci_full_suite_gate -- extension_remediation_backlog_sub_gate_is_blocking_and_points_to_dedicated_artifact --nocapture --exact`
+- Artifact pointers:
+  `tests/full_suite_gate/extension_remediation_backlog.json`,
+  `tests/full_suite_gate/certification_dossier.json`,
+  `tests/ext_conformance/reports/conformance_summary.json`
+
+#### Build-profile troubleshooting
+
+- Replay commands:
+  `rch exec -- cargo test --test bench_scenario_runner -- --nocapture`
+  `rch exec -- cargo test --test perf_budgets -- --nocapture`
+- Artifact pointers:
+  `tests/perf/reports/perf_comparison.json`,
+  `tests/perf/reports/perf_comparison_events.jsonl`,
+  `tests/perf/reports/stress_triage.json`
 
 ---
 
