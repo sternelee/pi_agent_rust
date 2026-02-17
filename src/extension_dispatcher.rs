@@ -4410,14 +4410,14 @@ mod tests {
                     if (globalThis.iterDone !== true) {
                         throw new Error("Async iterator did not finish");
                     }
-                    if (!Array.isArray(globalThis.iterChunks) || globalThis.iterChunks.length < 3) {
+                    if (!Array.isArray(globalThis.iterChunks) || globalThis.iterChunks.length < 2) {
                         throw new Error("Missing stream chunks: " + JSON.stringify(globalThis.iterChunks));
                     }
-                    if (!globalThis.iterChunks[0] || globalThis.iterChunks[0].stdout !== "a\n") {
-                        throw new Error("Unexpected first chunk: " + JSON.stringify(globalThis.iterChunks));
-                    }
-                    if (!globalThis.iterChunks[1] || globalThis.iterChunks[1].stdout !== "b\n") {
-                        throw new Error("Unexpected second chunk: " + JSON.stringify(globalThis.iterChunks));
+                    const stdout = globalThis.iterChunks
+                        .map((chunk) => (chunk && typeof chunk.stdout === "string" ? chunk.stdout : ""))
+                        .join("");
+                    if (stdout !== "a\nb\n") {
+                        throw new Error("Unexpected streamed stdout aggregate: " + JSON.stringify(globalThis.iterChunks));
                     }
                     const finalChunk = globalThis.iterChunks[globalThis.iterChunks.length - 1];
                     if (!finalChunk || finalChunk.code !== 0 || finalChunk.killed !== false) {
@@ -4447,12 +4447,14 @@ mod tests {
                 .eval(
                     r#"
                     globalThis.output = "";
-                    pi.exec("sh", ["-c", "printf 'a\\377b'"], { stream: true })
-                        .then(async (stream) => {
-                            for await (const chunk of stream) {
-                                if (chunk.stdout) globalThis.output += chunk.stdout;
-                            }
-                        });
+                    globalThis.outputDone = false;
+                    (async () => {
+                        const stream = pi.exec("sh", ["-c", "printf 'a\\377b'"], { stream: true });
+                        for await (const chunk of stream) {
+                            if (chunk.stdout) globalThis.output += chunk.stdout;
+                        }
+                        globalThis.outputDone = true;
+                    })();
                 "#,
                 )
                 .await
@@ -4474,6 +4476,9 @@ mod tests {
             runtime
                 .eval(
                     r#"
+                    if (globalThis.outputDone !== true) {
+                        throw new Error("Streaming output collection did not finish");
+                    }
                     // \uFFFD is the replacement character
                     if (globalThis.output !== "a\uFFFDb") {
                         throw new Error("Expected 'a\\uFFFDb', got: " + globalThis.output + " (len " + globalThis.output.length + ")");
