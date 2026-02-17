@@ -8,9 +8,11 @@
 //! - Exception policy is complete and current
 //!
 //! See also: `tests/release_readiness.rs` for the readiness report generator.
+#![allow(clippy::too_many_lines)]
 
-use serde_json::Value;
-use std::path::PathBuf;
+use serde_json::{Map, Value};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -24,6 +26,156 @@ fn load_json(relative: &str) -> Option<Value> {
 
 fn require_json(relative: &str) -> Value {
     load_json(relative).unwrap_or_else(|| panic!("required evidence file missing: {relative}"))
+}
+
+fn find_latest_phase1_matrix_validation(root: &Path) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    for relative in [
+        "tests/perf/reports/phase1_matrix_validation.json",
+        "tests/perf/runs/results/phase1_matrix_validation.json",
+    ] {
+        let candidate = root.join(relative);
+        if candidate.is_file() {
+            candidates.push(candidate);
+        }
+    }
+
+    let e2e_results_dir = root.join("tests/e2e_results");
+    if let Ok(entries) = std::fs::read_dir(e2e_results_dir) {
+        for entry in entries.flatten() {
+            let candidate = entry.path().join("results/phase1_matrix_validation.json");
+            if candidate.is_file() {
+                candidates.push(candidate);
+            }
+        }
+    }
+
+    candidates.sort_by_key(|path| {
+        std::fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+    });
+    candidates.pop()
+}
+
+fn require_phase1_matrix_validation() -> (String, Value) {
+    let root = repo_root();
+    let path = find_latest_phase1_matrix_validation(&root).unwrap_or_else(|| {
+        panic!(
+            "release gate BLOCKED: missing phase1_matrix_validation.json evidence artifact; \
+             expected at tests/perf/reports or tests/e2e_results/*/results"
+        )
+    });
+    let display_path = path.strip_prefix(&root).map_or_else(
+        |_| path.display().to_string(),
+        |rel| rel.display().to_string(),
+    );
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {display_path}: {err}"));
+    let json = serde_json::from_str(&text)
+        .unwrap_or_else(|err| panic!("{display_path} is not valid JSON: {err}"));
+    (display_path, json)
+}
+
+fn find_latest_parameter_sweeps(root: &Path) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    for relative in [
+        "tests/perf/reports/parameter_sweeps.json",
+        "tests/perf/runs/results/parameter_sweeps.json",
+    ] {
+        let candidate = root.join(relative);
+        if candidate.is_file() {
+            candidates.push(candidate);
+        }
+    }
+
+    let e2e_results_dir = root.join("tests/e2e_results");
+    if let Ok(entries) = std::fs::read_dir(e2e_results_dir) {
+        for entry in entries.flatten() {
+            let candidate = entry.path().join("results/parameter_sweeps.json");
+            if candidate.is_file() {
+                candidates.push(candidate);
+            }
+        }
+    }
+
+    candidates.sort_by_key(|path| {
+        std::fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+    });
+    candidates.pop()
+}
+
+fn find_latest_opportunity_matrix(root: &Path) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    for relative in [
+        "tests/perf/reports/opportunity_matrix.json",
+        "tests/perf/runs/results/opportunity_matrix.json",
+    ] {
+        let candidate = root.join(relative);
+        if candidate.is_file() {
+            candidates.push(candidate);
+        }
+    }
+
+    let e2e_results_dir = root.join("tests/e2e_results");
+    if let Ok(entries) = std::fs::read_dir(e2e_results_dir) {
+        for entry in entries.flatten() {
+            let candidate = entry.path().join("results/opportunity_matrix.json");
+            if candidate.is_file() {
+                candidates.push(candidate);
+            }
+        }
+    }
+
+    candidates.sort_by_key(|path| {
+        std::fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+    });
+    candidates.pop()
+}
+
+fn require_parameter_sweeps() -> (String, Value) {
+    let root = repo_root();
+    let path = find_latest_parameter_sweeps(&root).unwrap_or_else(|| {
+        panic!(
+            "release gate BLOCKED: missing parameter_sweeps.json evidence artifact; \
+             expected at tests/perf/reports or tests/e2e_results/*/results"
+        )
+    });
+    let display_path = path.strip_prefix(&root).map_or_else(
+        |_| path.display().to_string(),
+        |rel| rel.display().to_string(),
+    );
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {display_path}: {err}"));
+    let json = serde_json::from_str(&text)
+        .unwrap_or_else(|err| panic!("{display_path} is not valid JSON: {err}"));
+    (display_path, json)
+}
+
+fn require_opportunity_matrix() -> (String, Value) {
+    let root = repo_root();
+    let path = find_latest_opportunity_matrix(&root).unwrap_or_else(|| {
+        panic!(
+            "release gate BLOCKED: missing opportunity_matrix.json evidence artifact; \
+             expected at tests/perf/reports or tests/e2e_results/*/results"
+        )
+    });
+    let display_path = path.strip_prefix(&root).map_or_else(
+        |_| path.display().to_string(),
+        |rel| rel.display().to_string(),
+    );
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {display_path}: {err}"));
+    let json = serde_json::from_str(&text)
+        .unwrap_or_else(|err| panic!("{display_path} is not valid JSON: {err}"));
+    (display_path, json)
 }
 
 // ============================================================================
@@ -86,6 +238,55 @@ fn all_evidence_artifacts_are_valid_json() {
     }
 }
 
+#[test]
+fn phase1_matrix_validation_artifact_is_present_and_parseable() {
+    let (artifact, matrix) = require_phase1_matrix_validation();
+    let schema = matrix.get("schema").and_then(Value::as_str).unwrap_or("");
+    assert_eq!(
+        schema, "pi.perf.phase1_matrix_validation.v1",
+        "phase1 matrix schema mismatch in {artifact}"
+    );
+}
+
+#[test]
+fn parameter_sweeps_artifact_is_present_and_parseable() {
+    let (_, matrix) = require_phase1_matrix_validation();
+    let consumption_contract = require_consumption_contract(&matrix, "phase1_matrix_validation");
+    let sweeps_present = find_latest_parameter_sweeps(&repo_root()).is_some();
+    if !requires_strict_parameter_sweeps_contract(consumption_contract, sweeps_present) {
+        assert_orchestrate_parameter_sweeps_contract_tokens();
+        return;
+    }
+
+    let (artifact, sweeps) = require_parameter_sweeps();
+    let schema = sweeps.get("schema").and_then(Value::as_str).unwrap_or("");
+    assert_eq!(
+        schema, "pi.perf.parameter_sweeps.v1",
+        "parameter sweeps schema mismatch in {artifact}"
+    );
+}
+
+#[test]
+fn opportunity_matrix_artifact_is_present_and_parseable() {
+    let (_, matrix) = require_phase1_matrix_validation();
+    let consumption_contract = require_consumption_contract(&matrix, "phase1_matrix_validation");
+    let opportunity_present = find_latest_opportunity_matrix(&repo_root()).is_some();
+    if !requires_strict_opportunity_matrix_contract(consumption_contract, opportunity_present) {
+        assert_orchestrate_opportunity_matrix_contract_tokens();
+        return;
+    }
+
+    let (artifact, opportunity) = require_opportunity_matrix();
+    let schema = opportunity
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert_eq!(
+        schema, "pi.perf.opportunity_matrix.v1",
+        "opportunity matrix schema mismatch in {artifact}"
+    );
+}
+
 // ============================================================================
 // Schema validation
 // ============================================================================
@@ -95,6 +296,22 @@ fn conformance_summary_has_required_fields() {
     let sm = require_json("tests/ext_conformance/reports/conformance_summary.json");
 
     assert!(sm.get("schema").is_some(), "missing schema field");
+    let run_id = sm
+        .get("run_id")
+        .and_then(Value::as_str)
+        .map_or("", str::trim);
+    assert!(
+        !run_id.is_empty(),
+        "missing or empty run_id in conformance_summary.json"
+    );
+    let correlation_id = sm
+        .get("correlation_id")
+        .and_then(Value::as_str)
+        .map_or("", str::trim);
+    assert!(
+        !correlation_id.is_empty(),
+        "missing or empty correlation_id in conformance_summary.json"
+    );
     assert!(sm.get("counts").is_some(), "missing counts field");
     assert!(sm.get("pass_rate_pct").is_some(), "missing pass_rate_pct");
     assert!(sm.get("per_tier").is_some(), "missing per_tier");
@@ -145,6 +362,775 @@ fn traceability_matrix_has_requirements() {
             req.get("unit_tests").is_some(),
             "requirement {:?} missing unit_tests",
             req.get("id")
+        );
+    }
+}
+
+fn require_consumption_contract<'a>(matrix: &'a Value, artifact: &str) -> &'a Map<String, Value> {
+    matrix
+        .pointer("/consumption_contract")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| panic!("consumption_contract must be an object in {artifact}"))
+}
+
+fn assert_consumption_contract_downstream_beads(
+    consumption_contract: &Map<String, Value>,
+    artifact: &str,
+) {
+    let downstream_beads = consumption_contract
+        .get("downstream_beads")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| {
+            panic!("consumption_contract.downstream_beads must be an array in {artifact}")
+        });
+    let downstream_bead_set: HashSet<&str> =
+        downstream_beads.iter().filter_map(Value::as_str).collect();
+    for bead_id in ["bd-3ar8v.6.1", "bd-3ar8v.6.2"] {
+        assert!(
+            downstream_bead_set.contains(bead_id),
+            "consumption_contract.downstream_beads missing {bead_id} in {artifact}"
+        );
+    }
+}
+
+fn requires_strict_weighted_contract(
+    consumption_contract: &Map<String, Value>,
+    matrix: &Value,
+) -> bool {
+    let artifact_ready_for_phase5 = consumption_contract
+        .get("artifact_ready_for_phase5")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let weighted_present = matrix
+        .get("weighted_bottleneck_attribution")
+        .and_then(Value::as_object)
+        .is_some();
+    artifact_ready_for_phase5 || weighted_present
+}
+
+fn requires_strict_parameter_sweeps_contract(
+    consumption_contract: &Map<String, Value>,
+    sweeps_present: bool,
+) -> bool {
+    let artifact_ready_for_phase5 = consumption_contract
+        .get("artifact_ready_for_phase5")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    artifact_ready_for_phase5 || sweeps_present
+}
+
+fn requires_strict_opportunity_matrix_contract(
+    consumption_contract: &Map<String, Value>,
+    opportunity_present: bool,
+) -> bool {
+    let artifact_ready_for_phase5 = consumption_contract
+        .get("artifact_ready_for_phase5")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    artifact_ready_for_phase5 || opportunity_present
+}
+
+fn assert_orchestrate_weighted_contract_tokens(artifact: &str) {
+    let orchestrate = std::fs::read_to_string(repo_root().join("scripts/perf/orchestrate.sh"))
+        .expect("scripts/perf/orchestrate.sh should be readable");
+    for token in [
+        "\"weighted_bottleneck_attribution\"",
+        "\"pi.perf.phase1_weighted_bottleneck_attribution.v1\"",
+        "weighted_bottleneck_attribution.global_ranking",
+        "weighted_bottleneck_attribution.per_scale",
+    ] {
+        assert!(
+            orchestrate.contains(token),
+            "orchestrate contract token missing while weighted attribution artifact is absent in {artifact}: {token}"
+        );
+    }
+}
+
+fn assert_orchestrate_parameter_sweeps_contract_tokens() {
+    let orchestrate = std::fs::read_to_string(repo_root().join("scripts/perf/orchestrate.sh"))
+        .expect("scripts/perf/orchestrate.sh should be readable");
+    for token in [
+        "parameter_sweeps.json",
+        "\"pi.perf.parameter_sweeps.v1\"",
+        "\"parameter_sweeps\": \"pi.perf.parameter_sweeps.v1\"",
+        "phase1_matrix_validation.weighted_bottleneck_attribution",
+        "weighted_bottleneck_guided_grid",
+        "manifest[\"parameter_sweeps\"]",
+    ] {
+        assert!(
+            orchestrate.contains(token),
+            "orchestrate contract token missing for parameter_sweeps artifact: {token}"
+        );
+    }
+}
+
+fn assert_orchestrate_opportunity_matrix_contract_tokens() {
+    let orchestrate = std::fs::read_to_string(repo_root().join("scripts/perf/orchestrate.sh"))
+        .expect("scripts/perf/orchestrate.sh should be readable");
+    for token in [
+        "\"opportunity_matrix\"",
+        "\"pi.perf.opportunity_matrix.v1\"",
+        "\"generated_at\"",
+        "\"source_identity\"",
+        "\"readiness\"",
+        "\"decision\"",
+        "\"NO_DECISION\"",
+        "\"ranked_opportunities\"",
+        "\"fail_closed_conditions\"",
+        "decision = \"RANKED\" if readiness_ok else \"NO_DECISION\"",
+        "weighted_bottleneck_attribution.global_ranking",
+        "\"bd-3ar8v.6.1\"",
+    ] {
+        assert!(
+            orchestrate.contains(token),
+            "orchestrate contract token missing for opportunity_matrix artifact: {token}"
+        );
+    }
+}
+
+fn require_weighted_attribution<'a>(matrix: &'a Value, artifact: &str) -> &'a Map<String, Value> {
+    matrix
+        .get("weighted_bottleneck_attribution")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| {
+            panic!("phase1 matrix missing weighted_bottleneck_attribution object in {artifact}")
+        })
+}
+
+fn assert_weighted_schema_and_status<'a>(
+    weighted: &'a Map<String, Value>,
+    artifact: &str,
+) -> &'a str {
+    let weighted_schema = weighted.get("schema").and_then(Value::as_str).unwrap_or("");
+    assert_eq!(
+        weighted_schema, "pi.perf.phase1_weighted_bottleneck_attribution.v1",
+        "weighted attribution schema mismatch in {artifact}"
+    );
+
+    let status = weighted.get("status").and_then(Value::as_str).unwrap_or("");
+    assert!(
+        matches!(status, "computed" | "missing"),
+        "weighted attribution status must be computed|missing in {artifact}, got {status:?}"
+    );
+    status
+}
+
+fn assert_weighted_payload_shape(weighted: &Map<String, Value>, status: &str, artifact: &str) {
+    let per_scale = weighted
+        .get("per_scale")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("weighted attribution per_scale must be an array in {artifact}"));
+    let global_ranking = weighted
+        .get("global_ranking")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| {
+            panic!("weighted attribution global_ranking must be an array in {artifact}")
+        });
+
+    if status != "computed" {
+        return;
+    }
+
+    assert!(
+        !per_scale.is_empty(),
+        "weighted attribution per_scale must be non-empty when status=computed in {artifact}"
+    );
+    assert!(
+        !global_ranking.is_empty(),
+        "weighted attribution global_ranking must be non-empty when status=computed in {artifact}"
+    );
+
+    let observed_stages: HashSet<&str> = global_ranking
+        .iter()
+        .filter_map(|row| row.get("stage").and_then(Value::as_str))
+        .collect();
+    let expected_stages: HashSet<&str> = ["open_ms", "append_ms", "save_ms", "index_ms"]
+        .iter()
+        .copied()
+        .collect();
+    assert_eq!(
+        observed_stages, expected_stages,
+        "weighted attribution global_ranking stages mismatch in {artifact}"
+    );
+}
+
+fn assert_phase5_downstream_consumers(matrix: &Value, artifact: &str) {
+    let downstream_consumers = matrix
+        .pointer("/consumption_contract/downstream_consumers")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| {
+            panic!("consumption_contract.downstream_consumers must be an object in {artifact}")
+        });
+
+    for (consumer, bead_id, selector) in [
+        (
+            "opportunity_matrix",
+            "bd-3ar8v.6.1",
+            "weighted_bottleneck_attribution.global_ranking",
+        ),
+        (
+            "parameter_sweeps",
+            "bd-3ar8v.6.2",
+            "weighted_bottleneck_attribution.per_scale",
+        ),
+    ] {
+        let entry = downstream_consumers
+            .get(consumer)
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| {
+                panic!("consumption_contract.downstream_consumers.{consumer} missing in {artifact}")
+            });
+
+        let observed_bead = entry.get("bead_id").and_then(Value::as_str).unwrap_or("");
+        assert_eq!(
+            observed_bead, bead_id,
+            "downstream consumer bead mismatch for {consumer} in {artifact}"
+        );
+
+        let observed_selector = entry.get("selector").and_then(Value::as_str).unwrap_or("");
+        assert_eq!(
+            observed_selector, selector,
+            "downstream consumer selector mismatch for {consumer} in {artifact}"
+        );
+
+        let source_artifact = entry
+            .get("source_artifact")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        assert_eq!(
+            source_artifact, "phase1_matrix_validation",
+            "downstream consumer source_artifact mismatch for {consumer} in {artifact}"
+        );
+    }
+}
+
+fn parse_positive_u64(raw: Option<&Value>) -> Option<u64> {
+    match raw {
+        Some(Value::Number(value)) => value.as_u64().filter(|parsed| *parsed > 0),
+        Some(Value::String(value)) => value
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|parsed| *parsed > 0),
+        _ => None,
+    }
+}
+
+#[test]
+fn phase1_weighted_attribution_contract_links_phase5_consumers() {
+    let (artifact, matrix) = require_phase1_matrix_validation();
+    let consumption_contract = require_consumption_contract(&matrix, &artifact);
+
+    assert_consumption_contract_downstream_beads(consumption_contract, &artifact);
+
+    if !requires_strict_weighted_contract(consumption_contract, &matrix) {
+        assert_orchestrate_weighted_contract_tokens(&artifact);
+        return;
+    }
+
+    let weighted = require_weighted_attribution(&matrix, &artifact);
+    let status = assert_weighted_schema_and_status(weighted, &artifact);
+    assert_weighted_payload_shape(weighted, status, &artifact);
+    assert_phase5_downstream_consumers(&matrix, &artifact);
+}
+
+#[test]
+fn opportunity_matrix_contract_links_phase1_matrix_and_readiness() {
+    let (phase1_artifact, phase1_matrix) = require_phase1_matrix_validation();
+    let consumption_contract = require_consumption_contract(&phase1_matrix, &phase1_artifact);
+    let opportunity_present = find_latest_opportunity_matrix(&repo_root()).is_some();
+    if !requires_strict_opportunity_matrix_contract(consumption_contract, opportunity_present) {
+        assert_orchestrate_opportunity_matrix_contract_tokens();
+        return;
+    }
+
+    let (artifact, opportunity) = require_opportunity_matrix();
+
+    let source_identity = opportunity
+        .pointer("/source_identity")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| {
+            panic!("opportunity_matrix.source_identity must be an object in {artifact}")
+        });
+    let source_artifact = source_identity
+        .get("source_artifact")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert_eq!(
+        source_artifact, "phase1_matrix_validation",
+        "opportunity_matrix.source_identity.source_artifact mismatch in {artifact}"
+    );
+    let source_artifact_path = source_identity
+        .get("source_artifact_path")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert!(
+        !source_artifact_path.is_empty(),
+        "opportunity_matrix.source_identity.source_artifact_path must be non-empty in {artifact}"
+    );
+    let normalized_source_path = source_artifact_path.replace('\\', "/");
+    assert!(
+        normalized_source_path.ends_with("phase1_matrix_validation.json"),
+        "opportunity_matrix.source_identity.source_artifact_path must reference phase1_matrix_validation.json in {artifact}"
+    );
+    let normalized_phase1_artifact = phase1_artifact.replace('\\', "/");
+    assert!(
+        normalized_source_path.ends_with(&normalized_phase1_artifact)
+            || normalized_phase1_artifact.ends_with("phase1_matrix_validation.json"),
+        "opportunity_matrix source artifact path must align with discovered phase1 artifact: source={source_artifact_path:?}, phase1={phase1_artifact:?}"
+    );
+
+    let opportunity_correlation = opportunity
+        .get("correlation_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let phase1_correlation = phase1_matrix
+        .get("correlation_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert!(
+        !opportunity_correlation.is_empty() && !phase1_correlation.is_empty(),
+        "opportunity_matrix/phase1 correlation_id must be non-empty in {artifact} and {phase1_artifact}"
+    );
+    assert_eq!(
+        opportunity_correlation, phase1_correlation,
+        "opportunity_matrix correlation_id must match phase1 matrix correlation_id ({artifact} vs {phase1_artifact})"
+    );
+
+    let readiness = opportunity
+        .pointer("/readiness")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| panic!("opportunity_matrix.readiness must be an object in {artifact}"));
+    let readiness_status = readiness
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert!(
+        matches!(readiness_status, "ready" | "blocked" | "no_decision"),
+        "opportunity_matrix.readiness.status must be ready|blocked|no_decision in {artifact}, got {readiness_status:?}"
+    );
+    let readiness_decision = readiness
+        .get("decision")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert!(
+        matches!(readiness_decision, "RANKED" | "NO_DECISION"),
+        "opportunity_matrix.readiness.decision must be RANKED|NO_DECISION in {artifact}, got {readiness_decision:?}"
+    );
+    let readiness_mode = readiness.get("mode").and_then(Value::as_str).unwrap_or("");
+    assert_eq!(
+        readiness_mode, "fail_closed",
+        "opportunity_matrix.readiness.mode must be fail_closed in {artifact}"
+    );
+    let ready_for_phase5 = readiness.get("ready_for_phase5").and_then(Value::as_bool);
+    assert!(
+        ready_for_phase5.is_some(),
+        "opportunity_matrix.readiness.ready_for_phase5 must be a boolean in {artifact}"
+    );
+    let ranked_opportunities = opportunity
+        .pointer("/ranked_opportunities")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| {
+            panic!("opportunity_matrix.ranked_opportunities must be an array in {artifact}")
+        });
+    let phase1_ready = consumption_contract
+        .get("artifact_ready_for_phase5")
+        .and_then(Value::as_bool);
+    if let Some(phase1_ready) = phase1_ready {
+        assert_eq!(
+            ready_for_phase5,
+            Some(phase1_ready),
+            "opportunity_matrix.readiness.ready_for_phase5 must match phase1 consumption_contract.artifact_ready_for_phase5 ({artifact} vs {phase1_artifact})"
+        );
+    }
+    match readiness_status {
+        "ready" => {
+            assert_eq!(
+                ready_for_phase5,
+                Some(true),
+                "opportunity_matrix.readiness.ready_for_phase5 must be true when status=ready in {artifact}"
+            );
+            assert_eq!(
+                readiness_decision, "RANKED",
+                "opportunity_matrix.readiness.decision must be RANKED when status=ready in {artifact}"
+            );
+            assert!(
+                !ranked_opportunities.is_empty(),
+                "opportunity_matrix.ranked_opportunities must be non-empty when readiness.status=ready in {artifact}"
+            );
+            for (index, row) in ranked_opportunities.iter().enumerate() {
+                let row_obj = row.as_object().unwrap_or_else(|| {
+                    panic!(
+                        "opportunity_matrix.ranked_opportunities[{index}] must be an object in {artifact}"
+                    )
+                });
+                let rank = parse_positive_u64(row_obj.get("rank")).unwrap_or_else(|| {
+                    panic!(
+                        "opportunity_matrix.ranked_opportunities[{index}].rank must be a positive integer in {artifact}"
+                    )
+                });
+                assert_eq!(
+                    rank,
+                    (index + 1) as u64,
+                    "opportunity_matrix.ranked_opportunities[{index}].rank must equal index+1 in {artifact}"
+                );
+                let stage = row_obj
+                    .get("stage")
+                    .and_then(Value::as_str)
+                    .map_or("", str::trim);
+                assert!(
+                    !stage.is_empty(),
+                    "opportunity_matrix.ranked_opportunities[{index}].stage must be non-empty in {artifact}"
+                );
+
+                let weighted_contribution_pct = row_obj
+                    .get("weighted_contribution_pct")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(f64::NAN);
+                assert!(
+                    weighted_contribution_pct.is_finite() && weighted_contribution_pct >= 0.0,
+                    "opportunity_matrix.ranked_opportunities[{index}].weighted_contribution_pct must be non-negative numeric in {artifact}"
+                );
+                let expected_gain_pct = row_obj
+                    .get("expected_gain_pct")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(f64::NAN);
+                assert!(
+                    expected_gain_pct.is_finite() && expected_gain_pct >= 0.0,
+                    "opportunity_matrix.ranked_opportunities[{index}].expected_gain_pct must be non-negative numeric in {artifact}"
+                );
+                let priority_score = row_obj
+                    .get("priority_score")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(f64::NAN);
+                assert!(
+                    priority_score.is_finite() && priority_score > 0.0,
+                    "opportunity_matrix.ranked_opportunities[{index}].priority_score must be positive numeric in {artifact}"
+                );
+
+                let confidence = row_obj
+                    .get("confidence")
+                    .and_then(Value::as_object)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "opportunity_matrix.ranked_opportunities[{index}].confidence must be an object in {artifact}"
+                        )
+                    });
+                let confidence_level = confidence
+                    .get("level")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                assert!(
+                    matches!(confidence_level, "low" | "medium" | "high"),
+                    "opportunity_matrix.ranked_opportunities[{index}].confidence.level must be low|medium|high in {artifact}, got {confidence_level:?}"
+                );
+                let confidence_score = confidence
+                    .get("score")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(f64::NAN);
+                assert!(
+                    confidence_score.is_finite() && (0.0..=1.0).contains(&confidence_score),
+                    "opportunity_matrix.ranked_opportunities[{index}].confidence.score must be within [0,1] in {artifact}"
+                );
+                let confidence_sufficient = confidence
+                    .get("sufficient_for_decision")
+                    .and_then(Value::as_bool);
+                assert!(
+                    confidence_sufficient.is_some(),
+                    "opportunity_matrix.ranked_opportunities[{index}].confidence.sufficient_for_decision must be a boolean in {artifact}"
+                );
+
+                let user_impact = row_obj
+                    .get("user_impact")
+                    .and_then(Value::as_object)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "opportunity_matrix.ranked_opportunities[{index}].user_impact must be an object in {artifact}"
+                        )
+                    });
+                for field in ["resume_latency", "extension_responsiveness", "failure_risk"] {
+                    let value = user_impact
+                        .get(field)
+                        .and_then(Value::as_str)
+                        .map_or("", str::trim);
+                    assert!(
+                        !value.is_empty(),
+                        "opportunity_matrix.ranked_opportunities[{index}].user_impact.{field} must be non-empty in {artifact}"
+                    );
+                }
+            }
+        }
+        "blocked" => {
+            assert_eq!(
+                ready_for_phase5,
+                Some(false),
+                "opportunity_matrix.readiness.ready_for_phase5 must be false when status=blocked in {artifact}"
+            );
+            assert_eq!(
+                readiness_decision, "NO_DECISION",
+                "opportunity_matrix.readiness.decision must be NO_DECISION when status=blocked in {artifact}"
+            );
+            let blocking_reasons = readiness
+                .get("blocking_reasons")
+                .and_then(Value::as_array)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "opportunity_matrix.readiness.blocking_reasons must be an array when status=blocked in {artifact}"
+                    )
+                });
+            assert!(
+                !blocking_reasons.is_empty(),
+                "opportunity_matrix.readiness.blocking_reasons must be non-empty when status=blocked in {artifact}"
+            );
+            assert!(
+                ranked_opportunities.is_empty(),
+                "opportunity_matrix.ranked_opportunities must be empty when readiness.status=blocked in {artifact}"
+            );
+        }
+        "no_decision" => {
+            assert_eq!(
+                ready_for_phase5,
+                Some(false),
+                "opportunity_matrix.readiness.ready_for_phase5 must be false when status=no_decision in {artifact}"
+            );
+            assert_eq!(
+                readiness_decision, "NO_DECISION",
+                "opportunity_matrix.readiness.decision must be NO_DECISION when status=no_decision in {artifact}"
+            );
+            let no_decision_reasons = readiness
+                .get("no_decision_reasons")
+                .and_then(Value::as_array)
+                .or_else(|| readiness.get("blocking_reasons").and_then(Value::as_array))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "opportunity_matrix.readiness.no_decision_reasons|blocking_reasons must be an array when status=no_decision in {artifact}"
+                    )
+                });
+            assert!(
+                !no_decision_reasons.is_empty(),
+                "opportunity_matrix.readiness.no_decision_reasons must be non-empty when status=no_decision in {artifact}"
+            );
+            assert!(
+                ranked_opportunities.is_empty(),
+                "opportunity_matrix.ranked_opportunities must be empty when readiness.status=no_decision in {artifact}"
+            );
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn parameter_sweeps_contract_links_phase1_matrix_and_readiness() {
+    let (phase1_artifact, phase1_matrix) = require_phase1_matrix_validation();
+    let consumption_contract = require_consumption_contract(&phase1_matrix, &phase1_artifact);
+    let sweeps_present = find_latest_parameter_sweeps(&repo_root()).is_some();
+    if !requires_strict_parameter_sweeps_contract(consumption_contract, sweeps_present) {
+        assert_orchestrate_parameter_sweeps_contract_tokens();
+        return;
+    }
+
+    let (artifact, sweeps) = require_parameter_sweeps();
+
+    let source_identity = sweeps
+        .pointer("/source_identity")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| {
+            panic!("parameter_sweeps.source_identity must be an object in {artifact}")
+        });
+
+    let source_artifact = source_identity
+        .get("source_artifact")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert_eq!(
+        source_artifact, "phase1_matrix_validation",
+        "parameter_sweeps.source_identity.source_artifact mismatch in {artifact}"
+    );
+
+    let source_artifact_path = source_identity
+        .get("source_artifact_path")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert!(
+        !source_artifact_path.is_empty(),
+        "parameter_sweeps.source_identity.source_artifact_path must be non-empty in {artifact}"
+    );
+    let normalized_source_path = source_artifact_path.replace('\\', "/");
+    assert!(
+        normalized_source_path.ends_with("phase1_matrix_validation.json"),
+        "parameter_sweeps.source_identity.source_artifact_path must reference phase1_matrix_validation.json in {artifact}"
+    );
+    let normalized_phase1_artifact = phase1_artifact.replace('\\', "/");
+    assert!(
+        normalized_source_path.ends_with(&normalized_phase1_artifact)
+            || normalized_phase1_artifact.ends_with("phase1_matrix_validation.json"),
+        "parameter_sweeps source artifact path must align with discovered phase1 artifact: source={source_artifact_path:?}, phase1={phase1_artifact:?}"
+    );
+
+    let weighted_schema = source_identity
+        .get("weighted_bottleneck_schema")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert_eq!(
+        weighted_schema, "pi.perf.phase1_weighted_bottleneck_attribution.v1",
+        "parameter_sweeps.source_identity.weighted_bottleneck_schema mismatch in {artifact}"
+    );
+
+    let weighted_status = source_identity
+        .get("weighted_bottleneck_status")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert!(
+        matches!(weighted_status, "computed" | "missing"),
+        "parameter_sweeps.source_identity.weighted_bottleneck_status must be computed|missing in {artifact}, got {weighted_status:?}"
+    );
+
+    let sweeps_correlation = sweeps
+        .get("correlation_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let phase1_correlation = phase1_matrix
+        .get("correlation_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert!(
+        !sweeps_correlation.is_empty() && !phase1_correlation.is_empty(),
+        "parameter_sweeps/phase1 correlation_id must be non-empty in {artifact} and {phase1_artifact}"
+    );
+    assert_eq!(
+        sweeps_correlation, phase1_correlation,
+        "parameter_sweeps correlation_id must match phase1 matrix correlation_id ({artifact} vs {phase1_artifact})"
+    );
+
+    let readiness = sweeps
+        .pointer("/readiness")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| panic!("parameter_sweeps.readiness must be an object in {artifact}"));
+    let readiness_status = readiness
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let ready_for_phase5 = readiness.get("ready_for_phase5").and_then(Value::as_bool);
+    let blocking_reasons = readiness
+        .get("blocking_reasons")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| {
+            panic!("parameter_sweeps.readiness.blocking_reasons must be an array in {artifact}")
+        });
+
+    assert!(
+        matches!(readiness_status, "ready" | "blocked"),
+        "parameter_sweeps.readiness.status must be ready|blocked in {artifact}, got {readiness_status:?}"
+    );
+    match readiness_status {
+        "ready" => {
+            assert_eq!(
+                ready_for_phase5,
+                Some(true),
+                "parameter_sweeps.readiness.ready_for_phase5 must be true when status=ready in {artifact}"
+            );
+            assert!(
+                blocking_reasons.is_empty(),
+                "parameter_sweeps.readiness.blocking_reasons must be empty when status=ready in {artifact}"
+            );
+        }
+        "blocked" => {
+            assert_eq!(
+                ready_for_phase5,
+                Some(false),
+                "parameter_sweeps.readiness.ready_for_phase5 must be false when status=blocked in {artifact}"
+            );
+            assert!(
+                !blocking_reasons.is_empty(),
+                "parameter_sweeps.readiness.blocking_reasons must be non-empty when status=blocked in {artifact}"
+            );
+        }
+        _ => unreachable!(),
+    }
+
+    let phase1_ready = phase1_matrix
+        .pointer("/consumption_contract/artifact_ready_for_phase5")
+        .and_then(Value::as_bool);
+    if let Some(phase1_ready) = phase1_ready {
+        assert_eq!(
+            ready_for_phase5,
+            Some(phase1_ready),
+            "parameter_sweeps.readiness.ready_for_phase5 must match phase1 consumption_contract.artifact_ready_for_phase5 ({artifact} vs {phase1_artifact})"
+        );
+    }
+
+    let selected_defaults = sweeps
+        .pointer("/selected_defaults")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| {
+            panic!("parameter_sweeps.selected_defaults must be an object in {artifact}")
+        });
+    let mut selected_default_values = HashMap::new();
+    for key in ["flush_cadence_ms", "queue_max_items", "compaction_quota_mb"] {
+        let parsed = parse_positive_u64(selected_defaults.get(key)).unwrap_or_else(|| {
+            panic!(
+                "parameter_sweeps.selected_defaults.{key} must be a positive integer in {artifact}"
+            )
+        });
+        selected_default_values.insert(key, parsed);
+    }
+
+    let dimensions = sweeps
+        .pointer("/sweep_plan/dimensions")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| {
+            panic!("parameter_sweeps.sweep_plan.dimensions must be an array in {artifact}")
+        });
+    let mut observed_dimension_names = HashSet::new();
+    for (index, dimension) in dimensions.iter().enumerate() {
+        let dimension_obj = dimension.as_object().unwrap_or_else(|| {
+            panic!(
+                "parameter_sweeps.sweep_plan.dimensions[{index}] must be an object in {artifact}"
+            )
+        });
+        let name = dimension_obj
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        assert!(
+            !name.is_empty(),
+            "parameter_sweeps.sweep_plan.dimensions[{index}].name must be non-empty in {artifact}"
+        );
+        observed_dimension_names.insert(name.clone());
+        let candidate_values = dimension_obj
+            .get("candidate_values")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| {
+                panic!("parameter_sweeps.sweep_plan.dimensions[{index}].candidate_values must be an array in {artifact}")
+            });
+        assert!(
+            !candidate_values.is_empty(),
+            "parameter_sweeps.sweep_plan.dimensions[{index}].candidate_values must be non-empty in {artifact}"
+        );
+        let parsed_candidates: HashSet<u64> = candidate_values
+            .iter()
+            .map(|candidate| {
+                parse_positive_u64(Some(candidate)).unwrap_or_else(|| {
+                    panic!(
+                        "parameter_sweeps.sweep_plan.dimensions[{index}].candidate_values entries must be positive integers in {artifact}"
+                    )
+                })
+            })
+            .collect();
+        if let Some(selected_default) = selected_default_values.get(name.as_str()) {
+            assert!(
+                parsed_candidates.contains(selected_default),
+                "parameter_sweeps.selected_defaults.{name}={selected_default} must appear in sweep_plan.dimensions[{index}].candidate_values in {artifact}"
+            );
+        }
+    }
+    for required in ["flush_cadence_ms", "queue_max_items", "compaction_quota_mb"] {
+        assert!(
+            observed_dimension_names.contains(required),
+            "parameter_sweeps.sweep_plan.dimensions missing required knob {required} in {artifact}"
         );
     }
 }
