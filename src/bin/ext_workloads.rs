@@ -20,6 +20,10 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use clap::Parser;
 use futures::executor::block_on;
 use pi::error::{Error, Result};
+use pi::extension_scoring::{
+    InterferenceMatrixCompletenessReport, evaluate_interference_matrix_completeness,
+    format_interference_pair_key, parse_interference_pair_key,
+};
 use pi::extensions::JsExtensionLoadSpec;
 use pi::extensions_js::{HostcallKind, PiJsRuntime, PiJsRuntimeConfig};
 use pi::scheduler::{HostcallOutcome, WallClock};
@@ -123,6 +127,18 @@ impl StageWeights {
             execute: self.execute * total_us,
             io: self.io * total_us,
         }
+    }
+}
+
+fn stage_weight_component(weights: StageWeights, stage: &str) -> f64 {
+    match stage {
+        "marshal" => weights.marshal,
+        "queue" => weights.queue,
+        "schedule" => weights.schedule,
+        "policy" => weights.policy,
+        "execute" => weights.execute,
+        "io" => weights.io,
+        _ => 0.0,
     }
 }
 
@@ -3244,6 +3260,37 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("hotspot_matrix contains duplicate stage entry"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn hotspot_matrix_schema_rejects_stage_count_drift() {
+        let mut matrix = hotspot_matrix_schema_fixture();
+        matrix
+            .pointer_mut("/hotspot_matrix")
+            .and_then(Value::as_array_mut)
+            .expect("hotspot_matrix array")
+            .pop();
+
+        let err = validate_hotspot_matrix_schema(&matrix).expect_err("expected schema failure");
+        assert!(
+            err.to_string()
+                .contains("hotspot_matrix must contain 6 entries for complete stage decomposition"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn hotspot_matrix_schema_rejects_unknown_hotspot_stage() {
+        let mut matrix = hotspot_matrix_schema_fixture();
+        *matrix
+            .pointer_mut("/hotspot_matrix/0/stage")
+            .expect("hotspot_matrix[0].stage") = json!("dispatch");
+
+        let err = validate_hotspot_matrix_schema(&matrix).expect_err("expected schema failure");
+        assert!(
+            err.to_string().contains("field stage must be one of"),
             "unexpected error: {err}"
         );
     }

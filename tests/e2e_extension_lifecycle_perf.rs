@@ -1117,3 +1117,228 @@ fn composed_extension_load_succeeds() {
 
     shutdown(&manager);
 }
+
+/// Per-extension tool-call isolation: measure each extension's tool latency
+/// both in isolation and under composed load (all extensions loaded).
+/// Identifies which extensions suffer most from interference.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn per_extension_tool_isolation() {
+    let iterations = 20;
+    let mut specs: Vec<JsExtensionLoadSpec> = Vec::new();
+    let mut ext_names: Vec<&str> = Vec::new();
+    let mut records: Vec<Value> = Vec::new();
+
+    for ext_name in LIFECYCLE_EXTENSIONS {
+        let entry = artifact_entry(ext_name);
+        if !entry.exists() {
+            continue;
+        }
+        let spec = JsExtensionLoadSpec::from_entry_path(&entry).expect("spec");
+        specs.push(spec);
+        ext_names.push(ext_name);
+    }
+
+    if specs.len() < 2 {
+        eprintln!("[skip] need >=2 extensions for isolation test");
+        return;
+    }
+
+    // Phase A: Isolated tool-call latency per extension.
+    let mut isolated_latencies: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    for (i, ext_name) in ext_names.iter().enumerate() {
+        let harness = common::TestHarness::new(format!("isolation_single_{ext_name}"));
+        let manager = setup_manager_with_extension(&harness, &specs[i]);
+
+        let Some(runtime) = manager.js_runtime() else {
+            continue;
+        };
+        let ctx = json!({ "hasUI": false, "cwd": project_root().display().to_string() });
+
+        let mut samples = Vec::with_capacity(iterations);
+        for j in 0..iterations {
+            let start = Instant::now();
+            let _ = futures::executor::block_on(runtime.execute_tool(
+                ext_name.to_string(),
+                format!("iso-{j}"),
+                json!({"name": "test"}),
+                ctx.clone(),
+                NORMAL_TIMEOUT_MS,
+            ));
+            samples.push(start.elapsed().as_secs_f64() * 1_000_000.0);
+        }
+        samples.sort_by(f64::total_cmp);
+
+        let rec = samples_to_record(ext_name, &samples);
+        eprintln!(
+            "[isolation] {ext_name} single: p50={:.1}us p95={:.1}us",
+            rec.p50_us, rec.p95_us
+        );
+        records.push(json!({
+            "schema": "pi.ext.isolation.v1",
+            "phase": "isolated_tool_call",
+            "extension": ext_name,
+            "extension_count": 1,
+            "iterations": iterations,
+            "p50_us": rec.p50_us,
+            "p95_us": rec.p95_us,
+            "p99_us": rec.p99_us,
+            "mean_us": rec.mean_us,
+        }));
+        isolated_latencies.insert(ext_name.to_string(), samples);
+
+        shutdown(&manager);
+    }
+
+    // Phase B: Composed tool-call latency per extension.
+    let harness = common::TestHarness::new("isolation_composed");
+    let composed_manager = setup_composed_manager(&harness, &specs);
+    let Some(composed_runtime) = composed_manager.js_runtime() else {
+        eprintln!("[skip] no JS runtime for composed manager");
+        shutdown(&composed_manager);
+        return;
+    };
+    let ctx = json!({ "hasUI": false, "cwd": project_root().display().to_string() });
+
+    for ext_name in &ext_names {
+        let mut samples = Vec::with_capacity(iterations);
+        for j in 0..iterations {
+            let start = Instant::now();
+            let _ = futures::executor::block_on(composed_runtime.execute_tool(
+                ext_name.to_string(),
+                format!("comp-{j}"),
+                json!({"name": "test"}),
+                ctx.clone(),
+                NORMAL_TIMEOUT_MS,
+            ));
+            samples.push(start.elapsed().as_secs_f64() * 1_000_000.0);
+        }
+        samples.sort_by(f64::total_cmp);
+
+        let rec = samples_to_record(ext_name, &samples);
+        eprintln!(
+            "[isolation] {ext_name} composed: p50={:.1}us p95={:.1}us",
+            rec.p50_us, rec.p95_us
+        );
+
+        // Compute interference burden for this extension.
+        let isolated = isolated_latencies.get(*ext_name);
+        let isolated_p50 = isolated.map_or(rec.p50_us, |s| percentile_us(s, 50));
+        let burden_pct = if isolated_p50 > 0.0 {
+            ((rec.p50_us - isolated_p50) / isolated_p50) * 100.0
+        } else {
+            0.0
+        };
+
+        records.push(json!({
+            "schema": "pi.ext.isolation.v1",
+            "phase": "composed_tool_call",
+            "extension": ext_name,
+            "extension_count": specs.len(),
+            "iterations": iterations,
+            "p50_us": rec.p50_us,
+            "p95_us": rec.p95_us,
+            "p99_us": rec.p99_us,
+            "mean_us": rec.mean_us,
+            "interference_burden_pct": burden_pct,
+        }));
+    }
+
+    // Write isolation JSONL
+    let output_path = project_root().join("target/perf/e2e_isolation.jsonl");
+    write_jsonl(&records, &output_path);
+    eprintln!(
+        "\n[output] {} isolation records written to {}",
+        records.len(),
+        output_path.display()
+    );
+
+    shutdown(&composed_manager);
+}
+
+/// Incremental interference scaling: measure latency with 1, 2, then 3 extensions.
+/// Shows how interference grows with extension count.
+#[test]
+fn interference_scaling_by_count() {
+    let iterations = 20;
+    let mut all_specs: Vec<JsExtensionLoadSpec> = Vec::new();
+    let mut all_names: Vec<&str> = Vec::new();
+
+    for ext_name in LIFECYCLE_EXTENSIONS {
+        let entry = artifact_entry(ext_name);
+        if !entry.exists() {
+            continue;
+        }
+        all_specs.push(JsExtensionLoadSpec::from_entry_path(&entry).expect("spec"));
+        all_names.push(ext_name);
+    }
+
+    if all_specs.len() < 3 {
+        eprintln!("[skip] need >=3 extensions for scaling test");
+        return;
+    }
+
+    let mut records: Vec<Value> = Vec::new();
+    let mut prev_p50 = 0.0_f64;
+
+    for count in 1..=all_specs.len() {
+        let subset = &all_specs[..count];
+        let label = all_names[..count].join("+");
+        let harness = common::TestHarness::new(format!("scaling_{count}ext"));
+        let manager = setup_composed_manager(&harness, subset);
+
+        let samples = measure_event_latencies(&manager, iterations);
+        let rec = samples_to_record(&label, &samples);
+
+        let scaling_ratio = if prev_p50 > 0.0 {
+            rec.p50_us / prev_p50
+        } else {
+            1.0
+        };
+
+        eprintln!(
+            "[scaling] {count}ext ({label}): p50={:.1}us p95={:.1}us scale={scaling_ratio:.2}x",
+            rec.p50_us, rec.p95_us
+        );
+
+        records.push(json!({
+            "schema": "pi.ext.scaling.v1",
+            "extension_count": count,
+            "extensions": &all_names[..count],
+            "iterations": iterations,
+            "p50_us": rec.p50_us,
+            "p95_us": rec.p95_us,
+            "p99_us": rec.p99_us,
+            "mean_us": rec.mean_us,
+            "scaling_ratio_vs_previous": scaling_ratio,
+        }));
+
+        prev_p50 = rec.p50_us;
+        shutdown(&manager);
+    }
+
+    // Write scaling JSONL
+    let output_path = project_root().join("target/perf/e2e_scaling.jsonl");
+    write_jsonl(&records, &output_path);
+    eprintln!(
+        "\n[output] {} scaling records written to {}",
+        records.len(),
+        output_path.display()
+    );
+
+    // Verify scaling is sub-quadratic (each added extension should not more than 5x previous).
+    for record in &records {
+        let ratio = record
+            .get("scaling_ratio_vs_previous")
+            .and_then(Value::as_f64)
+            .unwrap_or(1.0);
+        let count = record
+            .get("extension_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        assert!(
+            ratio < 5.0,
+            "scaling ratio {ratio:.2}x at {count} extensions exceeds 5x (super-linear interference)"
+        );
+    }
+}
