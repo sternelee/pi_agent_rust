@@ -32,6 +32,7 @@ files = [
     "error_types",
     "franken_node_claim_contract",
     "franken_node_compat_harness",
+    "franken_node_compatibility_doctor_contract",
     "franken_node_kernel_extraction_boundary_manifest",
     "franken_node_package_interop_contract",
     "franken_node_runtime_substrate_contract",
