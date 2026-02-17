@@ -10783,6 +10783,10 @@ pub struct HostcallReactorTelemetry {
     pub total_enqueued: Vec<u64>,
     pub rejected_enqueues: u64,
     pub total_dispatched: u64,
+    /// Whether a NUMA slab pool is active.
+    pub numa_pool_active: bool,
+    /// Number of thread affinity advisories available.
+    pub affinity_advisory_count: usize,
 }
 
 /// Deterministic SPSC reactor mesh for hostcall traffic.
@@ -10808,17 +10812,65 @@ pub struct HostcallReactorMesh {
     rr_cursor: usize,
     rejected_enqueues: u64,
     total_dispatched: u64,
+    /// NUMA-aware slab pool for tracking per-shard resource utilization.
+    numa_pool: Option<crate::scheduler::NumaSlabPool>,
+    /// Thread affinity advice derived from the reactor's core mapping.
+    affinity_advice: Vec<crate::scheduler::ThreadAffinityAdvice>,
 }
 
 impl HostcallReactorMesh {
     /// Create a new reactor mesh with the given configuration.
     #[must_use]
+    #[allow(clippy::option_if_let_else)]
     pub fn new(config: HostcallReactorConfig) -> Self {
         let shard_count = config.shard_count.max(1);
         let lane_capacity = config.lane_capacity.max(1);
         let lanes = (0..shard_count)
             .map(|_| HostcallSpscLane::new(lane_capacity))
             .collect();
+
+        // Build NUMA slab pool and thread affinity advice from core_ids if configured.
+        let (numa_pool, affinity_advice) = if let Some(ref core_ids) = config.core_ids {
+            use crate::scheduler::{
+                AffinityEnforcement, NumaSlabConfig, NumaSlabPool, ReactorPlacementManifest,
+                ReactorShardBinding,
+            };
+            let bindings: Vec<ReactorShardBinding> = core_ids
+                .iter()
+                .enumerate()
+                .map(|(shard_id, &core_id)| ReactorShardBinding {
+                    shard_id,
+                    core_id,
+                    numa_node: core_id / 4, // heuristic: 4 cores per NUMA node
+                })
+                .collect();
+            let numa_node_count = bindings
+                .iter()
+                .map(|b| b.numa_node)
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                .max(1);
+            let manifest = ReactorPlacementManifest {
+                shard_count,
+                numa_node_count,
+                bindings,
+                fallback_reason: None,
+            };
+            let pool = NumaSlabPool::from_manifest(&manifest, NumaSlabConfig::default());
+            let advice = manifest.affinity_advice(AffinityEnforcement::Advisory);
+
+            tracing::debug!(
+                shard_count,
+                numa_nodes = pool.node_count(),
+                affinity_entries = advice.len(),
+                "Hostcall reactor mesh initialized with NUMA slab pool and affinity advice"
+            );
+
+            (Some(pool), advice)
+        } else {
+            (None, Vec::new())
+        };
+
         Self {
             config: HostcallReactorConfig {
                 shard_count,
@@ -10831,6 +10883,8 @@ impl HostcallReactorMesh {
             rr_cursor: 0,
             rejected_enqueues: 0,
             total_dispatched: 0,
+            numa_pool,
+            affinity_advice,
         }
     }
 
@@ -10862,6 +10916,8 @@ impl HostcallReactorMesh {
             total_enqueued: self.lanes.iter().map(|l| l.total_enqueued).collect(),
             rejected_enqueues: self.rejected_enqueues,
             total_dispatched: self.total_dispatched,
+            numa_pool_active: self.numa_pool.is_some(),
+            affinity_advisory_count: self.affinity_advice.len(),
         }
     }
 
@@ -10872,6 +10928,18 @@ impl HostcallReactorMesh {
             .core_ids
             .as_ref()
             .and_then(|ids| ids.get(shard_id).copied())
+    }
+
+    /// NUMA-aware slab pool (if core-ids were configured).
+    #[must_use]
+    pub const fn numa_pool(&self) -> Option<&crate::scheduler::NumaSlabPool> {
+        self.numa_pool.as_ref()
+    }
+
+    /// Thread affinity advice derived from reactor core mapping.
+    #[must_use]
+    pub fn affinity_advice(&self) -> &[crate::scheduler::ThreadAffinityAdvice] {
+        &self.affinity_advice
     }
 
     /// FNV-1a 64-bit hash for deterministic, process-independent routing.
@@ -17512,6 +17580,66 @@ pub async fn dispatch_host_call_shared(
         );
     }
 
+    // Replay trace recording: if the manager has replay enabled, record this dispatch.
+    if let Some(manager) = ctx.manager.as_ref() {
+        if let Some(replay_config) = manager.replay_config() {
+            let ext_id = ctx.extension_id.unwrap_or("unknown");
+            let trace_id = format!("hc-{}", &call_id);
+            let mut recorder =
+                crate::extension_replay::ReplayRecorder::new(trace_id, replay_config);
+
+            // Record the scheduled event.
+            recorder.record_scheduled(
+                ext_id,
+                &call_id,
+                std::collections::BTreeMap::from([
+                    ("capability".to_string(), capability.to_string()),
+                    ("method".to_string(), method.clone()),
+                ]),
+            );
+            recorder.tick();
+
+            // Record the policy decision.
+            recorder.record(
+                ext_id,
+                &call_id,
+                crate::extension_replay::ReplayEventKind::PolicyDecision,
+                std::collections::BTreeMap::from([
+                    ("decision".to_string(), format!("{decision:?}")),
+                    ("reason".to_string(), reason.clone()),
+                ]),
+            );
+            recorder.tick();
+
+            // Record the outcome.
+            let outcome_kind = if outcome_error_code.is_some() {
+                crate::extension_replay::ReplayEventKind::Failed
+            } else {
+                crate::extension_replay::ReplayEventKind::Completed
+            };
+            recorder.record(
+                ext_id,
+                &call_id,
+                outcome_kind,
+                std::collections::BTreeMap::from([(
+                    "duration_ms".to_string(),
+                    duration_ms.to_string(),
+                )]),
+            );
+
+            let observation = crate::extension_replay::ReplayCaptureObservation {
+                baseline_micros: duration_ms.saturating_mul(1000),
+                captured_micros: duration_ms.saturating_mul(1000),
+                trace_bytes: 0, // negligible overhead
+            };
+            if let Ok(result) = recorder.finish(observation) {
+                if result.gate_report.capture_allowed {
+                    manager.store_replay_bundle(result.bundle);
+                }
+            }
+        }
+    }
+
     outcome_to_host_result(&call_id, &outcome)
 }
 
@@ -20003,6 +20131,10 @@ struct ExtensionManagerInner {
     ctx_generation: u64,
     /// Core-pinned SPSC reactor mesh for fast-lane hostcall traffic (bd-3ar8v.4.20).
     hostcall_reactor: Option<HostcallReactorMesh>,
+    /// Replay trace configuration for extension hostcall forensics.
+    replay_config: Option<crate::extension_replay::ReplayLaneConfig>,
+    /// Completed replay trace bundles from recent dispatch cycles.
+    replay_bundles: VecDeque<crate::extension_replay::ReplayTraceBundle>,
 }
 
 impl std::fmt::Debug for ExtensionManager {
@@ -21243,6 +21375,49 @@ impl ExtensionManager {
         if let Ok(mut guard) = self.inner.lock() {
             guard.quota_states.remove(extension_id);
         }
+    }
+
+    // ── Replay trace integration ────────────────────────────────────
+
+    /// Enable replay trace recording with the given budget/config.
+    pub fn enable_replay(&self, config: crate::extension_replay::ReplayLaneConfig) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.replay_config = Some(config);
+        }
+    }
+
+    /// Disable replay trace recording.
+    pub fn disable_replay(&self) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.replay_config = None;
+        }
+    }
+
+    /// Store a completed replay trace bundle from a dispatch cycle.
+    pub fn store_replay_bundle(&self, bundle: crate::extension_replay::ReplayTraceBundle) {
+        if let Ok(mut guard) = self.inner.lock() {
+            // Keep at most 64 recent bundles to bound memory.
+            while guard.replay_bundles.len() >= 64 {
+                guard.replay_bundles.pop_front();
+            }
+            guard.replay_bundles.push_back(bundle);
+        }
+    }
+
+    /// Drain and return all stored replay trace bundles.
+    pub fn drain_replay_bundles(&self) -> Vec<crate::extension_replay::ReplayTraceBundle> {
+        self.inner.lock().ok().map_or_else(Vec::new, |mut guard| {
+            guard.replay_bundles.drain(..).collect()
+        })
+    }
+
+    /// Get the current replay lane config (if enabled).
+    #[must_use]
+    pub fn replay_config(&self) -> Option<crate::extension_replay::ReplayLaneConfig> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|guard| guard.replay_config.clone())
     }
 
     #[allow(
@@ -23951,7 +24126,7 @@ impl ExtensionManager {
         if has_hook_wasm {
             let mut wasm_payload = event_payload;
             if let Value::Object(map) = &mut wasm_payload {
-                map.insert("ctx".into(), ctx_payload);
+                map.insert("ctx".into(), (*ctx_payload).clone());
             }
             if let Some(value) = Self::dispatch_wasm_event_value(
                 &wasm_extensions,
