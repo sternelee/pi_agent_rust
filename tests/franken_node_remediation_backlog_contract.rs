@@ -138,10 +138,7 @@ fn validate_prioritization_model(contract: &Value) -> ValidationResult<()> {
         }
     }
 
-    let weight_sum: f64 = dimensions
-        .iter()
-        .filter_map(|d| d["weight"].as_f64())
-        .sum();
+    let weight_sum: f64 = dimensions.iter().filter_map(|d| d["weight"].as_f64()).sum();
     if (weight_sum - 1.0).abs() > 0.001 {
         return Err(format!(
             "ranking dimension weights must sum to 1.0, got: {weight_sum}"

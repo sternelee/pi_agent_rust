@@ -13,8 +13,7 @@ fn load_contract() -> Value {
     let path = repo_root().join(CONTRACT_PATH);
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {CONTRACT_PATH}: {e}"));
-    serde_json::from_str(&text)
-        .unwrap_or_else(|e| panic!("invalid JSON in {CONTRACT_PATH}: {e}"))
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("invalid JSON in {CONTRACT_PATH}: {e}"))
 }
 
 #[test]
@@ -50,10 +49,7 @@ fn replay_contract_capture_pipeline_has_required_modes() {
         modes.len()
     );
 
-    let mode_ids: HashSet<&str> = modes
-        .iter()
-        .filter_map(|m| m["mode_id"].as_str())
-        .collect();
+    let mode_ids: HashSet<&str> = modes.iter().filter_map(|m| m["mode_id"].as_str()).collect();
 
     for required in ["full_deterministic", "lightweight_trace", "off"] {
         assert!(
@@ -114,11 +110,15 @@ fn replay_contract_capture_invariants_prevent_behavioral_alteration() {
 
     let texts: Vec<&str> = invariants.iter().filter_map(Value::as_str).collect();
     assert!(
-        texts.iter().any(|t| t.contains("not alter") || t.contains("does not alter")),
+        texts
+            .iter()
+            .any(|t| t.contains("not alter") || t.contains("does not alter")),
         "capture invariants must guarantee recording does not alter behavior"
     );
     assert!(
-        texts.iter().any(|t| t.contains("sequence number") || t.contains("ordering")),
+        texts
+            .iter()
+            .any(|t| t.contains("sequence number") || t.contains("ordering")),
         "capture invariants must mention event ordering/sequence numbers"
     );
 }
@@ -130,10 +130,7 @@ fn replay_contract_replay_engine_has_strict_and_best_effort_modes() {
         .as_array()
         .expect("replay_modes must be an array");
 
-    let mode_ids: HashSet<&str> = modes
-        .iter()
-        .filter_map(|m| m["mode_id"].as_str())
-        .collect();
+    let mode_ids: HashSet<&str> = modes.iter().filter_map(|m| m["mode_id"].as_str()).collect();
 
     assert!(
         mode_ids.contains("strict_deterministic"),
@@ -204,7 +201,9 @@ fn replay_contract_fault_dossier_has_required_sections() {
     for section in sections {
         let sid = section["section_id"].as_str().unwrap_or("unknown");
         assert!(
-            section["description"].as_str().is_some_and(|d| !d.is_empty()),
+            section["description"]
+                .as_str()
+                .is_some_and(|d| !d.is_empty()),
             "dossier section {sid} must have non-empty description"
         );
     }
@@ -223,7 +222,9 @@ fn replay_contract_fault_dossier_is_self_contained() {
         "fault dossier invariants must declare self-containedness"
     );
     assert!(
-        texts.iter().any(|t| t.contains("bounded") || t.contains("size")),
+        texts
+            .iter()
+            .any(|t| t.contains("bounded") || t.contains("size")),
         "fault dossier invariants must declare size bounds"
     );
 }

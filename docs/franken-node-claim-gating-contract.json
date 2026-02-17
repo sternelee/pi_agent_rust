@@ -8,7 +8,8 @@
     "bd-3ar8v.7.4.3",
     "bd-3ar8v.7.2.4",
     "bd-3ar8v.7.5.1",
-    "bd-3ar8v.7.6.1"
+    "bd-3ar8v.7.6.1",
+    "bd-3ar8v.7.16.1"
   ],
   "status": "active_blocking_policy",
   "effective_date_utc": "2026-02-17T07:18:00Z",
@@ -71,6 +72,7 @@
         "kernel extraction boundary manifest and reintegration mapping evidence",
         "runtime-substrate generalization evidence for bd-3ar8v.7.5",
         "multi-tier execution engine evidence for bd-3ar8v.7.6",
+        "compatibility remediation backlog generator evidence for bd-3ar8v.7.16",
         "benchmark and resource gate pass with confidence-tagged evidence",
         "migration assistant and shadow-canary rollback safeguards",
         "crate reintegration evidence into pi_agent_rust"

@@ -13,8 +13,7 @@ fn load_contract() -> Value {
     let path = repo_root().join(CONTRACT_PATH);
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {CONTRACT_PATH}: {e}"));
-    serde_json::from_str(&text)
-        .unwrap_or_else(|e| panic!("invalid JSON in {CONTRACT_PATH}: {e}"))
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("invalid JSON in {CONTRACT_PATH}: {e}"))
 }
 
 #[test]
@@ -87,10 +86,7 @@ fn migration_contract_verdict_levels_include_required_set() {
         .as_array()
         .expect("verdict_levels must be an array");
 
-    let level_set: HashSet<&str> = levels
-        .iter()
-        .filter_map(|l| l["level"].as_str())
-        .collect();
+    let level_set: HashSet<&str> = levels.iter().filter_map(|l| l["level"].as_str()).collect();
 
     for required in ["pass", "warn", "action_required", "blocked"] {
         assert!(
@@ -232,12 +228,13 @@ fn migration_contract_fix_suggestions_cover_required_types() {
         types.len()
     );
 
-    let type_ids: HashSet<&str> = types
-        .iter()
-        .filter_map(|t| t["type_id"].as_str())
-        .collect();
+    let type_ids: HashSet<&str> = types.iter().filter_map(|t| t["type_id"].as_str()).collect();
 
-    for required in ["api_replacement", "polyfill_injection", "configuration_change"] {
+    for required in [
+        "api_replacement",
+        "polyfill_injection",
+        "configuration_change",
+    ] {
         assert!(
             type_ids.contains(required),
             "suggestion_types must include {required}"

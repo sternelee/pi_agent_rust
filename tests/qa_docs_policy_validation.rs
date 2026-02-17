@@ -1434,6 +1434,7 @@ fn franken_node_mission_contract_tier_mapping_declares_required_checks_and_phase
         "bd-3ar8v.7.5",
         "bd-3ar8v.7.6",
         "bd-3ar8v.7.15",
+        "bd-3ar8v.7.16",
     ] {
         assert!(
             strict_beads.contains(bead),
@@ -1452,6 +1453,8 @@ fn franken_node_mission_contract_tier_mapping_declares_required_checks_and_phase
         "docs/franken-node-kernel-extraction-boundary-manifest.json",
         "docs/franken-node-package-interop-contract.json",
         "docs/franken-node-runtime-substrate-contract.json",
+        "docs/franken-node-remediation-backlog-contract.json",
+        "docs/franken-node-shadow-canary-rollout-contract.json",
         "tests/full_suite_gate/franken_node_kernel_boundary_drift_report.json",
     ] {
         assert!(

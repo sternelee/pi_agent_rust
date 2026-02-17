@@ -13,8 +13,7 @@ fn load_contract() -> Value {
     let path = repo_root().join(CONTRACT_PATH);
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {CONTRACT_PATH}: {e}"));
-    serde_json::from_str(&text)
-        .unwrap_or_else(|e| panic!("invalid JSON in {CONTRACT_PATH}: {e}"))
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("invalid JSON in {CONTRACT_PATH}: {e}"))
 }
 
 #[test]
@@ -230,7 +229,9 @@ fn security_contract_threat_model_surfaces_have_mitigations() {
             "duplicate surface_id: {sid}"
         );
         assert!(
-            surface["mitigation"].as_str().is_some_and(|m| !m.is_empty()),
+            surface["mitigation"]
+                .as_str()
+                .is_some_and(|m| !m.is_empty()),
             "threat surface {sid} must have non-empty mitigation"
         );
         assert!(
@@ -284,9 +285,7 @@ fn security_contract_release_blockers_are_defined() {
 
     let blocker_texts: Vec<&str> = blockers.iter().filter_map(Value::as_str).collect();
     assert!(
-        blocker_texts
-            .iter()
-            .any(|b| b.contains("deny-by-default")),
+        blocker_texts.iter().any(|b| b.contains("deny-by-default")),
         "release_blockers must mention deny-by-default enforcement"
     );
     assert!(

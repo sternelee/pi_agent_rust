@@ -13,8 +13,7 @@ fn load_contract() -> Value {
     let path = repo_root().join(CONTRACT_PATH);
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {CONTRACT_PATH}: {e}"));
-    serde_json::from_str(&text)
-        .unwrap_or_else(|e| panic!("invalid JSON in {CONTRACT_PATH}: {e}"))
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("invalid JSON in {CONTRACT_PATH}: {e}"))
 }
 
 #[test]
@@ -120,11 +119,15 @@ fn event_loop_contract_has_invariants() {
 
     let texts: Vec<&str> = invariants.iter().filter_map(Value::as_str).collect();
     assert!(
-        texts.iter().any(|t| t.contains("microtask") || t.contains("Microtask")),
+        texts
+            .iter()
+            .any(|t| t.contains("microtask") || t.contains("Microtask")),
         "invariants must mention microtask draining"
     );
     assert!(
-        texts.iter().any(|t| t.contains("starve") || t.contains("starvation")),
+        texts
+            .iter()
+            .any(|t| t.contains("starve") || t.contains("starvation")),
         "invariants must address timer/IO starvation"
     );
 }
@@ -161,7 +164,9 @@ fn event_loop_contract_io_primitives_cover_required_set() {
             "IO primitive {pid} must have non-empty description"
         );
         assert!(
-            prim["node_api_parity"].as_array().is_some_and(|a| !a.is_empty()),
+            prim["node_api_parity"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty()),
             "IO primitive {pid} must list node_api_parity references"
         );
         assert!(
@@ -214,7 +219,9 @@ fn event_loop_contract_compatibility_toggles_have_required_fields() {
             "duplicate toggle_id: {tid}"
         );
         assert!(
-            toggle["description"].as_str().is_some_and(|d| !d.is_empty()),
+            toggle["description"]
+                .as_str()
+                .is_some_and(|d| !d.is_empty()),
             "toggle {tid} must have non-empty description"
         );
         assert!(

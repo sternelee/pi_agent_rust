@@ -56,13 +56,16 @@
         "bd-3ar8v.7.4",
         "bd-3ar8v.7.5",
         "bd-3ar8v.7.6",
-        "bd-3ar8v.7.15"
+        "bd-3ar8v.7.15",
+        "bd-3ar8v.7.16"
       ],
       "required_evidence_artifacts": [
         "docs/dropin-certification-verdict.json",
         "docs/franken-node-kernel-extraction-boundary-manifest.json",
         "docs/franken-node-package-interop-contract.json",
         "docs/franken-node-runtime-substrate-contract.json",
+        "docs/franken-node-remediation-backlog-contract.json",
+        "docs/franken-node-shadow-canary-rollout-contract.json",
         "tests/full_suite_gate/franken_node_kernel_boundary_drift_report.json"
       ],
       "required_check_ids": [
