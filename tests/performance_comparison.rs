@@ -8,7 +8,7 @@
 //! Run: `cargo test --test performance_comparison -- --nocapture`
 
 use chrono::{SecondsFormat, Utc};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -160,7 +160,7 @@ fn generate_comparison_json(comparisons: &[LoadComparison], raw: &Value) -> Valu
         "analysis": {
             "methodology": "Both runtimes load the same unmodified .ts extension files. TS uses Bun/jiti (native V8-based eval). Rust uses QuickJS with SWC transpilation from TypeScript to JavaScript before eval.",
             "regression_hypothesis": "Extension loading in Rust (QuickJS) is slower due to: (1) SWC TypeScript→JavaScript transpilation overhead per-load, (2) QuickJS bytecode compilation (no JIT), (3) virtual module system resolution. This is a cold-start cost; warm-path dispatch (tool calls, event hooks) is sub-50μs in Rust.",
-            "mitigation": "Planned: compiled bytecode caching (bd-4p9k opportunity matrix) to amortize cold-start across runs. See BENCHMARKS.md 'Opportunity Matrix' for prioritized improvements.",
+            "mitigation": "Planned: compiled bytecode caching plus weighted-attribution follow-through via bd-3ar8v.6.1 (opportunity matrix) and bd-3ar8v.6.2 (parameter sweeps) to amortize cold-start across runs. See BENCHMARKS.md 'Opportunity Matrix' for prioritized improvements.",
             "key_insight": "While extension loading is 96-131ms in Rust vs 1ms in TS, this is dominated by startup compilation. Steady-state operations (tool call roundtrip: 44μs, policy eval: 20ns) are orders of magnitude faster than TS equivalents. The loading cost is paid once per session."
         },
         "extensions": per_extension,
@@ -362,10 +362,21 @@ fn comparison_json_has_analysis() {
         analysis.get("regression_hypothesis").is_some(),
         "should document regression hypothesis"
     );
-    assert!(
-        analysis.get("mitigation").is_some(),
-        "should document planned mitigation"
-    );
+    let mitigation = analysis
+        .get("mitigation")
+        .and_then(Value::as_str)
+        .expect("should document planned mitigation");
+    for token in [
+        "bd-3ar8v.6.1",
+        "bd-3ar8v.6.2",
+        "opportunity matrix",
+        "parameter sweeps",
+    ] {
+        assert!(
+            mitigation.contains(token),
+            "mitigation should include token {token}, got: {mitigation}"
+        );
+    }
     assert!(
         analysis.get("methodology").is_some(),
         "should document methodology"

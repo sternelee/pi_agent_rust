@@ -8175,6 +8175,145 @@ if isinstance(phase1_matrix_validation, dict) and perf_phase1_matrix_validation_
             "phase-1 matrix validation regression_guards status/reason alignment failed"
         )
 
+    consumption_contract = phase1_matrix_validation.get("consumption_contract")
+    consumption_contract_obj = (
+        consumption_contract if isinstance(consumption_contract, dict) else None
+    )
+    require_condition(
+        "claim_integrity.phase1_matrix_consumption_contract_object",
+        path=perf_phase1_matrix_validation_path,
+        ok=consumption_contract_obj is not None,
+        ok_msg="phase-1 matrix validation consumption_contract object present",
+        fail_msg="phase-1 matrix validation missing consumption_contract object",
+        strict=claim_integrity_required,
+        remediation=(
+            "Emit consumption_contract in scripts/perf/orchestrate.sh with "
+            "downstream_beads/downstream_consumers plus artifact_ready_for_phase5."
+        ),
+    )
+
+    downstream_bead_ids: list[str] = []
+    invalid_downstream_bead_entries: list[str] = []
+    downstream_beads_raw = (
+        consumption_contract_obj.get("downstream_beads")
+        if isinstance(consumption_contract_obj, dict)
+        else None
+    )
+    if isinstance(downstream_beads_raw, list):
+        for index, raw_bead in enumerate(downstream_beads_raw):
+            if not isinstance(raw_bead, str):
+                invalid_downstream_bead_entries.append(
+                    f"downstream_beads[{index}] must be a string"
+                )
+                continue
+            bead_id = raw_bead.strip()
+            if not bead_id:
+                invalid_downstream_bead_entries.append(
+                    f"downstream_beads[{index}] must be non-empty"
+                )
+                continue
+            downstream_bead_ids.append(bead_id)
+    elif consumption_contract_obj is not None:
+        invalid_downstream_bead_entries.append("downstream_beads is not an array")
+
+    required_phase5_downstream_beads = {"bd-3ar8v.6.1", "bd-3ar8v.6.2"}
+    observed_downstream_bead_set = set(downstream_bead_ids)
+    missing_phase5_downstream_beads = sorted(
+        required_phase5_downstream_beads - observed_downstream_bead_set
+    )
+    downstream_beads_ok = (
+        not invalid_downstream_bead_entries and not missing_phase5_downstream_beads
+    )
+    require_condition(
+        "claim_integrity.phase1_matrix_downstream_beads_include_phase5",
+        path=perf_phase1_matrix_validation_path,
+        ok=downstream_beads_ok,
+        ok_msg=(
+            "phase-1 matrix validation downstream_beads include opportunity-matrix "
+            "and parameter-sweep consumers"
+        ),
+        fail_msg=(
+            "phase-1 matrix validation downstream_beads missing/invalid entries: "
+            f"missing={missing_phase5_downstream_beads}, "
+            f"invalid={invalid_downstream_bead_entries}"
+        ),
+        strict=claim_integrity_required,
+        remediation=(
+            "Include bd-3ar8v.6.1 and bd-3ar8v.6.2 in "
+            "consumption_contract.downstream_beads in scripts/perf/orchestrate.sh."
+        ),
+    )
+    if not downstream_beads_ok and claim_integrity_gate_active:
+        evidence_missing_or_stale_reasons.append(
+            "phase-1 matrix validation downstream_beads must include "
+            "bd-3ar8v.6.1 and bd-3ar8v.6.2"
+        )
+
+    downstream_consumers_raw = (
+        consumption_contract_obj.get("downstream_consumers")
+        if isinstance(consumption_contract_obj, dict)
+        else None
+    )
+    downstream_consumers_obj = (
+        downstream_consumers_raw if isinstance(downstream_consumers_raw, dict) else None
+    )
+    expected_downstream_consumers = {
+        "opportunity_matrix": {
+            "bead_id": "bd-3ar8v.6.1",
+            "selector": "weighted_bottleneck_attribution.global_ranking",
+            "source_artifact": "phase1_matrix_validation",
+        },
+        "parameter_sweeps": {
+            "bead_id": "bd-3ar8v.6.2",
+            "selector": "weighted_bottleneck_attribution.per_scale",
+            "source_artifact": "phase1_matrix_validation",
+        },
+    }
+    downstream_consumer_mismatches: list[str] = []
+    if downstream_consumers_obj is None:
+        downstream_consumer_mismatches.append(
+            "downstream_consumers must be an object"
+        )
+    else:
+        for consumer_name, expected_fields in expected_downstream_consumers.items():
+            consumer_entry = downstream_consumers_obj.get(consumer_name)
+            if not isinstance(consumer_entry, dict):
+                downstream_consumer_mismatches.append(
+                    f"downstream_consumers.{consumer_name} must be an object"
+                )
+                continue
+            for field_name, expected_value in expected_fields.items():
+                observed_value = consumer_entry.get(field_name)
+                if not isinstance(observed_value, str) or observed_value.strip() != expected_value:
+                    downstream_consumer_mismatches.append(
+                        f"downstream_consumers.{consumer_name}.{field_name} must be {expected_value!r}"
+                    )
+    downstream_consumers_ok = not downstream_consumer_mismatches
+    require_condition(
+        "claim_integrity.phase1_matrix_downstream_consumers_contract",
+        path=perf_phase1_matrix_validation_path,
+        ok=downstream_consumers_ok,
+        ok_msg=(
+            "phase-1 matrix downstream_consumers explicitly map weighted attribution "
+            "into phase-5 opportunity/sweep consumers"
+        ),
+        fail_msg=(
+            "phase-1 matrix downstream_consumers contract mismatch: "
+            f"{downstream_consumer_mismatches}"
+        ),
+        strict=claim_integrity_required,
+        remediation=(
+            "Set consumption_contract.downstream_consumers.{opportunity_matrix,"
+            "parameter_sweeps} with canonical bead_id/selector/source_artifact "
+            "in scripts/perf/orchestrate.sh."
+        ),
+    )
+    if not downstream_consumers_ok and claim_integrity_gate_active:
+        evidence_missing_or_stale_reasons.append(
+            "phase-1 matrix validation downstream_consumers contract mismatch for "
+            "opportunity_matrix/parameter_sweeps"
+        )
+
     matrix_cells = phase1_matrix_validation.get("matrix_cells")
     matrix_cells_list = matrix_cells if isinstance(matrix_cells, list) else []
     stage_summary = phase1_matrix_validation.get("stage_summary")

@@ -2388,6 +2388,18 @@ payload = {
             "bd-3ar8v.6.6",
             "bd-3ar8v.6.11",
         ],
+        "downstream_consumers": {
+            "opportunity_matrix": {
+                "bead_id": "bd-3ar8v.6.1",
+                "selector": "weighted_bottleneck_attribution.global_ranking",
+                "source_artifact": "phase1_matrix_validation",
+            },
+            "parameter_sweeps": {
+                "bead_id": "bd-3ar8v.6.2",
+                "selector": "weighted_bottleneck_attribution.per_scale",
+                "source_artifact": "phase1_matrix_validation",
+            },
+        },
         "artifact_ready_for_phase5": phase5_ready,
         "fail_closed_conditions": [
             "missing_matrix_source_record",

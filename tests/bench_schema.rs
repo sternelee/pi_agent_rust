@@ -296,6 +296,24 @@ for line in rows:
 path.write_text("\n".join(rewritten) + ("\n" if rewritten else ""), encoding="utf-8")
 PY
     fi
+    if [[ "${PI_FAKE_DROP_ALL_STAGE_SAMPLES:-0}" == "1" ]]; then
+      python3 - "$target_dir/perf/scenario_runner.jsonl" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+rows = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+rewritten = []
+for line in rows:
+    record = json.loads(line)
+    if record.get("scenario") == "session_workload_matrix":
+        for field in ("open_ms", "append_ms", "save_ms", "index_ms"):
+            record.pop(field, None)
+    rewritten.append(json.dumps(record, separators=(",", ":")))
+path.write_text("\n".join(rewritten) + ("\n" if rewritten else ""), encoding="utf-8")
+PY
+    fi
     cat >"$target_dir/perf/legacy_extension_workloads.jsonl" <<'JSON'
 {"schema":"pi.ext.legacy_bench.v1","scenario":"ext_load_init/load_init_cold","extension":"hello","summary":{"p50_ms":10.0}}
 {"schema":"pi.ext.legacy_bench.v1","scenario":"ext_tool_call/hello","extension":"hello","per_call_us":20.0}
@@ -2041,6 +2059,75 @@ fn validate_phase1_matrix_validation_record(record: &Value) -> Result<(), String
             "consumption_contract.artifact_ready_for_phase5 ({artifact_ready_for_phase5}) must equal expected deterministic value ({expected_artifact_ready_for_phase5}) from primary_outcomes.status={primary_status}, stage_summary(cells_with_complete_stage_breakdown={complete_cells}, cells_missing_stage_breakdown={missing_cells_count}, required_cell_count={required_cell_count}), regression_guards(memory={memory_guard_status}, correctness={correctness_guard_status}, security={security_guard_status})"
         ));
     }
+    let downstream_beads = consumption_contract
+        .get("downstream_beads")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "consumption_contract.downstream_beads must be an array".to_string())?;
+    let mut downstream_bead_set = HashSet::new();
+    for (index, bead) in downstream_beads.iter().enumerate() {
+        let bead_id = bead
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "consumption_contract.downstream_beads[{index}] must be a non-empty string"
+                )
+            })?;
+        downstream_bead_set.insert(bead_id.to_owned());
+    }
+    for required_bead in ["bd-3ar8v.6.1", "bd-3ar8v.6.2"] {
+        if !downstream_bead_set.contains(required_bead) {
+            return Err(format!(
+                "consumption_contract.downstream_beads missing required phase-5 consumer bead {required_bead}"
+            ));
+        }
+    }
+    let downstream_consumers = consumption_contract
+        .get("downstream_consumers")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            "consumption_contract.downstream_consumers must be an object".to_string()
+        })?;
+    for (consumer_name, expected_bead_id, expected_selector) in [
+        (
+            "opportunity_matrix",
+            "bd-3ar8v.6.1",
+            "weighted_bottleneck_attribution.global_ranking",
+        ),
+        (
+            "parameter_sweeps",
+            "bd-3ar8v.6.2",
+            "weighted_bottleneck_attribution.per_scale",
+        ),
+    ] {
+        let consumer = downstream_consumers
+            .get(consumer_name)
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                format!("consumption_contract.downstream_consumers.{consumer_name} must be an object")
+            })?;
+        let field_path = format!("consumption_contract.downstream_consumers.{consumer_name}");
+        let observed_bead_id = require_non_empty_string_field(consumer, &field_path, "bead_id")?;
+        if observed_bead_id != expected_bead_id {
+            return Err(format!(
+                "{field_path}.bead_id must be {expected_bead_id}, got: {observed_bead_id}"
+            ));
+        }
+        let observed_selector = require_non_empty_string_field(consumer, &field_path, "selector")?;
+        if observed_selector != expected_selector {
+            return Err(format!(
+                "{field_path}.selector must be {expected_selector}, got: {observed_selector}"
+            ));
+        }
+        let observed_source_artifact =
+            require_non_empty_string_field(consumer, &field_path, "source_artifact")?;
+        if observed_source_artifact != "phase1_matrix_validation" {
+            return Err(format!(
+                "{field_path}.source_artifact must be phase1_matrix_validation, got: {observed_source_artifact}"
+            ));
+        }
+    }
 
     let lineage = record
         .get("lineage")
@@ -2384,7 +2471,19 @@ fn phase1_matrix_validation_golden_fixture() -> Value {
             }
         },
         "consumption_contract": {
-            "downstream_beads": ["bd-3ar8v.2.12"],
+            "downstream_beads": ["bd-3ar8v.2.12", "bd-3ar8v.6.1", "bd-3ar8v.6.2"],
+            "downstream_consumers": {
+                "opportunity_matrix": {
+                    "bead_id": "bd-3ar8v.6.1",
+                    "selector": "weighted_bottleneck_attribution.global_ranking",
+                    "source_artifact": "phase1_matrix_validation"
+                },
+                "parameter_sweeps": {
+                    "bead_id": "bd-3ar8v.6.2",
+                    "selector": "weighted_bottleneck_attribution.per_scale",
+                    "source_artifact": "phase1_matrix_validation"
+                }
+            },
             "artifact_ready_for_phase5": true,
             "fail_closed_conditions": ["missing_stage_metrics"]
         },
@@ -3245,6 +3344,19 @@ fn phase1_matrix_validator_rejects_missing_stage_attribution() {
             "required_artifacts": {}
         },
         "consumption_contract": {
+            "downstream_beads": ["bd-3ar8v.6.1", "bd-3ar8v.6.2"],
+            "downstream_consumers": {
+                "opportunity_matrix": {
+                    "bead_id": "bd-3ar8v.6.1",
+                    "selector": "weighted_bottleneck_attribution.global_ranking",
+                    "source_artifact": "phase1_matrix_validation"
+                },
+                "parameter_sweeps": {
+                    "bead_id": "bd-3ar8v.6.2",
+                    "selector": "weighted_bottleneck_attribution.per_scale",
+                    "source_artifact": "phase1_matrix_validation"
+                }
+            },
             "artifact_ready_for_phase5": false
         },
         "lineage": {
@@ -3319,6 +3431,19 @@ fn phase1_matrix_validator_rejects_required_cell_count_mismatch() {
             "required_artifacts": {}
         },
         "consumption_contract": {
+            "downstream_beads": ["bd-3ar8v.6.1", "bd-3ar8v.6.2"],
+            "downstream_consumers": {
+                "opportunity_matrix": {
+                    "bead_id": "bd-3ar8v.6.1",
+                    "selector": "weighted_bottleneck_attribution.global_ranking",
+                    "source_artifact": "phase1_matrix_validation"
+                },
+                "parameter_sweeps": {
+                    "bead_id": "bd-3ar8v.6.2",
+                    "selector": "weighted_bottleneck_attribution.per_scale",
+                    "source_artifact": "phase1_matrix_validation"
+                }
+            },
             "artifact_ready_for_phase5": false
         },
         "lineage": {
@@ -3393,6 +3518,19 @@ fn phase1_matrix_validator_rejects_stage_summary_count_mismatch() {
             "required_artifacts": {}
         },
         "consumption_contract": {
+            "downstream_beads": ["bd-3ar8v.6.1", "bd-3ar8v.6.2"],
+            "downstream_consumers": {
+                "opportunity_matrix": {
+                    "bead_id": "bd-3ar8v.6.1",
+                    "selector": "weighted_bottleneck_attribution.global_ranking",
+                    "source_artifact": "phase1_matrix_validation"
+                },
+                "parameter_sweeps": {
+                    "bead_id": "bd-3ar8v.6.2",
+                    "selector": "weighted_bottleneck_attribution.per_scale",
+                    "source_artifact": "phase1_matrix_validation"
+                }
+            },
             "artifact_ready_for_phase5": false
         },
         "lineage": {
@@ -3611,6 +3749,19 @@ fn phase1_matrix_validator_rejects_non_primary_ordering_policy() {
             "required_artifacts": {}
         },
         "consumption_contract": {
+            "downstream_beads": ["bd-3ar8v.6.1", "bd-3ar8v.6.2"],
+            "downstream_consumers": {
+                "opportunity_matrix": {
+                    "bead_id": "bd-3ar8v.6.1",
+                    "selector": "weighted_bottleneck_attribution.global_ranking",
+                    "source_artifact": "phase1_matrix_validation"
+                },
+                "parameter_sweeps": {
+                    "bead_id": "bd-3ar8v.6.2",
+                    "selector": "weighted_bottleneck_attribution.per_scale",
+                    "source_artifact": "phase1_matrix_validation"
+                }
+            },
             "artifact_ready_for_phase5": false
         },
         "lineage": {
@@ -3930,6 +4081,9 @@ fn orchestrate_script_emits_phase1_matrix_validation_contract() {
         "\"weighted_contribution_pct\"",
         "\"confidence_method\"",
         "\"primary_e2e_before_microbench\"",
+        "\"downstream_consumers\"",
+        "weighted_bottleneck_attribution.global_ranking",
+        "weighted_bottleneck_attribution.per_scale",
         "\"artifact_ready_for_phase5\"",
         "\"failure_or_gap_reasons\"",
         "_regression_unverified",
@@ -4231,6 +4385,52 @@ fn orchestrate_generates_phase1_matrix_validation_artifact() {
         artifact_ready_for_phase5, expected_artifact_ready_for_phase5,
         "consumption_contract.artifact_ready_for_phase5 must match deterministic readiness prerequisites"
     );
+    let downstream_beads = matrix["consumption_contract"]["downstream_beads"]
+        .as_array()
+        .expect("consumption_contract.downstream_beads array");
+    let downstream_bead_set: HashSet<&str> =
+        downstream_beads.iter().filter_map(Value::as_str).collect();
+    for required_bead in ["bd-3ar8v.6.1", "bd-3ar8v.6.2"] {
+        assert!(
+            downstream_bead_set.contains(required_bead),
+            "consumption_contract.downstream_beads must include {required_bead}"
+        );
+    }
+    let downstream_consumers = matrix["consumption_contract"]["downstream_consumers"]
+        .as_object()
+        .expect("consumption_contract.downstream_consumers object");
+    for (consumer_name, expected_bead_id, expected_selector) in [
+        (
+            "opportunity_matrix",
+            "bd-3ar8v.6.1",
+            "weighted_bottleneck_attribution.global_ranking",
+        ),
+        (
+            "parameter_sweeps",
+            "bd-3ar8v.6.2",
+            "weighted_bottleneck_attribution.per_scale",
+        ),
+    ] {
+        let consumer = downstream_consumers
+            .get(consumer_name)
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| panic!("downstream consumer entry missing: {consumer_name}"));
+        assert_eq!(
+            consumer.get("bead_id").and_then(Value::as_str),
+            Some(expected_bead_id),
+            "downstream consumer bead_id mismatch for {consumer_name}"
+        );
+        assert_eq!(
+            consumer.get("selector").and_then(Value::as_str),
+            Some(expected_selector),
+            "downstream consumer selector mismatch for {consumer_name}"
+        );
+        assert_eq!(
+            consumer.get("source_artifact").and_then(Value::as_str),
+            Some("phase1_matrix_validation"),
+            "downstream consumer source_artifact mismatch for {consumer_name}"
+        );
+    }
 
     assert_eq!(
         manifest["phase1_matrix_validation"]["schema"].as_str(),
@@ -4376,6 +4576,22 @@ fn orchestrate_generates_phase1_matrix_validation_artifact() {
         let contribution = row["weighted_contribution_pct"]
             .as_f64()
             .expect("weighted_contribution_pct number");
+        let mean_share = row["mean_share_pct"].as_f64().expect("mean_share_pct number");
+        let ci95_lower = row["ci95_lower_pct"].as_f64().expect("ci95_lower_pct number");
+        let ci95_upper = row["ci95_upper_pct"].as_f64().expect("ci95_upper_pct number");
+        assert!(
+            ci95_lower <= mean_share + 1e-9 && mean_share <= ci95_upper + 1e-9,
+            "mean_share_pct must lie within CI bounds"
+        );
+        assert!(
+            ci95_lower <= ci95_upper + 1e-9,
+            "ci95_lower_pct must be <= ci95_upper_pct"
+        );
+        assert_eq!(
+            row["sample_size"].as_u64(),
+            Some(cells.len() as u64),
+            "weighted global_ranking sample_size should match valid matrix cell count in stub run"
+        );
         assert!(
             contribution <= previous_contribution + 1e-9,
             "weighted global_ranking must be sorted descending by weighted_contribution_pct"
@@ -4441,6 +4657,57 @@ fn orchestrate_phase1_matrix_treats_missing_index_as_incomplete() {
         has_missing_index_reason,
         "matrix_cells must record missing_stage_metrics:index_ms when index attribution is absent"
     );
+    let weighted = matrix["weighted_bottleneck_attribution"]
+        .as_object()
+        .expect("weighted_bottleneck_attribution object");
+    assert_eq!(
+        weighted["status"].as_str(),
+        Some("computed"),
+        "weighted attribution should stay computed when at least one valid matrix cell remains"
+    );
+    assert_eq!(
+        weighted["lineage"]["valid_cell_count"].as_u64(),
+        Some(9),
+        "dropping a required stage in one matrix cell should reduce weighted valid cell count by one"
+    );
+    let per_scale = weighted["per_scale"]
+        .as_array()
+        .expect("weighted_bottleneck_attribution.per_scale array");
+    let affected_partition = per_scale
+        .iter()
+        .find(|row| row["session_messages"].as_u64() == Some(100_000))
+        .and_then(|row| row["partitions"].as_array())
+        .and_then(|partitions| {
+            partitions
+                .iter()
+                .find(|partition| partition["workload_partition"].as_str() == Some("matched-state"))
+        })
+        .expect("must locate matched-state/session_100000 partition");
+    assert_eq!(
+        affected_partition["present"].as_bool(),
+        Some(false),
+        "dropped-stage partition should be excluded from weighted attribution per_scale output"
+    );
+    assert!(
+        affected_partition["total_stage_ms"].is_null(),
+        "present=false per-scale partition should not include total_stage_ms"
+    );
+    for stage in ["open_ms", "append_ms", "save_ms", "index_ms"] {
+        assert!(
+            affected_partition["stage_pct"][stage].is_null(),
+            "present=false per-scale partition should emit null stage_pct for {stage}"
+        );
+    }
+    let global_ranking = weighted["global_ranking"]
+        .as_array()
+        .expect("weighted_bottleneck_attribution.global_ranking array");
+    for row in global_ranking {
+        assert_eq!(
+            row["sample_size"].as_u64(),
+            Some(9),
+            "weighted global ranking sample_size should track valid cell count"
+        );
+    }
     let missing_cells = matrix["stage_summary"]["missing_cells"]
         .as_array()
         .expect("stage_summary.missing_cells array");
@@ -4480,6 +4747,77 @@ fn orchestrate_phase1_matrix_treats_missing_index_as_incomplete() {
     assert_eq!(
         summary_missing_index_keys, observed_missing_index_keys,
         "stage_summary.missing_cells must include the same partition-size keys that matrix_cells mark with missing_stage_metrics:index_ms"
+    );
+
+    let _ = fs::remove_dir_all(temp_root);
+}
+
+#[cfg(unix)]
+#[test]
+fn orchestrate_phase1_weighted_attribution_missing_when_no_stage_cells_are_valid() {
+    let (output, temp_root) =
+        run_orchestrate_with_fake_toolchain_with_env(&[("PI_FAKE_DROP_ALL_STAGE_SAMPLES", "1")]);
+    assert!(
+        output.status.success(),
+        "orchestrate.sh should succeed with stub toolchain. stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let matrix_path = temp_root
+        .join("run")
+        .join("results")
+        .join("phase1_matrix_validation.json");
+    let matrix: Value =
+        serde_json::from_str(&fs::read_to_string(&matrix_path).expect("read matrix artifact"))
+            .expect("parse matrix artifact");
+
+    assert_eq!(
+        matrix["stage_summary"]["cells_with_complete_stage_breakdown"].as_u64(),
+        Some(0),
+        "dropping all stage metrics should leave zero complete stage-attribution cells"
+    );
+    assert_eq!(
+        matrix["stage_summary"]["cells_missing_stage_breakdown"].as_u64(),
+        Some(10),
+        "dropping all stage metrics should mark every required cell as missing"
+    );
+    let weighted = matrix["weighted_bottleneck_attribution"]
+        .as_object()
+        .expect("weighted_bottleneck_attribution object");
+    assert_eq!(
+        weighted["status"].as_str(),
+        Some("missing"),
+        "weighted attribution should fail closed when no pass cells have stage totals"
+    );
+    assert_eq!(
+        weighted["reason"].as_str(),
+        Some("no_pass_cells_with_stage_totals"),
+        "weighted attribution missing status should include explicit reason"
+    );
+    assert_eq!(
+        weighted["lineage"]["source_cell_count"].as_u64(),
+        Some(10),
+        "weighted lineage source_cell_count should still track observed matrix cells"
+    );
+    assert_eq!(
+        weighted["lineage"]["valid_cell_count"].as_u64(),
+        Some(0),
+        "weighted lineage valid_cell_count should be zero when all stage metrics are absent"
+    );
+    assert_eq!(
+        weighted["per_scale"].as_array().map(Vec::len),
+        Some(0),
+        "missing weighted attribution should emit empty per_scale"
+    );
+    assert_eq!(
+        weighted["global_ranking"].as_array().map(Vec::len),
+        Some(0),
+        "missing weighted attribution should emit empty global_ranking"
+    );
+    assert_eq!(
+        matrix["consumption_contract"]["artifact_ready_for_phase5"].as_bool(),
+        Some(false),
+        "phase5 readiness must fail closed when weighted attribution has no valid source cells"
     );
 
     let _ = fs::remove_dir_all(temp_root);
