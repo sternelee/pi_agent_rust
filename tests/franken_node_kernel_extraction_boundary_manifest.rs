@@ -4,6 +4,21 @@ use std::path::PathBuf;
 
 const MANIFEST_PATH: &str = "docs/franken-node-kernel-extraction-boundary-manifest.json";
 const EXPECTED_SCHEMA: &str = "pi.frankennode.kernel_extraction_boundary_manifest.v1";
+const REQUIRED_CORE_MODULES: &[&str] = &[
+    "src/agent_cx.rs",
+    "src/scheduler.rs",
+    "src/hostcall_queue.rs",
+    "src/hostcall_amac.rs",
+    "src/extensions.rs",
+    "src/extensions_js.rs",
+    "src/session.rs",
+];
+const REQUIRED_BANNED_CROSS_BOUNDARY_PAIRS: &[(&str, &str)] = &[
+    ("hostcall_execution", "session_orchestration"),
+    ("extension_runtime_js", "provider_runtime"),
+];
+
+type ValidationResult<T> = std::result::Result<T, String>;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -54,7 +69,7 @@ fn non_empty_string_set(value: &Value, pointer: &str) -> HashSet<String> {
     out
 }
 
-fn module_ownership_index(manifest: &Value) -> HashMap<String, String> {
+fn collect_module_ownership_index(manifest: &Value) -> ValidationResult<HashMap<String, String>> {
     let mut ownership = HashMap::new();
     for domain in as_array(manifest, "/boundary_domains") {
         let domain_id = domain
@@ -62,21 +77,133 @@ fn module_ownership_index(manifest: &Value) -> HashMap<String, String> {
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|entry| !entry.is_empty())
-            .expect("every boundary domain must include non-empty domain_id");
+            .ok_or_else(|| {
+                "every boundary domain must include non-empty domain_id".to_string()
+            })?;
         for module in as_array(domain, "/current_modules") {
             let module_path = module
                 .as_str()
                 .map(str::trim)
                 .filter(|entry| !entry.is_empty())
-                .expect("every current_modules entry must be non-empty string");
+                .ok_or_else(|| {
+                    format!("every current_modules entry must be non-empty string in {domain_id}")
+                })?;
             let prior = ownership.insert(module_path.to_string(), domain_id.to_string());
-            assert!(
-                prior.is_none(),
-                "module {module_path} appears in multiple ownership domains: {prior:?} and {domain_id}"
-            );
+            if let Some(previous_owner) = prior {
+                return Err(format!(
+                    "module {module_path} appears in multiple ownership domains: {previous_owner} and {domain_id}"
+                ));
+            }
         }
     }
-    ownership
+    Ok(ownership)
+}
+
+fn deferred_module_set(manifest: &Value) -> HashSet<String> {
+    as_array(manifest, "/deferred_modules")
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .get("module_path")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .collect()
+}
+
+fn validate_required_core_module_coverage(manifest: &Value) -> ValidationResult<()> {
+    let ownership = collect_module_ownership_index(manifest)?;
+    let deferred = deferred_module_set(manifest);
+
+    for required_module in REQUIRED_CORE_MODULES {
+        let required_module = *required_module;
+        if !ownership.contains_key(required_module) && !deferred.contains(required_module) {
+            return Err(format!(
+                "required runtime module missing from boundary ownership/deferred maps: {required_module}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_banned_cross_boundary_pairs(manifest: &Value) -> ValidationResult<HashSet<(String, String)>> {
+    let mut pairs = HashSet::new();
+    for pair in as_array(manifest, "/ownership_rules/banned_cross_boundary_pairs") {
+        let from_domain = pair
+            .get("from_domain")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .ok_or_else(|| "banned_cross_boundary_pairs entries must include non-empty from_domain".to_string())?;
+        let to_domain = pair
+            .get("to_domain")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .ok_or_else(|| "banned_cross_boundary_pairs entries must include non-empty to_domain".to_string())?;
+
+        let inserted = pairs.insert((from_domain.to_string(), to_domain.to_string()));
+        if !inserted {
+            return Err(format!(
+                "duplicate banned cross-boundary pair detected: {from_domain}->{to_domain}"
+            ));
+        }
+    }
+
+    Ok(pairs)
+}
+
+fn validate_required_banned_cross_boundary_pairs(manifest: &Value) -> ValidationResult<()> {
+    let pairs = collect_banned_cross_boundary_pairs(manifest)?;
+    for (from_domain, to_domain) in REQUIRED_BANNED_CROSS_BOUNDARY_PAIRS {
+        let required_pair = ((*from_domain).to_string(), (*to_domain).to_string());
+        if !pairs.contains(&required_pair) {
+            return Err(format!(
+                "missing required banned cross-boundary pair: {from_domain}->{to_domain}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn domain_entry_mut<'a>(manifest: &'a mut Value, domain_id: &str) -> &'a mut Value {
+    let domains = manifest
+        .get_mut("boundary_domains")
+        .and_then(Value::as_array_mut)
+        .expect("manifest boundary_domains must be mutable array");
+    domains
+        .iter_mut()
+        .find(|domain| {
+            domain
+                .get("domain_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                == Some(domain_id)
+        })
+        .unwrap_or_else(|| panic!("missing boundary domain for mutation: {domain_id}"))
+}
+
+fn remove_string_entry(entries: &mut Vec<Value>, needle: &str) -> bool {
+    let before = entries.len();
+    entries.retain(|entry| entry.as_str().map(str::trim) != Some(needle));
+    before != entries.len()
+}
+
+fn remove_banned_pair(manifest: &mut Value, from_domain: &str, to_domain: &str) -> bool {
+    let pairs = manifest
+        .pointer_mut("/ownership_rules/banned_cross_boundary_pairs")
+        .and_then(Value::as_array_mut)
+        .expect("ownership_rules.banned_cross_boundary_pairs must be mutable array");
+    let before = pairs.len();
+    pairs.retain(|pair| {
+        let from = pair.get("from_domain").and_then(Value::as_str).map(str::trim);
+        let to = pair.get("to_domain").and_then(Value::as_str).map(str::trim);
+        !(from == Some(from_domain) && to == Some(to_domain))
+    });
+    before != pairs.len()
 }
 
 #[test]
@@ -123,22 +250,7 @@ fn kernel_boundary_manifest_has_expected_schema_and_linkage() {
 #[test]
 fn kernel_boundary_manifest_covers_required_core_modules() {
     let manifest = load_manifest();
-    let ownership = module_ownership_index(&manifest);
-
-    for required_module in [
-        "src/agent_cx.rs",
-        "src/scheduler.rs",
-        "src/hostcall_queue.rs",
-        "src/hostcall_amac.rs",
-        "src/extensions.rs",
-        "src/extensions_js.rs",
-        "src/session.rs",
-    ] {
-        assert!(
-            ownership.contains_key(required_module),
-            "required runtime module missing from boundary ownership map: {required_module}"
-        );
-    }
+    validate_required_core_module_coverage(&manifest).unwrap_or_else(|err| panic!("{err}"));
 }
 
 #[test]
@@ -231,6 +343,8 @@ fn kernel_boundary_manifest_enforces_fail_closed_ownership_rules() {
             );
         }
     }
+    validate_required_banned_cross_boundary_pairs(&manifest)
+        .unwrap_or_else(|err| panic!("{err}"));
 }
 
 #[test]
@@ -327,4 +441,63 @@ fn kernel_boundary_manifest_declares_drift_checks_reintegration_and_logging_fiel
             "structured_logging_contract.required_fields missing {required}"
         );
     }
+}
+
+#[test]
+fn kernel_boundary_manifest_duplicate_ownership_mutation_fails_closed() {
+    let mut manifest = load_manifest();
+    let target_domain = domain_entry_mut(&mut manifest, "hostcall_queueing");
+    let target_modules = target_domain
+        .get_mut("current_modules")
+        .and_then(Value::as_array_mut)
+        .expect("hostcall_queueing.current_modules must be mutable array");
+    target_modules.push(Value::String("src/scheduler.rs".to_string()));
+
+    let err = collect_module_ownership_index(&manifest)
+        .expect_err("duplicate module ownership mutation must fail validation");
+    assert!(
+        err.contains("src/scheduler.rs"),
+        "error should name duplicated module, got: {err}"
+    );
+}
+
+#[test]
+fn kernel_boundary_manifest_missing_required_mapping_mutation_fails_closed() {
+    let mut manifest = load_manifest();
+    let domain = domain_entry_mut(&mut manifest, "context_and_diagnostics");
+    let modules = domain
+        .get_mut("current_modules")
+        .and_then(Value::as_array_mut)
+        .expect("context_and_diagnostics.current_modules must be mutable array");
+    assert!(
+        remove_string_entry(modules, "src/agent_cx.rs"),
+        "mutation setup should remove src/agent_cx.rs from current_modules"
+    );
+
+    let err = validate_required_core_module_coverage(&manifest)
+        .expect_err("missing required module mapping must fail validation");
+    assert!(
+        err.contains("src/agent_cx.rs"),
+        "error should reference missing required module, got: {err}"
+    );
+}
+
+#[test]
+fn kernel_boundary_manifest_banned_pair_drift_mutation_fails_closed() {
+    let mut manifest = load_manifest();
+    assert!(
+        remove_banned_pair(
+            &mut manifest,
+            "extension_runtime_js",
+            "provider_runtime"
+        ),
+        "mutation setup should remove required banned cross-boundary pair"
+    );
+
+    let err = validate_required_banned_cross_boundary_pairs(&manifest)
+        .expect_err("missing required banned pair must fail validation");
+    assert!(
+        err.contains("extension_runtime_js->provider_runtime"),
+        "error should reference missing banned pair, got: {err}"
+    );
 }
