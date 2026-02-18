@@ -1009,6 +1009,12 @@ pub fn normalize_openai_codex_responses_base(base_url: &str) -> String {
     if base.ends_with("/backend-api/codex/responses") {
         return base.to_string();
     }
+    // Some registries (including legacy Pi) store the ChatGPT base as
+    // `https://chatgpt.com/backend-api`. In that case we only want to append
+    // `/codex/responses`, not `/backend-api/codex/responses` again.
+    if base.ends_with("/backend-api") {
+        return format!("{base}/codex/responses");
+    }
     if base.ends_with("/responses") {
         return base.to_string();
     }

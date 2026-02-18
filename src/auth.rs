@@ -3,6 +3,7 @@
 //! Auth file: ~/.pi/agent/auth.json
 
 use crate::agent_cx::AgentCx;
+use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::provider_metadata::{canonical_provider_id, provider_auth_env_keys, provider_metadata};
 use asupersync::channel::oneshot;
@@ -162,6 +163,13 @@ pub struct AuthStorage {
 }
 
 impl AuthStorage {
+    fn allow_external_provider_lookup(&self) -> bool {
+        // External credential auto-detection is intended for Pi's global auth
+        // file (typically `~/.pi/agent/auth.json`). Scoping it this way keeps
+        // tests and custom auth sandboxes deterministic.
+        self.path == Config::auth_path()
+    }
+
     fn entry_case_insensitive(&self, key: &str) -> Option<&AuthCredential> {
         self.entries.iter().find_map(|(existing, credential)| {
             existing.eq_ignore_ascii_case(key).then_some(credential)
@@ -327,7 +335,9 @@ impl AuthStorage {
         let cred = self.credential_for_provider(provider);
 
         let Some(cred) = cred else {
-            return if resolve_external_provider_api_key(provider).is_some() {
+            return if self.allow_external_provider_lookup()
+                && resolve_external_provider_api_key(provider).is_some()
+            {
                 CredentialStatus::ApiKey
             } else {
                 CredentialStatus::Missing
@@ -394,6 +404,9 @@ impl AuthStorage {
     /// Return a human-readable source label when credentials can be auto-detected
     /// from other locally-installed coding CLIs.
     pub fn external_setup_source(&self, provider: &str) -> Option<&'static str> {
+        if !self.allow_external_provider_lookup() {
+            return None;
+        }
         external_setup_source(provider)
     }
 
@@ -451,15 +464,20 @@ impl AuthStorage {
             return Some(key);
         }
 
-        if let Some(key) = resolve_external_provider_api_key(provider) {
-            return Some(key);
+        if self.allow_external_provider_lookup() {
+            if let Some(key) = resolve_external_provider_api_key(provider) {
+                return Some(key);
+            }
         }
 
         canonical_provider_id(provider)
             .filter(|canonical| *canonical != provider)
             .and_then(|canonical| {
-                self.api_key(canonical)
-                    .or_else(|| resolve_external_provider_api_key(canonical))
+                self.api_key(canonical).or_else(|| {
+                    self.allow_external_provider_lookup()
+                        .then(|| resolve_external_provider_api_key(canonical))
+                        .flatten()
+                })
             })
     }
 

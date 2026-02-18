@@ -469,6 +469,33 @@ pub fn select_model_and_thinking(
         }
     }
 
+    // If we restored or defaulted into a model that requires credentials but has
+    // none configured, prefer falling back to any ready model instead of forcing
+    // an immediate setup prompt. (Explicit CLI selection should still error.)
+    let explicit_model_selection = cli.provider.is_some() || cli.model.is_some();
+    let missing_creds = if explicit_model_selection {
+        None
+    } else {
+        selected_model.as_ref().and_then(|entry| {
+            if model_entry_is_ready(entry) {
+                None
+            } else {
+                Some((entry.model.provider.clone(), entry.model.id.clone()))
+            }
+        })
+    };
+    if let Some((missing_provider, missing_model_id)) = missing_creds {
+        let available = registry.get_available();
+        if !available.is_empty() {
+            let fallback = default_model_from_available(&available);
+            fallback_message = Some(format!(
+                "Missing credentials for {missing_provider}/{missing_model_id}. Using {}/{} based on detected keys.",
+                fallback.model.provider, fallback.model.id
+            ));
+            selected_model = Some(fallback);
+        }
+    }
+
     let Some(model_entry) = selected_model else {
         let models_path = default_models_path(global_dir);
         return Err(StartupError::NoModelsAvailable { models_path }.into());
@@ -494,7 +521,7 @@ pub fn select_model_and_thinking(
     }
 
     let thinking_level =
-        model_entry.clamp_thinking_level(thinking_level.unwrap_or(model::ThinkingLevel::Medium));
+        model_entry.clamp_thinking_level(thinking_level.unwrap_or(model::ThinkingLevel::XHigh));
 
     Ok(ModelSelection {
         model_entry,
@@ -612,11 +639,17 @@ fn restore_model_from_session(
 
 fn default_model_from_available(available: &[ModelEntry]) -> ModelEntry {
     let defaults = [
+        // Prefer Codex (ChatGPT OAuth) when available.
+        ("openai-codex", "gpt-5.3-codex"),
+        ("openai-codex", "gpt-5.2-codex"),
+        ("openai-codex", "gpt-5.1-codex-max"),
+        // Fall back to OpenAI API when configured.
+        ("openai", "gpt-5.3-codex"),
+        ("openai", "gpt-5.2-codex"),
+        ("openai", "gpt-5.1-codex"),
         ("amazon-bedrock", "us.anthropic.claude-opus-4-20250514-v1:0"),
         ("anthropic", "claude-opus-4-5"),
-        ("openai", "gpt-5.1-codex"),
         ("azure-openai-responses", "gpt-5.2"),
-        ("openai-codex", "gpt-5.2-codex"),
         ("google", "gemini-2.5-pro"),
         ("google-gemini-cli", "gemini-2.5-pro"),
         ("google-antigravity", "gemini-3-pro-high"),

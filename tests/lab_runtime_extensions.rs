@@ -64,7 +64,11 @@ fn lab_runtime_single_task_completes() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().schedule(task_id, 0);
+    runtime
+        .scheduler
+        .lock()
+        .expect("scheduler lock")
+        .schedule(task_id, 0);
     let steps = runtime.run_until_quiescent();
 
     assert!(steps > 0, "should have run at least one step");
@@ -102,7 +106,11 @@ fn run_ordering_test(seed: u64) -> Vec<usize> {
                 o.lock().unwrap().push(i);
             })
             .expect("create task");
-        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime
+            .scheduler
+            .lock()
+            .expect("scheduler lock")
+            .schedule(task_id, 0);
     }
 
     runtime.run_until_quiescent();
@@ -144,7 +152,11 @@ fn extension_manager_creation_under_lab() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().schedule(task_id, 0);
+    runtime
+        .scheduler
+        .lock()
+        .expect("scheduler lock")
+        .schedule(task_id, 0);
     runtime.run_until_quiescent();
 
     assert!(
@@ -221,7 +233,11 @@ fn register_extensions_under_lab(seed: u64) -> Vec<(String, usize)> {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().schedule(task_id, 0);
+    runtime
+        .scheduler
+        .lock()
+        .expect("scheduler lock")
+        .schedule(task_id, 0);
     runtime.run_until_quiescent();
 
     result.lock().unwrap().clone()
@@ -266,7 +282,11 @@ fn budget_set_and_get_deterministic() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().schedule(task_id, 0);
+    runtime
+        .scheduler
+        .lock()
+        .expect("scheduler lock")
+        .schedule(task_id, 0);
     runtime.run_until_quiescent();
 
     let values = result.lock().unwrap().clone();
@@ -297,7 +317,11 @@ fn budget_constants_under_lab() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().schedule(task_id, 0);
+    runtime
+        .scheduler
+        .lock()
+        .expect("scheduler lock")
+        .schedule(task_id, 0);
     runtime.run_until_quiescent();
 
     assert_eq!(
@@ -347,7 +371,11 @@ fn concurrent_registration_test(seed: u64) -> usize {
                 mgr.register(make_registration(&format!("ext-{task_idx}"), tools));
             })
             .expect("create task");
-        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime
+            .scheduler
+            .lock()
+            .expect("scheduler lock")
+            .schedule(task_id, 0);
     }
 
     runtime.run_until_quiescent();
@@ -444,7 +472,11 @@ fn no_invariant_violations_after_extension_work() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().schedule(task_id, 0);
+    runtime
+        .scheduler
+        .lock()
+        .expect("scheduler lock")
+        .schedule(task_id, 0);
     runtime.run_until_quiescent();
 
     let violations = runtime.check_invariants();
@@ -467,7 +499,11 @@ fn quiescence_reached_after_all_registrations() {
                 let _ = format!("task-{i}"); // Prevent unused warnings
             })
             .expect("create task");
-        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime
+            .scheduler
+            .lock()
+            .expect("scheduler lock")
+            .schedule(task_id, 0);
     }
 
     runtime.run_until_quiescent();
@@ -528,7 +564,11 @@ fn extension_ops_pass_across_seeds() {
             })
             .expect("create task");
 
-        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime
+            .scheduler
+            .lock()
+            .expect("scheduler lock")
+            .schedule(task_id, 0);
         runtime.run_until_quiescent();
 
         assert_eq!(
