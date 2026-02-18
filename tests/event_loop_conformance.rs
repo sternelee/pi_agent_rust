@@ -825,13 +825,14 @@ fn lab_mixed_interleaving_deterministic() {
             })
             .expect("create");
 
-        let ls = runtime.scheduler.lock();
-        // NOTE: we drop the lock after scheduling all tasks to avoid holding it
-        // across run_until_quiescent.
-        drop(ls);
-        runtime.scheduler.lock().schedule(tid1, 0);
-        runtime.scheduler.lock().schedule(tid2, 0);
-        runtime.scheduler.lock().schedule(tid3, 0);
+        // NOTE: keep the scheduler lock scoped to scheduling, so it is never held
+        // across `run_until_quiescent`.
+        {
+            let mut scheduler = runtime.scheduler.lock();
+            scheduler.schedule(tid1, 0);
+            scheduler.schedule(tid2, 0);
+            scheduler.schedule(tid3, 0);
+        }
 
         runtime.run_until_quiescent();
 

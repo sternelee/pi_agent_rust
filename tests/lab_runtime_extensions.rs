@@ -399,8 +399,11 @@ fn concurrent_provider_and_tool_registration() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().schedule(t1, 0);
-    runtime.scheduler.lock().schedule(t2, 0);
+    {
+        let mut scheduler = runtime.scheduler.lock();
+        scheduler.schedule(t1, 0);
+        scheduler.schedule(t2, 0);
+    }
     runtime.run_until_quiescent();
 
     assert_eq!(manager.extension_providers().len(), 2);
