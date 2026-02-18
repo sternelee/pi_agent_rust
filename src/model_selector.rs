@@ -25,6 +25,8 @@ pub struct ModelSelectorOverlay {
     selected: usize,
     query: String,
     max_visible: usize,
+    source_total: usize,
+    configured_only: bool,
 }
 
 impl ModelSelectorOverlay {
@@ -43,12 +45,15 @@ impl ModelSelectorOverlay {
     #[must_use]
     pub fn new_from_keys(mut keys: Vec<ModelKey>) -> Self {
         keys.sort_by(|a, b| a.provider.cmp(&b.provider).then_with(|| a.id.cmp(&b.id)));
+        let source_total = keys.len();
         let mut selector = Self {
             all: keys,
             filtered: Vec::new(),
             selected: 0,
             query: String::new(),
             max_visible: 10,
+            source_total,
+            configured_only: false,
         };
         selector.refresh_filtered();
         selector
@@ -147,6 +152,21 @@ impl ModelSelectorOverlay {
     #[must_use]
     pub const fn selected_index(&self) -> usize {
         self.selected
+    }
+
+    #[must_use]
+    pub const fn source_total(&self) -> usize {
+        self.source_total
+    }
+
+    #[must_use]
+    pub const fn configured_only(&self) -> bool {
+        self.configured_only
+    }
+
+    pub fn set_configured_only_scope(&mut self, source_total: usize) {
+        self.configured_only = true;
+        self.source_total = source_total.max(self.all.len());
     }
 
     #[must_use]

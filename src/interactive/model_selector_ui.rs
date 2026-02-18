@@ -2,6 +2,34 @@ use super::commands::model_entry_matches;
 use super::*;
 
 impl PiApp {
+    fn available_models_with_credentials(&self) -> Vec<ModelEntry> {
+        let auth = crate::auth::AuthStorage::load(crate::config::Config::auth_path()).ok();
+        let mut filtered = self
+            .available_models
+            .iter()
+            .filter(|entry| {
+                entry
+                    .api_key
+                    .as_ref()
+                    .is_some_and(|key| !key.trim().is_empty())
+                    || auth
+                        .as_ref()
+                        .and_then(|storage| storage.resolve_api_key(&entry.model.provider, None))
+                        .is_some()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        filtered.sort_by(|a, b| {
+            a.model
+                .provider
+                .cmp(&b.model.provider)
+                .then_with(|| a.model.id.cmp(&b.model.id))
+        });
+        filtered.dedup_by(|left, right| model_entry_matches(left, right));
+        filtered
+    }
+
     /// Open the model selector overlay.
     pub fn open_model_selector(&mut self) {
         if self.agent_state != AgentState::Idle {
@@ -17,6 +45,31 @@ impl PiApp {
         self.model_selector = Some(crate::model_selector::ModelSelectorOverlay::new(
             &self.available_models,
         ));
+    }
+
+    pub(super) fn open_model_selector_configured_only(&mut self) {
+        if self.agent_state != AgentState::Idle {
+            self.status_message = Some("Cannot switch models while processing".to_string());
+            return;
+        }
+
+        if self.available_models.is_empty() {
+            self.status_message = Some("No models available".to_string());
+            return;
+        }
+
+        let filtered = self.available_models_with_credentials();
+        if filtered.is_empty() {
+            self.status_message = Some(
+                "No models with configured API keys. Use /login <provider> to configure credentials."
+                    .to_string(),
+            );
+            return;
+        }
+
+        let mut overlay = crate::model_selector::ModelSelectorOverlay::new(&filtered);
+        overlay.set_configured_only_scope(self.available_models.len());
+        self.model_selector = Some(overlay);
     }
 
     /// Handle keyboard input while the model selector is open.
@@ -119,11 +172,24 @@ impl PiApp {
         let mut output = String::new();
 
         let _ = writeln!(output, "\n  {}", self.styles.title.render("Select a model"));
+        if selector.configured_only() {
+            let _ = writeln!(
+                output,
+                "  {}",
+                self.styles.muted.render(
+                    "Only showing models with configured API keys (see README for details)"
+                )
+            );
+        }
 
         // Search field
         let query = selector.query();
         let search_line = if query.is_empty() {
-            "  > (type to filter)".to_string()
+            if selector.configured_only() {
+                "  >".to_string()
+            } else {
+                "  > (type to filter)".to_string()
+            }
         } else {
             format!("  > {query}")
         };
@@ -181,6 +247,36 @@ impl PiApp {
                         end,
                         selector.filtered_len()
                     ))
+                );
+            }
+
+            if selector.configured_only() {
+                let _ = writeln!(
+                    output,
+                    "  {}",
+                    self.styles.muted.render(&format!(
+                        "({}/{})",
+                        selector.filtered_len(),
+                        selector.source_total()
+                    ))
+                );
+            }
+
+            if let Some(selected) = selector.selected_item()
+                && let Some(entry) = self.available_models.iter().find(|entry| {
+                    entry
+                        .model
+                        .provider
+                        .eq_ignore_ascii_case(&selected.provider)
+                        && entry.model.id.eq_ignore_ascii_case(&selected.id)
+                })
+            {
+                let _ = writeln!(
+                    output,
+                    "\n  {}",
+                    self.styles
+                        .muted
+                        .render(&format!("Model Name: {}", entry.model.name))
                 );
             }
         }

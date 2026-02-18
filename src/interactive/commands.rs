@@ -82,7 +82,7 @@ impl SlashCommand {
   /login [provider]  - Login/setup credentials; without provider shows status table
   /logout [provider] - Remove stored credentials
   /clear, /cls       - Clear conversation history
-  /model, /m [id|provider/id] - Show or change the current model
+  /model, /m [id|provider/id] - Open model selector or switch directly
   /thinking, /t [level] - Set thinking level (off/minimal/low/medium/high/xhigh)
   /scoped-models [patterns|clear] - Show or set scoped models for cycling
   /history, /hist    - Show input history
