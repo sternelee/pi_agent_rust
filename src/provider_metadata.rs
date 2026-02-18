@@ -958,7 +958,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     ProviderMetadata {
         canonical_id: "kimi-for-coding",
         display_name: Some("Kimi for Coding"),
-        aliases: &[],
+        aliases: &["kimi-coding"],
         auth_env_keys: &["KIMI_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
         routing_defaults: Some(ProviderRoutingDefaults {
@@ -1387,7 +1387,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     ProviderMetadata {
         canonical_id: "vercel",
         display_name: Some("Vercel AI"),
-        aliases: &[],
+        aliases: &["vercel-ai-gateway"],
         auth_env_keys: &["AI_GATEWAY_API_KEY"],
         onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
         routing_defaults: Some(ProviderRoutingDefaults {
@@ -1522,7 +1522,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
     ProviderMetadata {
         canonical_id: "azure-openai",
         display_name: Some("Azure OpenAI"),
-        aliases: &["azure", "azure-cognitive-services"],
+        aliases: &["azure", "azure-cognitive-services", "azure-openai-responses"],
         auth_env_keys: &["AZURE_OPENAI_API_KEY"],
         onboarding: ProviderOnboardingMode::NativeAdapterRequired,
         routing_defaults: None,
@@ -1591,6 +1591,9 @@ mod tests {
         let azure_cognitive_alias =
             provider_metadata("azure-cognitive-services").expect("azure-cognitive alias metadata");
         assert_eq!(azure_cognitive_alias.canonical_id, "azure-openai");
+        let azure_responses_alias =
+            provider_metadata("azure-openai-responses").expect("azure responses alias metadata");
+        assert_eq!(azure_responses_alias.canonical_id, "azure-openai");
         let vertex_anthropic_alias = provider_metadata("google-vertex-anthropic")
             .expect("google-vertex-anthropic alias metadata");
         assert_eq!(vertex_anthropic_alias.canonical_id, "google-vertex");
@@ -1600,6 +1603,12 @@ mod tests {
         let openrouter_alias =
             provider_metadata("open-router").expect("open-router alias metadata");
         assert_eq!(openrouter_alias.canonical_id, "openrouter");
+        let vercel_gateway_alias =
+            provider_metadata("vercel-ai-gateway").expect("vercel alias metadata");
+        assert_eq!(vercel_gateway_alias.canonical_id, "vercel");
+        let kimi_coding_alias =
+            provider_metadata("kimi-coding").expect("kimi-coding alias metadata");
+        assert_eq!(kimi_coding_alias.canonical_id, "kimi-for-coding");
     }
 
     #[test]
@@ -1679,6 +1688,10 @@ mod tests {
             &["AZURE_OPENAI_API_KEY"]
         );
         assert_eq!(
+            provider_auth_env_keys("azure-openai-responses"),
+            &["AZURE_OPENAI_API_KEY"]
+        );
+        assert_eq!(
             provider_auth_env_keys("copilot"),
             &["GITHUB_COPILOT_API_KEY", "GITHUB_TOKEN"]
         );
@@ -1694,6 +1707,11 @@ mod tests {
             provider_auth_env_keys("open-router"),
             &["OPENROUTER_API_KEY"]
         );
+        assert_eq!(
+            provider_auth_env_keys("vercel-ai-gateway"),
+            &["AI_GATEWAY_API_KEY"]
+        );
+        assert_eq!(provider_auth_env_keys("kimi-coding"), &["KIMI_API_KEY"]);
         // New UX aliases resolve to same auth keys as canonical
         assert_eq!(
             provider_auth_env_keys("together"),
@@ -2308,8 +2326,11 @@ mod tests {
 
         let kimi_alias = canonical_provider_id("kimi").expect("kimi alias");
         let kimi_coding = canonical_provider_id("kimi-for-coding").expect("kimi-for-coding");
+        let kimi_coding_legacy =
+            canonical_provider_id("kimi-coding").expect("kimi-coding legacy alias");
         assert_eq!(kimi_alias, "moonshotai");
         assert_eq!(kimi_coding, "kimi-for-coding");
+        assert_eq!(kimi_coding_legacy, "kimi-for-coding");
 
         let minimax = provider_routing_defaults("minimax").expect("minimax defaults");
         let minimax_cp =
@@ -2615,6 +2636,11 @@ mod tests {
         assert_eq!(vercel.api, "openai-completions");
         assert_eq!(vercel.base_url, "https://ai-gateway.vercel.sh/v1");
         assert!(vercel.auth_header);
+        let vercel_alias =
+            provider_routing_defaults("vercel-ai-gateway").expect("vercel alias defaults");
+        assert_eq!(vercel_alias.api, "openai-completions");
+        assert_eq!(vercel_alias.base_url, "https://ai-gateway.vercel.sh/v1");
+        assert!(vercel_alias.auth_header);
 
         let zenmux = provider_routing_defaults("zenmux").expect("zenmux defaults");
         assert_eq!(zenmux.api, "anthropic-messages");
