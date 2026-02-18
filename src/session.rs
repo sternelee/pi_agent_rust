@@ -2136,10 +2136,10 @@ impl Session {
             .iter()
             .filter_map(|e| {
                 let id = e.base_id()?;
-                if !has_children.contains(id.as_str()) {
-                    Some(id.clone())
-                } else {
+                if has_children.contains(id.as_str()) {
                     None
+                } else {
+                    Some(id.clone())
                 }
             })
             .collect()
@@ -2218,18 +2218,18 @@ impl Session {
         let mut visited = HashSet::with_capacity(self.entries.len().min(128));
         let mut current = Some(leaf_id.clone());
 
-        while let Some(id) = current {
+        while let Some(id) = current.as_ref() {
             if !visited.insert(id.clone()) {
                 break; // cycle detected
             }
-            let Some(&idx) = self.entry_index.get(&id) else {
+            let Some(&idx) = self.entry_index.get(id.as_str()) else {
                 break;
             };
             let Some(entry) = self.entries.get(idx) else {
                 break;
             };
             path_indices.push(idx);
-            current = entry.base().parent_id.clone();
+            current.clone_from(&entry.base().parent_id);
         }
 
         path_indices.reverse();
@@ -2422,12 +2422,12 @@ impl Session {
         let mut preview = None;
         let mut count = 0usize;
 
-        while let Some(id) = current {
+        while let Some(id) = current.as_ref() {
             if !visited.insert(id.clone()) {
                 tracing::warn!("Cycle detected in session tree while collecting path stats: {id}");
                 break;
             }
-            let Some(entry) = self.get_entry(&id) else {
+            let Some(entry) = self.get_entry(id.as_str()) else {
                 break;
             };
             if matches!(entry, SessionEntry::Message(_)) {
@@ -2447,7 +2447,7 @@ impl Session {
                     }
                 }
             }
-            current = entry.base().parent_id.clone();
+            current.clone_from(&entry.base().parent_id);
         }
 
         (preview.unwrap_or_else(|| String::from("(empty)")), count)
