@@ -99,7 +99,7 @@ proptest! {
         let cap = req.required_capability();
         prop_assert!(!cap.is_empty());
         prop_assert!(matches!(
-            cap.as_str(),
+            cap,
             "read" | "write" | "exec" | "tool" | "http" | "session" | "ui" | "events" | "log"
         ));
 
@@ -119,7 +119,7 @@ proptest! {
         let cap = req.required_capability();
         match kind {
             HostcallKind::Tool { .. } => prop_assert!(matches!(
-                cap.as_str(),
+                cap,
                 "read" | "write" | "exec" | "tool"
             )),
             HostcallKind::Exec { .. } => prop_assert_eq!(cap, "exec"),
