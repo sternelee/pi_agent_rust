@@ -1345,8 +1345,9 @@ verify_download_checksum() {
     checksum_source_kind="artifact-derived"
   else
     if ! fetch_url_to_file "$SHA_URL" "$checksum_file" "release checksum manifest"; then
-      err "Failed to download checksum manifest: $SHA_URL"
-      return 4
+      warn "No SHA256SUMS found in release; skipping checksum verification"
+      CHECKSUM_STATUS="skipped (no SHA256SUMS in release)"
+      return 0
     fi
   fi
 
@@ -1537,21 +1538,26 @@ download_release_binary() {
   if [ -n "$ARTIFACT_URL" ]; then
     candidates+=("$ASSET_NAME|$ARTIFACT_URL")
   else
-    candidates+=("pi-${VERSION}-${TARGET}${EXE_EXT}|https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/pi-${VERSION}-${TARGET}${EXE_EXT}")
-    candidates+=("pi-${TARGET}${EXE_EXT}|https://github.com/${OWNER}/${REPO}/releases/latest/download/pi-${TARGET}${EXE_EXT}")
-    candidates+=("pi-${OS}-${ARCH}${EXE_EXT}|https://github.com/${OWNER}/${REPO}/releases/latest/download/pi-${OS}-${ARCH}${EXE_EXT}")
+    # Prioritize versioned URLs over /latest/ since we already resolved the version.
+    # Try archive formats first (dsr default output), then bare binaries.
+    local base_v="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}"
+    local base_l="https://github.com/${OWNER}/${REPO}/releases/latest/download"
     if [ -n "$ASSET_PLATFORM" ]; then
       if [ -n "$EXE_EXT" ]; then
-        candidates+=("pi-${ASSET_PLATFORM}.zip|https://github.com/${OWNER}/${REPO}/releases/latest/download/pi-${ASSET_PLATFORM}.zip")
-        candidates+=("pi-${ASSET_PLATFORM}.zip|https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/pi-${ASSET_PLATFORM}.zip")
+        candidates+=("pi-${ASSET_PLATFORM}.zip|${base_v}/pi-${ASSET_PLATFORM}.zip")
+        candidates+=("pi-${ASSET_PLATFORM}.zip|${base_l}/pi-${ASSET_PLATFORM}.zip")
       else
-        candidates+=("pi-${ASSET_PLATFORM}.tar.xz|https://github.com/${OWNER}/${REPO}/releases/latest/download/pi-${ASSET_PLATFORM}.tar.xz")
-        candidates+=("pi-${ASSET_PLATFORM}.tar.xz|https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/pi-${ASSET_PLATFORM}.tar.xz")
-        candidates+=("pi-${ASSET_PLATFORM}.tar.gz|https://github.com/${OWNER}/${REPO}/releases/latest/download/pi-${ASSET_PLATFORM}.tar.gz")
-        candidates+=("pi-${ASSET_PLATFORM}.tar.gz|https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/pi-${ASSET_PLATFORM}.tar.gz")
-        candidates+=("pi-${OS}-${ARCH}.tar.gz|https://github.com/${OWNER}/${REPO}/releases/latest/download/pi-${OS}-${ARCH}.tar.gz")
+        candidates+=("pi-${ASSET_PLATFORM}.tar.xz|${base_v}/pi-${ASSET_PLATFORM}.tar.xz")
+        candidates+=("pi-${ASSET_PLATFORM}.tar.xz|${base_l}/pi-${ASSET_PLATFORM}.tar.xz")
+        candidates+=("pi-${ASSET_PLATFORM}.tar.gz|${base_v}/pi-${ASSET_PLATFORM}.tar.gz")
+        candidates+=("pi-${ASSET_PLATFORM}.tar.gz|${base_l}/pi-${ASSET_PLATFORM}.tar.gz")
       fi
     fi
+    candidates+=("pi-${VERSION}-${TARGET}${EXE_EXT}|${base_v}/pi-${VERSION}-${TARGET}${EXE_EXT}")
+    candidates+=("pi-${TARGET}${EXE_EXT}|${base_v}/pi-${TARGET}${EXE_EXT}")
+    candidates+=("pi-${TARGET}${EXE_EXT}|${base_l}/pi-${TARGET}${EXE_EXT}")
+    candidates+=("pi-${OS}-${ARCH}${EXE_EXT}|${base_v}/pi-${OS}-${ARCH}${EXE_EXT}")
+    candidates+=("pi-${OS}-${ARCH}${EXE_EXT}|${base_l}/pi-${OS}-${ARCH}${EXE_EXT}")
   fi
 
   local entry=""
