@@ -14060,12 +14060,6 @@ fn validate_extension_manifest(manifest: &ExtensionManifest) -> Result<()> {
     if manifest.name.trim().is_empty() {
         return Err(Error::validation("Extension manifest name is empty"));
     }
-    if matches!(manifest.runtime, ExtensionRuntime::Js) {
-        return Err(Error::validation(format!(
-            "Extension runtime `js` is no longer supported for `{}`. Use `runtime: \"native-rust\"` with a `.native.json` entrypoint.",
-            manifest.extension_id
-        )));
-    }
     if manifest.version.trim().is_empty() {
         return Err(Error::validation("Extension manifest version is empty"));
     }
@@ -14197,10 +14191,10 @@ impl ExtensionManifestSource {
         }
 
         match self.manifest.runtime {
-            ExtensionRuntime::Js => Err(Error::validation(format!(
-                "Extension manifest runtime `js` is no longer supported: {}. Use `runtime: \"native-rust\"` with a `.native.json` entrypoint.",
-                self.manifest_path.display()
-            ))),
+            ExtensionRuntime::Js => Ok(ExtensionLoadSpec::Js(JsExtensionLoadSpec::from_manifest(
+                &self.manifest,
+                &self.root,
+            )?)),
             ExtensionRuntime::NativeRust => Ok(ExtensionLoadSpec::NativeRust(
                 NativeRustExtensionLoadSpec::from_manifest(&self.manifest, &self.root)?,
             )),
@@ -14240,10 +14234,9 @@ pub fn resolve_extension_load_spec(entry: &Path) -> Result<ExtensionLoadSpec> {
                     NativeRustExtensionLoadSpec::from_entry_path(index)?,
                 ));
             }
-            return Err(Error::validation(format!(
-                "JS/TS extension entrypoints are no longer supported: {}. Provide extension.json with `runtime: \"native-rust\"` and a `.native.json` entrypoint.",
-                index.display()
-            )));
+            return Ok(ExtensionLoadSpec::Js(JsExtensionLoadSpec::from_entry_path(
+                index,
+            )?));
         }
         return Err(Error::validation(format!(
             "Extension directory has no manifest or entrypoint: {}",
@@ -14309,11 +14302,10 @@ pub fn resolve_extension_load_spec(entry: &Path) -> Result<ExtensionLoadSpec> {
                         ));
                     }
                 }
-                "js" | "ts" | "mjs" | "cjs" => {
-                    return Err(Error::validation(format!(
-                        "JS/TS extension entrypoints are no longer supported: {}. Use a `.native.json` descriptor and `runtime: \"native-rust\"`.",
-                        entry.display()
-                    )));
+                "js" | "ts" | "mjs" | "cjs" | "tsx" | "mts" | "cts" => {
+                    return Ok(ExtensionLoadSpec::Js(JsExtensionLoadSpec::from_entry_path(
+                        entry,
+                    )?));
                 }
                 _ => {}
             }
@@ -15813,6 +15805,18 @@ impl JsExtensionRuntimeHandle {
         interceptor: Arc<dyn HostcallInterceptor>,
     ) -> Result<Self> {
         Self::start_inner(config, tools, manager, Some(interceptor), None).await
+    }
+
+    /// Like [`start_with_interceptor`](Self::start_with_interceptor) but with
+    /// an explicit [`ExtensionPolicy`].
+    pub async fn start_with_interceptor_and_policy(
+        config: PiJsRuntimeConfig,
+        tools: Arc<ToolRegistry>,
+        manager: ExtensionManager,
+        interceptor: Arc<dyn HostcallInterceptor>,
+        policy: ExtensionPolicy,
+    ) -> Result<Self> {
+        Self::start_inner(config, tools, manager, Some(interceptor), Some(policy)).await
     }
 
     #[allow(clippy::too_many_lines)]
@@ -47072,6 +47076,73 @@ mod tests {
                 assert_eq!(native.entry_path, safe_canonicalize(&entry));
             }
             other => panic!("expected native-rust spec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_extension_load_spec_detects_js_entrypoint_file() {
+        let dir = tempdir().expect("tempdir");
+        let entry = dir.path().join("index.ts");
+        std::fs::write(
+            &entry,
+            r"
+            export default function init(_pi) {}
+            ",
+        )
+        .expect("write js entry");
+
+        let spec = resolve_extension_load_spec(&entry).expect("resolve load spec");
+        match spec {
+            ExtensionLoadSpec::Js(js) => {
+                let expected_id = entry
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|s| s.to_str())
+                    .expect("tempdir name")
+                    .to_string();
+                assert_eq!(js.extension_id, expected_id);
+                assert_eq!(js.entry_path, safe_canonicalize(&entry));
+            }
+            other => panic!("expected js spec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_extension_load_spec_detects_js_runtime_manifest() {
+        let dir = tempdir().expect("tempdir");
+        let entry = dir.path().join("index.ts");
+        std::fs::write(
+            &entry,
+            r"
+            export default function init(_pi) {}
+            ",
+        )
+        .expect("write js entry");
+        std::fs::write(
+            dir.path().join("extension.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema": "pi.ext.manifest.v1",
+                "extension_id": "test-js-ext",
+                "name": "Test JS Extension",
+                "version": "0.1.0",
+                "api_version": "1.0",
+                "runtime": "js",
+                "entrypoint": "index.ts",
+                "capabilities": []
+            }))
+            .expect("serialize manifest"),
+        )
+        .expect("write manifest");
+
+        let spec = resolve_extension_load_spec(dir.path()).expect("resolve load spec");
+        match spec {
+            ExtensionLoadSpec::Js(js) => {
+                assert_eq!(js.extension_id, "test-js-ext");
+                assert_eq!(js.name, "Test JS Extension");
+                assert_eq!(js.version, "0.1.0");
+                assert_eq!(js.entry_path, safe_canonicalize(&entry));
+            }
+            other => panic!("expected js spec, got {other:?}"),
         }
     }
 }

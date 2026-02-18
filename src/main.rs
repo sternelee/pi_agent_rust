@@ -34,8 +34,10 @@ use pi::config::SettingsScope;
 use pi::extension_index::ExtensionIndexStore;
 use pi::extensions::{
     ALL_CAPABILITIES, Capability, ExtensionLoadSpec, ExtensionRuntimeHandle,
-    NativeRustExtensionRuntimeHandle, PolicyDecision, resolve_extension_load_spec,
+    JsExtensionRuntimeHandle, NativeRustExtensionRuntimeHandle, PolicyDecision,
+    resolve_extension_load_spec,
 };
+use pi::extensions_js::PiJsRuntimeConfig;
 use pi::model::{AssistantMessage, ContentBlock, StopReason};
 use pi::models::{ModelEntry, ModelRegistry, default_models_path};
 use pi::package_manager::{
@@ -720,18 +722,12 @@ async fn run(
         .into());
     }
 
-    // Pre-warm native extension runtime in a background task so startup
-    // work can overlap with auth refresh, model selection, and session creation.
+    let mut has_js_extensions = false;
+    let mut has_native_extensions = false;
     for entry in resources.extensions() {
         match resolve_extension_load_spec(entry) {
-            Ok(ExtensionLoadSpec::NativeRust(_)) => {}
-            Ok(ExtensionLoadSpec::Js(_)) => {
-                return Err(pi::error::Error::validation(format!(
-                    "QuickJS extensions are retired: {}. Use `runtime: \"native-rust\"` with a `.native.json` entrypoint.",
-                    entry.display()
-                ))
-                .into());
-            }
+            Ok(ExtensionLoadSpec::NativeRust(_)) => has_native_extensions = true,
+            Ok(ExtensionLoadSpec::Js(_)) => has_js_extensions = true,
             #[cfg(feature = "wasm-host")]
             Ok(ExtensionLoadSpec::Wasm(_)) => {}
             Err(err) => {
@@ -740,16 +736,83 @@ async fn run(
         }
     }
 
-    let extension_prewarm_handle = if resources.extensions().is_empty() {
-        None
+    if has_js_extensions && has_native_extensions {
+        return Err(pi::error::Error::validation(
+            "Mixed extension runtimes are not supported in one session yet. Use either JS/TS extensions (QuickJS) or native-rust descriptors (*.native.json), but not both at once."
+                .to_string(),
+        )
+        .into());
+    }
+
+    let prewarm_policy = config
+        .resolve_extension_policy_with_metadata(cli.extension_policy.as_deref())
+        .policy;
+    let prewarm_repair = config.resolve_repair_policy_with_metadata(cli.repair_policy.as_deref());
+    let prewarm_repair_mode = if prewarm_repair.source == "default" {
+        pi::extensions::RepairPolicyMode::AutoStrict
+    } else {
+        prewarm_repair.effective_mode
+    };
+    let prewarm_memory_limit_bytes =
+        (prewarm_policy.max_memory_mb as usize).saturating_mul(1024 * 1024);
+
+    // Pre-warm extension runtime in a background task so startup work can overlap
+    // with auth refresh, model selection, and session creation.
+    let extension_prewarm_handle = if resources.extensions().is_empty() || has_js_extensions {
+        if resources.extensions().is_empty() {
+            None
+        } else {
+            let pre_enabled_tools = cli.enabled_tools();
+            let pre_mgr = pi::extensions::ExtensionManager::new();
+            pre_mgr.set_cwd(cwd.display().to_string());
+
+            let pre_tools = Arc::new(ToolRegistry::new(&pre_enabled_tools, &cwd, Some(&config)));
+
+            let resolved_risk = config.resolve_extension_risk_with_metadata();
+            pre_mgr.set_runtime_risk_config(resolved_risk.settings);
+
+            let pre_mgr_for_runtime = pre_mgr.clone();
+            let pre_tools_for_runtime = Arc::clone(&pre_tools);
+            let prewarm_policy_for_runtime = prewarm_policy.clone();
+            let prewarm_cwd = cwd.display().to_string();
+            Some((
+                pre_mgr,
+                pre_tools,
+                runtime_handle.spawn(async move {
+                    let mut js_config = PiJsRuntimeConfig {
+                        cwd: prewarm_cwd,
+                        repair_mode: AgentSession::runtime_repair_mode_from_policy_mode(
+                            prewarm_repair_mode,
+                        ),
+                        ..PiJsRuntimeConfig::default()
+                    };
+                    js_config.limits.memory_limit_bytes =
+                        Some(prewarm_memory_limit_bytes).filter(|bytes| *bytes > 0);
+                    let runtime = JsExtensionRuntimeHandle::start_with_policy(
+                        js_config,
+                        pre_tools_for_runtime,
+                        pre_mgr_for_runtime,
+                        prewarm_policy_for_runtime,
+                    )
+                    .await
+                    .map(ExtensionRuntimeHandle::Js)
+                    .map_err(anyhow::Error::new)?;
+                    tracing::info!(
+                        event = "pi.extension_runtime.engine_decision",
+                        stage = "main_prewarm",
+                        requested = "quickjs",
+                        selected = "quickjs",
+                        fallback = false,
+                        "Extension runtime engine selected for prewarm (legacy JS/TS)"
+                    );
+                    Ok::<ExtensionRuntimeHandle, anyhow::Error>(runtime)
+                }),
+            ))
+        }
     } else {
         let pre_enabled_tools = cli.enabled_tools();
         let pre_mgr = pi::extensions::ExtensionManager::new();
         pre_mgr.set_cwd(cwd.display().to_string());
-
-        let _pre_ext_policy = config
-            .resolve_extension_policy_with_metadata(cli.extension_policy.as_deref())
-            .policy;
         let pre_tools = Arc::new(ToolRegistry::new(&pre_enabled_tools, &cwd, Some(&config)));
 
         let resolved_risk = config.resolve_extension_risk_with_metadata();
@@ -769,7 +832,7 @@ async fn run(
                     requested = "native-rust",
                     selected = "native-rust",
                     fallback = false,
-                    "Extension runtime engine selected for prewarm (native-only)"
+                    "Extension runtime engine selected for prewarm (native-rust)"
                 );
                 Ok::<ExtensionRuntimeHandle, anyhow::Error>(runtime)
             }),

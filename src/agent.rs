@@ -21,12 +21,13 @@ use crate::extension_tools::collect_extension_tool_wrappers;
 use crate::extensions::{
     EXTENSION_EVENT_TIMEOUT_MS, ExtensionDeliverAs, ExtensionEventName, ExtensionHostActions,
     ExtensionLoadSpec, ExtensionManager, ExtensionPolicy, ExtensionRegion, ExtensionRuntimeHandle,
-    ExtensionSendMessage, ExtensionSendUserMessage, NativeRustExtensionLoadSpec,
-    NativeRustExtensionRuntimeHandle, RepairPolicyMode, resolve_extension_load_spec,
+    ExtensionSendMessage, ExtensionSendUserMessage, JsExtensionLoadSpec, JsExtensionRuntimeHandle,
+    NativeRustExtensionLoadSpec, NativeRustExtensionRuntimeHandle, RepairPolicyMode,
+    resolve_extension_load_spec,
 };
 #[cfg(feature = "wasm-host")]
 use crate::extensions::{WasmExtensionHost, WasmExtensionLoadSpec};
-use crate::extensions_js::RepairMode;
+use crate::extensions_js::{PiJsRuntimeConfig, RepairMode};
 use crate::model::{
     AssistantMessage, AssistantMessageEvent, ContentBlock, CustomMessage, ImageContent, Message,
     StopReason, StreamEvent, TextContent, ThinkingContent, ToolCall, ToolResultMessage, Usage,
@@ -2306,6 +2307,44 @@ mod extensions_integration_tests {
     }
 
     #[test]
+    fn agent_session_enable_extensions_rejects_mixed_js_and_native_entries() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async {
+            let temp_dir = tempfile::tempdir().expect("tempdir");
+            let js_entry = temp_dir.path().join("ext.mjs");
+            let native_entry = temp_dir.path().join("ext.native.json");
+            std::fs::write(
+                &js_entry,
+                r"
+                export default function init(_pi) {}
+                ",
+            )
+            .expect("write js extension entry");
+            std::fs::write(&native_entry, "{}").expect("write native extension descriptor");
+
+            let provider = Arc::new(NoopProvider);
+            let tools = ToolRegistry::new(&[], Path::new("."), None);
+            let agent = Agent::new(provider, tools, AgentConfig::default());
+            let session = Arc::new(Mutex::new(Session::in_memory()));
+            let mut agent_session =
+                AgentSession::new(agent, session, false, ResolvedCompactionSettings::default());
+
+            let err = agent_session
+                .enable_extensions(&[], temp_dir.path(), None, &[js_entry, native_entry])
+                .await
+                .expect_err("mixed extension runtimes should be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("Mixed extension runtimes are not supported"),
+                "unexpected mixed-runtime error message: {msg}"
+            );
+        });
+    }
+
+    #[test]
     fn extension_send_message_persists_custom_message_entry_when_idle() {
         let runtime = RuntimeBuilder::current_thread()
             .build()
@@ -4156,6 +4195,36 @@ impl AgentSession {
     }
 
     #[allow(clippy::too_many_arguments)]
+    async fn start_js_extension_runtime(
+        stage: &'static str,
+        cwd: &std::path::Path,
+        tools: Arc<ToolRegistry>,
+        manager: ExtensionManager,
+        policy: ExtensionPolicy,
+        repair_mode: RepairMode,
+        memory_limit_bytes: usize,
+    ) -> Result<ExtensionRuntimeHandle> {
+        let mut config = PiJsRuntimeConfig {
+            cwd: cwd.display().to_string(),
+            repair_mode,
+            ..PiJsRuntimeConfig::default()
+        };
+        config.limits.memory_limit_bytes = Some(memory_limit_bytes).filter(|bytes| *bytes > 0);
+
+        let runtime =
+            JsExtensionRuntimeHandle::start_with_policy(config, tools, manager, policy).await?;
+        tracing::info!(
+            event = "pi.extension_runtime.engine_decision",
+            stage,
+            requested = "quickjs",
+            selected = "quickjs",
+            fallback = false,
+            "Extension runtime engine selected (legacy JS/TS)"
+        );
+        Ok(ExtensionRuntimeHandle::Js(runtime))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn start_native_extension_runtime(
         stage: &'static str,
         _cwd: &std::path::Path,
@@ -4172,7 +4241,7 @@ impl AgentSession {
             requested = "native-rust",
             selected = "native-rust",
             fallback = false,
-            "Extension runtime engine selected (native-only)"
+            "Extension runtime engine selected (native-rust)"
         );
         Ok(ExtensionRuntimeHandle::NativeRust(runtime))
     }
@@ -4500,22 +4569,25 @@ impl AgentSession {
         repair_policy: Option<RepairPolicyMode>,
         pre_warmed: Option<PreWarmedExtensionRuntime>,
     ) -> Result<()> {
+        let mut js_specs: Vec<JsExtensionLoadSpec> = Vec::new();
         let mut native_specs: Vec<NativeRustExtensionLoadSpec> = Vec::new();
         #[cfg(feature = "wasm-host")]
         let mut wasm_specs: Vec<WasmExtensionLoadSpec> = Vec::new();
 
         for entry in extension_entries {
             match resolve_extension_load_spec(entry)? {
-                ExtensionLoadSpec::Js(_) => {
-                    return Err(Error::validation(format!(
-                        "QuickJS extensions are retired: {}. Use a native descriptor entrypoint (*.native.json).",
-                        entry.display()
-                    )));
-                }
+                ExtensionLoadSpec::Js(spec) => js_specs.push(spec),
                 ExtensionLoadSpec::NativeRust(spec) => native_specs.push(spec),
                 #[cfg(feature = "wasm-host")]
                 ExtensionLoadSpec::Wasm(spec) => wasm_specs.push(spec),
             }
+        }
+
+        if !js_specs.is_empty() && !native_specs.is_empty() {
+            return Err(Error::validation(
+                "Mixed extension runtimes are not supported in one session yet. Use either JS/TS extensions (QuickJS) or native-rust descriptors (*.native.json), but not both at once."
+                    .to_string(),
+            ));
         }
 
         let resolved_policy = policy.clone().unwrap_or_default();
@@ -4526,6 +4598,7 @@ impl AgentSession {
             Self::runtime_repair_mode_from_policy_mode(resolved_repair_policy);
         let memory_limit_bytes =
             (resolved_policy.max_memory_mb as usize).saturating_mul(1024 * 1024);
+        let wants_js_runtime = !js_specs.is_empty();
 
         // Either use the pre-warmed extension runtime (booted concurrently with startup)
         // or create a fresh runtime inline.
@@ -4535,33 +4608,64 @@ impl AgentSession {
             let tools = pre.tools;
             let runtime = match pre.runtime {
                 ExtensionRuntimeHandle::NativeRust(runtime) => {
-                    tracing::info!(
-                        event = "pi.extension_runtime.engine_decision",
-                        stage = "agent_enable_extensions_prewarmed",
-                        requested = "native-rust",
-                        selected = "native-rust",
-                        fallback = false,
-                        "Using pre-warmed extension runtime"
-                    );
-                    ExtensionRuntimeHandle::NativeRust(runtime)
+                    if wants_js_runtime {
+                        tracing::warn!(
+                            event = "pi.extension_runtime.prewarm.mismatch",
+                            expected = "quickjs",
+                            got = "native-rust",
+                            "Pre-warmed runtime mismatched requested JS mode; creating quickjs runtime"
+                        );
+                        Self::start_js_extension_runtime(
+                            "agent_enable_extensions_prewarm_mismatch",
+                            cwd,
+                            Arc::clone(&tools),
+                            manager.clone(),
+                            resolved_policy.clone(),
+                            runtime_repair_mode,
+                            memory_limit_bytes,
+                        )
+                        .await?
+                    } else {
+                        tracing::info!(
+                            event = "pi.extension_runtime.engine_decision",
+                            stage = "agent_enable_extensions_prewarmed",
+                            requested = "native-rust",
+                            selected = "native-rust",
+                            fallback = false,
+                            "Using pre-warmed extension runtime"
+                        );
+                        ExtensionRuntimeHandle::NativeRust(runtime)
+                    }
                 }
-                ExtensionRuntimeHandle::Js(_) => {
-                    tracing::warn!(
-                        event = "pi.extension_runtime.prewarm.mismatch",
-                        expected = "native-rust",
-                        got = "quickjs",
-                        "Pre-warmed runtime mismatched native-only mode; creating native-rust runtime"
-                    );
-                    Self::start_native_extension_runtime(
-                        "agent_enable_extensions_prewarm_mismatch",
-                        cwd,
-                        Arc::clone(&tools),
-                        manager.clone(),
-                        resolved_policy.clone(),
-                        runtime_repair_mode,
-                        memory_limit_bytes,
-                    )
-                    .await?
+                ExtensionRuntimeHandle::Js(runtime) => {
+                    if wants_js_runtime {
+                        tracing::info!(
+                            event = "pi.extension_runtime.engine_decision",
+                            stage = "agent_enable_extensions_prewarmed",
+                            requested = "quickjs",
+                            selected = "quickjs",
+                            fallback = false,
+                            "Using pre-warmed extension runtime"
+                        );
+                        ExtensionRuntimeHandle::Js(runtime)
+                    } else {
+                        tracing::warn!(
+                            event = "pi.extension_runtime.prewarm.mismatch",
+                            expected = "native-rust",
+                            got = "quickjs",
+                            "Pre-warmed runtime mismatched requested native mode; creating native-rust runtime"
+                        );
+                        Self::start_native_extension_runtime(
+                            "agent_enable_extensions_prewarm_mismatch",
+                            cwd,
+                            Arc::clone(&tools),
+                            manager.clone(),
+                            resolved_policy.clone(),
+                            runtime_repair_mode,
+                            memory_limit_bytes,
+                        )
+                        .await?
+                    }
                 }
             };
             manager.set_runtime(runtime);
@@ -4586,16 +4690,29 @@ impl AgentSession {
                 manager.set_runtime_risk_config(resolved_risk.settings);
             }
 
-            let runtime = Self::start_native_extension_runtime(
-                "agent_enable_extensions_boot",
-                cwd,
-                Arc::clone(&tools),
-                manager.clone(),
-                resolved_policy,
-                runtime_repair_mode,
-                memory_limit_bytes,
-            )
-            .await?;
+            let runtime = if wants_js_runtime {
+                Self::start_js_extension_runtime(
+                    "agent_enable_extensions_boot",
+                    cwd,
+                    Arc::clone(&tools),
+                    manager.clone(),
+                    resolved_policy,
+                    runtime_repair_mode,
+                    memory_limit_bytes,
+                )
+                .await?
+            } else {
+                Self::start_native_extension_runtime(
+                    "agent_enable_extensions_boot",
+                    cwd,
+                    Arc::clone(&tools),
+                    manager.clone(),
+                    resolved_policy,
+                    runtime_repair_mode,
+                    memory_limit_bytes,
+                )
+                .await?
+            };
             manager.set_runtime(runtime);
             (manager, tools)
         };
@@ -4637,6 +4754,10 @@ impl AgentSession {
                 Some(Arc::new(steering_fetcher)),
                 Some(Arc::new(follow_up_fetcher)),
             );
+        }
+
+        if !js_specs.is_empty() {
+            manager.load_js_extensions(js_specs).await?;
         }
 
         if !native_specs.is_empty() {
