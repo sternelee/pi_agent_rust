@@ -34,6 +34,7 @@ VERIFY=0
 NO_VERIFY=0
 FORCE_INSTALL=0
 OFFLINE="${PI_INSTALLER_OFFLINE:-0}"
+OFFLINE_TARBALL="${PI_INSTALLER_OFFLINE_TARBALL:-}"
 AGENT_SKILLS_ENABLED="${AGENT_SKILLS_ENABLED:-1}"
 
 CHECKSUM="${CHECKSUM:-}"
@@ -43,6 +44,10 @@ SIGSTORE_BUNDLE_URL="${SIGSTORE_BUNDLE_URL:-}"
 COSIGN_IDENTITY_RE="${COSIGN_IDENTITY_RE:-^https://github.com/${OWNER}/${REPO}/.github/workflows/release.yml@refs/tags/.*$}"
 COSIGN_OIDC_ISSUER="${COSIGN_OIDC_ISSUER:-https://token.actions.githubusercontent.com}"
 COMPLETIONS_MODE="${COMPLETIONS_MODE:-auto}"
+
+PROXY_ARGS=()
+PROXY_SOURCE=""
+WSL_DETECTED=0
 
 # ask|yes|no
 ADOPT_MODE="ask"
@@ -92,6 +97,13 @@ INSTALL_SOURCE="release"
 CHECKSUM_STATUS="pending"
 SIGSTORE_STATUS="pending"
 COMPLETIONS_STATUS="pending"
+CLAUDE_HOOK_STATUS="pending"
+GEMINI_HOOK_STATUS="pending"
+CODEX_HOOK_STATUS="pending"
+CLAUDE_HOOK_SETTINGS=""
+GEMINI_HOOK_SETTINGS=""
+CLAUDE_HOOK_BACKUP=""
+GEMINI_HOOK_BACKUP=""
 
 HAS_GUM=0
 if command -v gum >/dev/null 2>&1 && [ -t 1 ]; then
@@ -148,6 +160,240 @@ run_with_spinner() {
     info "$title" >&2
     "$@"
   fi
+}
+
+version_timeout_cmd() {
+  if command -v timeout >/dev/null 2>&1; then
+    printf '%s\n' "timeout"
+    return 0
+  fi
+  if command -v gtimeout >/dev/null 2>&1; then
+    printf '%s\n' "gtimeout"
+    return 0
+  fi
+  printf '%s\n' ""
+}
+
+capture_version_line() {
+  local bin_path="$1"
+  local timeout_cmd=""
+  timeout_cmd="$(version_timeout_cmd)"
+
+  local out=""
+  if [ -n "$timeout_cmd" ]; then
+    out=$("$timeout_cmd" 2 "$bin_path" --version 2>/dev/null | head -1 || true)
+  else
+    out=$("$bin_path" --version 2>/dev/null | head -1 || true)
+  fi
+  printf '%s\n' "$out"
+}
+
+setup_proxy() {
+  PROXY_ARGS=()
+  PROXY_SOURCE=""
+
+  local https_proxy_value="${HTTPS_PROXY:-${https_proxy:-}}"
+  local http_proxy_value="${HTTP_PROXY:-${http_proxy:-}}"
+
+  if [ -n "$https_proxy_value" ]; then
+    PROXY_ARGS=(--proxy "$https_proxy_value")
+    PROXY_SOURCE="$https_proxy_value"
+    info "Using HTTPS proxy from environment"
+    return 0
+  fi
+
+  if [ -n "$http_proxy_value" ]; then
+    PROXY_ARGS=(--proxy "$http_proxy_value")
+    PROXY_SOURCE="$http_proxy_value"
+    info "Using HTTP proxy from environment"
+    return 0
+  fi
+}
+
+is_local_resource_ref() {
+  local ref="${1:-}"
+  if [ -z "$ref" ]; then
+    return 1
+  fi
+  if [[ "$ref" != *"://"* ]]; then
+    # Plain paths (relative or absolute) are treated as local filesystem refs.
+    return 0
+  fi
+  case "$ref" in
+    file://*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+resource_to_local_path() {
+  local ref="$1"
+  case "$ref" in
+    file://*)
+      local path="${ref#file://}"
+      path="${path%%\?*}"
+      path="${path%%#*}"
+      printf '%s\n' "$path"
+      ;;
+    *)
+      printf '%s\n' "$ref"
+      ;;
+  esac
+}
+
+redact_proxy_value() {
+  local raw="${1:-}"
+  if [ -z "$raw" ]; then
+    printf '%s\n' "$raw"
+    return 0
+  fi
+
+  if [[ "$raw" == *"://"* ]]; then
+    local scheme="${raw%%://*}"
+    local rest="${raw#*://}"
+    local host="${rest##*@}"
+    if [ "$host" != "$rest" ]; then
+      printf '%s\n' "${scheme}://***@${host}"
+      return 0
+    fi
+  fi
+
+  if [[ "$raw" == *"@"* ]] && [[ "$raw" == *":"* ]]; then
+    local host="${raw##*@}"
+    printf '%s\n' "***@${host}"
+    return 0
+  fi
+
+  printf '%s\n' "$raw"
+}
+
+json_escape_string() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '%s' "$s"
+}
+
+ensure_network_allowed() {
+  local url="$1"
+  local context="$2"
+  if [ "$OFFLINE" -eq 1 ] && ! is_local_resource_ref "$url"; then
+    err "Offline mode forbids network access for ${context}: $url"
+    return 1
+  fi
+  return 0
+}
+
+fetch_url_to_file() {
+  local url="$1"
+  local output_path="$2"
+  local context="${3:-resource}"
+
+  if ! ensure_network_allowed "$url" "$context"; then
+    return 1
+  fi
+
+  if is_local_resource_ref "$url"; then
+    local local_path
+    local_path="$(resource_to_local_path "$url")"
+    if [ ! -e "$local_path" ]; then
+      err "Local ${context} not found: $local_path"
+      return 1
+    fi
+    cp "$local_path" "$output_path"
+    return 0
+  fi
+
+  curl -fsSL "${PROXY_ARGS[@]}" "$url" -o "$output_path"
+}
+
+fetch_url_to_stdout() {
+  local url="$1"
+  local context="${2:-resource}"
+
+  if ! ensure_network_allowed "$url" "$context"; then
+    return 1
+  fi
+
+  if is_local_resource_ref "$url"; then
+    local local_path
+    local_path="$(resource_to_local_path "$url")"
+    if [ ! -f "$local_path" ]; then
+      err "Local ${context} not found: $local_path"
+      return 1
+    fi
+    cat "$local_path"
+    return 0
+  fi
+
+  curl -fsSL "${PROXY_ARGS[@]}" "$url"
+}
+
+fetch_effective_url() {
+  local url="$1"
+  local context="${2:-resource}"
+
+  if ! ensure_network_allowed "$url" "$context"; then
+    return 1
+  fi
+
+  if is_local_resource_ref "$url"; then
+    printf '%s\n' "$url"
+    return 0
+  fi
+
+  curl -fsSL -o /dev/null -w '%{url_effective}' "${PROXY_ARGS[@]}" "$url"
+}
+
+probe_url_head() {
+  local url="$1"
+  local context="${2:-resource}"
+
+  if ! ensure_network_allowed "$url" "$context"; then
+    return 1
+  fi
+
+  if is_local_resource_ref "$url"; then
+    local local_path
+    local_path="$(resource_to_local_path "$url")"
+    [ -e "$local_path" ]
+    return $?
+  fi
+
+  curl -fsSLI "${PROXY_ARGS[@]}" --connect-timeout 5 --max-time 10 "$url" >/dev/null 2>&1
+}
+
+remove_path_recursively() {
+  local target="$1"
+
+  if [ -z "$target" ]; then
+    return 1
+  fi
+  if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+    return 0
+  fi
+
+  if [ -L "$target" ] || [ -f "$target" ] || [ -p "$target" ] || [ -S "$target" ] || [ -b "$target" ] || [ -c "$target" ]; then
+    rm -f "$target"
+    return $?
+  fi
+
+  if [ -d "$target" ]; then
+    local child=""
+    while IFS= read -r -d '' child; do
+      remove_path_recursively "$child" || return 1
+    done < <(find "$target" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+    rmdir "$target" 2>/dev/null || return 1
+    return 0
+  fi
+
+  return 1
 }
 
 pi_ascii_logo() {
@@ -271,7 +517,7 @@ Options:
   --from-source          Build from source instead of downloading release binary
   --verify               Run `pi --version` after install
   --no-verify            Skip checksum + signature verification
-  --offline              Skip network preflight check
+  --offline [TARBALL]    Offline mode; optional local artifact path
   --completions SHELL    Install shell completions for auto|off|bash|zsh|fish
   --no-completions       Skip shell completion installation
   --no-agent-skills      Skip installing AI agent skill files for Claude/Codex
@@ -367,7 +613,12 @@ while [ $# -gt 0 ]; do
       ;;
     --offline)
       OFFLINE=1
-      shift
+      if [ $# -ge 2 ] && [[ "$2" != -* ]]; then
+        OFFLINE_TARBALL="$2"
+        shift 2
+      else
+        shift
+      fi
       ;;
     --completions)
       if [ $# -lt 2 ] || [[ "$2" == -* ]]; then
@@ -541,14 +792,22 @@ resolve_version() {
     return 0
   fi
 
+  if [ "$OFFLINE" -eq 1 ]; then
+    err "Offline mode requires --version or --offline <local-artifact>"
+    exit 1
+  fi
+
   info "Resolving latest release tag"
   local latest_url="https://api.github.com/repos/${OWNER}/${REPO}/releases/latest"
   local tag=""
   if command -v curl >/dev/null 2>&1; then
-    tag=$(curl -fsSL -H "Accept: application/vnd.github+json" "$latest_url" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' || true)
+    tag=$(fetch_url_to_stdout "$latest_url" "release metadata" 2>/dev/null \
+      | grep '"tag_name":' \
+      | sed -E 's/.*"([^"]+)".*/\1/' \
+      || true)
     if [ -z "$tag" ]; then
       local redirect_target=""
-      redirect_target=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${OWNER}/${REPO}/releases/latest" 2>/dev/null || true)
+      redirect_target=$(fetch_effective_url "https://github.com/${OWNER}/${REPO}/releases/latest" "release redirect" 2>/dev/null || true)
       if [[ "$redirect_target" =~ /tag/([^/?#]+) ]]; then
         tag="${BASH_REMATCH[1]}"
       fi
@@ -581,13 +840,22 @@ detect_platform() {
   TARGET=""
   EXE_EXT=""
 
+  if [ "$OS" = "linux" ]; then
+    if [ "${PI_INSTALLER_TEST_FORCE_WSL:-0}" = "1" ] \
+      || grep -qi microsoft /proc/version 2>/dev/null \
+      || grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then
+      WSL_DETECTED=1
+      warn "WSL detected; terminal/path integration may need extra configuration"
+    fi
+  fi
+
   case "${OS}-${ARCH}" in
     linux-x86_64)
-      TARGET="x86_64-unknown-linux-gnu"
+      TARGET="x86_64-unknown-linux-musl"
       ASSET_PLATFORM="linux-amd64"
       ;;
     linux-aarch64)
-      TARGET="aarch64-unknown-linux-gnu"
+      TARGET="aarch64-unknown-linux-musl"
       ASSET_PLATFORM="linux-arm64"
       ;;
     darwin-x86_64)
@@ -648,6 +916,11 @@ ensure_dest_dir() {
     fi
     exit 1
   fi
+
+  local resolved_dest=""
+  if resolved_dest="$(cd "$DEST" 2>/dev/null && pwd -P)"; then
+    DEST="$resolved_dest"
+  fi
 }
 
 check_disk_space() {
@@ -673,7 +946,7 @@ check_existing_install() {
   local existing="$DEST/pi"
   if [ -x "$existing" ]; then
     local current
-    current=$("$existing" --version 2>/dev/null | head -1 || true)
+    current="$(capture_version_line "$existing")"
     if [ -n "$current" ]; then
       info "Existing pi detected at $existing: $current"
     fi
@@ -704,7 +977,7 @@ check_network_preflight() {
     return 0
   fi
 
-  if ! curl -fsSLI --connect-timeout 5 --max-time 10 "$probe_url" >/dev/null 2>&1; then
+  if ! probe_url_head "$probe_url" "network preflight probe"; then
     warn "Network preflight failed for $probe_url"
     warn "Continuing; install may still succeed on retry"
   fi
@@ -752,12 +1025,74 @@ validate_options() {
   if [ -n "$CHECKSUM" ] && [ -n "$CHECKSUM_URL" ]; then
     warn "Both --checksum and --checksum-url provided; --checksum takes precedence"
   fi
+
+  if [ "$OFFLINE" -eq 1 ] && [ -n "$ARTIFACT_URL" ] && ! is_local_resource_ref "$ARTIFACT_URL"; then
+    err "Offline mode requires a local --artifact-url path (or use --offline <tarball>)"
+    exit 1
+  fi
+
+  if [ "$OFFLINE" -eq 1 ] && [ -n "$CHECKSUM_URL" ] && ! is_local_resource_ref "$CHECKSUM_URL"; then
+    err "Offline mode requires a local --checksum-url path"
+    exit 1
+  fi
+
+  if [ "$OFFLINE" -eq 1 ] && [ -n "$SIGSTORE_BUNDLE_URL" ] && ! is_local_resource_ref "$SIGSTORE_BUNDLE_URL"; then
+    err "Offline mode requires a local --sigstore-bundle-url path"
+    exit 1
+  fi
+
+  if [ "$OFFLINE" -eq 1 ] && [ -z "$OFFLINE_TARBALL" ] && [ -z "$ARTIFACT_URL" ] && [ "$FROM_SOURCE" -eq 0 ]; then
+    err "Offline mode requires a local artifact path via --offline <tarball> or --artifact-url <local file>"
+    exit 1
+  fi
+
+  if [ "$OFFLINE" -eq 1 ] && [ "$FROM_SOURCE" -eq 1 ]; then
+    err "--offline cannot be combined with --from-source (source build needs network access)"
+    exit 1
+  fi
+
+  if [ -n "$OFFLINE_TARBALL" ]; then
+    OFFLINE=1
+    if [ -n "$ARTIFACT_URL" ]; then
+      err "Pass either --offline <tarball> or --artifact-url, not both"
+      exit 1
+    fi
+    if ! is_local_resource_ref "$OFFLINE_TARBALL"; then
+      err "--offline expects a local artifact path (absolute, relative, or file://)"
+      exit 1
+    fi
+
+    local offline_path
+    offline_path="$(resource_to_local_path "$OFFLINE_TARBALL")"
+    if [ ! -f "$offline_path" ]; then
+      err "Offline artifact not found: $offline_path"
+      exit 1
+    fi
+
+    if [ -d "$(dirname "$offline_path")" ]; then
+      local resolved_dir
+      resolved_dir="$(cd "$(dirname "$offline_path")" && pwd -P)"
+      offline_path="${resolved_dir}/$(basename "$offline_path")"
+    fi
+
+    OFFLINE_TARBALL="$offline_path"
+    ARTIFACT_URL="file://${OFFLINE_TARBALL}"
+  fi
 }
 
 check_dependencies() {
-  if [ "$FROM_SOURCE" -eq 0 ] && ! command -v curl >/dev/null 2>&1; then
-    err "curl is required for release downloads"
-    exit 1
+  if [ "$FROM_SOURCE" -eq 0 ]; then
+    local needs_curl=1
+    if [ -n "$ARTIFACT_URL" ] && is_local_resource_ref "$ARTIFACT_URL" \
+      && { [ -z "$CHECKSUM_URL" ] || is_local_resource_ref "$CHECKSUM_URL"; } \
+      && { [ -z "$SIGSTORE_BUNDLE_URL" ] || is_local_resource_ref "$SIGSTORE_BUNDLE_URL"; }; then
+      needs_curl=0
+    fi
+
+    if [ "$needs_curl" -eq 1 ] && ! command -v curl >/dev/null 2>&1; then
+      err "curl is required for release downloads"
+      exit 1
+    fi
   fi
 
   if [ "$FROM_SOURCE" -eq 1 ]; then
@@ -808,7 +1143,7 @@ cleanup() {
   fi
 
   if [ -n "$TMP" ] && [ -d "$TMP" ]; then
-    rm -rf "$TMP" 2>/dev/null || true
+    remove_path_recursively "$TMP" 2>/dev/null || true
   fi
   if [ "$LOCKED" -eq 1 ]; then
     rm -f "$LOCK_DIR/pid" 2>/dev/null || true
@@ -852,7 +1187,7 @@ detect_existing_pi() {
     return 0
   fi
 
-  CURRENT_PI_VERSION=$("$CURRENT_PI_PATH" --version 2>/dev/null | head -1 || true)
+  CURRENT_PI_VERSION="$(capture_version_line "$CURRENT_PI_PATH")"
 
   if is_rust_pi_output "$CURRENT_PI_VERSION"; then
     TS_PI_DETECTED=0
@@ -993,7 +1328,7 @@ verify_download_checksum() {
     expected="$CHECKSUM"
     checksum_source_kind="inline"
   elif [ -n "$CHECKSUM_URL" ]; then
-    if ! curl -fsSL "$CHECKSUM_URL" -o "$checksum_file"; then
+    if ! fetch_url_to_file "$CHECKSUM_URL" "$checksum_file" "checksum file"; then
       err "Failed to download checksum file: $CHECKSUM_URL"
       return 4
     fi
@@ -1002,14 +1337,14 @@ verify_download_checksum() {
     local artifact_base="${artifact_url%%\?*}"
     artifact_base="${artifact_base%%#*}"
     local derived_checksum_url="${artifact_base}.sha256"
-    if ! curl -fsSL "$derived_checksum_url" -o "$checksum_file"; then
+    if ! fetch_url_to_file "$derived_checksum_url" "$checksum_file" "derived checksum file"; then
       err "Failed to download checksum file: $derived_checksum_url"
       err "Provide --checksum or --checksum-url for custom artifact installs"
       return 4
     fi
     checksum_source_kind="artifact-derived"
   else
-    if ! curl -fsSL "$SHA_URL" -o "$checksum_file"; then
+    if ! fetch_url_to_file "$SHA_URL" "$checksum_file" "release checksum manifest"; then
       err "Failed to download checksum manifest: $SHA_URL"
       return 4
     fi
@@ -1086,6 +1421,11 @@ verify_sigstore_bundle() {
   fi
 
   local bundle_url="$SIGSTORE_BUNDLE_URL"
+  if [ "$OFFLINE" -eq 1 ] && [ -z "$bundle_url" ]; then
+    SIGSTORE_STATUS="skipped (offline; bundle not provided)"
+    warn "Offline mode: skipping signature verification without --sigstore-bundle-url"
+    return 0
+  fi
   if [ -z "$bundle_url" ]; then
     local artifact_base="${artifact_url%%\?*}"
     artifact_base="${artifact_base%%#*}"
@@ -1094,7 +1434,7 @@ verify_sigstore_bundle() {
 
   local bundle_file
   bundle_file="$TMP/$(basename "${bundle_url%%\?*}")"
-  if ! curl -fsSL "$bundle_url" -o "$bundle_file"; then
+  if ! fetch_url_to_file "$bundle_url" "$bundle_file" "sigstore bundle"; then
     SIGSTORE_STATUS="skipped (bundle unavailable)"
     warn "Sigstore bundle not found; skipping signature verification"
     return 0
@@ -1198,11 +1538,18 @@ download_release_binary() {
     candidates+=("$ASSET_NAME|$ARTIFACT_URL")
   else
     candidates+=("pi-${VERSION}-${TARGET}${EXE_EXT}|https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/pi-${VERSION}-${TARGET}${EXE_EXT}")
+    candidates+=("pi-${TARGET}${EXE_EXT}|https://github.com/${OWNER}/${REPO}/releases/latest/download/pi-${TARGET}${EXE_EXT}")
+    candidates+=("pi-${OS}-${ARCH}${EXE_EXT}|https://github.com/${OWNER}/${REPO}/releases/latest/download/pi-${OS}-${ARCH}${EXE_EXT}")
     if [ -n "$ASSET_PLATFORM" ]; then
       if [ -n "$EXE_EXT" ]; then
+        candidates+=("pi-${ASSET_PLATFORM}.zip|https://github.com/${OWNER}/${REPO}/releases/latest/download/pi-${ASSET_PLATFORM}.zip")
         candidates+=("pi-${ASSET_PLATFORM}.zip|https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/pi-${ASSET_PLATFORM}.zip")
       else
+        candidates+=("pi-${ASSET_PLATFORM}.tar.xz|https://github.com/${OWNER}/${REPO}/releases/latest/download/pi-${ASSET_PLATFORM}.tar.xz")
         candidates+=("pi-${ASSET_PLATFORM}.tar.xz|https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/pi-${ASSET_PLATFORM}.tar.xz")
+        candidates+=("pi-${ASSET_PLATFORM}.tar.gz|https://github.com/${OWNER}/${REPO}/releases/latest/download/pi-${ASSET_PLATFORM}.tar.gz")
+        candidates+=("pi-${ASSET_PLATFORM}.tar.gz|https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/pi-${ASSET_PLATFORM}.tar.gz")
+        candidates+=("pi-${OS}-${ARCH}.tar.gz|https://github.com/${OWNER}/${REPO}/releases/latest/download/pi-${OS}-${ARCH}.tar.gz")
       fi
     fi
   fi
@@ -1212,7 +1559,7 @@ download_release_binary() {
     local candidate="${entry%%|*}"
     local candidate_url="${entry#*|}"
     local artifact_file="$TMP/$candidate"
-    if ! curl -fsSL "$candidate_url" -o "$artifact_file"; then
+    if ! fetch_url_to_file "$candidate_url" "$artifact_file" "release artifact"; then
       if [ -n "$ARTIFACT_URL" ]; then
         err "Failed to download artifact: $candidate_url"
       fi
@@ -1254,6 +1601,11 @@ download_release_binary() {
 }
 
 build_from_source() {
+  if [ "$OFFLINE" -eq 1 ]; then
+    err "Offline mode cannot build from source (network access required)"
+    return 1
+  fi
+
   local src_dir="$TMP/src"
   git clone --depth 1 --branch "$VERSION" "https://github.com/${OWNER}/${REPO}.git" "$src_dir" >&2
   (cd "$src_dir" && cargo build --release --locked --bin pi >&2)
@@ -1503,6 +1855,445 @@ maybe_install_completions() {
   fi
 
   install_completions_for_shell "$shell_name" || true
+}
+
+claude_agent_detected() {
+  [ -d "$HOME/.claude" ] \
+    || [ -d "$HOME/.config/claude" ] \
+    || [ -d "$HOME/Library/Application Support/Claude" ] \
+    || command -v claude >/dev/null 2>&1
+}
+
+gemini_agent_detected() {
+  [ -d "$HOME/.gemini" ] \
+    || [ -d "$HOME/.gemini-cli" ] \
+    || command -v gemini >/dev/null 2>&1
+}
+
+codex_agent_detected() {
+  local codex_home="${CODEX_HOME:-$HOME/.codex}"
+  [ -d "$codex_home" ] || command -v codex >/dev/null 2>&1
+}
+
+resolve_claude_settings_path() {
+  local candidates=(
+    "$HOME/.claude/settings.json"
+    "$HOME/.config/claude/settings.json"
+    "$HOME/Library/Application Support/Claude/settings.json"
+  )
+  local path=""
+  for path in "${candidates[@]}"; do
+    if [ -f "$path" ]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done
+  printf '%s\n' "${candidates[0]}"
+}
+
+resolve_gemini_settings_path() {
+  local candidates=(
+    "$HOME/.gemini/settings.json"
+    "$HOME/.gemini-cli/settings.json"
+  )
+  local path=""
+  for path in "${candidates[@]}"; do
+    if [ -f "$path" ]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done
+  printf '%s\n' "${candidates[0]}"
+}
+
+create_settings_backup() {
+  local settings_file="$1"
+  if [ ! -f "$settings_file" ]; then
+    return 0
+  fi
+  local backup_path=""
+  backup_path="${settings_file}.bak.$(date +%Y%m%d%H%M%S)"
+  cp "$settings_file" "$backup_path"
+  printf '%s\n' "$backup_path"
+}
+
+configure_claude_hook() {
+  CLAUDE_HOOK_BACKUP=""
+  CLAUDE_HOOK_SETTINGS=""
+
+  if ! claude_agent_detected; then
+    CLAUDE_HOOK_STATUS="skipped (not detected)"
+    return 0
+  fi
+
+  CLAUDE_HOOK_SETTINGS="$(resolve_claude_settings_path)"
+  local settings_file="$CLAUDE_HOOK_SETTINGS"
+  local binary_path="$INSTALL_BIN_PATH"
+
+  if [ ! -f "$settings_file" ]; then
+    if ! mkdir -p "$(dirname "$settings_file")" 2>/dev/null; then
+      CLAUDE_HOOK_STATUS="failed (mkdir error)"
+      warn "Failed to prepare Claude settings directory: $(dirname "$settings_file")"
+      return 0
+    fi
+    local escaped_binary_path
+    escaped_binary_path="$(json_escape_string "$binary_path")"
+    if ! cat > "$settings_file" <<EOF_CLAUDE
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${escaped_binary_path}"
+          }
+        ]
+      }
+    ]
+  }
+}
+EOF_CLAUDE
+    then
+      CLAUDE_HOOK_STATUS="failed (write error)"
+      warn "Failed to write Claude settings file: $settings_file"
+      return 0
+    fi
+    CLAUDE_HOOK_STATUS="created"
+    ok "Configured Claude Code hook: $settings_file"
+    return 0
+  fi
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    CLAUDE_HOOK_STATUS="failed (python3 missing)"
+    warn "python3 not found; cannot merge Claude hook settings"
+    return 0
+  fi
+
+  local backup_path=""
+  backup_path="$(create_settings_backup "$settings_file" 2>/dev/null || true)"
+  if [ -f "$settings_file" ] && [ -z "$backup_path" ]; then
+    CLAUDE_HOOK_STATUS="failed (backup error)"
+    warn "Failed to create Claude settings backup: $settings_file"
+    return 0
+  fi
+  CLAUDE_HOOK_BACKUP="$backup_path"
+
+  local merge_result=""
+  if ! merge_result=$(python3 - "$settings_file" "$binary_path" <<'PYEOF'
+import json
+import os
+import shlex
+import sys
+
+settings_file = sys.argv[1]
+binary_path = sys.argv[2]
+binary_name = binary_path.rsplit("/", 1)[-1]
+
+try:
+    with open(settings_file, "r", encoding="utf-8") as f:
+        settings = json.load(f)
+except Exception:
+    settings = {}
+
+if not isinstance(settings, dict):
+    settings = {}
+
+hooks = settings.get("hooks")
+if not isinstance(hooks, dict):
+    hooks = {}
+    settings["hooks"] = hooks
+
+pre = hooks.get("PreToolUse")
+if not isinstance(pre, list):
+    pre = []
+    hooks["PreToolUse"] = pre
+
+bash_hooks = []
+other_entries = []
+for entry in pre:
+    if isinstance(entry, dict) and entry.get("matcher") == "Bash":
+        for hook in entry.get("hooks", []):
+            if hook not in bash_hooks:
+                bash_hooks.append(hook)
+    else:
+        other_entries.append(entry)
+
+def matches_binary(command: str) -> bool:
+    if not isinstance(command, str):
+        return False
+    cmd = command.strip()
+    if not cmd:
+        return False
+    if cmd == binary_path:
+        return True
+    try:
+        parts = shlex.split(cmd)
+    except Exception:
+        parts = cmd.split()
+    if not parts:
+        return False
+    first = parts[0]
+    if first == binary_path:
+        return True
+    if os.path.isabs(first):
+        try:
+            if os.path.realpath(first) == os.path.realpath(binary_path):
+                return True
+        except Exception:
+            pass
+    return False
+
+for hook in bash_hooks:
+    if isinstance(hook, dict):
+        command = str(hook.get("command", ""))
+        if matches_binary(command):
+            print("ALREADY")
+            raise SystemExit(0)
+
+bash_hooks.insert(0, {"type": "command", "command": binary_path})
+hooks["PreToolUse"] = [{"matcher": "Bash", "hooks": bash_hooks}] + other_entries
+
+with open(settings_file, "w", encoding="utf-8") as f:
+    json.dump(settings, f, indent=2)
+    f.write("\n")
+
+print("MERGED")
+PYEOF
+  ); then
+    if [ -n "$backup_path" ]; then
+      mv "$backup_path" "$settings_file" 2>/dev/null || true
+      CLAUDE_HOOK_BACKUP=""
+    fi
+    CLAUDE_HOOK_STATUS="failed (merge error)"
+    warn "Failed to merge Claude settings: $settings_file"
+    return 0
+  fi
+
+  case "$merge_result" in
+    ALREADY)
+      CLAUDE_HOOK_STATUS="already"
+      if [ -n "$backup_path" ]; then
+        rm -f "$backup_path" 2>/dev/null || true
+        CLAUDE_HOOK_BACKUP=""
+      fi
+      ;;
+    MERGED)
+      CLAUDE_HOOK_STATUS="merged"
+      ok "Updated Claude Code hook settings: $settings_file"
+      ;;
+    *)
+      if [ -n "$backup_path" ]; then
+        mv "$backup_path" "$settings_file" 2>/dev/null || true
+        CLAUDE_HOOK_BACKUP=""
+      fi
+      CLAUDE_HOOK_STATUS="failed (unexpected merge output)"
+      warn "Unexpected Claude hook merge result for $settings_file"
+      ;;
+  esac
+}
+
+configure_gemini_hook() {
+  GEMINI_HOOK_BACKUP=""
+  GEMINI_HOOK_SETTINGS=""
+
+  if ! gemini_agent_detected; then
+    GEMINI_HOOK_STATUS="skipped (not detected)"
+    return 0
+  fi
+
+  GEMINI_HOOK_SETTINGS="$(resolve_gemini_settings_path)"
+  local settings_file="$GEMINI_HOOK_SETTINGS"
+  local binary_path="$INSTALL_BIN_PATH"
+
+  if [ ! -f "$settings_file" ]; then
+    if ! mkdir -p "$(dirname "$settings_file")" 2>/dev/null; then
+      GEMINI_HOOK_STATUS="failed (mkdir error)"
+      warn "Failed to prepare Gemini settings directory: $(dirname "$settings_file")"
+      return 0
+    fi
+    local escaped_binary_path
+    escaped_binary_path="$(json_escape_string "$binary_path")"
+    if ! cat > "$settings_file" <<EOF_GEMINI
+{
+  "hooks": {
+    "BeforeTool": [
+      {
+        "matcher": "run_shell_command",
+        "hooks": [
+          {
+            "name": "pi-agent-rust",
+            "type": "command",
+            "command": "${escaped_binary_path}",
+            "timeout": 5000
+          }
+        ]
+      }
+    ]
+  }
+}
+EOF_GEMINI
+    then
+      GEMINI_HOOK_STATUS="failed (write error)"
+      warn "Failed to write Gemini settings file: $settings_file"
+      return 0
+    fi
+    GEMINI_HOOK_STATUS="created"
+    ok "Configured Gemini hook: $settings_file"
+    return 0
+  fi
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    GEMINI_HOOK_STATUS="failed (python3 missing)"
+    warn "python3 not found; cannot merge Gemini hook settings"
+    return 0
+  fi
+
+  local backup_path=""
+  backup_path="$(create_settings_backup "$settings_file" 2>/dev/null || true)"
+  if [ -f "$settings_file" ] && [ -z "$backup_path" ]; then
+    GEMINI_HOOK_STATUS="failed (backup error)"
+    warn "Failed to create Gemini settings backup: $settings_file"
+    return 0
+  fi
+  GEMINI_HOOK_BACKUP="$backup_path"
+
+  local merge_result=""
+  if ! merge_result=$(python3 - "$settings_file" "$binary_path" <<'PYEOF'
+import json
+import os
+import shlex
+import sys
+
+settings_file = sys.argv[1]
+binary_path = sys.argv[2]
+binary_name = binary_path.rsplit("/", 1)[-1]
+
+try:
+    with open(settings_file, "r", encoding="utf-8") as f:
+        settings = json.load(f)
+except Exception:
+    settings = {}
+
+if not isinstance(settings, dict):
+    settings = {}
+
+hooks = settings.get("hooks")
+if not isinstance(hooks, dict):
+    hooks = {}
+    settings["hooks"] = hooks
+
+before = hooks.get("BeforeTool")
+if not isinstance(before, list):
+    before = []
+    hooks["BeforeTool"] = before
+
+shell_hooks = []
+other_entries = []
+for entry in before:
+    if isinstance(entry, dict) and entry.get("matcher") == "run_shell_command":
+        for hook in entry.get("hooks", []):
+            if hook not in shell_hooks:
+                shell_hooks.append(hook)
+    else:
+        other_entries.append(entry)
+
+def matches_binary(command: str) -> bool:
+    if not isinstance(command, str):
+        return False
+    cmd = command.strip()
+    if not cmd:
+        return False
+    if cmd == binary_path:
+        return True
+    try:
+        parts = shlex.split(cmd)
+    except Exception:
+        parts = cmd.split()
+    if not parts:
+        return False
+    first = parts[0]
+    if first == binary_path:
+        return True
+    if os.path.isabs(first):
+        try:
+            if os.path.realpath(first) == os.path.realpath(binary_path):
+                return True
+        except Exception:
+            pass
+    return False
+
+for hook in shell_hooks:
+    if isinstance(hook, dict):
+        command = str(hook.get("command", ""))
+        if matches_binary(command):
+            print("ALREADY")
+            raise SystemExit(0)
+
+shell_hooks.insert(
+    0,
+    {
+        "name": "pi-agent-rust",
+        "type": "command",
+        "command": binary_path,
+        "timeout": 5000,
+    },
+)
+hooks["BeforeTool"] = [{"matcher": "run_shell_command", "hooks": shell_hooks}] + other_entries
+
+with open(settings_file, "w", encoding="utf-8") as f:
+    json.dump(settings, f, indent=2)
+    f.write("\n")
+
+print("MERGED")
+PYEOF
+  ); then
+    if [ -n "$backup_path" ]; then
+      mv "$backup_path" "$settings_file" 2>/dev/null || true
+      GEMINI_HOOK_BACKUP=""
+    fi
+    GEMINI_HOOK_STATUS="failed (merge error)"
+    warn "Failed to merge Gemini settings: $settings_file"
+    return 0
+  fi
+
+  case "$merge_result" in
+    ALREADY)
+      GEMINI_HOOK_STATUS="already"
+      if [ -n "$backup_path" ]; then
+        rm -f "$backup_path" 2>/dev/null || true
+        GEMINI_HOOK_BACKUP=""
+      fi
+      ;;
+    MERGED)
+      GEMINI_HOOK_STATUS="merged"
+      ok "Updated Gemini hook settings: $settings_file"
+      ;;
+    *)
+      if [ -n "$backup_path" ]; then
+        mv "$backup_path" "$settings_file" 2>/dev/null || true
+        GEMINI_HOOK_BACKUP=""
+      fi
+      GEMINI_HOOK_STATUS="failed (unexpected merge output)"
+      warn "Unexpected Gemini hook merge result for $settings_file"
+      ;;
+  esac
+}
+
+configure_codex_hook_status() {
+  if codex_agent_detected; then
+    CODEX_HOOK_STATUS="unsupported (Codex has no pre-exec hooks)"
+  else
+    CODEX_HOOK_STATUS="skipped (not detected)"
+  fi
+}
+
+configure_agent_hooks() {
+  info "Scanning AI agents and applying hook auto-configuration"
+  configure_claude_hook
+  configure_gemini_hook
+  configure_codex_hook_status
 }
 
 is_installer_managed_skill_file() {
@@ -1757,14 +2548,14 @@ install_skill_to_destination() {
     dir)
       if ! cp -R "$source_path/." "$staged_destination/" 2>/dev/null; then
         warn "Failed to install bundled skill into $destination"
-        rm -rf "$staged_destination" 2>/dev/null || true
+        remove_path_recursively "$staged_destination" 2>/dev/null || true
         return 1
       fi
       ;;
     file)
       if ! cp "$source_path" "$staged_destination/SKILL.md" 2>/dev/null; then
         warn "Failed to install skill file into $destination"
-        rm -rf "$staged_destination" 2>/dev/null || true
+        remove_path_recursively "$staged_destination" 2>/dev/null || true
         return 1
       fi
       ;;
@@ -1772,40 +2563,40 @@ install_skill_to_destination() {
 
   if [ ! -f "$staged_destination/SKILL.md" ]; then
     warn "Skill install failed: missing SKILL.md at $destination"
-    rm -rf "$staged_destination" 2>/dev/null || true
+    remove_path_recursively "$staged_destination" 2>/dev/null || true
     return 1
   fi
 
   if ! is_installer_managed_skill_file "$staged_destination/SKILL.md"; then
     if ! printf '\n<!-- %s -->\n' "$AGENT_SKILL_MARKER" >> "$staged_destination/SKILL.md"; then
       warn "Failed to mark skill as installer-managed at $destination"
-      rm -rf "$staged_destination" 2>/dev/null || true
+      remove_path_recursively "$staged_destination" 2>/dev/null || true
       return 1
     fi
   fi
 
   if ! is_installer_managed_skill_file "$staged_destination/SKILL.md"; then
     warn "Skill install failed: managed marker missing at $destination"
-    rm -rf "$staged_destination" 2>/dev/null || true
+    remove_path_recursively "$staged_destination" 2>/dev/null || true
     return 1
   fi
 
   if [ -e "$destination" ] || [ -L "$destination" ]; then
-    if ! rm -rf "$destination" 2>/dev/null; then
+    if ! remove_path_recursively "$destination" 2>/dev/null; then
       warn "Failed to replace existing skill directory: $destination"
-      rm -rf "$staged_destination" 2>/dev/null || true
+      remove_path_recursively "$staged_destination" 2>/dev/null || true
       return 1
     fi
   fi
   if [ -e "$destination" ] || [ -L "$destination" ]; then
     warn "Failed to clear existing skill directory: $destination"
-    rm -rf "$staged_destination" 2>/dev/null || true
+    remove_path_recursively "$staged_destination" 2>/dev/null || true
     return 1
   fi
 
   if ! mv "$staged_destination" "$destination" 2>/dev/null; then
     warn "Failed to move staged skill into place: $destination"
-    rm -rf "$staged_destination" 2>/dev/null || true
+    remove_path_recursively "$staged_destination" 2>/dev/null || true
     return 1
   fi
 
@@ -1864,7 +2655,7 @@ install_agent_skills() {
         if [ -z "$downloaded" ]; then
           break
         fi
-        if curl -fsSL "$skill_url" -o "$downloaded" >/dev/null 2>&1; then
+        if fetch_url_to_file "$skill_url" "$downloaded" "agent skill" >/dev/null 2>&1; then
           temp_skill="$downloaded"
           source_path="$downloaded"
           source_desc="github:${ref}"
@@ -1983,6 +2774,13 @@ write_state() {
     printf 'PIAR_CHECKSUM_STATUS=%q\n' "$CHECKSUM_STATUS"
     printf 'PIAR_SIGSTORE_STATUS=%q\n' "$SIGSTORE_STATUS"
     printf 'PIAR_COMPLETIONS_STATUS=%q\n' "$COMPLETIONS_STATUS"
+    printf 'PIAR_CLAUDE_HOOK_STATUS=%q\n' "$CLAUDE_HOOK_STATUS"
+    printf 'PIAR_GEMINI_HOOK_STATUS=%q\n' "$GEMINI_HOOK_STATUS"
+    printf 'PIAR_CODEX_HOOK_STATUS=%q\n' "$CODEX_HOOK_STATUS"
+    printf 'PIAR_CLAUDE_HOOK_SETTINGS=%q\n' "$CLAUDE_HOOK_SETTINGS"
+    printf 'PIAR_GEMINI_HOOK_SETTINGS=%q\n' "$GEMINI_HOOK_SETTINGS"
+    printf 'PIAR_CLAUDE_HOOK_BACKUP=%q\n' "$CLAUDE_HOOK_BACKUP"
+    printf 'PIAR_GEMINI_HOOK_BACKUP=%q\n' "$GEMINI_HOOK_BACKUP"
     printf 'PIAR_AGENT_SKILL_STATUS=%q\n' "$AGENT_SKILL_STATUS"
     printf 'PIAR_AGENT_SKILL_CLAUDE_PATH=%q\n' "$AGENT_SKILL_CLAUDE_PATH"
     printf 'PIAR_AGENT_SKILL_CODEX_PATH=%q\n' "$AGENT_SKILL_CODEX_PATH"
@@ -2007,7 +2805,7 @@ should_skip_reinstall() {
   fi
 
   local out
-  out=$("$INSTALL_BIN_PATH" --version 2>/dev/null | head -1 || true)
+  out="$(capture_version_line "$INSTALL_BIN_PATH")"
   if ! is_rust_pi_output "$out"; then
     return 1
   fi
@@ -2029,6 +2827,27 @@ print_summary() {
   lines+=("Checksum:  $CHECKSUM_STATUS")
   lines+=("Signature: $SIGSTORE_STATUS")
   lines+=("Shell:     $COMPLETIONS_STATUS")
+  if [ -n "$PROXY_SOURCE" ]; then
+    lines+=("Proxy:     $(redact_proxy_value "$PROXY_SOURCE")")
+  fi
+  if [ "$WSL_DETECTED" -eq 1 ]; then
+    lines+=("Platform:  WSL detected")
+  fi
+  lines+=("Claude hook: $CLAUDE_HOOK_STATUS")
+  lines+=("Gemini hook: $GEMINI_HOOK_STATUS")
+  lines+=("Codex hook:  $CODEX_HOOK_STATUS")
+  if [ -n "$CLAUDE_HOOK_SETTINGS" ]; then
+    lines+=("Claude cfg:  $CLAUDE_HOOK_SETTINGS")
+  fi
+  if [ -n "$GEMINI_HOOK_SETTINGS" ]; then
+    lines+=("Gemini cfg:  $GEMINI_HOOK_SETTINGS")
+  fi
+  if [ -n "$CLAUDE_HOOK_BACKUP" ]; then
+    lines+=("Claude bak:  $CLAUDE_HOOK_BACKUP")
+  fi
+  if [ -n "$GEMINI_HOOK_BACKUP" ]; then
+    lines+=("Gemini bak:  $GEMINI_HOOK_BACKUP")
+  fi
   lines+=("Skills:    $AGENT_SKILL_STATUS")
   if [ -n "$AGENT_SKILL_CLAUDE_PATH" ] && [ -f "$AGENT_SKILL_CLAUDE_PATH/SKILL.md" ]; then
     lines+=("Claude:    $AGENT_SKILL_CLAUDE_PATH")
@@ -2075,8 +2894,12 @@ print_summary() {
 main() {
   validate_options
   load_existing_state
+  setup_proxy
   resolve_version
   show_header
+  if [ "$OFFLINE" -eq 1 ] && [ -n "$OFFLINE_TARBALL" ]; then
+    info "Offline artifact mode enabled: $OFFLINE_TARBALL"
+  fi
   detect_existing_pi
   choose_adoption_mode
   choose_dest_for_adoption
@@ -2110,6 +2933,7 @@ main() {
     fi
     maybe_add_path
     maybe_install_completions
+    configure_agent_hooks
     install_agent_skills
     write_state
     print_summary
@@ -2146,6 +2970,10 @@ main() {
         err "Pass --version vX.Y.Z with --artifact-url, or use --from-source directly"
         exit 1
       fi
+      if [ "$OFFLINE" -eq 1 ]; then
+        err "Offline mode download failed; source fallback is disabled"
+        exit 1
+      fi
       warn "Release download failed; falling back to source build"
       FROM_SOURCE=1
       INSTALL_SOURCE="source (release fallback)"
@@ -2167,6 +2995,7 @@ main() {
 
   maybe_add_path
   maybe_install_completions
+  configure_agent_hooks
   install_agent_skills
   write_state
   INSTALL_COMMITTED=1

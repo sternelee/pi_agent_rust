@@ -18,8 +18,10 @@ PATH_MARKER="# pi-agent-rust installer PATH"
 
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/pi-agent-rust"
 STATE_FILE="$STATE_DIR/install-state.env"
+STATE_LOADED=0
 
 PIAR_INSTALL_BIN=""
+PIAR_INSTALL_BIN_NAME=""
 PIAR_ADOPTED_TYPESCRIPT="0"
 PIAR_LEGACY_ALIAS_PATH=""
 PIAR_LEGACY_MOVED_FROM=""
@@ -28,6 +30,8 @@ PIAR_PATH_MARKER=""
 PIAR_AGENT_SKILL_STATUS=""
 PIAR_AGENT_SKILL_CLAUDE_PATH=""
 PIAR_AGENT_SKILL_CODEX_PATH=""
+PIAR_CLAUDE_HOOK_SETTINGS=""
+PIAR_GEMINI_HOOK_SETTINGS=""
 RESTORE_CONFLICT=0
 
 AGENT_SKILL_NAME="pi-agent-rust"
@@ -194,10 +198,37 @@ load_state() {
 
   # shellcheck disable=SC1090
   source "$STATE_FILE"
+  STATE_LOADED=1
 
   if [ -n "${PIAR_PATH_MARKER:-}" ]; then
     PATH_MARKER="$PIAR_PATH_MARKER"
   fi
+}
+
+version_timeout_cmd() {
+  if command -v timeout >/dev/null 2>&1; then
+    printf '%s\n' "timeout"
+    return 0
+  fi
+  if command -v gtimeout >/dev/null 2>&1; then
+    printf '%s\n' "gtimeout"
+    return 0
+  fi
+  printf '%s\n' ""
+}
+
+capture_version_line() {
+  local path="$1"
+  local timeout_cmd=""
+  timeout_cmd="$(version_timeout_cmd)"
+
+  local out=""
+  if [ -n "$timeout_cmd" ]; then
+    out=$("$timeout_cmd" 2 "$path" --version 2>/dev/null | head -1 || true)
+  else
+    out=$("$path" --version 2>/dev/null | head -1 || true)
+  fi
+  printf '%s\n' "$out"
 }
 
 is_rust_pi_output() {
@@ -210,7 +241,7 @@ is_rust_pi_binary() {
   [ -x "$path" ] || return 1
 
   local out
-  out=$("$path" --version 2>/dev/null | head -1 || true)
+  out="$(capture_version_line "$path")"
   is_rust_pi_output "$out"
 }
 
@@ -235,10 +266,242 @@ is_expected_skill_directory() {
   esac
 }
 
+is_expected_hook_settings_path() {
+  local path="$1"
+  local agent="$2"
+  [ -n "$path" ] || return 1
+
+  case "$agent" in
+    claude)
+      case "$path" in
+        "$HOME/.claude/settings.json"|"$HOME/.config/claude/settings.json"|"$HOME/Library/Application Support/Claude/settings.json")
+          return 0
+          ;;
+      esac
+      ;;
+    gemini)
+      case "$path" in
+        "$HOME/.gemini/settings.json"|"$HOME/.gemini-cli/settings.json")
+          return 0
+          ;;
+      esac
+      ;;
+  esac
+
+  return 1
+}
+
+hook_binary_path() {
+  if [ -n "${PIAR_INSTALL_BIN:-}" ]; then
+    printf '%s\n' "$PIAR_INSTALL_BIN"
+    return 0
+  fi
+  printf '%s\n' ""
+}
+
+hook_binary_name() {
+  if [ -n "${PIAR_INSTALL_BIN_NAME:-}" ]; then
+    printf '%s\n' "$PIAR_INSTALL_BIN_NAME"
+    return 0
+  fi
+  if [ -n "${PIAR_INSTALL_BIN:-}" ]; then
+    printf '%s\n' "$(basename "$PIAR_INSTALL_BIN")"
+    return 0
+  fi
+  printf '%s\n' "pi"
+}
+
+remove_hook_from_settings() {
+  local settings_file="$1"
+  local hook_key="$2"
+  local matcher="$3"
+
+  if [ -z "$settings_file" ] || [ ! -f "$settings_file" ]; then
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    warn "python3 not found; skipping hook cleanup for $settings_file"
+    return 0
+  fi
+
+  local bin_path
+  local bin_name
+  bin_path="$(hook_binary_path)"
+  bin_name="$(hook_binary_name)"
+
+  local py_result=""
+  if ! py_result=$(python3 - "$settings_file" "$hook_key" "$matcher" "$bin_path" "$bin_name" <<'PYEOF'
+import json
+import os
+import shlex
+import sys
+
+settings_file = sys.argv[1]
+hook_key = sys.argv[2]
+matcher = sys.argv[3]
+binary_path = sys.argv[4]
+binary_name = sys.argv[5]
+
+def matches_binary(command: str) -> bool:
+    if not isinstance(command, str):
+        return False
+    cmd = command.strip()
+    if not cmd:
+        return False
+    if binary_path and cmd == binary_path:
+        return True
+    try:
+        parts = shlex.split(cmd)
+    except Exception:
+        parts = cmd.split()
+    if not parts:
+        return False
+    first = parts[0]
+    if binary_path and first == binary_path:
+        return True
+    if binary_path and os.path.isabs(first):
+        try:
+            if os.path.realpath(first) == os.path.realpath(binary_path):
+                return True
+        except Exception:
+            pass
+    return False
+
+try:
+    with open(settings_file, "r", encoding="utf-8") as f:
+        settings = json.load(f)
+except Exception:
+    print("SKIP_INVALID_JSON")
+    raise SystemExit(0)
+
+if not isinstance(settings, dict):
+    print("SKIP_INVALID_JSON")
+    raise SystemExit(0)
+
+hooks = settings.get("hooks")
+if not isinstance(hooks, dict):
+    print("NO_HOOKS")
+    raise SystemExit(0)
+
+entries = hooks.get(hook_key)
+if not isinstance(entries, list):
+    print("NO_HOOKS")
+    raise SystemExit(0)
+
+changed = False
+new_entries = []
+for entry in entries:
+    if isinstance(entry, dict) and entry.get("matcher") == matcher:
+        current_hooks = entry.get("hooks", [])
+        if not isinstance(current_hooks, list):
+            current_hooks = []
+        kept = []
+        for hook in current_hooks:
+            if isinstance(hook, dict) and matches_binary(str(hook.get("command", ""))):
+                changed = True
+                continue
+            kept.append(hook)
+        if kept:
+            entry["hooks"] = kept
+            new_entries.append(entry)
+        elif current_hooks:
+            changed = True
+    else:
+        new_entries.append(entry)
+
+if not changed:
+    print("ALREADY_ABSENT")
+    raise SystemExit(0)
+
+hooks[hook_key] = new_entries
+if not hooks[hook_key]:
+    del hooks[hook_key]
+if not hooks:
+    settings.pop("hooks", None)
+
+with open(settings_file, "w", encoding="utf-8") as f:
+    json.dump(settings, f, indent=2)
+    f.write("\n")
+
+print("REMOVED")
+PYEOF
+  ); then
+    warn "Failed to update hook settings: $settings_file"
+    return 0
+  fi
+
+  case "$py_result" in
+    REMOVED)
+      ok "Removed installer hook from $settings_file"
+      ;;
+    ALREADY_ABSENT|NO_HOOKS)
+      ;;
+    SKIP_INVALID_JSON)
+      warn "Skipping hook cleanup; invalid JSON in $settings_file"
+      ;;
+    *)
+      warn "Unexpected hook cleanup result for $settings_file: $py_result"
+      ;;
+  esac
+}
+
+remove_installer_hooks() {
+  if [ "$STATE_LOADED" -ne 1 ]; then
+    return 0
+  fi
+
+  if [ -z "${PIAR_CLAUDE_HOOK_SETTINGS:-}" ] && [ -z "${PIAR_GEMINI_HOOK_SETTINGS:-}" ]; then
+    return 0
+  fi
+
+  if [ -z "$(hook_binary_path)" ]; then
+    warn "Skipping hook cleanup because installer binary path is missing from state"
+    return 0
+  fi
+
+  if [ -n "${PIAR_CLAUDE_HOOK_SETTINGS:-}" ]; then
+    if is_expected_hook_settings_path "$PIAR_CLAUDE_HOOK_SETTINGS" "claude"; then
+      remove_hook_from_settings "$PIAR_CLAUDE_HOOK_SETTINGS" "PreToolUse" "Bash"
+    else
+      warn "Skipping unexpected Claude hook settings path: $PIAR_CLAUDE_HOOK_SETTINGS"
+    fi
+  fi
+  if [ -n "${PIAR_GEMINI_HOOK_SETTINGS:-}" ]; then
+    if is_expected_hook_settings_path "$PIAR_GEMINI_HOOK_SETTINGS" "gemini"; then
+      remove_hook_from_settings "$PIAR_GEMINI_HOOK_SETTINGS" "BeforeTool" "run_shell_command"
+    else
+      warn "Skipping unexpected Gemini hook settings path: $PIAR_GEMINI_HOOK_SETTINGS"
+    fi
+  fi
+}
+
 remove_file_if_exists() {
   local path="$1"
   if [ -e "$path" ] || [ -L "$path" ]; then
     rm -f "$path"
+    return 0
+  fi
+  return 1
+}
+
+remove_path_recursively() {
+  local target="$1"
+  if [ -z "$target" ]; then
+    return 1
+  fi
+  if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+    return 0
+  fi
+  if [ -L "$target" ] || [ -f "$target" ] || [ -p "$target" ] || [ -S "$target" ] || [ -b "$target" ] || [ -c "$target" ]; then
+    rm -f "$target"
+    return $?
+  fi
+  if [ -d "$target" ]; then
+    local child=""
+    while IFS= read -r -d '' child; do
+      remove_path_recursively "$child" || return 1
+    done < <(find "$target" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+    rmdir "$target" 2>/dev/null || return 1
     return 0
   fi
   return 1
@@ -367,7 +630,7 @@ remove_installed_skills() {
       continue
     fi
 
-    rm -rf "$dir" 2>/dev/null || true
+    remove_path_recursively "$dir" 2>/dev/null || true
     if [ ! -e "$dir" ]; then
       ok "Removed installer-managed skill: $dir"
     else
@@ -404,6 +667,9 @@ plan_summary() {
   fi
   if [ -n "$PIAR_AGENT_SKILL_CLAUDE_PATH" ] || [ -n "$PIAR_AGENT_SKILL_CODEX_PATH" ]; then
     lines+=("Agent skills: remove installer-managed Claude/Codex skill dirs")
+  fi
+  if [ -n "$PIAR_CLAUDE_HOOK_SETTINGS" ] || [ -n "$PIAR_GEMINI_HOOK_SETTINGS" ]; then
+    lines+=("Agent hooks: remove installer-managed Claude/Gemini hook entries")
   fi
   if [ -n "$PIAR_AGENT_SKILL_STATUS" ]; then
     lines+=("Recorded skill status: $PIAR_AGENT_SKILL_STATUS")
@@ -448,6 +714,7 @@ main() {
   remove_installed_binary
   remove_legacy_alias
   remove_installed_skills
+  remove_installer_hooks
   restore_moved_typescript_pi
   remove_path_entries
   remove_state
