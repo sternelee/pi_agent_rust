@@ -13,8 +13,8 @@ use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
 use pi::conformance::normalization::{is_path_key, path_suffix_match};
 use pi::extensions::{
-    ExtensionManager, ExtensionSession, HostcallInterceptor, JsExtensionLoadSpec,
-    JsExtensionRuntimeHandle,
+    ExtensionManager, ExtensionPolicy, ExtensionPolicyMode, ExtensionSession, HostcallInterceptor,
+    JsExtensionLoadSpec, JsExtensionRuntimeHandle,
 };
 use pi::extensions_js::{HostcallKind, HostcallRequest, PiJsRuntimeConfig};
 use pi::scheduler::HostcallOutcome;
@@ -1763,12 +1763,16 @@ fn load_extension_with_mocks(
         let manager = manager.clone();
         let tools = Arc::clone(&tools);
         let interceptor_clone = Arc::clone(&interceptor) as Arc<dyn HostcallInterceptor>;
+        let mut policy = ExtensionPolicy::default();
+        policy.mode = ExtensionPolicyMode::Permissive;
+        policy.deny_caps.clear();
         async move {
-            JsExtensionRuntimeHandle::start_with_interceptor(
+            JsExtensionRuntimeHandle::start_with_interceptor_and_policy(
                 js_config,
                 tools,
                 manager,
                 interceptor_clone,
+                policy,
             )
             .await
             .map_err(|e| format!("start runtime: {e}"))
@@ -3420,6 +3424,10 @@ fn pi_mono_node_modules() -> PathBuf {
     pi_mono_root().join("node_modules")
 }
 
+fn pi_mono_coding_agent_node_modules() -> PathBuf {
+    pi_mono_root().join("packages/coding-agent/node_modules")
+}
+
 fn pi_mono_packages() -> PathBuf {
     pi_mono_root().join("packages")
 }
@@ -3472,25 +3480,29 @@ fn run_ts_scenario(extension_path: &Path, scenario: &Scenario) -> Result<Value, 
     let node_path_base = ts_oracle_node_path();
     let node_path: Cow<'_, str> = match std::env::var("NODE_PATH") {
         Ok(existing) if !existing.trim().is_empty() => Cow::Owned(format!(
-            "{}:{}:{}",
+            "{}:{}:{}:{}",
             node_path_base.display(),
             pi_mono_node_modules().display(),
+            pi_mono_coding_agent_node_modules().display(),
             existing
         )),
         _ => Cow::Owned(format!(
-            "{}:{}",
+            "{}:{}:{}",
             node_path_base.display(),
-            pi_mono_node_modules().display()
+            pi_mono_node_modules().display(),
+            pi_mono_coding_agent_node_modules().display()
         )),
     };
 
     // Build scenario JSON for stdin
     let scenario_input = serde_json::json!({
+        "id": scenario.id,
         "kind": scenario.kind,
         "tool_name": scenario.tool_name,
         "command_name": scenario.command_name,
         "event_name": scenario.event_name,
         "input": scenario.input,
+        "setup": scenario.setup,
     });
     let stdin_data =
         serde_json::to_string(&scenario_input).map_err(|e| format!("serialize scenario: {e}"))?;
@@ -3580,6 +3592,11 @@ fn normalize_result(val: &Value) -> Value {
             for (k, v) in map {
                 // Skip timing fields
                 if k == "load_time_ms" || k == "exec_time_ms" || k == "duration_ms" {
+                    continue;
+                }
+                // Treat absent vs explicit null as equivalent for optional fields
+                // emitted by one runtime but omitted by the other.
+                if k == "savedPath" && v.is_null() {
                     continue;
                 }
                 out.insert(k.clone(), normalize_result(v));
@@ -3728,70 +3745,52 @@ fn parity_runner() {
                 continue;
             };
 
-            // Run Rust
+            // Registration-only: skip parity
+            if scenario.kind == "provider"
+                || (scenario.kind == "tool" && scenario.tool_name.is_none())
+            {
+                results.push(ParityResult {
+                    status: "skip".to_string(),
+                    skip_reason: Some("registration-only scenario".to_string()),
+                    ..base
+                });
+                continue;
+            }
+
+            // Run Rust via the same scenario harness used by scenario_conformance,
+            // so mock-backed contexts (UI responses, exec/http stubs) stay aligned.
             let rust_start = Instant::now();
-            let rust_result = match scenario.kind.as_str() {
-                "tool" if scenario.tool_name.is_some() => {
-                    let loaded = match load_extension(&ext_path) {
-                        Ok(l) => l,
-                        Err(e) => {
-                            results.push(ParityResult {
-                                status: "rust_error".to_string(),
-                                error: Some(format!("load: {e}")),
-                                ..base
-                            });
-                            continue;
-                        }
-                    };
-                    execute_tool_scenario(&loaded, scenario, &ext_path)
-                }
-                "command" => {
-                    let loaded = match load_extension(&ext_path) {
-                        Ok(l) => l,
-                        Err(e) => {
-                            results.push(ParityResult {
-                                status: "rust_error".to_string(),
-                                error: Some(format!("load: {e}")),
-                                ..base
-                            });
-                            continue;
-                        }
-                    };
-                    execute_command_scenario(&loaded, scenario, &ext_path)
-                }
-                "event" => {
-                    let loaded = match load_extension(&ext_path) {
-                        Ok(l) => l,
-                        Err(e) => {
-                            results.push(ParityResult {
-                                status: "rust_error".to_string(),
-                                error: Some(format!("load: {e}")),
-                                ..base
-                            });
-                            continue;
-                        }
-                    };
-                    execute_event_scenario(&loaded, scenario, &ext_path)
-                }
-                "provider" | "tool" => {
-                    // Registration-only: skip parity
-                    results.push(ParityResult {
-                        status: "skip".to_string(),
-                        skip_reason: Some("registration-only scenario".to_string()),
-                        ..base
-                    });
-                    continue;
-                }
-                other => {
-                    results.push(ParityResult {
-                        status: "skip".to_string(),
-                        skip_reason: Some(format!("unsupported kind: {other}")),
-                        ..base
-                    });
-                    continue;
-                }
-            };
+            let rust_exec = run_scenario(ext, scenario, &sample.items);
             let rust_ms = u64::try_from(rust_start.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+            let rust_result = match rust_exec.status.as_str() {
+                "skip" => {
+                    results.push(ParityResult {
+                        status: "skip".to_string(),
+                        skip_reason: rust_exec
+                            .skip_reason
+                            .or_else(|| Some("scenario skipped by Rust harness".to_string())),
+                        rust_ms,
+                        ..base
+                    });
+                    continue;
+                }
+                "error" => {
+                    results.push(ParityResult {
+                        status: "rust_error".to_string(),
+                        error: rust_exec
+                            .error
+                            .or_else(|| Some("scenario execution error".to_string())),
+                        rust_ms,
+                        ..base
+                    });
+                    continue;
+                }
+                _ => match rust_exec.error {
+                    Some(err) => Err(err),
+                    None => Ok(rust_exec.output.unwrap_or(Value::Null)),
+                },
+            };
 
             // Run TS oracle
             let ts_start = Instant::now();
@@ -3925,17 +3924,9 @@ fn parity_runner() {
     eprintln!("[parity] Events: {}", parity_jsonl.display());
     eprintln!("[parity] Triage: {}", triage_path.display());
 
-    // Known environment-dependent scenarios where TS and Rust legitimately differ
-    // due to different working directories / filesystem content
-    let known_env_diffs: &[&str] = &[
-        "scn-subagent-001", // TS finds project agents in pi-mono dir; Rust uses empty test dir
-    ];
-
     // Assert no unexpected mismatches
-    let parity_failures: Vec<&ParityResult> = results
-        .iter()
-        .filter(|r| r.status == "mismatch" && !known_env_diffs.contains(&r.scenario_id.as_str()))
-        .collect();
+    let parity_failures: Vec<&ParityResult> =
+        results.iter().filter(|r| r.status == "mismatch").collect();
     assert!(
         parity_failures.is_empty(),
         "Parity mismatches ({}):\n{}",
