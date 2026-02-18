@@ -601,16 +601,44 @@ fn should_sample_shadow_dual_exec(request: &HostcallRequest, sample_ppm: u32) ->
     if sample_ppm >= DUAL_EXEC_SAMPLE_MODULUS_PPM {
         return true;
     }
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(request.call_id.as_bytes());
-    hasher.update(request.trace_id.to_le_bytes());
-    if let Some(extension_id) = request.extension_id.as_deref() {
-        hasher.update(extension_id.as_bytes());
-    }
-    let digest = hasher.finalize();
-    let bucket = u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]])
-        % DUAL_EXEC_SAMPLE_MODULUS_PPM;
+    let bucket = shadow_sampling_bucket(request) % DUAL_EXEC_SAMPLE_MODULUS_PPM;
     bucket < sample_ppm
+}
+
+#[inline]
+fn fnv1a64_update(mut hash: u64, bytes: &[u8]) -> u64 {
+    const FNV1A_PRIME: u64 = 1_099_511_628_211;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV1A_PRIME);
+    }
+    hash
+}
+
+#[inline]
+fn shadow_sampling_bucket(request: &HostcallRequest) -> u32 {
+    // Deterministic, allocation-free mixing for high-frequency sampling checks.
+    const FNV1A_OFFSET_BASIS: u64 = 14_695_981_039_346_656_037;
+    let mut hash = FNV1A_OFFSET_BASIS;
+    hash = fnv1a64_update(hash, request.call_id.as_bytes());
+    hash = fnv1a64_update(hash, &[0xFF]);
+    hash = fnv1a64_update(hash, &request.trace_id.to_le_bytes());
+    if let Some(extension_id) = request.extension_id.as_deref() {
+        hash = fnv1a64_update(hash, &[0xFE]);
+        hash = fnv1a64_update(hash, extension_id.as_bytes());
+    }
+
+    // Final avalanche to improve low-bit dispersion before modulus.
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    hash ^= hash >> 33;
+
+    let bytes = hash.to_le_bytes();
+    let low = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let high = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    low ^ high
 }
 
 fn normalized_shadow_op(op: &str) -> String {
@@ -624,42 +652,79 @@ fn normalized_shadow_op(op: &str) -> String {
     normalized
 }
 
+#[inline]
+fn with_folded_ascii_alnum_token<T>(token: &str, f: impl FnOnce(&[u8]) -> T) -> T {
+    const INLINE_CAP: usize = 64;
+    let mut inline = [0_u8; INLINE_CAP];
+    let mut inline_len = 0_usize;
+    let mut heap: Option<Vec<u8>> = None;
+
+    for byte in token.trim().bytes() {
+        if !byte.is_ascii_alphanumeric() {
+            continue;
+        }
+        let folded = byte.to_ascii_lowercase();
+        if let Some(buf) = heap.as_mut() {
+            buf.push(folded);
+            continue;
+        }
+        if inline_len < INLINE_CAP {
+            inline[inline_len] = folded;
+            inline_len += 1;
+        } else {
+            let mut buf = Vec::with_capacity(token.len());
+            buf.extend_from_slice(&inline[..inline_len]);
+            buf.push(folded);
+            heap = Some(buf);
+        }
+    }
+
+    if let Some(buf) = heap {
+        f(buf.as_slice())
+    } else {
+        f(&inline[..inline_len])
+    }
+}
+
 fn shadow_safe_session_op(op: &str) -> bool {
-    let normalized = normalized_shadow_op(op);
-    matches!(
-        normalized.as_str(),
-        "getstate"
-            | "getmessages"
-            | "getentries"
-            | "getbranch"
-            | "getfile"
-            | "getname"
-            | "getmodel"
-            | "getthinkinglevel"
-            | "getlabel"
-            | "getlabels"
-            | "getallsessions"
-    )
+    with_folded_ascii_alnum_token(op, |folded| {
+        matches!(
+            folded,
+            b"getstate"
+                | b"getmessages"
+                | b"getentries"
+                | b"getbranch"
+                | b"getfile"
+                | b"getname"
+                | b"getmodel"
+                | b"getthinkinglevel"
+                | b"getlabel"
+                | b"getlabels"
+                | b"getallsessions"
+        )
+    })
 }
 
 fn shadow_safe_events_op(op: &str) -> bool {
-    let normalized = normalized_shadow_op(op);
-    matches!(
-        normalized.as_str(),
-        "getactivetools"
-            | "getalltools"
-            | "getmodel"
-            | "getthinkinglevel"
-            | "getflag"
-            | "listflags"
-    )
+    with_folded_ascii_alnum_token(op, |folded| {
+        matches!(
+            folded,
+            b"getactivetools"
+                | b"getalltools"
+                | b"getmodel"
+                | b"getthinkinglevel"
+                | b"getflag"
+                | b"listflags"
+        )
+    })
 }
 
 fn shadow_safe_tool(name: &str) -> bool {
-    matches!(
-        name.trim().to_ascii_lowercase().as_str(),
-        "read" | "grep" | "find" | "ls"
-    )
+    let name = name.trim();
+    name.eq_ignore_ascii_case("read")
+        || name.eq_ignore_ascii_case("grep")
+        || name.eq_ignore_ascii_case("find")
+        || name.eq_ignore_ascii_case("ls")
 }
 
 fn is_shadow_safe_request(request: &HostcallRequest) -> bool {
@@ -1730,6 +1795,7 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn emit_io_uring_lane_telemetry(
         &self,
         request: &HostcallRequest,
@@ -1784,10 +1850,13 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
         );
     }
 
-    fn advanced_dispatch_enabled(&self) -> bool {
-        self.dual_exec_config.sample_ppm > 0
-            || self.io_uring_lane_config.enabled
-            || self.io_uring_force_compat
+    const fn advanced_dispatch_enabled(&self) -> bool {
+        self.dual_exec_config.sample_ppm > 0 || self.io_uring_lane_active()
+    }
+
+    #[inline]
+    const fn io_uring_lane_active(&self) -> bool {
+        self.io_uring_lane_config.enabled || self.io_uring_force_compat
     }
 
     /// Drain pending hostcall requests from the JS runtime.
@@ -1973,7 +2042,7 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
     }
 
     /// Dispatch a hostcall and enqueue its completion into the JS scheduler.
-    #[allow(clippy::future_not_send)]
+    #[allow(clippy::future_not_send, clippy::too_many_lines)]
     pub async fn dispatch_and_complete(&self, request: HostcallRequest) {
         let cap = request.required_capability();
         let (check, lookup_path) = self.policy_lookup(cap, request.extension_id.as_deref());
@@ -2000,52 +2069,67 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
             return;
         }
 
-        let queue_snapshot = self.js_runtime().hostcall_queue_telemetry();
-        let queue_depth = queue_snapshot.total_depth;
-        let overflow_depth = queue_snapshot.overflow_depth;
-        let overflow_rejected_total = queue_snapshot.overflow_rejected_total;
         let dispatch_started_at = Instant::now();
-        let opcode_entropy = hostcall_opcode_entropy(&request.kind, &request.payload);
-        let io_hint = hostcall_io_hint(&request.kind);
-        let capability_class = HostcallCapabilityClass::from_capability(cap);
-        let lane_decision = decide_io_uring_lane(
-            self.io_uring_lane_config,
-            IoUringLaneDecisionInput {
-                capability: capability_class,
+        let mut queue_depth = 1_usize;
+        let mut overflow_depth = 0_usize;
+        let mut overflow_rejected_total = 0_u64;
+
+        let (outcome, lane_for_shadow) = if self.io_uring_lane_active() {
+            let queue_snapshot = self.js_runtime().hostcall_queue_telemetry();
+            queue_depth = queue_snapshot.total_depth;
+            overflow_depth = queue_snapshot.overflow_depth;
+            overflow_rejected_total = queue_snapshot.overflow_rejected_total;
+
+            let io_hint = hostcall_io_hint(&request.kind);
+            let capability_class = HostcallCapabilityClass::from_capability(cap);
+            let lane_decision = decide_io_uring_lane(
+                self.io_uring_lane_config,
+                IoUringLaneDecisionInput {
+                    capability: capability_class,
+                    io_hint,
+                    queue_depth,
+                    force_compat_lane: self.io_uring_force_compat,
+                },
+            );
+            self.emit_io_uring_lane_telemetry(
+                &request,
+                cap,
+                capability_class,
                 io_hint,
                 queue_depth,
-                force_compat_lane: self.io_uring_force_compat,
-            },
-        );
-        self.emit_io_uring_lane_telemetry(
-            &request,
-            cap,
-            capability_class,
-            io_hint,
-            queue_depth,
-            lane_decision.lane,
-            lane_decision.fallback_code(),
-        );
+                lane_decision.lane,
+                lane_decision.fallback_code(),
+            );
 
-        let outcome = match lane_decision.lane {
-            HostcallDispatchLane::Fast => self.dispatch_hostcall_fast(&request).await,
-            HostcallDispatchLane::IoUring => {
-                let bridge_dispatch = self.dispatch_hostcall_io_uring(&request).await;
-                self.emit_io_uring_bridge_telemetry(
-                    &request,
-                    bridge_dispatch.state,
-                    bridge_dispatch.fallback_reason,
-                );
-                bridge_dispatch.outcome
-            }
-            HostcallDispatchLane::Compat => self.dispatch_hostcall_compat_shadow(&request).await,
+            let outcome = match lane_decision.lane {
+                HostcallDispatchLane::Fast => self.dispatch_hostcall_fast(&request).await,
+                HostcallDispatchLane::IoUring => {
+                    let bridge_dispatch = self.dispatch_hostcall_io_uring(&request).await;
+                    self.emit_io_uring_bridge_telemetry(
+                        &request,
+                        bridge_dispatch.state,
+                        bridge_dispatch.fallback_reason,
+                    );
+                    bridge_dispatch.outcome
+                }
+                HostcallDispatchLane::Compat => {
+                    self.dispatch_hostcall_compat_shadow(&request).await
+                }
+            };
+            (outcome, lane_decision.lane)
+        } else {
+            (
+                self.dispatch_hostcall_fast(&request).await,
+                HostcallDispatchLane::Fast,
+            )
         };
 
-        if lane_decision.lane != HostcallDispatchLane::Compat {
+        if lane_for_shadow != HostcallDispatchLane::Compat {
             self.run_shadow_dual_exec(&request, &outcome).await;
         }
 
         let service_time_us = dispatch_started_at.elapsed().as_secs_f64() * 1_000_000.0;
+        let opcode_entropy = hostcall_opcode_entropy(&request.kind, &request.payload);
         let llc_miss_rate = llc_miss_proxy(queue_depth, overflow_depth, overflow_rejected_total);
         let regime_signal = RegimeSignal {
             queue_depth: usize_to_f64(queue_depth),
@@ -3764,6 +3848,23 @@ mod tests {
             Arc::new(NullUiHandler),
             PathBuf::from("."),
             policy,
+        )
+    }
+
+    fn build_dispatcher_with_policy_and_oracle(
+        runtime: Rc<PiJsRuntime<DeterministicClock>>,
+        policy: ExtensionPolicy,
+        oracle_config: DualExecOracleConfig,
+    ) -> ExtensionDispatcher<DeterministicClock> {
+        ExtensionDispatcher::new_with_policy_and_oracle_config(
+            runtime,
+            Arc::new(ToolRegistry::new(&[], Path::new("."), None)),
+            Arc::new(HttpConnector::with_defaults()),
+            Arc::new(NullSession),
+            Arc::new(NullUiHandler),
+            PathBuf::from("."),
+            policy,
+            oracle_config,
         )
     }
 
@@ -10085,6 +10186,62 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_denied_capability_still_denied_when_advanced_path_disabled() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+
+            runtime
+                .eval(
+                    r#"
+                    globalThis.err = null;
+                    pi.exec("echo", ["hello"]).catch((e) => { globalThis.err = e; });
+                "#,
+                )
+                .await
+                .expect("eval");
+
+            let requests = runtime.drain_hostcall_requests();
+            assert_eq!(requests.len(), 1);
+
+            let oracle_config = DualExecOracleConfig {
+                sample_ppm: 0,
+                ..DualExecOracleConfig::default()
+            };
+            let policy = ExtensionPolicy::from_profile(PolicyProfile::Safe);
+            let mut dispatcher =
+                build_dispatcher_with_policy_and_oracle(Rc::clone(&runtime), policy, oracle_config);
+            dispatcher.io_uring_lane_config = IoUringLanePolicyConfig::conservative();
+            dispatcher.io_uring_force_compat = false;
+            assert!(
+                !dispatcher.advanced_dispatch_enabled(),
+                "advanced path should be disabled for this test"
+            );
+
+            for request in requests {
+                dispatcher.dispatch_and_complete(request).await;
+            }
+
+            let _ = runtime.tick().await.expect("tick");
+
+            runtime
+                .eval(
+                    r#"
+                    if (globalThis.err === null) throw new Error("Promise not rejected");
+                    if (globalThis.err.code !== "denied") {
+                        throw new Error("Expected denied code, got: " + globalThis.err.code);
+                    }
+                "#,
+                )
+                .await
+                .expect("verify denied error");
+        });
+    }
+
+    #[test]
     fn dispatch_allowed_capability_proceeds() {
         futures::executor::block_on(async {
             let runtime = Rc::new(
@@ -10123,6 +10280,131 @@ mod tests {
                 )
                 .await
                 .expect("verify allowed");
+        });
+    }
+
+    #[test]
+    fn dispatch_allowed_capability_still_resolves_when_advanced_path_disabled() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+
+            runtime
+                .eval(
+                    r#"
+                    globalThis.result = null;
+                    pi.log("test message").then((r) => { globalThis.result = r; });
+                "#,
+                )
+                .await
+                .expect("eval");
+
+            let requests = runtime.drain_hostcall_requests();
+            assert_eq!(requests.len(), 1);
+
+            let oracle_config = DualExecOracleConfig {
+                sample_ppm: 0,
+                ..DualExecOracleConfig::default()
+            };
+            let policy = ExtensionPolicy::from_profile(PolicyProfile::Permissive);
+            let mut dispatcher =
+                build_dispatcher_with_policy_and_oracle(Rc::clone(&runtime), policy, oracle_config);
+            dispatcher.io_uring_lane_config = IoUringLanePolicyConfig::conservative();
+            dispatcher.io_uring_force_compat = false;
+            assert!(
+                !dispatcher.advanced_dispatch_enabled(),
+                "advanced path should be disabled for this test"
+            );
+
+            for request in requests {
+                dispatcher.dispatch_and_complete(request).await;
+            }
+
+            let _ = runtime.tick().await.expect("tick");
+
+            runtime
+                .eval(
+                    r#"
+                    if (globalThis.result === null) throw new Error("Promise not resolved");
+                "#,
+                )
+                .await
+                .expect("verify allowed");
+        });
+    }
+
+    #[test]
+    fn advanced_dispatch_enabled_when_dual_exec_sampling_non_zero() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+            let oracle_config = DualExecOracleConfig {
+                sample_ppm: 1,
+                ..DualExecOracleConfig::default()
+            };
+            let dispatcher = build_dispatcher_with_policy_and_oracle(
+                Rc::clone(&runtime),
+                ExtensionPolicy::from_profile(PolicyProfile::Permissive),
+                oracle_config,
+            );
+            assert!(dispatcher.advanced_dispatch_enabled());
+        });
+    }
+
+    #[test]
+    fn advanced_dispatch_enabled_when_io_uring_is_enabled() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+            let oracle_config = DualExecOracleConfig {
+                sample_ppm: 0,
+                ..DualExecOracleConfig::default()
+            };
+            let mut dispatcher = build_dispatcher_with_policy_and_oracle(
+                Rc::clone(&runtime),
+                ExtensionPolicy::from_profile(PolicyProfile::Permissive),
+                oracle_config,
+            );
+            dispatcher.io_uring_lane_config = IoUringLanePolicyConfig {
+                enabled: true,
+                ring_available: true,
+                max_queue_depth: 256,
+                allow_filesystem: true,
+                allow_network: true,
+            };
+            assert!(dispatcher.advanced_dispatch_enabled());
+        });
+    }
+
+    #[test]
+    fn advanced_dispatch_enabled_when_io_uring_force_compat_is_set() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+            let oracle_config = DualExecOracleConfig {
+                sample_ppm: 0,
+                ..DualExecOracleConfig::default()
+            };
+            let mut dispatcher = build_dispatcher_with_policy_and_oracle(
+                Rc::clone(&runtime),
+                ExtensionPolicy::from_profile(PolicyProfile::Permissive),
+                oracle_config,
+            );
+            dispatcher.io_uring_lane_config = IoUringLanePolicyConfig::conservative();
+            dispatcher.io_uring_force_compat = true;
+            assert!(dispatcher.advanced_dispatch_enabled());
         });
     }
 
