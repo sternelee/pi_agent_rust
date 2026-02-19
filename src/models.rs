@@ -28,7 +28,11 @@ impl ModelEntry {
     pub fn supports_xhigh(&self) -> bool {
         matches!(
             self.model.id.as_str(),
-            "gpt-5.1-codex-max" | "gpt-5.2" | "gpt-5.2-codex" | "gpt-5.3-codex"
+            "gpt-5.1-codex-max"
+                | "gpt-5.2"
+                | "gpt-5.2-codex"
+                | "gpt-5.3-codex"
+                | "gpt-5.3-codex-spark"
         )
     }
 
@@ -730,6 +734,37 @@ fn built_in_models(auth: &AuthStorage) -> Vec<ModelEntry> {
             model: Model {
                 id: "gpt-5.3-codex".to_string(),
                 name: "GPT-5.3 Codex".to_string(),
+                api: Api::OpenAICodexResponses.to_string(),
+                provider: "openai-codex".to_string(),
+                base_url: "https://chatgpt.com/backend-api".to_string(),
+                reasoning: true,
+                input: vec![InputType::Text, InputType::Image],
+                cost: ModelCost {
+                    input: 0.0,
+                    output: 0.0,
+                    cache_read: 0.0,
+                    cache_write: 0.0,
+                },
+                context_window: 272_000,
+                max_tokens: 128_000,
+                headers: HashMap::new(),
+            },
+            api_key: auth.resolve_api_key("openai-codex", None),
+            headers: HashMap::new(),
+            auth_header: true,
+            compat: None,
+            oauth_config: None,
+        });
+    }
+
+    // Ensure the latest Codex Spark variant exists for OpenAI Codex routing.
+    if !models.iter().any(|entry| {
+        entry.model.provider == "openai-codex" && entry.model.id == "gpt-5.3-codex-spark"
+    }) {
+        models.push(ModelEntry {
+            model: Model {
+                id: "gpt-5.3-codex-spark".to_string(),
+                name: "GPT-5.3 Codex Spark".to_string(),
                 api: Api::OpenAICodexResponses.to_string(),
                 provider: "openai-codex".to_string(),
                 base_url: "https://chatgpt.com/backend-api".to_string(),
@@ -2004,6 +2039,7 @@ mod tests {
         assert!(make_model_entry("gpt-5.2", true).supports_xhigh());
         assert!(make_model_entry("gpt-5.2-codex", true).supports_xhigh());
         assert!(make_model_entry("gpt-5.3-codex", true).supports_xhigh());
+        assert!(make_model_entry("gpt-5.3-codex-spark", true).supports_xhigh());
     }
 
     #[test]
@@ -3007,7 +3043,11 @@ mod tests {
                 let entry = dummy_model(&id, true);
                 let expected = matches!(
                     id.as_str(),
-                    "gpt-5.1-codex-max" | "gpt-5.2" | "gpt-5.2-codex" | "gpt-5.3-codex"
+                    "gpt-5.1-codex-max"
+                        | "gpt-5.2"
+                        | "gpt-5.2-codex"
+                        | "gpt-5.3-codex"
+                        | "gpt-5.3-codex-spark"
                 );
                 assert_eq!(entry.supports_xhigh(), expected);
             }
