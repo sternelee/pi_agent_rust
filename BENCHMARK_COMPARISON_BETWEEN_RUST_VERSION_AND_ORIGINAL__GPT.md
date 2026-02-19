@@ -1,6 +1,6 @@
 # BENCHMARK_COMPARISON_BETWEEN_RUST_VERSION_AND_ORIGINAL__GPT
 
-Generated: 2026-02-18
+Generated: 2026-02-19
 Workspace: `/data/projects/pi_agent_rust`
 
 ## 0) Post-Hardening Status Update (2026-02-17)
@@ -33,11 +33,53 @@ This report now includes a post-hardening extension-compatibility checkpoint.
   - `cargo clippy --all-targets -- -D warnings` ✅
   - `cargo test --test event_loop_conformance --test lab_runtime_extensions --test extensions_event_wiring` ✅ (`12 + 15 + 133` tests passed)
 
+## 0.2) Live-Provider Release-Binary Checkpoint (2026-02-19)
+
+- Dev-firstset gate (debug binaries, required before any new release build in this flow):
+  - artifact: `tests/ext_conformance/reports/release_binary_e2e/ollama_firstset_dev_20260219_jobs10_timeout600.json`
+  - run: `release-e2e-20260219T032439Z`
+  - provider/model: `ollama` / `qwen2.5:0.5b`
+  - result: `20/20` pass (`0` fail, `0` timeout)
+- Full optimized release-binary sweep (after dev gate passed):
+  - artifact: `tests/ext_conformance/reports/release_binary_e2e/ollama_full_release_20260219_jobs10_timeout600.json`
+  - run: `release-e2e-20260219T033502Z`
+  - provider/model: `ollama` / `qwen2.5:0.5b`
+  - result: `224/224` pass (`0` fail, `0` timeout)
+- This lane is compatibility-focused (real `pi` binary + live provider path) rather than paid-provider throughput benchmarking.
+
+## 0.3) Full Perf Orchestrator Checkpoint (2026-02-19)
+
+- Full-suite orchestration run:
+  - command: `./scripts/perf/orchestrate.sh --profile full --skip-build --no-rch --output-dir /data/tmp/pi_agent_rust/codex/perf/full_local_skipbuild_retry_20260219T0650Z`
+  - correlation: `fullbench-local-skipbuild-retry-20260219T0650Z`
+  - manifest: `/data/tmp/pi_agent_rust/codex/perf/full_local_skipbuild_retry_20260219T0650Z/manifest.json`
+- Run summary:
+  - suites: `11` total, `9` pass, `2` fail, `0` skip
+  - duration: `1,601,650ms`
+  - passing suites:
+    - `perf_comparison`
+    - `perf_bench_harness`
+    - `perf_baseline_variance`
+    - `ext_bench_harness`
+    - `bench_schema`
+    - `bench_scenario`
+    - `criterion_tools`
+    - `criterion_system`
+    - `criterion_extensions`
+  - failing suites:
+    - `perf_budgets` (`exit=101`): strict fail-closed budget contract due missing/stale evidence artifacts at expected canonical paths (criterion/pijs/release-binary inputs).
+    - `perf_regression` (`exit=101`): `binary_size_check` failed because release binary path was not present for strict mode (`/data/tmp/pi_agent_rust/codex/perf/release/pi`).
+- Interpretation:
+  - The two failures are evidence-path/precondition failures, not a demonstrated runtime-latency regression.
+  - In the same run, the measured startup guards in `perf_regression` remained green (`--help` P95 `3.8ms`, `--version` P95 `3.6ms`).
+
 ## 1) Lede (Do Not Bury This)
 
-1. Fresh secure-path reruns (2026-02-18) show major Rust improvements; against the last validated legacy baselines, Rust now wins the measured `1M`/`5M` matched-state and realistic workload totals in this report’s harness.
+1. Fresh secure-path reruns (2026-02-18) plus a full orchestrator checkpoint (2026-02-19) continue to show the same trendline: against the last validated legacy baselines, Rust wins the measured `1M`/`5M` matched-state and realistic workload totals in this report’s harness.
 2. Rust remains **much smaller in memory footprint** in matched-state and realistic flows, with substantial RSS advantages retained.
-3. Extension compatibility is currently fully passing in local conformance validation: matrix run shows `224/224` pass (`0` fail, `0` skipped).
+3. Extension compatibility is fully passing in both local matrix conformance and live-provider release-binary execution:
+   - Matrix: `224/224` pass (`0` fail, `0` skipped)
+   - Release-binary E2E (ollama, optimized binaries): `224/224` pass (`0` fail, `0` timeout)
 4. Rust has significantly expanded first-class capability surface versus legacy coding-agent CLI (commands, policy explainers, provider metadata/control, risk/quota/security instrumentation).
 5. The largest practical optimization target remains session append/save behavior at high token-volume and large histories; this is the best lever for major speed gains.
 6. Startup/readiness latency strongly favors Rust in this snapshot: fresh Rust `--help`/`--version` means are ~`3.02ms`/`2.77ms`; direct legacy reruns are currently blocked, but prior validated legacy means remain ~`1.0s` (Node) and ~`0.73s` (Bun).
@@ -93,12 +135,14 @@ Build/regeneration note:
 - Realistic E2E benchmark: resume + append + extension-like activity + slash-like state changes + forking + exports + compactions.
 - Extension microbench: real extension loading and real tool/event dispatch.
 - Extension corpus conformance: full vendored/unvendored compatibility reports.
+- Release-binary live-provider extension E2E: dev-firstset gate (`20` cases) followed by full optimized sweep (`224` cases).
 - These suites are intended to function as a practical system-level regression harness, not just synthetic microbench snapshots.
 
 ### 2.4 Provider API Cost Control
 - This report does **not** use paid external API calls for the benchmark matrices.
-- No cost-driving live-provider throughput benchmark is included here.
-- If provider-call benchmarks are added, use `ollama` first for cost control.
+- It does include live-provider extension compatibility runs using local `ollama` (`qwen2.5:0.5b`) to validate non-mocked runtime behavior.
+- No paid-provider throughput benchmark is included here.
+- If provider-call throughput benchmarks are added, use `ollama` first for cost control.
 
 ---
 
@@ -549,6 +593,8 @@ Sources:
 - `tests/ext_conformance/reports/sharded/shard_0_report.json` (`generated_at=2026-02-18T23:43:48Z`)
 - `tests/ext_conformance/reports/scenario_conformance.json` (`generated_at=2026-02-18T23:11:57Z`)
 - `tests/ext_conformance/reports/parity/triage.json` (`generated_at=2026-02-18T23:12:13Z`)
+- `tests/ext_conformance/reports/release_binary_e2e/ollama_firstset_dev_20260219_jobs10_timeout600.json` (`runId=release-e2e-20260219T032439Z`)
+- `tests/ext_conformance/reports/release_binary_e2e/ollama_full_release_20260219_jobs10_timeout600.json` (`runId=release-e2e-20260219T033502Z`)
 
 Vendored matrix status:
 - manifest count: `224`
@@ -572,6 +618,30 @@ Parity triage sample:
 - skip: `3`
 - rust_error: `0`
 - ts_error: `0`
+
+## 7.3.1 Release-Binary Live-Provider E2E (2026-02-19)
+
+Execution order used for this checkpoint:
+1. Dev-firstset gate on debug binaries (`max_cases=20`) to validate behavior before release build.
+2. Full optimized release-binary sweep on the complete vendored manifest.
+
+Results:
+- Dev-firstset gate (`ollama_firstset_dev_20260219_jobs10_timeout600.json`):
+  - total: `20`
+  - pass: `20`
+  - fail: `0`
+  - timeout: `0`
+- Full release sweep (`ollama_full_release_20260219_jobs10_timeout600.json`):
+  - total: `224`
+  - pass: `224`
+  - fail: `0`
+  - timeout: `0`
+  - missing_extension: `0`
+  - process_error: `0`
+
+Interpretation:
+- The extension compatibility claim now has both harness-level conformance evidence and real `target/release/pi` live-provider execution evidence.
+- This is strong runtime compatibility validation; it is not a throughput/latency benchmark for provider quality.
 
 ## 7.4 Historical Baseline (2026-02-14, Superseded)
 

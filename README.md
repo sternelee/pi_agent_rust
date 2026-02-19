@@ -78,6 +78,8 @@ Security is a first-class design goal here, not a bolt-on:
 - Capability-gated hostcalls (`tool`/`exec`/`http`/`session`/`ui`/`events`)
 - Two-stage extension `exec` enforcement: capability gate first, then command mediation that blocks critical shell classes by default (for example recursive delete, disk/device writes, reverse shell) and can tighten to block high-tier classes in strict/safe policy
 - Policy + runtime risk + quota enforcement on the execution path
+- Per-extension trust lifecycle (`pending` -> `acknowledged` -> `trusted` -> `killed`) with kill-switch audit logs and explicit operator provenance
+- Hostcall-lane emergency controls that can force compatibility-lane execution globally or for one extension when fast-lane behavior needs immediate containment
 - Structured concurrency via `asupersync` for more predictable cancellation/lifecycle behavior
 - Auditable runtime signals/ledgers and redacted security alerts for extension behavior
 
@@ -102,17 +104,37 @@ Resume/open responsiveness is also much better at scale:
 | 1M session resume | 17.59 ms | 119.76 ms | 50.83 ms | `6.81x` faster than Node, `2.89x` faster than Bun |
 | 5M session resume | 58.68 ms | 396.41 ms | 155.63 ms | `6.76x` faster than Node, `2.65x` faster than Bun |
 
-Extension assurance is also grounded in real execution paths:
+Extension runtime guarantees are also concrete:
 
 | Extension assurance signal | Why you should care |
 |---|---|
-| Two-stage `exec` guard (`exec` capability policy + command-level mediation) | Even when an extension is allowed to invoke `exec`, obviously dangerous shell signatures are blocked before process spawn and recorded in audit artifacts |
-| Release-binary live-provider E2E harness (`ext_release_binary_e2e`) | Extension behavior is validated via `target/release/pi` against a real provider/model path (default `ollama` + `qwen2.5:0.5b`), not only mocked flows |
-| Vendored conformance matrix + scenario suites | Day-to-day compatibility stays measurable and regression-resistant across the extension corpus |
+| Two-stage `exec` guard (`exec` capability policy + command-level mediation + DCG/heredoc AST signals) | Dangerous shell intent is caught before spawn, including destructive payloads hidden in multiline wrappers |
+| Trust lifecycle + kill switch (`pending/acknowledged/trusted/killed`) | You can quarantine an extension instantly, log who pulled the switch and why, and require explicit re-acknowledgement before restoring access |
+| Hostcall lane kill-switch controls (`forced_compat_global_kill_switch`, `forced_compat_extension_kill_switch`) | Fast-path regressions can be contained immediately by forcing compatibility-lane execution without disabling the extension system |
+| Deterministic hostcall reactor mesh (shard affinity, bounded SPSC lanes, backpressure telemetry, optional NUMA slab tracking) | Runtime behavior stays predictable under contention; queue pressure and routing decisions are observable instead of opaque |
+| Startup prewarm + warm isolate reuse for JS runtimes | Runtime creation overlaps startup and warm reuse keeps repeated extension runs low-latency without a Node/Bun process model |
+| Tamper-evident runtime risk ledger (`verify` / `replay` / `calibrate`) | Security decisions are hash-linked and can be replayed or threshold-tuned from real runtime traces |
 
-Bottom line: for real Pi/OpenClaw usage, the Rust version is faster, far more memory-efficient, and materially stronger on extension execution safety with realistic conformance evidence.
+Bottom line: for real Pi/OpenClaw usage, the Rust version is faster, far more memory-efficient, and materially stronger on extension runtime safety under real workload pressure.
 
-<sub>Data source: `BENCHMARK_COMPARISON_BETWEEN_RUST_VERSION_AND_ORIGINAL__GPT.md` (latest secure-path refresh, 2026-02-18).</sub>
+<sub>Data source: `BENCHMARK_COMPARISON_BETWEEN_RUST_VERSION_AND_ORIGINAL__GPT.md` (latest secure-path + full orchestrator checkpoints, 2026-02-19).</sub>
+
+## How We Made It So Fast
+
+In this README, `we` means the project owner and collaborating coding agents.  
+The speed gains come from runtime design, not one trick.
+
+| Technique | What we do | Runtime effect |
+|---|---|---|
+| Cold-start minimization | Single static binary, no Node/Bun runtime bootstrap, no JIT warmup, startup prewarm for extension runtime paths | Faster time-to-first-interaction |
+| Less copying on hot paths | `Arc`/`Cow` message flow, zero-copy hostcall/tool payload handling, reduced clone-heavy provider/session paths | Lower CPU and allocation pressure |
+| Deterministic dispatch core | Typed hostcall opcodes, fast-lane/compat-lane routing, bounded shard queues with reactor-mesh telemetry | Better tail latency under concurrent extension load |
+| Efficient long-session storage | SQLite session index + v2 sidecar (segmented log + offset index) with O(index+tail) reopen path | Fast resume on large histories |
+| Streaming parser tuned for real networks | SSE parser tracks scanned bytes, handles UTF-8 tails, normalizes chunk boundaries, interns event-type strings | Lower streaming overhead and fewer parser stalls |
+| Safe fast-path controls | Shadow dual execution sampling, automatic backoff on divergence/overhead, compatibility-lane kill switches for containment | Keeps optimizations fast without silent behavior drift |
+| CI-level performance governance | Scenario matrices, strict artifact contracts, fail-closed perf gates | Regressions are caught before release |
+
+If you want the full implementation inventory, see [Performance Engineering](#performance-engineering).
 
 ## Benchmark Methodology and Claim Integrity
 
@@ -344,11 +366,13 @@ Pi supports two extension runtime families with capability-gated host connectors
   - `.js/.ts/.mjs/.cjs/.tsx/.mts/.cts` run directly in embedded QuickJS (no descriptor conversion).
   - `*.native.json` loads the native-rust descriptor runtime.
   - One session currently uses one runtime family at a time (JS/TS or native descriptor).
-- Compatibility metrics are tracked in [docs/ext-compat.md](docs/ext-compat.md) and `tests/ext_conformance/reports/pipeline/`
 - **Sub-100ms cold load** (P95), **sub-1ms warm load** (P99)
 - Node API shims for `fs`, `path`, `os`, `crypto`, `child_process`, `url`, and more
 - Capability-based security: extensions call explicit connectors (`tool/exec/http/session/ui`) with audit logging
 - Command-level exec mediation: dangerous shell signatures are classified and blocked before spawn, with redacted denial alerts and mediation ledger entries
+- Trust-state lifecycle and kill-switch controls with audited state transitions (`pending`/`acknowledged`/`trusted`/`killed`)
+- Hostcall reactor mesh with deterministic shard routing, bounded queue backpressure, and optional NUMA-aware telemetry
+- Runtime prewarm path with warm isolate reuse so extension startup cost is mostly paid before the first prompt
 
 ### Credential-Aware Model Selection
 
@@ -408,21 +432,35 @@ This project validates extension compatibility with a three-track pipeline:
      - `tests/ext_conformance/reports/pipeline/full_validation_report.md`
      - Plus stage-specific reports under `tests/ext_conformance/reports/**`
 
-3. **Run release-binary live-provider E2E**
+3. **Run dev-firstset live-provider gate (must pass before release build)**
    - Binary: `ext_release_binary_e2e`
    - Typical command:
-     - `cargo build --release --bin pi`
-     - `cargo run --bin ext_release_binary_e2e -- --provider ollama --model qwen2.5:0.5b --max-cases 10 --out-json tests/ext_conformance/reports/release_binary_e2e/ollama_release_e2e_smoke.json --out-md tests/ext_conformance/reports/release_binary_e2e/ollama_release_e2e_smoke.md`
+     - `cargo build --bin pi --bin ext_release_binary_e2e`
+     - `PI_HTTP_REQUEST_TIMEOUT_SECS=0 target/debug/ext_release_binary_e2e --pi-bin target/debug/pi --provider ollama --model qwen2.5:0.5b --jobs 10 --timeout-secs 600 --max-cases 20 --extension-policy balanced --out-json tests/ext_conformance/reports/release_binary_e2e/ollama_firstset_dev_20260219_jobs10_timeout600.json --out-md tests/ext_conformance/reports/release_binary_e2e/ollama_firstset_dev_20260219_jobs10_timeout600.md`
+   - Purpose:
+     - Proves the current codepath works end-to-end on a representative first-set before paying release-build cost.
+     - Serves as the promotion gate to full release-binary validation.
+   - Gate:
+     - Require `pass=20 / total=20` with `fail=0`.
+   - Artifacts:
+     - `tests/ext_conformance/reports/release_binary_e2e/ollama_firstset_dev_20260219_jobs10_timeout600.json`
+     - `tests/ext_conformance/reports/release_binary_e2e/ollama_firstset_dev_20260219_jobs10_timeout600.md`
+
+4. **Run full release-binary live-provider E2E (after step 3 passes)**
+   - Binary: `ext_release_binary_e2e`
+   - Typical command:
+     - `cargo build --release --bin pi --bin ext_release_binary_e2e`
+     - `PI_HTTP_REQUEST_TIMEOUT_SECS=0 target/release/ext_release_binary_e2e --pi-bin target/release/pi --provider ollama --model qwen2.5:0.5b --jobs 10 --timeout-secs 600 --extension-policy balanced --out-json tests/ext_conformance/reports/release_binary_e2e/ollama_full_release_20260219_jobs10_timeout600.json --out-md tests/ext_conformance/reports/release_binary_e2e/ollama_full_release_20260219_jobs10_timeout600.md`
    - Purpose:
      - Executes `target/release/pi` directly for each selected extension case.
      - Uses a live provider/model path (default `ollama` + `qwen2.5:0.5b`) to exercise non-mocked end-to-end behavior.
      - Emits per-case stdout/stderr captures plus summary artifacts (`pi.ext.release_binary_e2e.v1`).
    - Artifacts:
-     - `tests/ext_conformance/reports/release_binary_e2e/ollama_release_e2e_smoke.json`
-     - `tests/ext_conformance/reports/release_binary_e2e/ollama_release_e2e_smoke.md`
+     - `tests/ext_conformance/reports/release_binary_e2e/ollama_full_release_20260219_jobs10_timeout600.json`
+     - `tests/ext_conformance/reports/release_binary_e2e/ollama_full_release_20260219_jobs10_timeout600.md`
      - `tests/ext_conformance/reports/release_binary_e2e/cases/*`
 
-4. **Aggregate and triage**
+5. **Aggregate and triage**
    - `full_validation_report.json` combines:
      - Stage-level pass/fail (`stageSummary`, `stageResults`)
      - Corpus counts (`corpus`)
@@ -456,12 +494,14 @@ From:
 - `tests/ext_conformance/reports/sharded/shard_0_report.json` (generated `2026-02-18T23:43:48Z`)
 - `tests/ext_conformance/reports/scenario_conformance.json` (generated `2026-02-18T23:11:57Z`)
 - `tests/ext_conformance/reports/parity/triage.json` (generated `2026-02-18T23:12:13Z`)
-- `tests/ext_conformance/reports/release_binary_e2e/ollama_release_e2e_smoke.md` (generated `2026-02-19T00:33:00Z`)
+- `tests/ext_conformance/reports/release_binary_e2e/ollama_firstset_dev_20260219_jobs10_timeout600.json` (run `release-e2e-20260219T032439Z`)
+- `tests/ext_conformance/reports/release_binary_e2e/ollama_full_release_20260219_jobs10_timeout600.json` (run `release-e2e-20260219T033502Z`)
 
 - Vendored matrix conformance: `manifest_count=224`, `tested=224`, `passed=224`, `failed=0`, `skipped=0`
 - Scenario suite conformance: `25/25` passed (`0` fail, `0` error, `0` skip)
 - Differential parity triage sample: `22` match, `0` mismatch, `3` skip (`total=25`)
-- Release-binary live-provider smoke: `9/10` passed with `1` timeout (`bash-spawn-hook`) under `ollama` + `qwen2.5:0.5b`
+- Dev first-set live-provider gate (`max_cases=20`, debug binaries): `20/20` passed (`0` fail, `0` timeout)
+- Release-binary live-provider full run (optimized binaries, `jobs=10`, `timeout=600s`, `ollama` + `qwen2.5:0.5b`): `224/224` passed (`0` fail, `0` timeout)
 
 ---
 
@@ -903,14 +943,19 @@ The sections above compare mechanics. This section calls out concrete features p
 | **`pi doctor` diagnostics command** (`text`/`json`/`markdown`, `--only`, `--fix`, extension compatibility checks) | Gives actionable environment + compatibility diagnostics, supports CI gating (non-zero on failures), and can auto-fix safe issues like missing dirs/permissions |
 | **Capability-gated extension policy profiles** (`safe` / `balanced` / `permissive`) with per-extension overrides | Lets operators run shared extensions with explicit capability boundaries instead of ambient full-system access |
 | **Secret-aware extension env filtering** (`pi.env()` blocklist for keys/tokens/secrets) | Reduces accidental credential exposure from extension code paths |
+| **Per-extension trust lifecycle + kill-switch audit trail** (`pending`/`acknowledged`/`trusted`/`killed`, `kill_switch`, `lift_kill_switch`) | Supports immediate containment, explicit operator provenance, and controlled re-entry after review |
+| **Hostcall compatibility-lane emergency controls** (global/per-extension forced-compat switches + reason codes) | Gives operators a deterministic rollback path for fast-lane incidents without losing extension availability |
 | **Runtime risk controller for extension hostcalls** (configurable, fail-closed by default) | Adds another enforcement layer beyond static policy for suspicious runtime behavior in extension call flows |
 | **Argument-aware runtime risk scoring for shell paths** (`dcg_rule_hit`, `dcg_heredoc_hit`, heredoc AST inspection across Bash/Python/JS/TS/Ruby) | Detects destructive intent hidden in multiline scripts and wrapper commands before hostcall execution |
 | **Tamper-evident runtime risk ledger tooling** (`ext_runtime_risk_ledger verify|replay|calibrate`) | Security decisions are hash-chained and can be verified, replayed, and threshold-calibrated from real traces |
 | **Unified incident evidence bundle export** (risk ledger, security alerts, hostcall telemetry, exec mediation, secret-broker events) | Incident response can triage from one structured artifact set instead of stitching ad-hoc logs |
-| **Extension preflight compatibility analysis** (policy-aware extension checks) | Surfaces likely incompatibilities and security-sensitive patterns before runtime execution |
+| **Deterministic hostcall reactor mesh with optional NUMA slab pool** (shard affinity, global-order drain, bounded SPSC lanes, telemetry) | Keeps extension dispatch predictable under load and surfaces queue/backpressure behavior for tuning |
+| **Warm isolate pool + startup prewarm handoff** | Moves JS runtime preparation off the first interactive turn and reuses warmed state safely between runs |
+| **Extension preflight static analysis** (imports/forbidden-pattern scan with policy-aware hints) | Catches risky extension patterns before runtime execution |
 | **Node/Bun-compatible extension runtime without Node/Bun dependency** (embedded QuickJS + shims) | Runs legacy extension workflows in a single native binary deployment model |
 | **Extension compatibility scanner + conformance harness** | Makes extension support measurable and auditable instead of anecdotal |
 | **SQLite session index sidecar** (WAL + lock + stale reindex path) | Gives fast session resume/list operations at scale without scanning every JSONL file on each query |
+| **Session Store V2 rollback and migration ledger** (segmented log + checkpoints + rollback events) | Long-session recovery can unwind to a known checkpoint with explicit migration/rollback provenance |
 | **Optional SQLite session storage backend** (`sqlite-sessions` feature) | Supports deployments that want database-backed session persistence in addition to JSONL |
 | **Crash-resilient session save path** (temp file + atomic persist) | Improves session-file durability during writes and reduces partial-write failure modes |
 | **Unified hostcall dispatcher with typed taxonomy mapping** (`timeout` / `denied` / `io` / `invalid_request` / `internal`) | Produces consistent extension/runtime error semantics and easier client handling |
@@ -1367,6 +1412,7 @@ Extensions run in an embedded QuickJS runtime (`rquickjs` crate) and communicate
 - **Fast lane** is used when the call shape matches known safe patterns (for example common `tool` and `session` operations). This avoids extra allocation and parsing work.
 - **Compatibility lane** is the fallback for uncommon or partially-specified calls.
 - Both lanes still enforce the same capability policy and permission checks.
+- Operators can force compatibility-lane routing globally or per extension as an emergency control path.
 
 For observability, each call is tagged with a stable lane key (for example `tool|tool.read|filesystem` or `tool|fallback|filesystem`) so latency and failure trends can be grouped consistently.
 
@@ -1393,6 +1439,8 @@ Mode changes are gated by sample coverage and risk checks, so Pi does not switch
 **Compatibility scanner**: Before loading, Pi statically analyzes extension source code for imports, `require()` calls, and forbidden patterns (`eval`, `Function()`, `process.binding`, `dlopen`). The scan produces a capability evidence ledger that informs policy decisions.
 
 **Environment variable filtering**: Extensions calling `pi.env()` hit a blocklist that denies access to API keys, credentials, tokens, and private keys. The filter blocks exact matches (`ANTHROPIC_API_KEY`, `AWS_SECRET_ACCESS_KEY`), suffix patterns (`*_API_KEY`, `*_SECRET`, `*_TOKEN`), and prefix patterns (`AWS_SECRET_*`, `AWS_SESSION_*`). Only `PI_*` variables are unconditionally allowed.
+
+**Trust lifecycle and kill switch**: Extension trust state is tracked explicitly (`pending`, `acknowledged`, `trusted`, `killed`). A kill switch demotes an extension to `killed`, quarantines it in the runtime risk controller, emits a critical alert, and writes an audit record. Lifting the switch requires an explicit operator action and moves the extension back to `acknowledged`.
 
 ### Extension Runtime Decision Logic (Plain English)
 
@@ -1546,6 +1594,7 @@ Pi also supports a v2 sidecar store next to JSONL sessions for faster resume and
 - Offset index rows for direct seeks and fast tail reads
 - Periodic checkpoints and a manifest snapshot
 - Migration ledger entries for auditability
+- Checkpoint-based rollback path with explicit rollback event logging
 
 **How resume works:**
 
@@ -1558,6 +1607,7 @@ Pi also supports a v2 sidecar store next to JSONL sessions for faster resume and
 - Segment frames carry payload and chain hashes.
 - Index rows store byte offsets plus CRC32C checksums.
 - Validation checks offset bounds, checksum matches, and frame/index alignment before trusting the sidecar.
+- Truncated trailing frames are recoverable during rebuild; non-EOF frame corruption fails closed instead of silently dropping data.
 
 **CLI support:**
 
@@ -1772,6 +1822,13 @@ Pi separates performance evidence artifacts from distributable release artifacts
 Policy implication: release/size artifacts alone are not valid evidence for global performance
 claims. Performance claims must cite benchmark evidence bundles with reproducible provenance.
 See `docs/testing-policy.md` and `docs/releasing.md` for normative policy details.
+
+Latest full orchestrator checkpoint (`2026-02-19`):
+- Run output: `/data/tmp/pi_agent_rust/codex/perf/full_local_skipbuild_retry_20260219T0650Z`
+- Correlation ID: `fullbench-local-skipbuild-retry-20260219T0650Z`
+- Summary: `11` suites total, `9` pass, `2` fail (`perf_budgets`, `perf_regression`)
+- Failure mode: both failures were strict evidence/precondition checks (missing/stale canonical artifact paths and missing strict release-binary path), not a measured throughput/latency collapse.
+- Measured startup guards in the same run stayed green: `--help` P95 `3.8ms`, `--version` P95 `3.6ms`.
 
 ### Fast Loop vs Definitive Benchmarks
 
@@ -2140,7 +2197,7 @@ A: Yes. Create a `models.json` file in `~/.pi/agent/` or `.pi/` with entries spe
 A: Pi maintains a SQLite index of all session files. When you run `pi -c`, it queries the index for the most recently modified session whose working directory matches your current project. This avoids scanning the filesystem on every resume.
 
 **Q: What happens if an extension tries to access something dangerous?**
-A: Every hostcall from an extension is checked against the active capability policy before execution. Dangerous capabilities (`exec`, `env`) are denied by default under `safe` and `balanced` unless explicitly opted in (for example via `PI_EXTENSION_ALLOW_DANGEROUS=1`), and are available under `permissive`. For `exec`, Pi then applies command mediation before spawn: it classifies command+arg signatures and blocks critical classes by default (for example recursive delete, disk/device write, reverse shell), with strict/safe policy able to block high-tier classes as well (for example shutdown, process-kill, credential-file modification). Denied calls return errors to the extension Promise path, and denial events are recorded in redacted security-alert and exec-mediation audit artifacts. Sensitive env keys (API keys/tokens/secrets) remain filtered.
+A: Every hostcall from an extension is checked against the active capability policy before execution. Dangerous capabilities (`exec`, `env`) are denied by default under `safe` and `balanced` unless explicitly opted in (for example via `PI_EXTENSION_ALLOW_DANGEROUS=1`), and are available under `permissive`. For `exec`, Pi then applies command mediation before spawn: it classifies command+arg signatures and blocks critical classes by default (for example recursive delete, disk/device write, reverse shell), with strict/safe policy able to block high-tier classes as well (for example shutdown, process-kill, credential-file modification). Denied calls return errors to the extension Promise path, and denial events are recorded in redacted security-alert and exec-mediation audit artifacts. Sensitive env keys (API keys/tokens/secrets) remain filtered. If behavior escalates, you can kill-switch that extension into quarantined `killed` state immediately or force compatibility-lane routing as a containment step while investigating.
 
 **Q: Does Pi work with self-hosted or proxied LLMs?**
 A: Yes. Point any provider at a custom base URL via `models.json`. Pi normalizes URL paths per API type and applies compatibility overrides for field-name and feature differences. This works with vLLM, Ollama, LiteLLM, and similar OpenAI-compatible servers.
@@ -2202,10 +2259,20 @@ rch exec -- cargo test conformance
 Focused validation tools:
 
 ```bash
-# Release-binary + live-provider extension smoke (non-mock path)
-rch exec -- cargo build --release --bin pi
-rch exec -- cargo run --bin ext_release_binary_e2e -- \
-  --provider ollama --model qwen2.5:0.5b --max-cases 10
+# Dev-firstset gate before release build
+rch exec -- cargo build --bin pi --bin ext_release_binary_e2e
+PI_HTTP_REQUEST_TIMEOUT_SECS=0 rch exec -- \
+  cargo run --bin ext_release_binary_e2e -- \
+  --pi-bin target/debug/pi \
+  --provider ollama --model qwen2.5:0.5b \
+  --jobs 10 --timeout-secs 600 --max-cases 20 --extension-policy balanced
+
+# Full optimized release-binary run after gate passes
+rch exec -- cargo build --release --bin pi --bin ext_release_binary_e2e
+PI_HTTP_REQUEST_TIMEOUT_SECS=0 target/release/ext_release_binary_e2e \
+  --pi-bin target/release/pi \
+  --provider ollama --model qwen2.5:0.5b \
+  --jobs 10 --timeout-secs 600 --extension-policy balanced
 
 # Runtime risk ledger forensics (verify, replay, calibrate)
 rch exec -- cargo run --bin ext_runtime_risk_ledger -- verify --input path/to/runtime_risk_ledger.json

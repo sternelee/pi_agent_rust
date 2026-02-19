@@ -526,6 +526,8 @@ run_test_suite() {
   fi
 
   # Write per-suite result record
+  # Some suite targets may clean BENCH_OUTPUT_DIR on failure; ensure the sink exists.
+  mkdir -p "$result_dir"
   cat > "$result_dir/result.json" <<EOF
 {
   "schema": "pi.perf.suite_result.v1",
