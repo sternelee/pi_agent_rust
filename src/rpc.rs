@@ -187,6 +187,8 @@ struct RpcSharedState {
     auto_retry_enabled: bool,
 }
 
+const MAX_RPC_PENDING_MESSAGES: usize = 128;
+
 impl RpcSharedState {
     fn new(config: &Config) -> Self {
         Self {
@@ -203,12 +205,22 @@ impl RpcSharedState {
         self.steering.len() + self.follow_up.len()
     }
 
-    fn push_steering(&mut self, message: Message) {
+    fn push_steering(&mut self, message: Message) -> Result<()> {
+        if self.steering.len() >= MAX_RPC_PENDING_MESSAGES {
+            return Err(Error::session(
+                "Steering queue is full (Do you have too many pending commands?)",
+            ));
+        }
         self.steering.push_back(message);
+        Ok(())
     }
 
-    fn push_follow_up(&mut self, message: Message) {
+    fn push_follow_up(&mut self, message: Message) -> Result<()> {
+        if self.follow_up.len() >= MAX_RPC_PENDING_MESSAGES {
+            return Err(Error::session("Follow-up queue is full"));
+        }
         self.follow_up.push_back(message);
+        Ok(())
     }
 
     fn pop_steering(&mut self) -> Vec<Message> {
@@ -337,7 +349,7 @@ pub async fn run(
                     .map_or_else(|_| Vec::new(), |mut state| state.pop_follow_up())
             })
         };
-        guard.agent.set_message_fetchers(
+        guard.agent.register_message_fetchers(
             Some(Arc::new(steering_fetcher)),
             Some(Arc::new(follow_fetcher)),
         );
@@ -376,6 +388,7 @@ pub async fn run(
         let manager_ui = (*manager).clone();
         let runtime_handle_ui = options.runtime_handle.clone();
         options.runtime_handle.spawn(async move {
+            const MAX_UI_PENDING_REQUESTS: usize = 64;
             let cx = AgentCx::for_request();
             while let Ok(request) = extension_ui_rx.recv(&cx).await {
                 if request.expects_response() {
@@ -386,8 +399,16 @@ pub async fn run(
                         if guard.active.is_none() {
                             guard.active = Some(request.clone());
                             true
-                        } else {
+                        } else if guard.queue.len() < MAX_UI_PENDING_REQUESTS {
                             guard.queue.push_back(request.clone());
+                            false
+                        } else {
+                            drop(guard);
+                            let _ = manager_ui.respond_ui(ExtensionUiResponse {
+                                id: request.id.clone(),
+                                value: None,
+                                cancelled: true,
+                            });
                             false
                         }
                     };
@@ -467,25 +488,7 @@ pub async fn run(
                 let expanded = options.resources.expand_input(&message);
 
                 if is_streaming.load(Ordering::SeqCst) {
-                    let queued = {
-                        let mut state = shared_state
-                            .lock(&cx)
-                            .await
-                            .map_err(|err| Error::session(format!("state lock failed: {err}")))?;
-                        match streaming_behavior {
-                            Some(StreamingBehavior::Steer) => {
-                                state.push_steering(build_user_message(&expanded, &images));
-                                true
-                            }
-                            Some(StreamingBehavior::FollowUp) => {
-                                state.push_follow_up(build_user_message(&expanded, &images));
-                                true
-                            }
-                            None => false,
-                        }
-                    };
-
-                    if !queued {
+                    if streaming_behavior.is_none() {
                         let resp = response_error(
                             id,
                             "prompt",
@@ -495,12 +498,38 @@ pub async fn run(
                         continue;
                     }
 
-                    let _ = out_tx.send(response_ok(id, "prompt", None));
+                    let queued_result = {
+                        let mut state = shared_state
+                            .lock(&cx)
+                            .await
+                            .map_err(|err| Error::session(format!("state lock failed: {err}")))?;
+                        match streaming_behavior {
+                            Some(StreamingBehavior::Steer) => {
+                                state.push_steering(build_user_message(&expanded, &images))
+                            }
+                            Some(StreamingBehavior::FollowUp) => {
+                                state.push_follow_up(build_user_message(&expanded, &images))
+                            }
+                            None => Ok(()), // Unreachable due to check above
+                        }
+                    };
+
+                    match queued_result {
+                        Ok(()) => {
+                            let _ = out_tx.send(response_ok(id, "prompt", None));
+                        }
+                        Err(err) => {
+                            let resp = response_error_with_hints(id, "prompt", &err);
+                            let _ = out_tx.send(resp);
+                        }
+                    }
                     continue;
                 }
 
                 // Ack immediately.
                 let _ = out_tx.send(response_ok(id, "prompt", None));
+
+                is_streaming.store(true, Ordering::SeqCst);
 
                 let out_tx = out_tx.clone();
                 let session = Arc::clone(&session);
@@ -554,16 +583,26 @@ pub async fn run(
                 }
 
                 if is_streaming.load(Ordering::SeqCst) {
-                    shared_state
+                    let result = shared_state
                         .lock(&cx)
                         .await
                         .map_err(|err| Error::session(format!("state lock failed: {err}")))?
                         .push_steering(build_user_message(&expanded, &[]));
-                    let _ = out_tx.send(response_ok(id, "steer", None));
+
+                    match result {
+                        Ok(()) => {
+                            let _ = out_tx.send(response_ok(id, "steer", None));
+                        }
+                        Err(err) => {
+                            let _ = out_tx.send(response_error_with_hints(id, "steer", &err));
+                        }
+                    }
                     continue;
                 }
 
                 let _ = out_tx.send(response_ok(id, "steer", None));
+
+                is_streaming.store(true, Ordering::SeqCst);
 
                 let out_tx = out_tx.clone();
                 let session = Arc::clone(&session);
@@ -617,16 +656,26 @@ pub async fn run(
                 }
 
                 if is_streaming.load(Ordering::SeqCst) {
-                    shared_state
+                    let result = shared_state
                         .lock(&cx)
                         .await
                         .map_err(|err| Error::session(format!("state lock failed: {err}")))?
                         .push_follow_up(build_user_message(&expanded, &[]));
-                    let _ = out_tx.send(response_ok(id, "follow_up", None));
+
+                    match result {
+                        Ok(()) => {
+                            let _ = out_tx.send(response_ok(id, "follow_up", None));
+                        }
+                        Err(err) => {
+                            let _ = out_tx.send(response_error_with_hints(id, "follow_up", &err));
+                        }
+                    }
                     continue;
                 }
 
                 let _ = out_tx.send(response_ok(id, "follow_up", None));
+
+                is_streaming.store(true, Ordering::SeqCst);
 
                 let out_tx = out_tx.clone();
                 let session = Arc::clone(&session);
@@ -1591,12 +1640,15 @@ pub async fn run(
     }
 
     // Explicitly shut down extension runtimes before the session drops.
-    // Without this, ExtensionRegion::drop() runs synchronously and cannot
-    // coordinate with the QuickJS runtime thread's GC cleanup.
-    if let Ok(guard) = session.lock(&cx).await {
-        if let Some(ref ext) = guard.extensions {
-            ext.shutdown().await;
-        }
+    // Move the region out under lock, then await shutdown after releasing
+    // the lock so we don't hold the session mutex across an async wait.
+    let extension_region = session
+        .lock(&cx)
+        .await
+        .ok()
+        .and_then(|mut guard| guard.extensions.take());
+    if let Some(ext) = extension_region {
+        ext.shutdown().await;
     }
 
     Ok(())
@@ -3141,6 +3193,123 @@ struct BashRpcResult {
     full_output_path: Option<String>,
 }
 
+const fn line_count_from_newline_count(
+    total_bytes: usize,
+    newline_count: usize,
+    last_byte_was_newline: bool,
+) -> usize {
+    if total_bytes == 0 {
+        0
+    } else if last_byte_was_newline {
+        newline_count
+    } else {
+        newline_count.saturating_add(1)
+    }
+}
+
+async fn ingest_bash_rpc_chunk(
+    bytes: Vec<u8>,
+    chunks: &mut VecDeque<Vec<u8>>,
+    chunks_bytes: &mut usize,
+    total_bytes: &mut usize,
+    total_lines: &mut usize,
+    last_byte_was_newline: &mut bool,
+    temp_file: &mut Option<asupersync::fs::File>,
+    temp_file_path: &mut Option<PathBuf>,
+    spill_failed: &mut bool,
+    max_chunks_bytes: usize,
+) {
+    if bytes.is_empty() {
+        return;
+    }
+
+    *last_byte_was_newline = bytes.last().is_some_and(|byte| *byte == b'\n');
+    *total_bytes = total_bytes.saturating_add(bytes.len());
+    *total_lines = total_lines.saturating_add(memchr_iter(b'\n', &bytes).count());
+
+    // Spill to temp file if we exceed the limit
+    if *total_bytes > DEFAULT_MAX_BYTES && temp_file.is_none() && !*spill_failed {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let path = std::env::temp_dir().join(format!("pi-rpc-bash-{id}.log"));
+
+        // Secure synchronous creation
+        let created = {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            options.open(&path).is_ok()
+        };
+
+        if created {
+            // Re-open async for writing
+            match asupersync::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .await
+            {
+                Ok(mut file) => {
+                    // Flush existing chunks to the new file
+                    for existing in chunks.iter() {
+                        use asupersync::io::AsyncWriteExt;
+                        if let Err(e) = file.write_all(existing).await {
+                            tracing::warn!("Failed to flush bash chunk to temp file: {e}");
+                            *spill_failed = true;
+                            // Drop file to stop further writes
+                            // Note: we can't easily drop 'mut file' here because we are in a loop
+                            // but we can set temp_file to None below if we don't assign it.
+                            break;
+                        }
+                    }
+                    if !*spill_failed {
+                        *temp_file = Some(file);
+                        *temp_file_path = Some(path);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to reopen bash temp file async: {e}");
+                    // Clean up the empty file we just created
+                    let _ = std::fs::remove_file(&path);
+                    *spill_failed = true;
+                }
+            }
+        } else {
+            *spill_failed = true;
+        }
+    }
+
+    // Write new chunk to file if we have one
+    if let Some(file) = temp_file.as_mut() {
+        if *total_bytes <= crate::tools::BASH_FILE_LIMIT_BYTES {
+            use asupersync::io::AsyncWriteExt;
+            if let Err(e) = file.write_all(&bytes).await {
+                tracing::warn!("Failed to write bash chunk to temp file: {e}");
+                *spill_failed = true;
+                *temp_file = None;
+            }
+        } else {
+            // Hard limit reached. Stop writing and close the file to release the FD.
+            if !*spill_failed {
+                tracing::warn!("Bash output exceeded hard limit; stopping file log");
+                *spill_failed = true;
+                *temp_file = None;
+            }
+        }
+    }
+
+    // Update memory buffer
+    *chunks_bytes = chunks_bytes.saturating_add(bytes.len());
+    chunks.push_back(bytes);
+    while *chunks_bytes > max_chunks_bytes && chunks.len() > 1 {
+        if let Some(front) = chunks.pop_front() {
+            *chunks_bytes = chunks_bytes.saturating_sub(front.len());
+        }
+    }
+}
+
 async fn run_bash_rpc(
     cwd: &std::path::Path,
     command: &str,
@@ -3159,7 +3328,7 @@ async fn run_bash_rpc(
 
     fn pump_stream(
         mut reader: impl std::io::Read,
-        tx: std::sync::mpsc::Sender<StreamChunk>,
+        tx: std::sync::mpsc::SyncSender<StreamChunk>,
         kind: StreamKind,
     ) {
         let mut buf = [0u8; 8192];
@@ -3178,11 +3347,10 @@ async fn run_bash_rpc(
         }
     }
 
-    let shell = if std::path::Path::new("/bin/bash").exists() {
-        "/bin/bash"
-    } else {
-        "sh"
-    };
+    let shell = ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .unwrap_or("sh");
 
     let command = format!("trap 'code=$?; wait; exit $code' EXIT\n{command}");
 
@@ -3205,23 +3373,42 @@ async fn run_bash_rpc(
 
     let mut guard = crate::tools::ProcessGuard::new(child, true);
 
-    let (tx, rx) = std::sync::mpsc::channel::<StreamChunk>();
+    let (tx, rx) = std::sync::mpsc::sync_channel::<StreamChunk>(128);
     let tx_stdout = tx.clone();
     let stdout_handle =
         std::thread::spawn(move || pump_stream(stdout, tx_stdout, StreamKind::Stdout));
     let stderr_handle = std::thread::spawn(move || pump_stream(stderr, tx, StreamKind::Stderr));
 
     let tick = Duration::from_millis(10);
-    let mut stdout_bytes = Vec::new();
-    let mut stderr_bytes = Vec::new();
+
+    // Bounded buffer state (same logic as BashTool)
+    let mut chunks: VecDeque<Vec<u8>> = VecDeque::new();
+    let mut chunks_bytes = 0usize;
+    let mut total_bytes = 0usize;
+    let mut total_lines = 0usize;
+    let mut last_byte_was_newline = false;
+    let mut temp_file: Option<asupersync::fs::File> = None;
+    let mut temp_file_path: Option<PathBuf> = None;
+    let max_chunks_bytes = DEFAULT_MAX_BYTES * 2;
+
     let mut cancelled = false;
+    let mut spill_failed = false;
 
     let exit_code = loop {
         while let Ok(chunk) = rx.try_recv() {
-            match chunk.kind {
-                StreamKind::Stdout => stdout_bytes.extend_from_slice(&chunk.bytes),
-                StreamKind::Stderr => stderr_bytes.extend_from_slice(&chunk.bytes),
-            }
+            ingest_bash_rpc_chunk(
+                chunk.bytes,
+                &mut chunks,
+                &mut chunks_bytes,
+                &mut total_bytes,
+                &mut total_lines,
+                &mut last_byte_was_newline,
+                &mut temp_file,
+                &mut temp_file_path,
+                &mut spill_failed,
+                max_chunks_bytes,
+            )
+            .await;
         }
 
         if !cancelled && abort_rx.try_recv().is_ok() {
@@ -3245,16 +3432,29 @@ async fn run_bash_rpc(
         sleep(wall_now(), tick).await;
     };
 
-    // Drain remaining output (including anything still queued after senders drop).
+    // Drain remaining output
     let drain_deadline = Instant::now() + Duration::from_secs(2);
+    let mut drain_timed_out = false;
     loop {
         match rx.try_recv() {
-            Ok(chunk) => match chunk.kind {
-                StreamKind::Stdout => stdout_bytes.extend_from_slice(&chunk.bytes),
-                StreamKind::Stderr => stderr_bytes.extend_from_slice(&chunk.bytes),
-            },
+            Ok(chunk) => {
+                ingest_bash_rpc_chunk(
+                    chunk.bytes,
+                    &mut chunks,
+                    &mut chunks_bytes,
+                    &mut total_bytes,
+                    &mut total_lines,
+                    &mut last_byte_was_newline,
+                    &mut temp_file,
+                    &mut temp_file_path,
+                    &mut spill_failed,
+                    max_chunks_bytes,
+                )
+                .await;
+            }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
                 if Instant::now() >= drain_deadline {
+                    drain_timed_out = true;
                     break;
                 }
                 sleep(wall_now(), tick).await;
@@ -3262,39 +3462,55 @@ async fn run_bash_rpc(
             Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
         }
     }
+
+    // Drop the receiver to close the channel.
+    // This ensures that any `tx.send()` calls in the pump threads return an error (Disconnected)
+    // instead of blocking if the channel is full, preventing a deadlock on `join()`.
+    drop(rx);
+
     let _ = stdout_handle.join();
     let _ = stderr_handle.join();
 
-    let mut combined = stdout_bytes;
-    combined.extend_from_slice(&stderr_bytes);
-    let full_output = String::from_utf8_lossy(&combined).to_string();
+    // Explicitly drop the temp file handle to ensure any buffered data is flushed to disk
+    // before we potentially return the path to the caller.
+    drop(temp_file);
 
-    // Write the full output to a temp file before truncation consumes the
-    // string, but only when truncation will actually be needed.
-    let total_lines = memchr_iter(b'\n', full_output.as_bytes()).count() + 1;
-    let will_truncate = total_lines > DEFAULT_MAX_LINES || full_output.len() > DEFAULT_MAX_BYTES;
-    let full_output_path = if will_truncate {
-        let id = uuid::Uuid::new_v4().simple().to_string();
-        let path = std::env::temp_dir().join(format!("pi-rpc-bash-{id}.log"));
-        asupersync::fs::write(&path, full_output.as_bytes()).await?;
-        Some(path.display().to_string())
-    } else {
-        None
-    };
+    // Construct final output from memory buffer
+    let mut combined = Vec::with_capacity(chunks_bytes);
+    for chunk in chunks {
+        combined.extend_from_slice(&chunk);
+    }
+    let tail_output = String::from_utf8_lossy(&combined).to_string();
 
-    let truncation = truncate_tail(full_output, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
-    let output_text = if truncation.content.is_empty() {
+    let mut truncation = truncate_tail(tail_output, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
+    if total_bytes > chunks_bytes {
+        truncation.truncated = true;
+        truncation.truncated_by = Some(crate::tools::TruncatedBy::Bytes);
+        truncation.total_bytes = total_bytes;
+        truncation.total_lines =
+            line_count_from_newline_count(total_bytes, total_lines, last_byte_was_newline);
+    } else if drain_timed_out {
+        truncation.truncated = true;
+        truncation.truncated_by = Some(crate::tools::TruncatedBy::Bytes);
+    }
+    let will_truncate = truncation.truncated;
+
+    let mut output_text = if truncation.content.is_empty() {
         "(no output)".to_string()
     } else {
         truncation.content
     };
+
+    if drain_timed_out {
+        output_text.push_str("\n... [Output truncated: drain timeout]");
+    }
 
     Ok(BashRpcResult {
         output: output_text,
         exit_code,
         cancelled,
         truncated: will_truncate,
-        full_output_path,
+        full_output_path: temp_file_path.map(|p| p.display().to_string()),
     })
 }
 
@@ -3622,6 +3838,14 @@ mod tests {
             auth,
             runtime_handle,
         }
+    }
+
+    #[test]
+    fn line_count_from_newline_count_matches_trailing_newline_semantics() {
+        assert_eq!(line_count_from_newline_count(0, 0, false), 0);
+        assert_eq!(line_count_from_newline_count(2, 1, true), 1);
+        assert_eq!(line_count_from_newline_count(1, 0, false), 1);
+        assert_eq!(line_count_from_newline_count(3, 1, false), 2);
     }
 
     // -----------------------------------------------------------------------

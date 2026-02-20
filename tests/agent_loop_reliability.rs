@@ -1257,6 +1257,30 @@ fn max_tool_iterations_exceeded_returns_clean_stop() {
             message.error_message
         );
 
+        let persisted_assistant = agent_session
+            .agent
+            .messages()
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                Message::Assistant(assistant) => Some(assistant),
+                _ => None,
+            })
+            .expect("assistant message should be persisted");
+        assert_eq!(
+            persisted_assistant.stop_reason,
+            StopReason::Error,
+            "persisted assistant message should reflect max-iteration error"
+        );
+        assert!(
+            persisted_assistant
+                .error_message
+                .as_ref()
+                .is_some_and(|m| m.contains("Maximum tool iterations")),
+            "persisted assistant error should mention max iterations, got: {:?}",
+            persisted_assistant.error_message
+        );
+
         let guard = tl.lock().expect("lock");
         assert!(
             guard.tool_starts >= 2,

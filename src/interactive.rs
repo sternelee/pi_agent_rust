@@ -160,14 +160,31 @@ impl PiApp {
             None
         };
 
+        // Capture scroll state before update if we aren't following tail.
+        // We want to maintain the distance from the bottom to keep the view stable
+        // if content is appended while the user is scrolled up.
+        let dist_from_bottom = if follow_tail {
+            None
+        } else {
+            let current_content_height = self.conversation_viewport.total_line_count();
+            let current_y_offset = self.conversation_viewport.y_offset();
+            Some(current_content_height.saturating_sub(current_y_offset))
+        };
+
         let content = self.build_conversation_content();
         let trimmed = content.trim_end();
         let effective = self.view_effective_conversation_height().max(1);
         self.conversation_viewport.height = effective;
         self.conversation_viewport.set_content(trimmed);
+
         if follow_tail {
             self.conversation_viewport.goto_bottom();
             self.follow_stream_tail = true;
+        } else if let Some(dist) = dist_from_bottom {
+            // Restore scroll position relative to the new bottom.
+            let new_content_height = trimmed.lines().count();
+            let new_y_offset = new_content_height.saturating_sub(dist);
+            self.conversation_viewport.set_y_offset(new_y_offset);
         }
 
         if let Some(start) = vp_start {
@@ -813,10 +830,14 @@ impl PiApp {
         let text = self.input.value();
         let range = self.autocomplete.replace_range.clone();
 
+        // Guard against stale range if editor content changed since autocomplete was triggered.
+        let start = range.start.min(text.len());
+        let end = range.end.min(text.len()).max(start);
+
         let mut new_text = String::with_capacity(text.len().saturating_add(item.insert.len()));
-        new_text.push_str(&text[..range.start]);
+        new_text.push_str(&text[..start]);
         new_text.push_str(&item.insert);
-        new_text.push_str(&text[range.end..]);
+        new_text.push_str(&text[end..]);
 
         self.input.set_value(&new_text);
         self.input.cursor_end();
@@ -1442,7 +1463,7 @@ impl PiApp {
                     out
                 })
             };
-            agent.set_message_fetchers(
+            agent.register_message_fetchers(
                 Some(Arc::new(steering_fetcher)),
                 Some(Arc::new(follow_up_fetcher)),
             );

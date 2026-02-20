@@ -576,15 +576,18 @@ impl FileCache {
     }
 }
 
-fn collect_project_files(cwd: &Path) -> Vec<String> {
-    // Prefer a fast external enumerator when present.
-    if let Some(bin) = find_fd_binary() {
-        if let Some(files) = run_fd_list_files(bin, cwd) {
-            return files;
-        }
-    }
+const MAX_FILE_CACHE_ENTRIES: usize = 5000;
 
-    walk_project_files(cwd)
+fn collect_project_files(cwd: &Path) -> Vec<String> {
+    let mut files = find_fd_binary().map_or_else(
+        || walk_project_files(cwd),
+        |bin| run_fd_list_files(bin, cwd).unwrap_or_else(|| walk_project_files(cwd)),
+    );
+
+    if files.len() > MAX_FILE_CACHE_ENTRIES {
+        files.truncate(MAX_FILE_CACHE_ENTRIES);
+    }
+    files
 }
 
 fn normalize_file_ref_candidate(candidate: &str) -> String {

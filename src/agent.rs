@@ -394,11 +394,11 @@ pub struct Agent {
     /// Message history.
     messages: Vec<Message>,
 
-    /// Steering message fetcher (interrupt).
-    steering_fetcher: Option<MessageFetcher>,
+    /// Fetchers for queued steering messages (interrupts).
+    steering_fetchers: Vec<MessageFetcher>,
 
-    /// Follow-up message fetcher (after idle).
-    follow_up_fetcher: Option<MessageFetcher>,
+    /// Fetchers for queued follow-up messages (idle).
+    follow_up_fetchers: Vec<MessageFetcher>,
 
     /// Internal queue for steering/follow-up messages.
     message_queue: MessageQueue,
@@ -416,8 +416,8 @@ impl Agent {
             config,
             extensions: None,
             messages: Vec::new(),
-            steering_fetcher: None,
-            follow_up_fetcher: None,
+            steering_fetchers: Vec::new(),
+            follow_up_fetchers: Vec::new(),
             message_queue: MessageQueue::new(QueueMode::OneAtATime, QueueMode::OneAtATime),
             cached_tool_defs: None,
         }
@@ -449,14 +449,21 @@ impl Agent {
         self.provider = provider;
     }
 
-    /// Configure async fetchers for queued steering/follow-up messages.
-    pub fn set_message_fetchers(
+    /// Register async fetchers for queued steering/follow-up messages.
+    ///
+    /// This is additive: multiple sources (e.g. RPC, extensions) can register
+    /// fetchers, and the agent will poll all of them.
+    pub fn register_message_fetchers(
         &mut self,
         steering: Option<MessageFetcher>,
         follow_up: Option<MessageFetcher>,
     ) {
-        self.steering_fetcher = steering;
-        self.follow_up_fetcher = follow_up;
+        if let Some(fetcher) = steering {
+            self.steering_fetchers.push(fetcher);
+        }
+        if let Some(fetcher) = follow_up {
+            self.follow_up_fetchers.push(fetcher);
+        }
     }
 
     /// Extend the tool registry with additional tools (e.g. extension-registered tools).
@@ -524,6 +531,11 @@ impl Agent {
     fn build_context(&mut self) -> Context<'_> {
         let messages: Cow<'_, [Message]> = if self.config.block_images {
             let mut msgs = self.messages.clone();
+            // Filter out hidden custom messages.
+            msgs.retain(|m| match m {
+                Message::Custom(c) => c.display,
+                _ => true,
+            });
             let stats = filter_images_for_provider(&mut msgs);
             if stats.removed_images > 0 {
                 tracing::debug!(
@@ -534,7 +546,22 @@ impl Agent {
             }
             Cow::Owned(msgs)
         } else {
-            Cow::Borrowed(self.messages.as_slice())
+            // Check if we need to filter hidden custom messages to avoid cloning if not needed.
+            let has_hidden = self.messages.iter().any(|m| match m {
+                Message::Custom(c) => !c.display,
+                _ => false,
+            });
+
+            if has_hidden {
+                let mut msgs = self.messages.clone();
+                msgs.retain(|m| match m {
+                    Message::Custom(c) => c.display,
+                    _ => true,
+                });
+                Cow::Owned(msgs)
+            } else {
+                Cow::Borrowed(self.messages.as_slice())
+            }
         };
 
         // Borrow cached tool defs if available; otherwise build + cache + borrow.
@@ -819,11 +846,22 @@ impl Agent {
                         let mut stop_message = (*assistant_arc).clone();
                         stop_message.stop_reason = StopReason::Error;
                         stop_message.error_message = Some(error_message.clone());
+                        let stop_arc = Arc::new(stop_message.clone());
+                        let stop_event_message = Message::Assistant(Arc::clone(&stop_arc));
+
+                        // Keep in-memory transcript and event payloads aligned with the
+                        // error stop result returned to callers.
+                        if let Some(last @ Message::Assistant(_)) = self.messages.last_mut() {
+                            *last = stop_event_message.clone();
+                        }
+                        if let Some(last @ Message::Assistant(_)) = new_messages.last_mut() {
+                            *last = stop_event_message.clone();
+                        }
 
                         let turn_end_event = AgentEvent::TurnEnd {
                             session_id: session_id.clone(),
                             turn_index: current_turn_index,
-                            message: assistant_event_message.clone(),
+                            message: stop_event_message,
                             tool_results: Vec::new(),
                         };
                         self.dispatch_extension_lifecycle_event(&turn_end_event)
@@ -951,17 +989,21 @@ impl Agent {
     }
 
     async fn drain_steering_messages(&mut self) -> Vec<Message> {
-        let fetched = self.fetch_messages(self.steering_fetcher.as_ref()).await;
-        for message in fetched {
-            self.message_queue.push_steering(message);
+        for fetcher in &self.steering_fetchers {
+            let fetched = self.fetch_messages(Some(fetcher)).await;
+            for message in fetched {
+                self.message_queue.push_steering(message);
+            }
         }
         self.message_queue.pop_steering()
     }
 
     async fn drain_follow_up_messages(&mut self) -> Vec<Message> {
-        let fetched = self.fetch_messages(self.follow_up_fetcher.as_ref()).await;
-        for message in fetched {
-            self.message_queue.push_follow_up(message);
+        for fetcher in &self.follow_up_fetchers {
+            let fetched = self.fetch_messages(Some(fetcher)).await;
+            for message in fetched {
+                self.message_queue.push_follow_up(message);
+            }
         }
         self.message_queue.pop_follow_up()
     }
@@ -1383,6 +1425,38 @@ impl Agent {
         Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone())
     }
 
+    async fn execute_parallel_batch(
+        &self,
+        batch: Vec<(usize, ToolCall)>,
+        on_event: AgentEventHandler,
+        abort: Option<AbortSignal>,
+    ) -> Vec<(usize, (ToolOutput, bool))> {
+        let futures = batch.into_iter().map(|(idx, tc)| {
+            let on_event = Arc::clone(&on_event);
+            async move { (idx, self.execute_tool_owned(tc, on_event).await) }
+        });
+
+        if let Some(signal) = abort.as_ref() {
+            use futures::future::{Either, select};
+            let all_fut = stream::iter(futures)
+                .buffer_unordered(MAX_CONCURRENT_TOOLS)
+                .collect::<Vec<_>>()
+                .fuse();
+            let abort_fut = signal.wait().fuse();
+            futures::pin_mut!(all_fut, abort_fut);
+
+            match select(all_fut, abort_fut).await {
+                Either::Left((batch_results, _)) => batch_results,
+                Either::Right(_) => Vec::new(), // Aborted
+            }
+        } else {
+            stream::iter(futures)
+                .buffer_unordered(MAX_CONCURRENT_TOOLS)
+                .collect::<Vec<_>>()
+                .await
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     async fn execute_tool_calls(
         &mut self,
@@ -1413,7 +1487,6 @@ impl Agent {
         // Phase 2: Execute tools with safety barriers.
         let mut pending_parallel: Vec<(usize, ToolCall)> = Vec::new();
         let mut tool_outputs: Vec<Option<(ToolOutput, bool)>> = vec![None; tool_calls.len()];
-        let self_ref = &*self;
 
         // Iterate through tools. If read-only, buffer. If unsafe, flush buffer then run unsafe.
         for (index, tool_call) in tool_calls.iter().enumerate() {
@@ -1427,39 +1500,21 @@ impl Agent {
             if is_read_only {
                 pending_parallel.push((index, tool_call.clone()));
             } else {
+                // Check steering BEFORE flushing parallel or running unsafe.
+                let steering = self.drain_steering_messages().await;
+                if !steering.is_empty() {
+                    steering_messages = Some(steering);
+                    break;
+                }
+
                 // Barrier: flush parallel buffer first
                 if !pending_parallel.is_empty() {
                     let batch = std::mem::take(&mut pending_parallel);
-                    let futures = batch.into_iter().map(|(idx, tc)| {
-                        let on_event = Arc::clone(&on_event);
-                        async move { (idx, self_ref.execute_tool_owned(tc, on_event).await) }
-                    });
-
-                    if let Some(signal) = abort.as_ref() {
-                        use futures::future::{Either, select};
-                        let all_fut = stream::iter(futures)
-                            .buffer_unordered(MAX_CONCURRENT_TOOLS)
-                            .collect::<Vec<_>>()
-                            .fuse();
-                        let abort_fut = signal.wait().fuse();
-                        futures::pin_mut!(all_fut, abort_fut);
-
-                        match select(all_fut, abort_fut).await {
-                            Either::Left((batch_results, _)) => {
-                                for (idx, result) in batch_results {
-                                    tool_outputs[idx] = Some(result);
-                                }
-                            }
-                            Either::Right(_) => break, // Aborted
-                        }
-                    } else {
-                        let batch_results = stream::iter(futures)
-                            .buffer_unordered(MAX_CONCURRENT_TOOLS)
-                            .collect::<Vec<_>>()
-                            .await;
-                        for (idx, result) in batch_results {
-                            tool_outputs[idx] = Some(result);
-                        }
+                    let results = self
+                        .execute_parallel_batch(batch, Arc::clone(&on_event), abort.clone())
+                        .await;
+                    for (idx, result) in results {
+                        tool_outputs[idx] = Some(result);
                     }
                 }
 
@@ -1468,76 +1523,100 @@ impl Agent {
                 }
 
                 // Execute unsafe tool sequentially
-                let result = self_ref
-                    .execute_tool_owned(tool_call.clone(), Arc::clone(&on_event))
+                // Check steering AGAIN before the potentially expensive unsafe tool
+                let steering = self.drain_steering_messages().await;
+                if !steering.is_empty() {
+                    steering_messages = Some(steering);
+                    break;
+                }
+
+                let result = self
+                    .execute_tool(tool_call.clone(), Arc::clone(&on_event))
                     .await;
                 tool_outputs[index] = Some(result);
             }
         }
 
         // Flush remaining parallel tools
-        if !pending_parallel.is_empty() && !abort.as_ref().is_some_and(AbortSignal::is_aborted) {
+        if !pending_parallel.is_empty()
+            && !abort.as_ref().is_some_and(AbortSignal::is_aborted)
+            && steering_messages.is_none()
+        {
             let batch = std::mem::take(&mut pending_parallel);
-            let futures = batch.into_iter().map(|(idx, tc)| {
-                let on_event = Arc::clone(&on_event);
-                async move { (idx, self_ref.execute_tool_owned(tc, on_event).await) }
-            });
-
-            if let Some(signal) = abort.as_ref() {
-                use futures::future::{Either, select};
-                let all_fut = stream::iter(futures)
-                    .buffer_unordered(MAX_CONCURRENT_TOOLS)
-                    .collect::<Vec<_>>()
-                    .fuse();
-                let abort_fut = signal.wait().fuse();
-                futures::pin_mut!(all_fut, abort_fut);
-
-                match select(all_fut, abort_fut).await {
-                    Either::Left((batch_results, _)) => {
-                        for (idx, result) in batch_results {
-                            tool_outputs[idx] = Some(result);
-                        }
-                    }
-                    Either::Right(_) => {} // Aborted
-                }
-            } else {
-                let batch_results = stream::iter(futures)
-                    .buffer_unordered(MAX_CONCURRENT_TOOLS)
-                    .collect::<Vec<_>>()
+            // Check steering one last time before final flush
+            let steering = self.drain_steering_messages().await;
+            if steering.is_empty() {
+                let results = self
+                    .execute_parallel_batch(batch, Arc::clone(&on_event), abort.clone())
                     .await;
-                for (idx, result) in batch_results {
+                for (idx, result) in results {
                     tool_outputs[idx] = Some(result);
                 }
+            } else {
+                steering_messages = Some(steering);
             }
         }
 
         // Phase 3: Process results sequentially and handle skips.
         for (index, tool_call) in tool_calls.iter().enumerate() {
+            // Check for new steering if we haven't already found some.
+            // This catches steering messages that arrived during the *last* tool's execution.
+            if steering_messages.is_none() && !abort.as_ref().is_some_and(AbortSignal::is_aborted) {
+                let steering = self.drain_steering_messages().await;
+                if !steering.is_empty() {
+                    steering_messages = Some(steering);
+                }
+            }
+
             // Extract the result, tracking whether the tool actually executed.
-            // If `tool_outputs[index]` is `Some`, `execute_tool` ran and already
-            // emitted streaming Update events via its callback. If `None`, the
-            // tool was skipped/aborted and we must emit a placeholder Update
-            // event here. In both cases, Phase 1 already emitted Start and we
-            // emit End below.
-            let (output, is_error, was_executed) =
-                if let Some((out, err)) = tool_outputs[index].take() {
-                    (out, err, true)
-                } else {
-                    (
-                        ToolOutput {
-                            content: vec![ContentBlock::Text(TextContent::new(
-                                "Tool execution aborted",
-                            ))],
-                            details: None,
-                            is_error: true,
-                        },
-                        true,
-                        false,
-                    )
+            // If `tool_outputs[index]` is `Some`, `execute_tool` ran.
+            // If `None`, the tool was skipped/aborted.
+            if let Some((output, is_error)) = tool_outputs[index].take() {
+                // Tool executed normally.
+                // Always emit ToolExecutionEnd to close the lifecycle.
+                on_event(AgentEvent::ToolExecutionEnd {
+                    tool_call_id: tool_call.id.clone(),
+                    tool_name: tool_call.name.clone(),
+                    result: ToolOutput {
+                        content: output.content.clone(),
+                        details: output.details.clone(),
+                        is_error,
+                    },
+                    is_error,
+                });
+
+                let tool_result = Arc::new(ToolResultMessage {
+                    tool_call_id: tool_call.id.clone(),
+                    tool_name: tool_call.name.clone(),
+                    content: output.content,
+                    details: output.details,
+                    is_error,
+                    timestamp: Utc::now().timestamp_millis(),
+                });
+
+                let msg = Message::ToolResult(Arc::clone(&tool_result));
+                self.messages.push(msg.clone());
+                on_event(AgentEvent::MessageStart {
+                    message: msg.clone(),
+                });
+                let end_msg = msg.clone();
+                new_messages.push(msg);
+                on_event(AgentEvent::MessageEnd { message: end_msg });
+
+                results.push(tool_result);
+            } else if steering_messages.is_some() {
+                // Skipped due to steering.
+                results.push(self.skip_tool_call(tool_call, &on_event, new_messages));
+            } else {
+                // Aborted or otherwise failed to run (e.g. abort signal).
+                let output = ToolOutput {
+                    content: vec![ContentBlock::Text(TextContent::new(
+                        "Tool execution aborted",
+                    ))],
+                    details: None,
+                    is_error: true,
                 };
 
-            if !was_executed {
-                // Emit placeholder Update for aborted/skipped tools.
                 on_event(AgentEvent::ToolExecutionUpdate {
                     tool_call_id: tool_call.id.clone(),
                     tool_name: tool_call.name.clone(),
@@ -1545,57 +1624,40 @@ impl Agent {
                     partial_result: ToolOutput {
                         content: output.content.clone(),
                         details: output.details.clone(),
-                        is_error,
+                        is_error: true,
                     },
                 });
-            }
 
-            // Always emit ToolExecutionEnd to close the lifecycle started
-            // by Phase 1's ToolExecutionStart.
-            on_event(AgentEvent::ToolExecutionEnd {
-                tool_call_id: tool_call.id.clone(),
-                tool_name: tool_call.name.clone(),
-                result: ToolOutput {
-                    content: output.content.clone(),
-                    details: output.details.clone(),
-                    is_error,
-                },
-                is_error,
-            });
+                on_event(AgentEvent::ToolExecutionEnd {
+                    tool_call_id: tool_call.id.clone(),
+                    tool_name: tool_call.name.clone(),
+                    result: ToolOutput {
+                        content: output.content.clone(),
+                        details: output.details.clone(),
+                        is_error: true,
+                    },
+                    is_error: true,
+                });
 
-            let tool_result = Arc::new(ToolResultMessage {
-                tool_call_id: tool_call.id.clone(),
-                tool_name: tool_call.name.clone(),
-                content: output.content,
-                details: output.details,
-                is_error,
-                timestamp: Utc::now().timestamp_millis(),
-            });
+                let tool_result = Arc::new(ToolResultMessage {
+                    tool_call_id: tool_call.id.clone(),
+                    tool_name: tool_call.name.clone(),
+                    content: output.content,
+                    details: output.details,
+                    is_error: true,
+                    timestamp: Utc::now().timestamp_millis(),
+                });
 
-            let msg = Message::ToolResult(Arc::clone(&tool_result));
-            self.messages.push(msg.clone());
-            on_event(AgentEvent::MessageStart {
-                message: msg.clone(),
-            });
-            let end_msg = msg.clone();
-            new_messages.push(msg);
-            on_event(AgentEvent::MessageEnd { message: end_msg });
+                let msg = Message::ToolResult(Arc::clone(&tool_result));
+                self.messages.push(msg.clone());
+                on_event(AgentEvent::MessageStart {
+                    message: msg.clone(),
+                });
+                let end_msg = msg.clone();
+                new_messages.push(msg);
+                on_event(AgentEvent::MessageEnd { message: end_msg });
 
-            results.push(tool_result);
-
-            if abort.as_ref().is_some_and(AbortSignal::is_aborted) {
-                continue;
-            }
-
-            // Steering logic
-            let steering = self.drain_steering_messages().await;
-            if !steering.is_empty() {
-                steering_messages = Some(steering);
-                // Handle remaining skipped tools
-                for skipped in tool_calls.iter().skip(index + 1) {
-                    results.push(self.skip_tool_call(skipped, &on_event, new_messages));
-                }
-                break;
+                results.push(tool_result);
             }
         }
 
@@ -4750,7 +4812,7 @@ impl AgentSession {
                     queue.pop_follow_up()
                 })
             };
-            self.agent.set_message_fetchers(
+            self.agent.register_message_fetchers(
                 Some(Arc::new(steering_fetcher)),
                 Some(Arc::new(follow_up_fetcher)),
             );

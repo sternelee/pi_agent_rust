@@ -171,7 +171,7 @@ fn extract_file_ops_from_message(
         };
 
         match name.as_str() {
-            "read" => {
+            "read" | "grep" | "find" | "ls" => {
                 file_ops.read.insert(path.to_string());
             }
             "write" => {
