@@ -3930,7 +3930,7 @@ async fn ingest_bash_chunk(chunk: Vec<u8>, state: &mut BashOutputState) -> Resul
         // Create the file synchronously with restricted permissions to avoid
         // a race condition where the file is world-readable before we fix it.
         // We also capture the inode (on Unix) to verify identity later.
-        let expected_inode = {
+        let expected_inode: Option<u64> = {
             let mut options = std::fs::OpenOptions::new();
             options.write(true).create_new(true);
 
