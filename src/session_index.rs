@@ -274,6 +274,32 @@ impl Default for SessionIndex {
     }
 }
 
+/// Queue (currently immediate) index update for a persisted session snapshot.
+///
+/// Callers use this helper from save paths where index freshness is
+/// best-effort and must not fail the underlying session write.
+pub(crate) fn enqueue_session_index_snapshot_update(
+    sessions_root: PathBuf,
+    path: PathBuf,
+    header: SessionHeader,
+    message_count: u64,
+    name: Option<String>,
+) {
+    if let Err(err) = SessionIndex::for_sessions_root(&sessions_root).index_session_snapshot(
+        &path,
+        &header,
+        message_count,
+        name,
+    ) {
+        tracing::warn!(
+            sessions_root = %sessions_root.display(),
+            path = %path.display(),
+            error = %err,
+            "Failed to update session index snapshot"
+        );
+    }
+}
+
 fn init_schema(conn: &SqliteConnection) -> Result<()> {
     conn.execute_raw(
         "CREATE TABLE IF NOT EXISTS sessions (
