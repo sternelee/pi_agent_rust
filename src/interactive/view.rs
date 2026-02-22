@@ -38,20 +38,21 @@ pub(super) fn normalize_raw_terminal_newlines(input: String) -> String {
         return input;
     }
 
+    let bytes = input.as_bytes();
     let mut out = String::with_capacity(input.len() + 16);
-    let mut prev_was_cr = false;
-    for ch in input.chars() {
-        if ch == '\n' {
-            if !prev_was_cr {
-                out.push('\r');
-            }
-            out.push('\n');
-            prev_was_cr = false;
-        } else {
-            prev_was_cr = ch == '\r';
-            out.push(ch);
+    let mut cursor = 0usize;
+
+    // Byte-scan with memchr avoids UTF-8 decode on the hot view() path.
+    for newline_idx in memchr::memchr_iter(b'\n', bytes) {
+        out.push_str(&input[cursor..newline_idx]);
+        if newline_idx == 0 || bytes[newline_idx - 1] != b'\r' {
+            out.push('\r');
         }
+        out.push('\n');
+        cursor = newline_idx + 1;
     }
+
+    out.push_str(&input[cursor..]);
     out
 }
 
@@ -180,32 +181,38 @@ fn streaming_needs_markdown_renderer(markdown: &str) -> bool {
     false
 }
 
-fn render_streaming_plaintext(markdown: &str, max_width: usize) -> String {
-    let mut rendered = String::with_capacity(markdown.len() + 8);
-    for (line_idx, line) in markdown.split('\n').enumerate() {
-        if line_idx > 0 {
-            rendered.push('\n');
-        }
-        let segments = wrapped_line_segments(line, max_width);
-        for (segment_idx, segment) in segments.into_iter().enumerate() {
-            if segment_idx > 0 {
-                rendered.push('\n');
-            }
-            rendered.push_str(segment);
-        }
+fn append_wrapped_plain_line_to_output(output: &mut String, line: &str, max_width: usize) {
+    if max_width == 0 || line.is_empty() {
+        let _ = writeln!(output, "  {line}");
+        return;
     }
-    rendered
+
+    let mut segment_start = 0usize;
+    let mut segment_width = 0usize;
+    for (idx, ch) in line.char_indices() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if segment_width + ch_width > max_width && idx > segment_start {
+            let _ = writeln!(output, "  {}", &line[segment_start..idx]);
+            segment_start = idx;
+            segment_width = 0;
+        }
+        segment_width += ch_width;
+    }
+
+    let _ = writeln!(output, "  {}", &line[segment_start..]);
 }
 
-fn render_streaming_markdown(
+fn append_streaming_plaintext_to_output(output: &mut String, markdown: &str, max_width: usize) {
+    for line in markdown.split_terminator('\n') {
+        append_wrapped_plain_line_to_output(output, line, max_width);
+    }
+}
+
+fn render_streaming_markdown_with_glamour(
     markdown: &str,
     markdown_style: &GlamourStyleConfig,
     max_width: usize,
 ) -> String {
-    if !streaming_needs_markdown_renderer(markdown) {
-        return render_streaming_plaintext(markdown, max_width);
-    }
-
     let stabilized_markdown = stabilize_streaming_markdown(markdown);
     glamour::Renderer::new()
         .with_style_config(markdown_style.clone())
@@ -940,13 +947,22 @@ impl PiApp {
         // Render partial markdown on every stream update so headings/lists/code
         // format as they arrive instead of showing raw markers.
         if !self.current_response.is_empty() {
-            let rendered = render_streaming_markdown(
-                &self.current_response,
-                &self.markdown_style,
-                self.term_width.saturating_sub(6).max(40),
-            );
-            for line in rendered.lines() {
-                let _ = writeln!(output, "  {line}");
+            let markdown_width = self.term_width.saturating_sub(6).max(40);
+            if streaming_needs_markdown_renderer(&self.current_response) {
+                let rendered = render_streaming_markdown_with_glamour(
+                    &self.current_response,
+                    &self.markdown_style,
+                    markdown_width,
+                );
+                for line in rendered.lines() {
+                    let _ = writeln!(output, "  {line}");
+                }
+            } else {
+                append_streaming_plaintext_to_output(
+                    output,
+                    &self.current_response,
+                    markdown_width,
+                );
             }
         }
     }
@@ -1572,6 +1588,12 @@ mod tests {
     }
 
     #[test]
+    fn normalize_raw_terminal_newlines_preserves_utf8_content() {
+        let normalized = normalize_raw_terminal_newlines("αβ\nγ\r\nδ\n".to_string());
+        assert_eq!(normalized, "αβ\r\nγ\r\nδ\r\n");
+    }
+
+    #[test]
     fn clamp_to_terminal_height_noop_when_fits() {
         let input = "line1\nline2\nline3".to_string();
         // 2 newlines => 3 rows; term_height=4 allows 3 newlines => fits.
@@ -1742,8 +1764,9 @@ mod tests {
     }
 
     #[test]
-    fn render_streaming_markdown_plain_text_fast_path_wraps() {
-        let rendered = render_streaming_markdown("abcdef", &GlamourStyleConfig::default(), 4);
-        assert_eq!(rendered, "abcd\nef");
+    fn append_streaming_plaintext_to_output_wraps_without_trailing_blank() {
+        let mut out = String::new();
+        append_streaming_plaintext_to_output(&mut out, "abcdef\n", 4);
+        assert_eq!(out, "  abcd\n  ef\n");
     }
 }

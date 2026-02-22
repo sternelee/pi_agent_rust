@@ -1687,7 +1687,20 @@ impl Session {
                         let session_name = self.cached_name.clone();
                         // Pre-serialize new entries into a single buffer (typically 1-3 entries).
                         let new_entries = &self.entries[new_start..];
-                        let mut serialized_buf = Vec::with_capacity(new_entries.len() * 512);
+                        // Scale buffer reservation from observed on-disk average entry size to
+                        // avoid repeated growth/copy when appending large entries.
+                        let estimated_entry_bytes = std::fs::metadata(&path_clone)
+                            .ok()
+                            .and_then(|meta| usize::try_from(meta.len()).ok())
+                            .map_or(512, |file_bytes| {
+                                let avg = file_bytes / new_start.max(1);
+                                avg.clamp(512, 256 * 1024)
+                            });
+                        let mut serialized_buf = Vec::with_capacity(
+                            new_entries
+                                .len()
+                                .saturating_mul(estimated_entry_bytes.saturating_add(1)),
+                        );
                         for entry in new_entries {
                             serde_json::to_writer(&mut serialized_buf, entry)?;
                             serialized_buf.push(b'\n');
@@ -1976,7 +1989,8 @@ impl Session {
     }
 
     pub fn ensure_entry_ids(&mut self) {
-        ensure_entry_ids(&mut self.entries);
+        // `rebuild_all_caches()` runs `finalize_loaded_entries()`, which already
+        // fills missing entry IDs and rebuilds all derived caches in one pass.
         self.rebuild_all_caches();
     }
 
@@ -3558,7 +3572,7 @@ fn session_entry_stats(entries: &[SessionEntry]) -> (u64, Option<String>) {
 /// Minimum entry count to activate parallel deserialization (Gap E).
 const PARALLEL_THRESHOLD: usize = 512;
 /// Number of JSONL lines deserialized per batch in the blocking open path.
-const JSONL_PARSE_BATCH_SIZE: usize = 2048;
+const JSONL_PARSE_BATCH_SIZE: usize = 8192;
 
 /// Parse a JSONL session file on the current (blocking) thread.
 ///
