@@ -72,8 +72,8 @@ fn assert_contains_entry<'a>(
 }
 
 #[test]
-fn dropin174_session_surface_logs_include_requirement_id() {
-    let harness = TestHarness::new("dropin174_session_surface_logs_include_requirement_id");
+fn dropin143_session_surface_logs_include_requirement_id() {
+    let harness = TestHarness::new("dropin143_session_surface_logs_include_requirement_id");
     harness
         .log()
         .info_ctx("dropin174.session", "Session parity assertion", |ctx| {

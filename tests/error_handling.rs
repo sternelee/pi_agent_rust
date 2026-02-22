@@ -49,8 +49,8 @@ fn get_text_content(content: &[pi::model::ContentBlock]) -> String {
 }
 
 #[test]
-fn dropin174_error_surface_logs_include_requirement_id() {
-    let harness = TestHarness::new("dropin174_error_surface_logs_include_requirement_id");
+fn dropin144_error_surface_logs_include_requirement_id() {
+    let harness = TestHarness::new("dropin144_error_surface_logs_include_requirement_id");
     harness
         .log()
         .info_ctx("dropin174.error", "Error parity assertion", |ctx| {
