@@ -40,8 +40,8 @@ fn write_file(path: &Path, contents: &str) {
 }
 
 #[test]
-fn dropin174_config_surface_logs_include_requirement_id() {
-    let harness = TestHarness::new("dropin174_config_surface_logs_include_requirement_id");
+fn dropin142_config_surface_logs_include_requirement_id() {
+    let harness = TestHarness::new("dropin142_config_surface_logs_include_requirement_id");
     harness.log().info_ctx(
         "dropin174.config",
         "Config precedence parity assertion",

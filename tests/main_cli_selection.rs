@@ -95,8 +95,8 @@ fn custom_model_entry(provider: &str, api_key: Option<&str>) -> ModelEntry {
 }
 
 #[test]
-fn dropin174_cli_surface_logs_include_requirement_id() {
-    let harness = TestHarness::new("dropin174_cli_surface_logs_include_requirement_id");
+fn dropin141_cli_surface_logs_include_requirement_id() {
+    let harness = TestHarness::new("dropin141_cli_surface_logs_include_requirement_id");
     harness
         .log()
         .info_ctx("dropin174.cli", "CLI parity assertion", |ctx| {
