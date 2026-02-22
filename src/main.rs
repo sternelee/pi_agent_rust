@@ -1463,8 +1463,16 @@ async fn handle_package_update(manager: &PackageManager, source: Option<String>)
         return Ok(());
     }
 
+    let mut failed = 0;
     for entry in entries {
-        manager.update_source(&entry.source, entry.scope).await?;
+        if let Err(e) = manager.update_source(&entry.source, entry.scope).await {
+            eprintln!("Failed to update {}: {}", entry.source, e);
+            failed += 1;
+        }
+    }
+
+    if failed > 0 {
+        bail!("Failed to update {} packages", failed);
     }
     println!("Updated packages");
     Ok(())
@@ -3059,7 +3067,9 @@ fn save_list_models_cache(models_path: &Path, payload: &ListModelsCachePayload) 
     };
     let mut writer = io::BufWriter::new(file);
     if serde_json::to_writer(&mut writer, payload).is_ok() && writer.flush().is_ok() {
-        let _ = fs::rename(temp_path, cache_path);
+        let _ = fs::rename(&temp_path, cache_path);
+    } else {
+        let _ = fs::remove_file(&temp_path);
     }
 }
 
@@ -4141,7 +4151,8 @@ fn read_piped_stdin() -> Result<Option<String>> {
     }
 
     let mut data = String::new();
-    io::stdin().read_to_string(&mut data)?;
+    let mut handle = io::stdin().take(100 * 1024 * 1024); // 100MB limit
+    handle.read_to_string(&mut data)?;
     if data.is_empty() {
         Ok(None)
     } else {

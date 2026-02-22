@@ -840,7 +840,7 @@ pub async fn run(
                     continue;
                 }
 
-                {
+                let result: Result<()> = async {
                     let mut guard = session
                         .lock(&cx)
                         .await
@@ -871,38 +871,53 @@ pub async fn run(
                     if clamped != current_thinking {
                         apply_thinking_level(&mut guard, clamped).await?;
                     }
+                    Ok(())
                 }
+                .await;
 
-                let _ = out_tx.send(response_ok(
-                    id,
-                    "set_model",
-                    Some(rpc_model_from_entry(&entry)),
-                ));
+                match result {
+                    Ok(()) => {
+                        let _ = out_tx.send(response_ok(
+                            id,
+                            "set_model",
+                            Some(rpc_model_from_entry(&entry)),
+                        ));
+                    }
+                    Err(err) => {
+                        let _ = out_tx.send(response_error_with_hints(id, "set_model", &err));
+                    }
+                }
             }
 
             "cycle_model" => {
-                let (entry, thinking_level, is_scoped) = {
+                let result = async {
                     let mut guard = session
                         .lock(&cx)
                         .await
                         .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
-                    let Some(result) = cycle_model_for_rpc(&mut guard, &options).await? else {
-                        let _ =
-                            out_tx.send(response_ok(id.clone(), "cycle_model", Some(Value::Null)));
-                        continue;
-                    };
-                    result
-                };
+                    cycle_model_for_rpc(&mut guard, &options).await
+                }
+                .await;
 
-                let _ = out_tx.send(response_ok(
-                    id,
-                    "cycle_model",
-                    Some(json!({
-                        "model": rpc_model_from_entry(&entry),
-                        "thinkingLevel": thinking_level.to_string(),
-                        "isScoped": is_scoped,
-                    })),
-                ));
+                match result {
+                    Ok(Some((entry, thinking_level, is_scoped))) => {
+                        let _ = out_tx.send(response_ok(
+                            id,
+                            "cycle_model",
+                            Some(json!({
+                                "model": rpc_model_from_entry(&entry),
+                                "thinkingLevel": thinking_level.to_string(),
+                                "isScoped": is_scoped,
+                            })),
+                        ));
+                    }
+                    Ok(None) => {
+                        let _ = out_tx.send(response_ok(id.clone(), "cycle_model", Some(Value::Null)));
+                    }
+                    Err(err) => {
+                        let _ = out_tx.send(response_error_with_hints(id, "cycle_model", &err));
+                    }
+                }
             }
 
             "set_thinking_level" => {
@@ -981,7 +996,14 @@ pub async fn run(
                         .position(|level| *level == current)
                         .unwrap_or(0);
                     let next = levels[(current_index + 1) % levels.len()];
-                    apply_thinking_level(&mut guard, next).await?;
+                    if let Err(err) = apply_thinking_level(&mut guard, next).await {
+                        let _ = out_tx.send(response_error_with_hints(
+                            id.clone(),
+                            "cycle_thinking_level",
+                            &err,
+                        ));
+                        continue;
+                    }
                     next
                 };
                 let _ = out_tx.send(response_ok(
@@ -1093,7 +1115,7 @@ pub async fn run(
                     ));
                     continue;
                 };
-                {
+                let result: Result<()> = async {
                     let mut guard = session
                         .lock(&cx)
                         .await
@@ -1105,8 +1127,18 @@ pub async fn run(
                         inner_session.append_session_info(Some(name.to_string()));
                     }
                     guard.persist_session().await?;
+                    Ok(())
                 }
-                let _ = out_tx.send(response_ok(id, "set_session_name", None));
+                .await;
+
+                match result {
+                    Ok(()) => {
+                        let _ = out_tx.send(response_ok(id, "set_session_name", None));
+                    }
+                    Err(err) => {
+                        let _ = out_tx.send(response_error_with_hints(id, "set_session_name", &err));
+                    }
+                }
             }
 
             "get_last_assistant_text" => {
@@ -1142,12 +1174,18 @@ pub async fn run(
                     })?;
                     inner.export_snapshot()
                 };
-                let path = export_html_snapshot(&snapshot, output_path.as_deref()).await?;
-                let _ = out_tx.send(response_ok(
-                    id,
-                    "export_html",
-                    Some(json!({ "path": path })),
-                ));
+                match export_html_snapshot(&snapshot, output_path.as_deref()).await {
+                    Ok(path) => {
+                        let _ = out_tx.send(response_ok(
+                            id,
+                            "export_html",
+                            Some(json!({ "path": path })),
+                        ));
+                    }
+                    Err(err) => {
+                        let _ = out_tx.send(response_error_with_hints(id, "export_html", &err));
+                    }
+                }
             }
 
             "bash" => {
@@ -1247,7 +1285,7 @@ pub async fn run(
                     .and_then(Value::as_str)
                     .map(str::to_string);
 
-                let data = {
+                let result: Result<Value> = async {
                     let mut guard = session
                         .lock(&cx)
                         .await
@@ -1287,19 +1325,20 @@ pub async fn run(
                     })?;
 
                     is_compacting.store(true, Ordering::SeqCst);
-                    let result =
-                        compact(prep, provider, key, custom_instructions.as_deref()).await?;
+                    let compact_res = compact(prep, provider, key, custom_instructions.as_deref()).await;
                     is_compacting.store(false, Ordering::SeqCst);
-                    let details_value = compaction_details_to_value(&result.details)?;
+                    let result_data = compact_res?;
+                    
+                    let details_value = compaction_details_to_value(&result_data.details)?;
 
                     let messages = {
                         let mut inner_session = guard.session.lock(&cx).await.map_err(|err| {
                             Error::session(format!("inner session lock failed: {err}"))
                         })?;
                         inner_session.append_compaction(
-                            result.summary.clone(),
-                            result.first_kept_entry_id.clone(),
-                            result.tokens_before,
+                            result_data.summary.clone(),
+                            result_data.first_kept_entry_id.clone(),
+                            result_data.tokens_before,
                             Some(details_value.clone()),
                             None,
                         );
@@ -1308,15 +1347,23 @@ pub async fn run(
                     guard.persist_session().await?;
                     guard.agent.replace_messages(messages);
 
-                    json!({
-                        "summary": result.summary,
-                        "firstKeptEntryId": result.first_kept_entry_id,
-                        "tokensBefore": result.tokens_before,
+                    Ok(json!({
+                        "summary": result_data.summary,
+                        "firstKeptEntryId": result_data.first_kept_entry_id,
+                        "tokensBefore": result_data.tokens_before,
                         "details": details_value,
-                    })
-                };
+                    }))
+                }
+                .await;
 
-                let _ = out_tx.send(response_ok(id, "compact", Some(data)));
+                match result {
+                    Ok(data) => {
+                        let _ = out_tx.send(response_ok(id, "compact", Some(data)));
+                    }
+                    Err(err) => {
+                        let _ = out_tx.send(response_error_with_hints(id, "compact", &err));
+                    }
+                }
             }
 
             "new_session" => {
@@ -1431,84 +1478,95 @@ pub async fn run(
                     continue;
                 };
 
-                // Phase 1: Snapshot — brief lock to compute ForkPlan + extract metadata.
-                let (fork_plan, parent_path, session_dir, save_enabled, header_snapshot) = {
-                    let guard = session
-                        .lock(&cx)
-                        .await
-                        .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
-                    let inner = guard.session.lock(&cx).await.map_err(|err| {
-                        Error::session(format!("inner session lock failed: {err}"))
-                    })?;
-                    let plan = inner.plan_fork_from_user_message(entry_id)?;
-                    let parent_path = inner.path.as_ref().map(|p| p.display().to_string());
-                    let session_dir = inner.session_dir.clone();
-                    let header = inner.header.clone();
-                    (plan, parent_path, session_dir, guard.save_enabled(), header)
-                    // Both locks released here.
-                };
+                let result: Result<String> = async {
+                    // Phase 1: Snapshot — brief lock to compute ForkPlan + extract metadata.
+                    let (fork_plan, parent_path, session_dir, save_enabled, header_snapshot) = {
+                        let guard = session
+                            .lock(&cx)
+                            .await
+                            .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
+                        let inner = guard.session.lock(&cx).await.map_err(|err| {
+                            Error::session(format!("inner session lock failed: {err}"))
+                        })?;
+                        let plan = inner.plan_fork_from_user_message(entry_id)?;
+                        let parent_path = inner.path.as_ref().map(|p| p.display().to_string());
+                        let session_dir = inner.session_dir.clone();
+                        let header = inner.header.clone();
+                        (plan, parent_path, session_dir, guard.save_enabled(), header)
+                        // Both locks released here.
+                    };
 
-                // Phase 2: Build new session without holding any lock.
-                let crate::session::ForkPlan {
-                    entries,
-                    leaf_id,
-                    selected_text,
-                } = fork_plan;
+                    // Phase 2: Build new session without holding any lock.
+                    let crate::session::ForkPlan {
+                        entries,
+                        leaf_id,
+                        selected_text,
+                    } = fork_plan;
 
-                let mut new_session = if save_enabled {
-                    crate::session::Session::create_with_dir(session_dir)
-                } else {
-                    crate::session::Session::in_memory()
-                };
-                new_session.header.parent_session = parent_path;
-                new_session
-                    .header
-                    .provider
-                    .clone_from(&header_snapshot.provider);
-                new_session
-                    .header
-                    .model_id
-                    .clone_from(&header_snapshot.model_id);
-                new_session
-                    .header
-                    .thinking_level
-                    .clone_from(&header_snapshot.thinking_level);
-                new_session.entries = entries;
-                new_session.leaf_id = leaf_id;
-                new_session.ensure_entry_ids();
+                    let mut new_session = if save_enabled {
+                        crate::session::Session::create_with_dir(session_dir)
+                    } else {
+                        crate::session::Session::in_memory()
+                    };
+                    new_session.header.parent_session = parent_path;
+                    new_session
+                        .header
+                        .provider
+                        .clone_from(&header_snapshot.provider);
+                    new_session
+                        .header
+                        .model_id
+                        .clone_from(&header_snapshot.model_id);
+                    new_session
+                        .header
+                        .thinking_level
+                        .clone_from(&header_snapshot.thinking_level);
+                    new_session.entries = entries;
+                    new_session.leaf_id = leaf_id;
+                    new_session.ensure_entry_ids();
 
-                let messages = new_session.to_messages_for_current_path();
-                let session_id = new_session.header.id.clone();
+                    let messages = new_session.to_messages_for_current_path();
+                    let session_id = new_session.header.id.clone();
 
-                // Phase 3: Swap — brief lock to install the new session.
-                {
-                    let mut guard = session
-                        .lock(&cx)
-                        .await
-                        .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
-                    let mut inner = guard.session.lock(&cx).await.map_err(|err| {
-                        Error::session(format!("inner session lock failed: {err}"))
-                    })?;
-                    *inner = new_session;
-                    drop(inner);
-                    guard.agent.replace_messages(messages);
-                    guard.agent.stream_options_mut().session_id = Some(session_id);
+                    // Phase 3: Swap — brief lock to install the new session.
+                    {
+                        let mut guard = session
+                            .lock(&cx)
+                            .await
+                            .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
+                        let mut inner = guard.session.lock(&cx).await.map_err(|err| {
+                            Error::session(format!("inner session lock failed: {err}"))
+                        })?;
+                        *inner = new_session;
+                        drop(inner);
+                        guard.agent.replace_messages(messages);
+                        guard.agent.stream_options_mut().session_id = Some(session_id);
+                    }
+
+                    {
+                        let mut state = shared_state
+                            .lock(&cx)
+                            .await
+                            .map_err(|err| Error::session(format!("state lock failed: {err}")))?;
+                        state.steering.clear();
+                        state.follow_up.clear();
+                    }
+
+                    Ok(selected_text)
+                }.await;
+
+                match result {
+                    Ok(selected_text) => {
+                        let _ = out_tx.send(response_ok(
+                            id,
+                            "fork",
+                            Some(json!({ "text": selected_text, "cancelled": false })),
+                        ));
+                    }
+                    Err(err) => {
+                        let _ = out_tx.send(response_error_with_hints(id, "fork", &err));
+                    }
                 }
-
-                {
-                    let mut state = shared_state
-                        .lock(&cx)
-                        .await
-                        .map_err(|err| Error::session(format!("state lock failed: {err}")))?;
-                    state.steering.clear();
-                    state.follow_up.clear();
-                }
-
-                let _ = out_tx.send(response_ok(
-                    id,
-                    "fork",
-                    Some(json!({ "text": selected_text, "cancelled": false })),
-                ));
             }
 
             "get_fork_messages" => {
@@ -3229,11 +3287,12 @@ async fn ingest_bash_rpc_chunk(
 
     // Spill to temp file if we exceed the limit
     if *total_bytes > DEFAULT_MAX_BYTES && temp_file.is_none() && !*spill_failed {
-        let id = uuid::Uuid::new_v4().simple().to_string();
+        let id_full = uuid::Uuid::new_v4().simple().to_string();
+        let id = &id_full[..16];
         let path = std::env::temp_dir().join(format!("pi-rpc-bash-{id}.log"));
 
         // Secure synchronous creation
-        let created = {
+        let expected_inode: Option<u64> = {
             let mut options = std::fs::OpenOptions::new();
             options.write(true).create_new(true);
             #[cfg(unix)]
@@ -3241,10 +3300,27 @@ async fn ingest_bash_rpc_chunk(
                 use std::os::unix::fs::OpenOptionsExt;
                 options.mode(0o600);
             }
-            options.open(&path).is_ok()
+            
+            match options.open(&path) {
+                Ok(file) => {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt;
+                        file.metadata().ok().map(|m| m.ino())
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        None
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to create bash temp file: {e}");
+                    None
+                }
+            }
         };
 
-        if created {
+        if expected_inode.is_some() || !cfg!(unix) {
             // Re-open async for writing
             match asupersync::fs::OpenOptions::new()
                 .append(true)
@@ -3252,21 +3328,42 @@ async fn ingest_bash_rpc_chunk(
                 .await
             {
                 Ok(mut file) => {
-                    // Flush existing chunks to the new file
-                    for existing in chunks.iter() {
-                        use asupersync::io::AsyncWriteExt;
-                        if let Err(e) = file.write_all(existing).await {
-                            tracing::warn!("Failed to flush bash chunk to temp file: {e}");
-                            *spill_failed = true;
-                            // Drop file to stop further writes
-                            // Note: we can't easily drop 'mut file' here because we are in a loop
-                            // but we can set temp_file to None below if we don't assign it.
-                            break;
+                    // Validate identity to prevent TOCTOU/symlink attacks
+                    let mut identity_match = true;
+                    #[cfg(unix)]
+                    if let Some(expected) = expected_inode {
+                        use std::os::unix::fs::MetadataExt;
+                        match file.metadata().await {
+                            Ok(meta) => {
+                                if meta.ino() != expected {
+                                    tracing::warn!("Temp file identity mismatch (possible TOCTOU attack)");
+                                    identity_match = false;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to stat temp file: {e}");
+                                identity_match = false;
+                            }
                         }
                     }
-                    if !*spill_failed {
-                        *temp_file = Some(file);
-                        *temp_file_path = Some(path);
+
+                    if identity_match {
+                        // Flush existing chunks to the new file
+                        for existing in chunks.iter() {
+                            use asupersync::io::AsyncWriteExt;
+                            if let Err(e) = file.write_all(existing).await {
+                                tracing::warn!("Failed to flush bash chunk to temp file: {e}");
+                                *spill_failed = true;
+                                break;
+                            }
+                        }
+                        if !*spill_failed {
+                            *temp_file = Some(file);
+                            *temp_file_path = Some(path);
+                        }
+                    } else {
+                        let _ = std::fs::remove_file(&path);
+                        *spill_failed = true;
                     }
                 }
                 Err(e) => {
@@ -3465,11 +3562,11 @@ async fn run_bash_rpc(
 
     // Drop the receiver to close the channel.
     // This ensures that any `tx.send()` calls in the pump threads return an error (Disconnected)
-    // instead of blocking if the channel is full, preventing a deadlock on `join()`.
+    // instead of blocking if the channel is full.
+    // We intentionally do NOT join() the pump threads because if a background child process
+    // inherits stdout/stderr, the pipe remains open and `read()` blocks indefinitely,
+    // which would cause `join()` to hang the entire agent.
     drop(rx);
-
-    let _ = stdout_handle.join();
-    let _ = stderr_handle.join();
 
     // Explicitly drop the temp file handle to ensure any buffered data is flushed to disk
     // before we potentially return the path to the caller.

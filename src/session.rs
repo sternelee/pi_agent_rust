@@ -1089,16 +1089,22 @@ impl Session {
         // Check for V2 sidecar store — enables O(index+tail) resume.
         if session_store_v2::has_v2_sidecar(&path) {
             let is_stale = (|| -> Option<bool> {
-                let v2_index = session_store_v2::v2_sidecar_path(&path)
-                    .join("index")
-                    .join("offsets.jsonl");
                 let jsonl_meta = std::fs::metadata(&path).ok()?;
-                let v2_meta = std::fs::metadata(v2_index).ok()?;
+                
+                let v2_root = session_store_v2::v2_sidecar_path(&path);
+                let v2_index = v2_root.join("index").join("offsets.jsonl");
+                let v2_manifest = v2_root.join("manifest.json");
+
+                // Check index first, fallback to manifest
+                let v2_meta = std::fs::metadata(&v2_index)
+                    .or_else(|_| std::fs::metadata(&v2_manifest))
+                    .ok()?;
+
                 let jsonl_mtime = jsonl_meta.modified().ok()?;
                 let v2_mtime = v2_meta.modified().ok()?;
                 Some(jsonl_mtime > v2_mtime)
             })()
-            .unwrap_or(false);
+            .unwrap_or(true); // Default to true (stale) if metadata cannot be verified
 
             if is_stale {
                 tracing::warn!(

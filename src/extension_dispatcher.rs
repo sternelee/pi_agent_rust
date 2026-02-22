@@ -2877,26 +2877,67 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
                 let mut stdout = child.stdout.take().ok_or("Missing stdout pipe")?;
                 let mut stderr = child.stderr.take().ok_or("Missing stderr pipe")?;
 
-                let stdout_handle =
-                    thread::spawn(move || -> std::result::Result<Vec<u8>, String> {
-                        let mut buf = Vec::new();
-                        stdout
-                            .read_to_end(&mut buf)
-                            .map_err(|err| err.to_string())?;
-                        Ok(buf)
-                    });
-                let stderr_handle =
-                    thread::spawn(move || -> std::result::Result<Vec<u8>, String> {
-                        let mut buf = Vec::new();
-                        stderr
-                            .read_to_end(&mut buf)
-                            .map_err(|err| err.to_string())?;
-                        Ok(buf)
-                    });
+                #[derive(Clone, Copy)]
+                enum StreamKind {
+                    Stdout,
+                    Stderr,
+                }
+
+                struct StreamChunk {
+                    kind: StreamKind,
+                    bytes: Vec<u8>,
+                }
+
+                fn pump_stream(
+                    mut reader: impl std::io::Read,
+                    tx: std::sync::mpsc::SyncSender<StreamChunk>,
+                    kind: StreamKind,
+                ) {
+                    let mut buf = [0u8; 8192];
+                    loop {
+                        let read = match reader.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(read) => read,
+                        };
+                        let chunk = StreamChunk {
+                            kind,
+                            bytes: buf[..read].to_vec(),
+                        };
+                        if tx.send(chunk).is_err() {
+                            break;
+                        }
+                    }
+                }
+
+                let (tx, rx) = std::sync::mpsc::sync_channel::<StreamChunk>(128);
+                let tx_stdout = tx.clone();
+                let _stdout_handle =
+                    thread::spawn(move || pump_stream(stdout, tx_stdout, StreamKind::Stdout));
+                let _stderr_handle =
+                    thread::spawn(move || pump_stream(stderr, tx, StreamKind::Stderr));
 
                 let start = Instant::now();
                 let mut killed = false;
+                let mut stdout_bytes = Vec::new();
+                let mut stderr_bytes = Vec::new();
+                let max_bytes = crate::tools::DEFAULT_MAX_BYTES.saturating_mul(2);
+
                 let status = loop {
+                    while let Ok(chunk) = rx.try_recv() {
+                        match chunk.kind {
+                            StreamKind::Stdout => {
+                                if stdout_bytes.len() < max_bytes {
+                                    stdout_bytes.extend_from_slice(&chunk.bytes);
+                                }
+                            }
+                            StreamKind::Stderr => {
+                                if stderr_bytes.len() < max_bytes {
+                                    stderr_bytes.extend_from_slice(&chunk.bytes);
+                                }
+                            }
+                        }
+                    }
+
                     if let Some(status) = child.try_wait().map_err(|err| err.to_string())? {
                         break status;
                     }
@@ -2913,14 +2954,34 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
                     thread::sleep(Duration::from_millis(10));
                 };
 
-                let stdout_bytes = stdout_handle
-                    .join()
-                    .map_err(|_| "stdout reader thread panicked".to_string())?
-                    .map_err(|err| format!("Read stdout: {err}"))?;
-                let stderr_bytes = stderr_handle
-                    .join()
-                    .map_err(|_| "stderr reader thread panicked".to_string())?
-                    .map_err(|err| format!("Read stderr: {err}"))?;
+                let drain_deadline = Instant::now() + Duration::from_secs(2);
+                loop {
+                    match rx.try_recv() {
+                        Ok(chunk) => {
+                            match chunk.kind {
+                                StreamKind::Stdout => {
+                                    if stdout_bytes.len() < max_bytes {
+                                        stdout_bytes.extend_from_slice(&chunk.bytes);
+                                    }
+                                }
+                                StreamKind::Stderr => {
+                                    if stderr_bytes.len() < max_bytes {
+                                        stderr_bytes.extend_from_slice(&chunk.bytes);
+                                    }
+                                }
+                            }
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                            if Instant::now() >= drain_deadline {
+                                break;
+                            }
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                    }
+                }
+
+                drop(rx); // Close the channel so pump threads exit if blocked
 
                 let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
                 let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();

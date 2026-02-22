@@ -1989,7 +1989,7 @@ fn contains_global_mutation(text: &str) -> bool {
     let assignment_patterns = ["globalThis.", "global.", "globalThis["];
 
     for pat in &assignment_patterns {
-        if let Some(pos) = text.find(pat) {
+        for (pos, _) in text.match_indices(pat) {
             let after = &text[pos + pat.len()..];
             // Check if this is an assignment (has = but not == or ===)
             if let Some(eq_pos) = after.find('=') {
@@ -2053,7 +2053,18 @@ fn truncate_snippet(text: &str) -> String {
     if text.len() <= MAX_SNIPPET_LEN {
         text.to_string()
     } else {
-        format!("{}...", &text[..MAX_SNIPPET_LEN])
+        let mut end = 0;
+        for (i, c) in text.char_indices() {
+            if i >= MAX_SNIPPET_LEN {
+                break;
+            }
+            end = i + c.len_utf8();
+        }
+        if end < text.len() {
+            format!("{}...", &text[..end])
+        } else {
+            text.to_string()
+        }
     }
 }
 
@@ -2102,26 +2113,22 @@ fn relative_posix_path(root: &Path, path: &Path) -> String {
 /// block comment state to avoid false positives.
 fn strip_block_comment_tracking(line: &str, in_block: &mut bool) -> String {
     let mut result = String::with_capacity(line.len());
-    let bytes = line.as_bytes();
-    let mut i = 0;
+    let mut chars = line.chars().peekable();
 
-    while i < bytes.len() {
+    while let Some(c) = chars.next() {
         if *in_block {
-            if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+            if c == '*' && chars.peek() == Some(&'/') {
+                chars.next(); // Consume '/'
                 *in_block = false;
-                i += 2;
-            } else {
-                i += 1;
             }
-        } else if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+        } else if c == '/' && chars.peek() == Some(&'*') {
+            chars.next(); // Consume '*'
             *in_block = true;
-            i += 2;
-        } else if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+        } else if c == '/' && chars.peek() == Some(&'/') {
             // Rest of line is comment.
             break;
         } else {
-            result.push(bytes[i] as char);
-            i += 1;
+            result.push(c);
         }
     }
 

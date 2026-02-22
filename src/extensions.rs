@@ -4315,6 +4315,13 @@ impl SecretBrokerPolicy {
             return false;
         }
 
+        let upper = name.to_ascii_uppercase();
+
+        // Unconditionally allow PI_* variables.
+        if upper.starts_with("PI_") {
+            return false;
+        }
+
         // Check disclosure allowlist first (overrides everything).
         if self
             .disclosure_allowlist
@@ -4323,8 +4330,6 @@ impl SecretBrokerPolicy {
         {
             return false;
         }
-
-        let upper = name.to_ascii_uppercase();
 
         // Exact match.
         if self
@@ -23759,37 +23764,50 @@ fn check_version_constraint(version: &str, range: &str) -> bool {
         return false;
     };
 
+    let is_gte = |r_maj: u32, r_min: u32, r_pat: u32| -> bool {
+        if v_major > r_maj {
+            return true;
+        }
+        if v_major < r_maj {
+            return false;
+        }
+        if v_minor > r_min {
+            return true;
+        }
+        if v_minor < r_min {
+            return false;
+        }
+        v_patch >= r_pat
+    };
+
     if let Some(rest) = range.strip_prefix('^') {
-        let Some((r_major, _, _)) = parse(rest) else {
+        let Some((r_major, r_minor, r_patch)) = parse(rest) else {
             return false;
         };
+        if !is_gte(r_major, r_minor, r_patch) {
+            return false;
+        }
+        if r_major == 0 {
+            if r_minor == 0 {
+                return v_major == 0 && v_minor == 0 && v_patch == r_patch;
+            }
+            return v_major == 0 && v_minor == r_minor;
+        }
         return v_major == r_major;
     }
 
     if let Some(rest) = range.strip_prefix('~') {
-        let Some((r_major, r_minor, _)) = parse(rest) else {
+        let Some((r_major, r_minor, r_patch)) = parse(rest) else {
             return false;
         };
-        return v_major == r_major && v_minor == r_minor;
+        return v_major == r_major && v_minor == r_minor && v_patch >= r_patch;
     }
 
     if let Some(rest) = range.strip_prefix(">=") {
         let Some((r_major, r_minor, r_patch)) = parse(rest) else {
             return false;
         };
-        if v_major > r_major {
-            return true;
-        }
-        if v_major < r_major {
-            return false;
-        }
-        if v_minor > r_minor {
-            return true;
-        }
-        if v_minor < r_minor {
-            return false;
-        }
-        return v_patch >= r_patch;
+        return is_gte(r_major, r_minor, r_patch);
     }
 
     version == range

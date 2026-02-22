@@ -859,8 +859,14 @@ impl PiApp {
         let range = self.autocomplete.replace_range.clone();
 
         // Guard against stale range if editor content changed since autocomplete was triggered.
-        let start = range.start.min(text.len());
-        let end = range.end.min(text.len()).max(start);
+        let mut start = range.start.min(text.len());
+        while start > 0 && !text.is_char_boundary(start) {
+            start -= 1;
+        }
+        let mut end = range.end.min(text.len()).max(start);
+        while end < text.len() && !text.is_char_boundary(end) {
+            end += 1;
+        }
 
         let mut new_text = String::with_capacity(text.len().saturating_add(item.insert.len()));
         new_text.push_str(&text[..start]);

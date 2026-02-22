@@ -320,7 +320,7 @@ impl PiConsole {
 
     /// Move cursor up N lines.
     pub fn cursor_up(&self, n: usize) {
-        if self.is_tty {
+        if self.is_tty && n > 0 {
             print!("\x1b[{n}A");
             let _ = io::stdout().flush();
         }
@@ -610,12 +610,18 @@ fn strip_markup(text: &str) -> String {
                 buffer.clear();
                 in_tag = false;
             } else if c == '[' {
-                // Nested '[' means the previous '[' was literal.
-                // Flush previous '[' and buffer, start new tag candidate.
-                result.push('[');
-                result.push_str(&buffer);
-                buffer.clear();
-                // Stay in_tag for this new '['
+                if buffer.is_empty() {
+                    // Escaped bracket: `[[` becomes `[`
+                    result.push('[');
+                    in_tag = false;
+                } else {
+                    // Nested '[' means the previous '[' was literal.
+                    // Flush previous '[' and buffer, start new tag candidate.
+                    result.push('[');
+                    result.push_str(&buffer);
+                    buffer.clear();
+                    // Stay in_tag for this new '['
+                }
             } else {
                 buffer.push(c);
             }

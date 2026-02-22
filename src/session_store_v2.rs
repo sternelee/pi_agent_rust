@@ -993,6 +993,7 @@ impl SessionStoreV2 {
                             error = %e,
                             "SessionStoreV2 encountered oversized line during index rebuild; truncating segment"
                         );
+                        drop(reader);
                         truncate_file_to(seg_path, byte_offset)?;
                         remove_orphaned_segments(&segment_files[i + 1..])?;
                         break 'segments;
@@ -1025,6 +1026,7 @@ impl SessionStoreV2 {
                                 line_number,
                                 "SessionStoreV2 dropping valid but newline-missing trailing segment frame during index rebuild"
                             );
+                            drop(reader);
                             truncate_file_to(seg_path, byte_offset)?;
                             remove_orphaned_segments(&segment_files[i + 1..])?;
                             break 'segments;
@@ -1041,6 +1043,7 @@ impl SessionStoreV2 {
                                 "SessionStoreV2 dropping truncated trailing segment frame during index rebuild"
                             );
                             // Trim the incomplete tail so subsequent reads and appends remain valid.
+                            drop(reader);
                             truncate_file_to(seg_path, byte_offset)?;
                             remove_orphaned_segments(&segment_files[i + 1..])?;
                             break 'segments;
@@ -1062,6 +1065,7 @@ impl SessionStoreV2 {
                         last_seq = last_observed_seq,
                         "SessionStoreV2 detected non-monotonic entry sequence during rebuild; truncating segment"
                     );
+                    drop(reader);
                     truncate_file_to(seg_path, byte_offset)?;
                     remove_orphaned_segments(&segment_files[i + 1..])?;
                     break 'segments;
@@ -1096,6 +1100,7 @@ impl SessionStoreV2 {
         }
 
         index_writer.flush()?;
+        drop(index_writer); // Close the file handle before renaming (fixes Windows ERROR_SHARING_VIOLATION)
 
         // Atomically replace the old index with the rebuilt one
         fs::rename(&index_tmp_path, &index_path)?;
@@ -1443,14 +1448,21 @@ fn write_jsonl_lines<T: Serialize>(path: &Path, rows: &[T]) -> Result<()> {
 
 fn read_jsonl<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Vec<T>> {
     let file = File::open(path)?;
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
     let mut out = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let bytes_read = read_line_with_limit(&mut reader, &mut line, MAX_FRAME_READ_BYTES)
+            .map_err(|e| Error::Io(Box::new(e)))?;
+        if bytes_read == 0 {
+            break;
+        }
         if line.trim().is_empty() {
             continue;
         }
-        out.push(serde_json::from_str::<T>(&line)?);
+        let json_line = line.trim_end_matches('\n').trim_end_matches('\r');
+        out.push(serde_json::from_str::<T>(json_line)?);
     }
     Ok(out)
 }

@@ -730,18 +730,18 @@ impl Agent {
                 }
 
                 if abort.as_ref().is_some_and(AbortSignal::is_aborted) {
-                    let abort_message = self.build_abort_message(last_assistant.as_deref());
+                    let abort_message = self.build_abort_message(None);
                     let message = Message::assistant(abort_message.clone());
-                    if !matches!(self.messages.last(), Some(Message::Assistant(_))) {
-                        self.messages.push(message.clone());
-                        new_messages.push(message.clone());
-                        on_event(AgentEvent::MessageStart {
-                            message: message.clone(),
-                        });
-                    }
+                    
+                    self.messages.push(message.clone());
+                    new_messages.push(message.clone());
+                    on_event(AgentEvent::MessageStart {
+                        message: message.clone(),
+                    });
                     on_event(AgentEvent::MessageEnd {
                         message: message.clone(),
                     });
+                    
                     let turn_end_event = AgentEvent::TurnEnd {
                         session_id: session_id.clone(),
                         turn_index: current_turn_index,
@@ -1027,6 +1027,16 @@ impl Agent {
                             None
                         };
                         let abort_arc = Arc::new(self.build_abort_message(last_partial));
+                        if !sent_start {
+                            on_event(AgentEvent::MessageStart {
+                                message: Message::Assistant(Arc::clone(&abort_arc)),
+                            });
+                            self.messages.push(Message::Assistant(Arc::clone(&abort_arc)));
+                            added_partial = true;
+                            // We do NOT set sent_start = true here because we are returning immediately,
+                            // but setting added_partial = true prevents finalize_assistant_message from
+                            // emitting a second MessageStart.
+                        }
                         on_event(AgentEvent::MessageUpdate {
                             message: Message::Assistant(Arc::clone(&abort_arc)),
                             assistant_message_event: AssistantMessageEvent::Error {
@@ -1441,13 +1451,6 @@ impl Agent {
     ) -> Result<ToolExecutionOutcome> {
         let mut results = Vec::new();
         let mut steering_messages: Option<Vec<Message>> = None;
-
-        if abort.as_ref().is_some_and(AbortSignal::is_aborted) {
-            return Ok(ToolExecutionOutcome {
-                tool_results: results,
-                steering_messages,
-            });
-        }
 
         // Phase 1: Emit start events for ALL tools up front.
         for tool_call in tool_calls {

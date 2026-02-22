@@ -640,11 +640,9 @@ export default function activate(pi) {
 }
 "#,
     );
-    // TODO(SEC): When gap G-2 is fixed, change this to:
-    //   assert!(result.starts_with("BLOCKED:"), ...);
     assert!(
-        result == "ESCAPED_GAP_G2" || result.starts_with("BLOCKED:"),
-        "Write outside workspace: currently GAP G-2 (allows escape), got: {result}"
+        result.starts_with("BLOCKED:"),
+        "Write outside workspace must be blocked, got: {result}"
     );
 }
 

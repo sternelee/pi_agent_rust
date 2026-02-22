@@ -1267,12 +1267,6 @@ fn resolve_value(value: &str) -> Option<String> {
             .filter(|v| !v.is_empty());
     }
 
-    if let Ok(env_val) = std::env::var(value) {
-        if !env_val.is_empty() {
-            return Some(env_val);
-        }
-    }
-
     if value.is_empty() {
         None
     } else {
@@ -2119,7 +2113,6 @@ mod tests {
             resolve_value(&format!("env:{env_key}")).as_deref(),
             Some(env_val.as_str())
         );
-        assert_eq!(resolve_value(&env_key).as_deref(), Some(env_val.as_str()));
 
         let dir = tempdir().expect("tempdir");
         let key_path = dir.path().join("api_key.txt");

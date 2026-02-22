@@ -116,6 +116,9 @@ pub const LS_SCAN_HARD_LIMIT: usize = 20_000;
 /// Hard limit for read tool file size (100MB) to prevent OOM.
 pub const READ_TOOL_MAX_BYTES: u64 = 100 * 1024 * 1024;
 
+/// Hard limit for write/edit tool file size (100MB) to prevent OOM.
+pub const WRITE_TOOL_MAX_BYTES: usize = 100 * 1024 * 1024;
+
 /// Maximum size for an image to be sent to the API (4.5MB).
 pub const IMAGE_MAX_BYTES: usize = 4_718_592;
 
@@ -199,15 +202,20 @@ pub fn truncate_head(
     let first_newline = memchr::memchr(b'\n', content.as_bytes());
     let first_line_bytes = first_newline.unwrap_or(content.len());
     if first_line_bytes > max_bytes {
+        let mut limit = max_bytes;
+        while limit > 0 && !content.is_char_boundary(limit) {
+            limit -= 1;
+        }
+        content.truncate(limit);
         return TruncationResult {
-            content: String::new(),
+            content,
             truncated: true,
             truncated_by: Some(TruncatedBy::Bytes),
             total_lines,
             total_bytes,
-            output_lines: 0,
-            output_bytes: 0,
-            last_line_partial: false,
+            output_lines: 1,
+            output_bytes: limit,
+            last_line_partial: true,
             first_line_exceeds_limit: true,
             max_lines,
             max_bytes,
@@ -1587,7 +1595,7 @@ impl Tool for ReadTool {
         let line_num_width = max_line_num.to_string().len().max(5);
 
         for (i, line) in effective_iter.enumerate() {
-            if i >= lines_to_take {
+            if i >= lines_to_take || start_line + i >= total_lines {
                 break;
             }
             if i > 0 {
@@ -2512,6 +2520,14 @@ impl Tool for EditTool {
         let input: EditInput =
             serde_json::from_value(input).map_err(|e| Error::validation(e.to_string()))?;
 
+        if input.new_text.len() > WRITE_TOOL_MAX_BYTES {
+            return Err(Error::validation(format!(
+                "New text size exceeds maximum allowed ({} > {} bytes)",
+                input.new_text.len(),
+                WRITE_TOOL_MAX_BYTES
+            )));
+        }
+
         let absolute_path = resolve_read_path(&input.path, &self.cwd);
 
         // Match legacy behavior: any access failure is reported as "File not found".
@@ -2678,10 +2694,12 @@ impl Tool for EditTool {
             .ok()
             .map(|m| m.permissions());
         let parent = absolute_path.parent().unwrap_or_else(|| Path::new("."));
-        let temp_file = tempfile::NamedTempFile::new_in(parent)
+        let mut temp_file = tempfile::NamedTempFile::new_in(parent)
             .map_err(|e| Error::tool("edit", format!("Failed to create temp file: {e}")))?;
-        asupersync::fs::write(temp_file.path(), &final_content)
-            .await
+        use std::io::Write;
+        temp_file
+            .as_file_mut()
+            .write_all(final_content.as_bytes())
             .map_err(|e| Error::tool("edit", format!("Failed to write temp file: {e}")))?;
 
         // Restore original file permissions (tempfile defaults to 0o600) before persisting.
@@ -2788,6 +2806,14 @@ impl Tool for WriteTool {
         let input: WriteInput =
             serde_json::from_value(input).map_err(|e| Error::validation(e.to_string()))?;
 
+        if input.content.len() > WRITE_TOOL_MAX_BYTES {
+            return Err(Error::validation(format!(
+                "Content size exceeds maximum allowed ({} > {} bytes)",
+                input.content.len(),
+                WRITE_TOOL_MAX_BYTES
+            )));
+        }
+
         let path = resolve_path(&input.path, &self.cwd);
 
         // Create parent directories if needed
@@ -2804,11 +2830,13 @@ impl Tool for WriteTool {
         // Capture original permissions before the file is replaced (new files get None).
         let original_perms = std::fs::metadata(&path).ok().map(|m| m.permissions());
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let temp_file = tempfile::NamedTempFile::new_in(parent)
+        let mut temp_file = tempfile::NamedTempFile::new_in(parent)
             .map_err(|e| Error::tool("write", format!("Failed to create temp file: {e}")))?;
 
-        asupersync::fs::write(temp_file.path(), input.content.as_bytes())
-            .await
+        use std::io::Write;
+        temp_file
+            .as_file_mut()
+            .write_all(input.content.as_bytes())
             .map_err(|e| Error::tool("write", format!("Failed to write temp file: {e}")))?;
 
         // Restore original file permissions (tempfile defaults to 0o600) before persisting.
@@ -4044,14 +4072,22 @@ async fn ingest_bash_chunk(chunk: Vec<u8>, state: &mut BashOutputState) -> Resul
         }
 
         // Write buffered chunks to file first so it contains output from the beginning.
+        let mut failed_flush = false;
         for existing in &state.chunks {
-            file.write_all(existing)
-                .await
-                .map_err(|e| Error::tool("bash", e.to_string()))?;
+            if let Err(e) = file.write_all(existing).await {
+                tracing::warn!("Failed to flush bash chunk to temp file: {e}");
+                failed_flush = true;
+                break;
+            }
         }
 
-        state.temp_file_path = Some(path);
-        state.temp_file = Some(file);
+        if failed_flush {
+            state.spill_failed = true;
+            let _ = std::fs::remove_file(&path);
+        } else {
+            state.temp_file_path = Some(path);
+            state.temp_file = Some(file);
+        }
     }
 
     if let Some(file) = state.temp_file.as_mut() {

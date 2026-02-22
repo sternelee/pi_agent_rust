@@ -324,80 +324,73 @@ where
         parser.feed_into(s, |event| pending.push_back(event));
     }
 
-    fn feed_valid_prefix(&mut self, bytes: &[u8]) {
-        if bytes.is_empty() {
-            return;
-        }
-        let Ok(s) = std::str::from_utf8(bytes) else {
-            return;
-        };
-        self.feed_to_pending(s);
-    }
-
     fn process_chunk_without_utf8_tail(&mut self, bytes: Vec<u8>) -> Result<(), std::io::Error> {
-        match std::str::from_utf8(&bytes) {
-            Ok(s) => {
-                self.feed_to_pending(s);
-                Ok(())
-            }
-            Err(err) => {
-                let valid_len = err.valid_up_to();
-                self.feed_valid_prefix(&bytes[..valid_len]);
-
-                if let Some(invalid_len) = err.error_len() {
-                    // Hard UTF-8 error: skip invalid sequence, keep the rest.
-                    let mut remainder = bytes;
-                    remainder.drain(..valid_len + invalid_len);
-
-                    // Try to recover valid text from the remainder immediately
-                    match std::str::from_utf8(&remainder) {
-                        Ok(s) => self.feed_to_pending(s),
-                        Err(_) => self.utf8_buffer = remainder,
+        let mut processed = 0;
+        loop {
+            match std::str::from_utf8(&bytes[processed..]) {
+                Ok(s) => {
+                    if !s.is_empty() {
+                        self.feed_to_pending(s);
+                    }
+                    return Ok(());
+                }
+                Err(err) => {
+                    let valid_len = err.valid_up_to();
+                    if valid_len > 0 {
+                        let s = std::str::from_utf8(&bytes[processed..processed + valid_len])
+                            .expect("valid utf8 prefix");
+                        self.feed_to_pending(s);
+                        processed += valid_len;
                     }
 
-                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, err));
+                    if let Some(invalid_len) = err.error_len() {
+                        self.feed_to_pending("\u{FFFD}");
+                        processed += invalid_len;
+                    } else {
+                        self.utf8_buffer.extend_from_slice(&bytes[processed..]);
+                        return Ok(());
+                    }
                 }
-
-                let mut remainder = bytes;
-                remainder.drain(..valid_len);
-                self.utf8_buffer = remainder;
-                Ok(())
             }
         }
     }
 
     fn process_chunk_with_utf8_tail(&mut self, bytes: &[u8]) -> Result<(), std::io::Error> {
         self.utf8_buffer.extend_from_slice(bytes);
-        let mut utf8_buffer = std::mem::take(&mut self.utf8_buffer);
-
-        match std::str::from_utf8(&utf8_buffer) {
-            Ok(s) => {
-                self.feed_to_pending(s);
-                utf8_buffer.clear();
-            }
-            Err(err) => {
-                let valid_len = err.valid_up_to();
-                self.feed_valid_prefix(&utf8_buffer[..valid_len]);
-
-                if let Some(invalid_len) = err.error_len() {
-                    // Hard UTF-8 error: skip invalid sequence, keep the rest.
-                    utf8_buffer.drain(..valid_len + invalid_len);
-
-                    // Try to recover valid text from the remainder immediately
-                    match std::str::from_utf8(&utf8_buffer) {
-                        Ok(s) => self.feed_to_pending(s),
-                        Err(_) => self.utf8_buffer = utf8_buffer,
+        let mut processed = 0;
+        loop {
+            match std::str::from_utf8(&self.utf8_buffer[processed..]) {
+                Ok(s) => {
+                    if !s.is_empty() {
+                        self.feed_to_pending(s);
+                    }
+                    self.utf8_buffer.clear();
+                    return Ok(());
+                }
+                Err(err) => {
+                    let valid_len = err.valid_up_to();
+                    if valid_len > 0 {
+                        let s = std::str::from_utf8(
+                            &self.utf8_buffer[processed..processed + valid_len],
+                        )
+                        .expect("valid utf8 prefix");
+                        self.feed_to_pending(s);
+                        processed += valid_len;
                     }
 
-                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, err));
+                    if let Some(invalid_len) = err.error_len() {
+                        self.feed_to_pending("\u{FFFD}");
+                        processed += invalid_len;
+                    } else {
+                        // Move remaining bytes to start of utf8_buffer
+                        let remaining = self.utf8_buffer.len() - processed;
+                        self.utf8_buffer.copy_within(processed.., 0);
+                        self.utf8_buffer.truncate(remaining);
+                        return Ok(());
+                    }
                 }
-
-                utf8_buffer.drain(..valid_len);
             }
         }
-
-        self.utf8_buffer = utf8_buffer;
-        Ok(())
     }
 
     fn process_chunk(&mut self, bytes: Vec<u8>) -> Result<(), std::io::Error> {

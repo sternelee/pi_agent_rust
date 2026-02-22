@@ -5254,6 +5254,22 @@ impl JsModuleResolver for PiJsResolver {
             // separators (Windows backslashes → forward slashes for QuickJS).
             let canonical = crate::extensions::safe_canonicalize(&path);
 
+            let is_safe = roots.iter().any(|root| {
+                let canonical_root = crate::extensions::safe_canonicalize(root);
+                canonical.starts_with(&canonical_root)
+            });
+
+            if !is_safe {
+                tracing::warn!(
+                    event = "pijs.resolve.escape",
+                    base = %base,
+                    specifier = %spec,
+                    resolved = %canonical.display(),
+                    "import resolved to path outside extension roots"
+                );
+                return Err(rquickjs::Error::new_resolving(base, name));
+            }
+
             return Ok(canonical.to_string_lossy().replace('\\', "/"));
         }
 
@@ -5532,8 +5548,16 @@ fn store_to_disk_cache(cache_dir: &Path, cache_key: &str, source: &[u8]) {
             return;
         }
     }
-    if let Err(err) = fs::write(&path, source) {
-        tracing::debug!(event = "pijs.module_cache.disk.write_failed", path = %path.display(), %err);
+    
+    let temp_path = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4().simple()));
+    if let Err(err) = fs::write(&temp_path, source) {
+        tracing::debug!(event = "pijs.module_cache.disk.write_failed", path = %temp_path.display(), %err);
+        return;
+    }
+    
+    if let Err(err) = fs::rename(&temp_path, &path) {
+        tracing::debug!(event = "pijs.module_cache.disk.rename_failed", from = %temp_path.display(), to = %path.display(), %err);
+        let _ = fs::remove_file(&temp_path);
     }
 }
 
@@ -5808,50 +5832,44 @@ fn try_dist_to_src_fallback(path: &Path) -> Option<PathBuf> {
 
     let src_path = format!("{}/src/{}", &path_str[..idx], &path_str[idx + 6..]);
 
-    let candidates = [
-        PathBuf::from(&src_path),
-        PathBuf::from(src_path.replace(".js", ".ts")),
-        PathBuf::from(src_path.replace(".js", ".tsx")),
-    ];
+    let candidate = PathBuf::from(&src_path);
 
-    for candidate in &candidates {
-        if let Some(resolved) = resolve_existing_module_candidate(candidate.clone()) {
-            // Privilege monotonicity check (bd-k5q5.9.1.3): ensure the
-            // resolved path stays within the extension root.
-            let verdict = verify_repair_monotonicity(&extension_root, path, &resolved);
-            if !verdict.is_safe() {
-                tracing::warn!(
-                    event = "pijs.repair.monotonicity_violation",
-                    original = %path_str,
-                    resolved = %resolved.display(),
-                    verdict = ?verdict,
-                    "repair blocked: resolved path escapes extension root"
-                );
-                return None;
-            }
-
-            // Structural validation gate (bd-k5q5.9.5.1): verify the
-            // resolved file is parseable before accepting the repair.
-            let structural = validate_repaired_artifact(&resolved);
-            if !structural.is_valid() {
-                tracing::warn!(
-                    event = "pijs.repair.structural_validation_failed",
-                    original = %path_str,
-                    resolved = %resolved.display(),
-                    verdict = %structural,
-                    "repair blocked: resolved artifact failed structural validation"
-                );
-                continue;
-            }
-
-            tracing::info!(
-                event = "pijs.repair.dist_to_src",
+    if let Some(resolved) = resolve_existing_module_candidate(candidate) {
+        // Privilege monotonicity check (bd-k5q5.9.1.3): ensure the
+        // resolved path stays within the extension root.
+        let verdict = verify_repair_monotonicity(&extension_root, path, &resolved);
+        if !verdict.is_safe() {
+            tracing::warn!(
+                event = "pijs.repair.monotonicity_violation",
                 original = %path_str,
                 resolved = %resolved.display(),
-                "auto-repair: resolved dist/ → src/ fallback"
+                verdict = ?verdict,
+                "repair blocked: resolved path escapes extension root"
             );
-            return Some(resolved);
+            return None;
         }
+
+        // Structural validation gate (bd-k5q5.9.5.1): verify the
+        // resolved file is parseable before accepting the repair.
+        let structural = validate_repaired_artifact(&resolved);
+        if !structural.is_valid() {
+            tracing::warn!(
+                event = "pijs.repair.structural_validation_failed",
+                original = %path_str,
+                resolved = %resolved.display(),
+                verdict = %structural,
+                "repair blocked: resolved artifact failed structural validation"
+            );
+            return None;
+        }
+
+        tracing::info!(
+            event = "pijs.repair.dist_to_src",
+            original = %path_str,
+            resolved = %resolved.display(),
+            "auto-repair: resolved dist/ → src/ fallback"
+        );
+        return Some(resolved);
     }
 
     None
@@ -6044,7 +6062,9 @@ pub fn generate_monorepo_stub(names: &[String]) -> String {
             continue;
         }
 
-        let export = if name.chars().all(|c| c.is_ascii_uppercase() || c == '_') && !name.is_empty()
+        let export = if name == "default" {
+            "export default () => {};".to_string()
+        } else if name.chars().all(|c| c.is_ascii_uppercase() || c == '_') && !name.is_empty()
         {
             // ALL_CAPS constant
             format!("export const {name} = [];")
@@ -8906,6 +8926,12 @@ const __pi_vfs = (() => {
     nextFd: 100,
   };
 
+  function checkWriteAccess(resolved) {
+    if (typeof globalThis.__pi_host_check_write_access === "function") {
+      globalThis.__pi_host_check_write_access(resolved);
+    }
+  }
+
   function normalizePath(input) {
     let raw = String(input ?? "").replace(/\\/g, "/");
     // Strip Windows UNC verbatim prefix that canonicalize() produces.
@@ -9233,6 +9259,7 @@ const __pi_vfs = (() => {
   state.listChildren = listChildren;
   state.makeStat = makeStat;
   state.resolvePath = resolvePath;
+  state.checkWriteAccess = checkWriteAccess;
   state.parseOpenFlags = parseOpenFlags;
   state.getFdEntry = getFdEntry;
   state.toWritableView = toWritableView;
@@ -9277,6 +9304,7 @@ export function readFileSync(path, encoding) {
 
 export function appendFileSync(path, data, opts) {
   const resolved = __pi_vfs.resolvePath(path, true);
+  __pi_vfs.checkWriteAccess(resolved);
   const current = __pi_vfs.files.get(resolved) || new Uint8Array();
   const next = __pi_vfs.toBytes(data, opts);
   const merged = new Uint8Array(current.byteLength + next.byteLength);
@@ -9288,6 +9316,7 @@ export function appendFileSync(path, data, opts) {
 
 export function writeFileSync(path, data, opts) {
   const resolved = __pi_vfs.resolvePath(path, true);
+  __pi_vfs.checkWriteAccess(resolved);
   __pi_vfs.ensureDir(__pi_vfs.dirname(resolved));
   __pi_vfs.files.set(resolved, __pi_vfs.toBytes(data, opts));
 }
@@ -9327,6 +9356,7 @@ export function realpathSync(path, _opts) {
 }
 export function unlinkSync(path) {
   const normalized = __pi_vfs.normalizePath(path);
+  __pi_vfs.checkWriteAccess(normalized);
   if (__pi_vfs.symlinks.delete(normalized)) {
     return;
   }
@@ -9336,6 +9366,7 @@ export function unlinkSync(path) {
 }
 export function rmdirSync(path, _opts) {
   const normalized = __pi_vfs.normalizePath(path);
+  __pi_vfs.checkWriteAccess(normalized);
   if (normalized === "/") {
     throw new Error("EBUSY: resource busy or locked, rmdir '/'");
   }
@@ -9363,6 +9394,7 @@ export function rmdirSync(path, _opts) {
 }
 export function rmSync(path, opts) {
   const normalized = __pi_vfs.normalizePath(path);
+  __pi_vfs.checkWriteAccess(normalized);
   if (__pi_vfs.files.has(normalized)) {
     __pi_vfs.files.delete(normalized);
     return;
@@ -9405,6 +9437,8 @@ export function copyFileSync(src, dest, _mode) {
 export function renameSync(oldPath, newPath) {
   const src = __pi_vfs.normalizePath(oldPath);
   const dst = __pi_vfs.normalizePath(newPath);
+  __pi_vfs.checkWriteAccess(src);
+  __pi_vfs.checkWriteAccess(dst);
   const linkTarget = __pi_vfs.symlinks.get(src);
   if (linkTarget !== undefined) {
     __pi_vfs.ensureDir(__pi_vfs.dirname(dst));
@@ -9422,6 +9456,8 @@ export function renameSync(oldPath, newPath) {
   throw new Error(`ENOENT: no such file or directory, rename '${String(oldPath ?? "")}'`);
 }
 export function mkdirSync(path, _opts) {
+  const resolved = __pi_vfs.resolvePath(path, true);
+  __pi_vfs.checkWriteAccess(resolved);
   __pi_vfs.ensureDir(path);
   return __pi_vfs.normalizePath(path);
 }
@@ -9454,6 +9490,7 @@ export function readlinkSync(path, opts) {
 }
 export function symlinkSync(target, path, _type) {
   const normalized = __pi_vfs.normalizePath(path);
+  __pi_vfs.checkWriteAccess(normalized);
   const parent = __pi_vfs.dirname(normalized);
   if (!__pi_vfs.dirs.has(parent)) {
     throw new Error(`ENOENT: no such file or directory, symlink '${String(path ?? "")}'`);
@@ -9466,6 +9503,10 @@ export function symlinkSync(target, path, _type) {
 export function openSync(path, flags = "r", _mode) {
   const resolved = __pi_vfs.resolvePath(path, true);
   const opts = __pi_vfs.parseOpenFlags(flags);
+
+  if (opts.writable || opts.create || opts.append || opts.truncate) {
+    __pi_vfs.checkWriteAccess(resolved);
+  }
 
   if (__pi_vfs.dirs.has(resolved)) {
     throw new Error(`EISDIR: illegal operation on a directory, open '${String(path ?? "")}'`);
