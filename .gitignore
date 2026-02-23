@@ -100,6 +100,9 @@ claude-upgrade-progress.json
 # Claude Code IDE config
 .claude/
 
+# Clippy/lint output logs
+clippy.log
+
 # Ephemeral agent scratch/repro/plan files
 repro_fuzzy.rs
 PLAN_TO_FIX_READ_TOOL.md
