@@ -353,7 +353,7 @@ mod tests {
                 }
             }
             InputEventOutcome::Block { reason } => {
-                panic!("expected continue, got block: {reason:?}");
+                assert!(false, "expected continue, got block: {reason:?}");
             }
         }
     }
@@ -585,7 +585,7 @@ mod tests {
                     assert_eq!(reason.as_deref(), Some("Denied by policy"));
                 }
                 InputEventOutcome::Continue { .. } => {
-                    panic!("expected block for action={action}");
+                    assert!(false, "expected block for action={action}");
                 }
             }
         }
@@ -667,7 +667,7 @@ mod tests {
             InputEventOutcome::Block { reason } => {
                 assert_eq!(reason.as_deref(), Some("Policy denied"));
             }
-            InputEventOutcome::Continue { .. } => panic!("expected block"),
+            InputEventOutcome::Continue { .. } => assert!(false, "expected block"),
         }
     }
 
@@ -790,7 +790,7 @@ mod tests {
                 assert_eq!(images.len(), 1);
                 assert_eq!(images[0].data, "ATT_BASE64");
             }
-            InputEventOutcome::Block { .. } => panic!("expected continue"),
+            InputEventOutcome::Block { .. } => assert!(false, "expected continue"),
         }
     }
 

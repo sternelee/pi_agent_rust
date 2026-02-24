@@ -40,12 +40,12 @@ async fn test_session_save_persistence() {
              if let crate::model::UserContent::Text(text) = content {
                  assert_eq!(text, "Hello");
              } else {
-                 panic!("Unexpected content type");
+                 assert!(false, "Unexpected content type");
              }
         } else {
-            panic!("Unexpected message type");
+            assert!(false, "Unexpected message type");
         }
     } else {
-        panic!("Unexpected entry type");
+        assert!(false, "Unexpected entry type");
     }
 }

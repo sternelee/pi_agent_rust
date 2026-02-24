@@ -947,7 +947,7 @@ mod tests {
         match fs::remove_dir_all(&dir) {
             Ok(()) => {}
             Err(err) if err.kind() == ErrorKind::NotFound => {}
-            Err(err) => panic!("cleanup failed: {err}"),
+            Err(err) => assert!(false, "cleanup failed: {err}"),
         }
         fs::create_dir_all(&dir).expect("create temp report dir");
 

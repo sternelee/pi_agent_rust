@@ -9538,7 +9538,7 @@ mod tests {
                     );
                 }
                 HostcallOutcome::Success(_) | HostcallOutcome::StreamChunk { .. } => {
-                    panic!("unknown op should not succeed");
+                    assert!(false, "unknown op should not succeed");
                 }
             }
         });
@@ -9564,10 +9564,10 @@ mod tests {
                     );
                 }
                 HostcallOutcome::Success(_) => {
-                    panic!("set_model with missing provider should not succeed");
+                    assert!(false, "set_model with missing provider should not succeed");
                 }
                 HostcallOutcome::StreamChunk { .. } => {
-                    panic!("set_model with missing provider should not stream");
+                    assert!(false, "set_model with missing provider should not stream");
                 }
             }
         });
@@ -9594,10 +9594,10 @@ mod tests {
                     assert_eq!(code, "invalid_request");
                 }
                 HostcallOutcome::Success(_) => {
-                    panic!("set_model with missing modelId should not succeed");
+                    assert!(false, "set_model with missing modelId should not succeed");
                 }
                 HostcallOutcome::StreamChunk { .. } => {
-                    panic!("set_model with missing modelId should not stream");
+                    assert!(false, "set_model with missing modelId should not stream");
                 }
             }
         });
@@ -9620,10 +9620,10 @@ mod tests {
                     assert_eq!(code, "invalid_request");
                 }
                 HostcallOutcome::Success(_) => {
-                    panic!("set_thinking_level with no level should not succeed");
+                    assert!(false, "set_thinking_level with no level should not succeed");
                 }
                 HostcallOutcome::StreamChunk { .. } => {
-                    panic!("set_thinking_level with no level should not stream");
+                    assert!(false, "set_thinking_level with no level should not stream");
                 }
             }
         });
@@ -9646,10 +9646,10 @@ mod tests {
                     assert_eq!(code, "invalid_request");
                 }
                 HostcallOutcome::Success(_) => {
-                    panic!("set_label with no targetId should not succeed");
+                    assert!(false, "set_label with no targetId should not succeed");
                 }
                 HostcallOutcome::StreamChunk { .. } => {
-                    panic!("set_label with no targetId should not stream");
+                    assert!(false, "set_label with no targetId should not stream");
                 }
             }
         });
@@ -9679,10 +9679,10 @@ mod tests {
                     );
                 }
                 HostcallOutcome::Success(_) => {
-                    panic!("invalid message should not succeed");
+                    assert!(false, "invalid message should not succeed");
                 }
                 HostcallOutcome::StreamChunk { .. } => {
-                    panic!("invalid message should not stream");
+                    assert!(false, "invalid message should not stream");
                 }
             }
         });
@@ -9799,10 +9799,10 @@ mod tests {
                         assert_eq!(code, "io", "session IO error for op '{op}' must be 'io'");
                     }
                     HostcallOutcome::Success(_) => {
-                        panic!("op '{op}' with failing session should not succeed");
+                        assert!(false, "op '{op}' with failing session should not succeed");
                     }
                     HostcallOutcome::StreamChunk { .. } => {
-                        panic!("op '{op}' with failing session should not stream");
+                        assert!(false, "op '{op}' with failing session should not stream");
                     }
                 }
             }
@@ -9886,7 +9886,7 @@ mod tests {
                             "alias pair ({snake}, {camel}) should produce same output"
                         );
                     }
-                    _ => panic!("alias pair ({snake}, {camel}) should both succeed"),
+                    _ => assert!(false, "alias pair ({snake}, {camel}) should both succeed"),
                 }
             }
         });
@@ -10020,7 +10020,7 @@ mod tests {
                     );
                     assert!(result.error.is_none(), "success should not include error");
                 }
-                other => panic!("expected host_result body, got {other:?}"),
+                other => assert!(false, "expected host_result body, got {other:?}"),
             }
         });
     }
@@ -10088,7 +10088,7 @@ mod tests {
                         Value::String("invalid_request".to_string())
                     );
                 }
-                other => panic!("expected host_result body, got {other:?}"),
+                other => assert!(false, "expected host_result body, got {other:?}"),
             }
         });
     }
@@ -10147,7 +10147,7 @@ mod tests {
                         Value::Number(serde_json::Number::from(1))
                     );
                 }
-                other => panic!("expected host_result body, got {other:?}"),
+                other => assert!(false, "expected host_result body, got {other:?}"),
             }
         });
     }
@@ -10176,12 +10176,10 @@ mod tests {
                     assert_eq!(value, serde_json::json!({ "events": [] }));
                 }
                 HostcallOutcome::Error { code, message } => {
-                    panic!(
-                        "events.list for unknown extension should not fail (code={code}): {message}"
-                    );
+                    assert!(false, "events.list for unknown extension should not fail (code={code}): {message}");
                 }
                 HostcallOutcome::StreamChunk { .. } => {
-                    panic!("events.list for unknown extension should not stream");
+                    assert!(false, "events.list for unknown extension should not stream");
                 }
             }
         });
@@ -10587,7 +10585,7 @@ mod tests {
                         error.message
                     );
                 }
-                other => panic!("expected host_result body, got {other:?}"),
+                other => assert!(false, "expected host_result body, got {other:?}"),
             }
         });
     }
@@ -11183,7 +11181,7 @@ mod tests {
                 assert_eq!(plain_error.message, traced_error.message);
                 assert_eq!(plain_error.retryable, traced_error.retryable);
             }
-            _ => panic!("plain and traced protocol results disagree on error presence"),
+            _ => assert!(false, "plain and traced protocol results disagree on error presence"),
         }
     }
 
@@ -11600,7 +11598,7 @@ mod tests {
                     assert!(!result.is_error, "expected success: {result:?}");
                     assert!(result.output.is_object());
                 }
-                other => panic!("expected host_result, got {other:?}"),
+                other => assert!(false, "expected host_result, got {other:?}"),
             }
         });
     }
@@ -11645,7 +11643,7 @@ mod tests {
                         error.message
                     );
                 }
-                other => panic!("expected host_result, got {other:?}"),
+                other => assert!(false, "expected host_result, got {other:?}"),
             }
         });
     }
@@ -11685,7 +11683,7 @@ mod tests {
                     let error = result.error.expect("error");
                     assert_eq!(error.code, HostCallErrorCode::InvalidRequest);
                 }
-                other => panic!("expected host_result, got {other:?}"),
+                other => assert!(false, "expected host_result, got {other:?}"),
             }
         });
     }
@@ -11740,7 +11738,7 @@ mod tests {
                 ExtensionBody::HostResult(result) => {
                     assert!(!result.is_error, "expected success: {result:?}");
                 }
-                other => panic!("expected host_result, got {other:?}"),
+                other => assert!(false, "expected host_result, got {other:?}"),
             }
         });
     }
@@ -11786,7 +11784,7 @@ mod tests {
                 ExtensionBody::HostResult(result) => {
                     assert!(!result.is_error, "expected success: {result:?}");
                 }
-                other => panic!("expected host_result, got {other:?}"),
+                other => assert!(false, "expected host_result, got {other:?}"),
             }
         });
     }
@@ -11831,7 +11829,7 @@ mod tests {
                         error.message
                     );
                 }
-                other => panic!("expected host_result, got {other:?}"),
+                other => assert!(false, "expected host_result, got {other:?}"),
             }
         });
     }
@@ -11876,7 +11874,7 @@ mod tests {
                         error.message
                     );
                 }
-                other => panic!("expected host_result, got {other:?}"),
+                other => assert!(false, "expected host_result, got {other:?}"),
             }
         });
     }
@@ -11914,7 +11912,7 @@ mod tests {
                 ExtensionBody::HostResult(result) => {
                     assert!(!result.is_error, "log dispatch should succeed: {result:?}");
                 }
-                other => panic!("expected host_result, got {other:?}"),
+                other => assert!(false, "expected host_result, got {other:?}"),
             }
         });
     }
@@ -12788,7 +12786,7 @@ mod tests {
                         "unexpected cancellation message: {message}"
                     );
                 }
-                other => panic!("expected cancellation error outcome, got {other:?}"),
+                other => assert!(false, "expected cancellation error outcome, got {other:?}"),
             }
         });
     }

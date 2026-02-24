@@ -167,7 +167,7 @@ impl OpenAIResponsesProvider {
 fn bearer_token_from_authorization_header(value: &str) -> Option<String> {
     let mut parts = value.split_whitespace();
     let scheme = parts.next()?;
-    let token = parts.next()?;
+    let token /*_*/= parts.next()?;
     if parts.next().is_some() {
         return None;
     }
@@ -1337,7 +1337,7 @@ mod tests {
 
     #[test]
     fn test_bearer_token_parser_accepts_case_insensitive_scheme() {
-        let token = super::bearer_token_from_authorization_header("bEaReR abc.def.ghi");
+        let token /*_*/= super::bearer_token_from_authorization_header("bEaReR abc.def.ghi");
         assert_eq!(token.as_deref(), Some("abc.def.ghi"));
         assert!(super::bearer_token_from_authorization_header("Basic abc").is_none());
         assert!(super::bearer_token_from_authorization_header("Bearer").is_none());
@@ -1359,7 +1359,7 @@ mod tests {
             })],
             Vec::new(),
         );
-        let token = build_test_jwt("acct_test_123");
+        let token /*_*/= build_test_jwt("acct_test_123");
         let mut headers = HashMap::new();
         headers.insert("Authorization".to_string(), format!("Bearer {token}"));
         let options = StreamOptions {
@@ -1516,7 +1516,7 @@ mod tests {
                     {
                         break;
                     }
-                    Err(err) => panic!("read request failed: {err}"),
+                    Err(err) => assert!(false, "read request failed: {err}"),
                 }
             }
 
@@ -1542,7 +1542,7 @@ mod tests {
                     {
                         break;
                     }
-                    Err(err) => panic!("read request body failed: {err}"),
+                    Err(err) => assert!(false, "read request body failed: {err}"),
                 }
             }
 

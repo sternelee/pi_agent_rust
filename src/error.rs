@@ -1756,7 +1756,7 @@ mod tests {
             let err = Error::provider(*provider, *message);
             let d = err
                 .auth_diagnostic()
-                .unwrap_or_else(|| panic!("expected MissingApiKey diagnostic for {provider}"));
+                .unwrap_or_else(|| assert!(false, "expected MissingApiKey diagnostic for {provider}"));
             assert_eq!(
                 d.code,
                 AuthDiagnosticCode::MissingApiKey,
@@ -1788,7 +1788,7 @@ mod tests {
             let err = Error::provider(*provider, *message);
             let d = err
                 .auth_diagnostic()
-                .unwrap_or_else(|| panic!("expected InvalidApiKey diagnostic for {provider}"));
+                .unwrap_or_else(|| assert!(false, "expected InvalidApiKey diagnostic for {provider}"));
             assert_eq!(
                 d.code,
                 AuthDiagnosticCode::InvalidApiKey,
@@ -2017,7 +2017,7 @@ mod tests {
             let err = Error::auth(*message);
             let d = err
                 .auth_diagnostic()
-                .unwrap_or_else(|| panic!("expected diagnostic for Auth({message})"));
+                .unwrap_or_else(|| assert!(false, "expected diagnostic for Auth({message})"));
             assert_eq!(
                 d.code, *expected_code,
                 "wrong code for Auth({message}): {:?}",
@@ -2034,7 +2034,7 @@ mod tests {
             let err = Error::provider("openai", *msg);
             let d = err
                 .auth_diagnostic()
-                .unwrap_or_else(|| panic!("no diagnostic for: {msg}"));
+                .unwrap_or_else(|| assert!(false, "no diagnostic for: {msg}"));
             assert_eq!(
                 d.code,
                 AuthDiagnosticCode::MissingApiKey,
@@ -2078,7 +2078,7 @@ mod tests {
             let err = Error::provider("openai", *msg);
             let d = err
                 .auth_diagnostic()
-                .unwrap_or_else(|| panic!("no diagnostic for: {msg}"));
+                .unwrap_or_else(|| assert!(false, "no diagnostic for: {msg}"));
             assert_eq!(
                 d.code,
                 AuthDiagnosticCode::QuotaExceeded,

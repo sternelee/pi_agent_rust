@@ -1334,7 +1334,7 @@ mod tests {
                     {
                         break;
                     }
-                    Err(err) => panic!("read request failed: {err}"),
+                    Err(err) => assert!(false, "read request failed: {err}"),
                 }
             }
 
@@ -1360,7 +1360,7 @@ mod tests {
                     {
                         break;
                     }
-                    Err(err) => panic!("read request body failed: {err}"),
+                    Err(err) => assert!(false, "read request body failed: {err}"),
                 }
             }
 

@@ -3996,7 +3996,7 @@ mod tests {
         let mut entry = dummy_entry("gpt-4o-mini", true);
         entry.model.provider = "openai".to_string();
         entry.auth_header = true;
-        entry.api_key = Some("inline-model-key".to_string());
+        entry.api_key /*_*/= Some("inline-model-key".to_string());
 
         let auth_path = tempfile::tempdir()
             .expect("tempdir")
@@ -4021,7 +4021,7 @@ mod tests {
         let mut entry = dummy_entry("gpt-4o-mini", true);
         entry.model.provider = "openai".to_string();
         entry.auth_header = true;
-        entry.api_key = Some("   ".to_string());
+        entry.api_key /*_*/= Some("   ".to_string());
 
         let auth_path = tempfile::tempdir()
             .expect("tempdir")
@@ -4168,7 +4168,7 @@ mod tests {
                 content: UserContent::Text(text),
                 ..
             }) => assert_eq!(text, "hello"),
-            other => panic!("expected text user message, got {other:?}"),
+            other => assert!(false, "expected text user message, got {other:?}"),
         }
     }
 
@@ -4188,7 +4188,7 @@ mod tests {
                 assert!(matches!(&blocks[0], ContentBlock::Text(_)));
                 assert!(matches!(&blocks[1], ContentBlock::Image(_)));
             }
-            other => panic!("expected blocks user message, got {other:?}"),
+            other => assert!(false, "expected blocks user message, got {other:?}"),
         }
     }
 

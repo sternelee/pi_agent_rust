@@ -3571,7 +3571,7 @@ mod tests {
 
         match parse_source("checkpoint-pi", dir.path()) {
             ParsedSource::Local { path } => assert_eq!(path, local),
-            other => panic!("expected local source, got {other:?}"),
+            other => assert!(false, "expected local source, got {other:?}"),
         }
     }
 
@@ -4629,7 +4629,7 @@ mod tests {
                 assert_eq!(name, "@scope/pkg");
                 assert!(pinned);
             }
-            other => panic!("expected Npm, got {other:?}"),
+            other => assert!(false, "expected Npm, got {other:?}"),
         }
     }
 
@@ -4640,7 +4640,7 @@ mod tests {
             ParsedSource::Npm { pinned, .. } => {
                 assert!(!pinned);
             }
-            other => panic!("expected Npm, got {other:?}"),
+            other => assert!(false, "expected Npm, got {other:?}"),
         }
     }
 
@@ -4661,7 +4661,7 @@ mod tests {
                 assert_eq!(r#ref, Some("v2".to_string()));
                 assert!(pinned);
             }
-            other => panic!("expected Git, got {other:?}"),
+            other => assert!(false, "expected Git, got {other:?}"),
         }
     }
 
@@ -4673,7 +4673,7 @@ mod tests {
                 assert_eq!(repo, "github.com/user/repo");
                 assert_eq!(host, "github.com");
             }
-            other => panic!("expected Git, got {other:?}"),
+            other => assert!(false, "expected Git, got {other:?}"),
         }
     }
 
@@ -4684,7 +4684,7 @@ mod tests {
             ParsedSource::Local { path } => {
                 assert_eq!(path, dir.path().join("my-ext"));
             }
-            other => panic!("expected Local, got {other:?}"),
+            other => assert!(false, "expected Local, got {other:?}"),
         }
     }
 
@@ -4696,7 +4696,7 @@ mod tests {
             ParsedSource::Local { path } => {
                 assert_eq!(path, PathBuf::from("/abs/my-ext"));
             }
-            other => panic!("expected Local, got {other:?}"),
+            other => assert!(false, "expected Local, got {other:?}"),
         }
     }
 
@@ -4713,7 +4713,7 @@ mod tests {
             (ParsedSource::Git { path: p1, .. }, ParsedSource::Git { path: p2, .. }) => {
                 assert_eq!(p1, p2, "same local source should produce same hash");
             }
-            _ => panic!("expected Git for both"),
+            _ => assert!(false, "expected Git for both"),
         }
     }
 
@@ -5217,7 +5217,7 @@ mod tests {
                 // After sanitization, traversal segments are filtered out.
                 assert_eq!(host, "local");
             }
-            other => panic!("expected Git, got {other:?}"),
+            other => assert!(false, "expected Git, got {other:?}"),
         }
 
         // Case 2: Traversal in middle
@@ -5227,7 +5227,7 @@ mod tests {
                 assert_eq!(host, "github.com");
                 assert_eq!(path, "user/repo");
             }
-            other => panic!("expected Git, got {other:?}"),
+            other => assert!(false, "expected Git, got {other:?}"),
         }
 
         // Case 3: Just dots
@@ -5236,7 +5236,7 @@ mod tests {
                 // ".." starts with ".." -> looks_like_local_path -> local hash
                 assert_eq!(host, "local");
             }
-            other => panic!("expected Git, got {other:?}"),
+            other => assert!(false, "expected Git, got {other:?}"),
         }
     }
 

@@ -6071,7 +6071,7 @@ pub fn extract_import_names(source: &str, specifier: &str) -> Vec<String> {
 /// Parse a comma-separated list of import names, skipping `type`-only imports.
 fn parse_import_list(raw: &str, out: &mut Vec<String>) {
     for token in raw.split(',') {
-        let token = token.trim();
+        let token /*_*/= token.trim();
         if token.is_empty() {
             continue;
         }
@@ -10287,7 +10287,7 @@ const _URL = globalThis.URL || (() => {
       const protoEnd = u.indexOf(':');
       this.protocol = protoEnd >= 0 ? u.slice(0, protoEnd + 1) : '';
       let rest = protoEnd >= 0 ? u.slice(protoEnd + 1) : u;
-      this.username = ''; this.password = '';
+      this.username = ''; this.password /*_*/= '';
       if (rest.startsWith('//')) {
         rest = rest.slice(2);
         const pathStart = rest.indexOf('/');
@@ -10301,7 +10301,7 @@ const _URL = globalThis.URL || (() => {
           const colonIdx = userInfo.indexOf(':');
           if (colonIdx >= 0) {
             this.username = userInfo.slice(0, colonIdx);
-            this.password = userInfo.slice(colonIdx + 1);
+            this.password /*_*/= userInfo.slice(colonIdx + 1);
           } else {
             this.username = userInfo;
           }
@@ -18938,7 +18938,7 @@ import { isIPv4 as netIsIpv4 } from "node:net";
         std::fs::write(&base, "export {};\n").expect("write base");
 
         let outside = root.join("secret.ts");
-        std::fs::write(&outside, "export const secret = 1;\n").expect("write outside");
+        std::fs::write(&outside, "export const secret /*_*/= 1;\n").expect("write outside");
 
         let mode = RepairMode::default();
         let roots = vec![extension_root];

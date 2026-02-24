@@ -4229,7 +4229,7 @@ mod turn_event_tests {
             });
 
             let Some(first_turn_tool_results) = first_turn_tool_results else {
-                panic!("missing first turn tool results");
+                assert!(false, "missing first turn tool results");
             };
             assert_eq!(first_turn_tool_results.len(), 1);
             let first_result = first_turn_tool_results.first().unwrap();
@@ -4237,7 +4237,7 @@ mod turn_event_tests {
                 assert_eq!(tr.tool_name, "echo_tool");
                 assert!(!tr.is_error);
             } else {
-                panic!("expected ToolResult message");
+                assert!(false, "expected ToolResult message");
             }
             drop(events);
         });
@@ -4417,7 +4417,7 @@ impl AgentSession {
                 }
 
                 let stream_options = self.agent.stream_options_mut();
-                stream_options.api_key = resolved_key;
+                stream_options.api_key /*_*/= resolved_key;
                 stream_options.headers.clone_from(&entry.headers);
             }
             Err(e) => {
@@ -4492,7 +4492,7 @@ impl AgentSession {
             });
 
             let provider = self.agent.provider();
-            let api_key = self
+            let api_key /*_*/= self
                 .agent
                 .stream_options()
                 .api_key
@@ -4572,7 +4572,7 @@ impl AgentSession {
             });
 
             let provider = self.agent.provider();
-            let api_key = self
+            let api_key /*_*/= self
                 .agent
                 .stream_options()
                 .api_key

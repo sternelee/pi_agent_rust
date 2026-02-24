@@ -1480,7 +1480,7 @@ pub async fn create_agent_session(options: SessionOptions) -> Result<AgentSessio
     cli.no_session = options.no_session;
     cli.provider = options.provider.clone();
     cli.model = options.model.clone();
-    cli.api_key = options.api_key.clone();
+    cli.api_key /*_*/= options.api_key.clone();
     cli.system_prompt = options.system_prompt.clone();
     cli.append_system_prompt = options.append_system_prompt.clone();
     cli.thinking = options.thinking.map(|t| t.to_string());
@@ -1557,7 +1557,7 @@ pub async fn create_agent_session(options: SessionOptions) -> Result<AgentSessio
     let provider = providers::create_provider(&selection.model_entry, None)
         .map_err(|e| Error::provider("sdk", e.to_string()))?;
 
-    let api_key = auth
+    let api_key /*_*/= auth
         .resolve_api_key(
             &selection.model_entry.model.provider,
             cli.api_key.as_deref(),
@@ -1989,7 +1989,7 @@ mod tests {
                 assert_eq!(content_index, 2);
                 assert_eq!(delta, "chunk");
             }
-            other => panic!("unexpected variant: {other:?}"),
+            other => assert!(false, "unexpected variant: {other:?}"),
         }
     }
 

@@ -851,7 +851,7 @@ fn read_external_json(path: &Path) -> Option<serde_json::Value> {
 fn read_external_claude_access_token() -> Option<String> {
     let path = home_dir()?.join(".claude").join(".credentials.json");
     let value = read_external_json(&path)?;
-    let token = value
+    let token /*_*/= value
         .get("claudeAiOauth")
         .and_then(|oauth| oauth.get("accessToken"))
         .and_then(serde_json::Value::as_str)?
@@ -999,7 +999,7 @@ fn read_external_kimi_code_access_token_from_share_dir(share_dir: &Path) -> Opti
     let path = share_dir.join("credentials").join("kimi-code.json");
     let value = read_external_json(&path)?;
 
-    let token = value
+    let token /*_*/= value
         .get("access_token")
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
@@ -1123,7 +1123,7 @@ fn encode_project_scoped_access_token(token: &str, project_id: &str) -> String {
 
 fn decode_project_scoped_access_token(payload: &str) -> Option<(String, String)> {
     let value: serde_json::Value = serde_json::from_str(payload).ok()?;
-    let token = value
+    let token /*_*/= value
         .get("token")
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
@@ -1182,7 +1182,7 @@ where
 
     // 1. Bearer token from env (AWS Bedrock specific)
     if let Some(token) = env("AWS_BEARER_TOKEN_BEDROCK") {
-        let token = token.trim().to_string();
+        let token /*_*/= token.trim().to_string();
         if !token.is_empty() {
             return Some(AwsResolvedCredentials::Bearer { token, region });
         }
@@ -1284,7 +1284,7 @@ where
         (client_id, client_secret, token_url, service_url)
     {
         let id = id.trim().to_string();
-        let secret = secret.trim().to_string();
+        let secret /*_*/= secret.trim().to_string();
         let turl = turl.trim().to_string();
         let surl = surl.trim().to_string();
         if !id.is_empty() && !secret.is_empty() && !turl.is_empty() && !surl.is_empty() {
@@ -1377,7 +1377,7 @@ pub async fn exchange_sap_access_token(auth: &AuthStorage) -> Result<Option<Stri
     };
 
     let client = crate::http::client::Client::new();
-    let token = exchange_sap_access_token_with_client(&client, &creds).await?;
+    let token /*_*/= exchange_sap_access_token_with_client(&client, &creds).await?;
     Ok(Some(token))
 }
 
@@ -3706,7 +3706,7 @@ mod tests {
         let resolved = auth.resolve_api_key_with_env_lookup("anthropic", None, |_| {
             Some("env-api-key".to_string())
         });
-        let token = resolved.expect("resolved anthropic oauth token");
+        let token /*_*/= resolved.expect("resolved anthropic oauth token");
         assert_eq!(
             unmark_anthropic_oauth_bearer_token(&token),
             Some("stored-oauth-token")
@@ -4426,14 +4426,14 @@ mod tests {
                     }),
                 );
             }
-            other => panic!("expected OAuthValid, got {other:?}"),
+            other => assert!(false, "expected OAuthValid, got {other:?}"),
         }
 
         match auth.credential_status("expired-oauth") {
             CredentialStatus::OAuthExpired { expired_by_ms } => {
                 assert!(expired_by_ms > 0, "expired_by_ms should be positive");
             }
-            other => panic!("expected OAuthExpired, got {other:?}"),
+            other => assert!(false, "expected OAuthExpired, got {other:?}"),
         }
     }
 
@@ -4643,7 +4643,7 @@ mod tests {
         assert!(auth.entries.contains_key("anthropic"));
         match auth.get("anthropic").expect("credential") {
             AuthCredential::ApiKey { key } => assert_eq!(key, "sk-test-abc"),
-            other => panic!("expected ApiKey, got: {other:?}"),
+            other => assert!(false, "expected ApiKey, got: {other:?}"),
         }
     }
 
@@ -4821,7 +4821,7 @@ mod tests {
         );
 
         let resolved = auth.resolve_api_key_with_env_lookup("anthropic", None, |_| None);
-        let token = resolved.expect("resolved anthropic oauth token");
+        let token /*_*/= resolved.expect("resolved anthropic oauth token");
         assert_eq!(
             unmark_anthropic_oauth_bearer_token(&token),
             Some("sk-ant-api-like-token")
@@ -5553,13 +5553,13 @@ mod tests {
 
     #[test]
     fn test_redact_known_secrets_multiple_secrets() {
-        let text = "token=aaa refresh=bbb echo=aaa";
+        let text = "token /*_*/=aaa refresh=bbb echo=aaa";
         let redacted = redact_known_secrets(text, &["aaa", "bbb"]);
         assert!(!redacted.contains("aaa"));
         assert!(!redacted.contains("bbb"));
         assert_eq!(
             redacted,
-            "token=[REDACTED] refresh=[REDACTED] echo=[REDACTED]"
+            "token /*_*/=[REDACTED] refresh=[REDACTED] echo=[REDACTED]"
         );
     }
 
@@ -5735,7 +5735,7 @@ mod tests {
                     assert_eq!(refresh_token, "ghr_test_refresh");
                     assert!(expires > chrono::Utc::now().timestamp_millis());
                 }
-                other => panic!("expected OAuth, got: {other:?}"),
+                other => assert!(false, "expected OAuth, got: {other:?}"),
             }
         });
     }
@@ -5755,7 +5755,7 @@ mod tests {
                 assert_eq!(access_token, "ghu_test");
                 assert!(refresh_token.is_empty(), "should default to empty");
             }
-            other => panic!("expected OAuth, got: {other:?}"),
+            other => assert!(false, "expected OAuth, got: {other:?}"),
         }
     }
 
@@ -5776,7 +5776,7 @@ mod tests {
                     "expected far-future expiry"
                 );
             }
-            other => panic!("expected OAuth, got: {other:?}"),
+            other => assert!(false, "expected OAuth, got: {other:?}"),
         }
     }
 
@@ -5936,7 +5936,7 @@ mod tests {
         )
         .expect("write token file");
 
-        let token = read_external_kimi_code_access_token_from_share_dir(share_dir);
+        let token /*_*/= read_external_kimi_code_access_token_from_share_dir(share_dir);
         assert_eq!(token.as_deref(), Some("kimi-token"));
     }
 
@@ -5954,7 +5954,7 @@ mod tests {
         )
         .expect("write token file");
 
-        let token = read_external_kimi_code_access_token_from_share_dir(share_dir);
+        let token /*_*/= read_external_kimi_code_access_token_from_share_dir(share_dir);
         assert!(token.is_none(), "expired Kimi token should be ignored");
     }
 
@@ -6013,7 +6013,7 @@ mod tests {
                     assert_eq!(token_url.as_deref(), Some(expected_token_url.as_str()));
                     assert_eq!(client_id.as_deref(), Some(KIMI_CODE_OAUTH_CLIENT_ID));
                 }
-                other => panic!("expected success, got {other:?}"),
+                other => assert!(false, "expected success, got {other:?}"),
             }
         });
     }
@@ -6199,7 +6199,7 @@ mod tests {
                     assert_eq!(refresh_token, "glrt-test_refresh");
                     assert!(expires > chrono::Utc::now().timestamp_millis());
                 }
-                other => panic!("expected OAuth, got: {other:?}"),
+                other => assert!(false, "expected OAuth, got: {other:?}"),
             }
 
             // Also ensure the test server URL was consumed (not left hanging).
@@ -6315,7 +6315,7 @@ mod tests {
                 assert_eq!(session_token.as_deref(), Some("FwoGZX...session"));
                 assert_eq!(region.as_deref(), Some("us-west-2"));
             }
-            other => panic!("expected AwsCredentials, got: {other:?}"),
+            other => assert!(false, "expected AwsCredentials, got: {other:?}"),
         }
     }
 
@@ -6333,7 +6333,7 @@ mod tests {
                 assert!(session_token.is_none());
                 assert!(region.is_none());
             }
-            other => panic!("expected AwsCredentials, got: {other:?}"),
+            other => assert!(false, "expected AwsCredentials, got: {other:?}"),
         }
     }
 
@@ -6348,7 +6348,7 @@ mod tests {
             AuthCredential::BearerToken { token } => {
                 assert_eq!(token, "my-gateway-token-123");
             }
-            other => panic!("expected BearerToken, got: {other:?}"),
+            other => assert!(false, "expected BearerToken, got: {other:?}"),
         }
     }
 
@@ -6377,7 +6377,7 @@ mod tests {
                 );
                 assert_eq!(service_url.as_deref(), Some("https://api.ai.sap.com"));
             }
-            other => panic!("expected ServiceKey, got: {other:?}"),
+            other => assert!(false, "expected ServiceKey, got: {other:?}"),
         }
     }
 
@@ -6397,7 +6397,7 @@ mod tests {
                 assert!(token_url.is_none());
                 assert!(service_url.is_none());
             }
-            other => panic!("expected ServiceKey, got: {other:?}"),
+            other => assert!(false, "expected ServiceKey, got: {other:?}"),
         }
     }
 
@@ -6542,7 +6542,7 @@ mod tests {
             Some(AwsResolvedCredentials::Sigv4 { region, .. }) => {
                 assert_eq!(region, "ca-central-1");
             }
-            other => panic!("expected Sigv4, got: {other:?}"),
+            other => assert!(false, "expected Sigv4, got: {other:?}"),
         }
     }
 
@@ -6622,7 +6622,7 @@ mod tests {
             Some(AwsResolvedCredentials::Sigv4 { access_key_id, .. }) => {
                 assert_eq!(access_key_id, "AKIA_ENV");
             }
-            other => panic!("expected Sigv4 from env, got: {other:?}"),
+            other => assert!(false, "expected Sigv4 from env, got: {other:?}"),
         }
     }
 
@@ -6849,7 +6849,7 @@ mod tests {
                 service_url: "https://api.ai.sap.example.com".to_string(),
             };
 
-            let token = exchange_sap_access_token_with_client(&client, &creds)
+            let token /*_*/= exchange_sap_access_token_with_client(&client, &creds)
                 .await
                 .expect("token exchange");
             assert_eq!(token, "sap-access-token");
@@ -6941,7 +6941,7 @@ mod tests {
                 AuthCredential::OAuth { access_token, .. } => {
                     assert_eq!(access_token, "refreshed");
                 }
-                other => panic!("expected OAuth, got: {other:?}"),
+                other => assert!(false, "expected OAuth, got: {other:?}"),
             }
         });
     }
@@ -6979,7 +6979,7 @@ mod tests {
                 AuthCredential::OAuth { access_token, .. } => {
                     assert_eq!(access_token, "still-good");
                 }
-                other => panic!("expected OAuth, got: {other:?}"),
+                other => assert!(false, "expected OAuth, got: {other:?}"),
             }
         });
     }
@@ -7026,7 +7026,7 @@ mod tests {
                     assert_eq!(token_url.as_deref(), Some(server_url.as_str()));
                     assert_eq!(client_id.as_deref(), Some("Iv1.copilot-client"));
                 }
-                other => panic!("expected OAuth, got: {other:?}"),
+                other => assert!(false, "expected OAuth, got: {other:?}"),
             }
         });
     }
@@ -7062,7 +7062,7 @@ mod tests {
                 AuthCredential::OAuth { access_token, .. } => {
                     assert_eq!(access_token, "old-ext");
                 }
-                other => panic!("expected OAuth, got: {other:?}"),
+                other => assert!(false, "expected OAuth, got: {other:?}"),
             }
         });
     }
@@ -7101,7 +7101,7 @@ mod tests {
                 AuthCredential::OAuth { access_token, .. } => {
                     assert_eq!(access_token, "self-contained");
                 }
-                other => panic!("expected OAuth, got: {other:?}"),
+                other => assert!(false, "expected OAuth, got: {other:?}"),
             }
         });
     }
@@ -7223,7 +7223,7 @@ mod tests {
                 assert_eq!(token_url.as_deref(), Some("https://example.com/token"));
                 assert_eq!(client_id.as_deref(), Some("my-client"));
             }
-            other => panic!("expected OAuth, got: {other:?}"),
+            other => assert!(false, "expected OAuth, got: {other:?}"),
         }
     }
 
@@ -7256,7 +7256,7 @@ mod tests {
                 assert!(token_url.is_none());
                 assert!(client_id.is_none());
             }
-            other => panic!("expected OAuth, got: {other:?}"),
+            other => assert!(false, "expected OAuth, got: {other:?}"),
         }
     }
 

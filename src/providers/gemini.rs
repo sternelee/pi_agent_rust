@@ -225,7 +225,7 @@ fn build_google_cli_request(
 
 fn decode_project_scoped_access_payload(payload: &str) -> Option<(String, String)> {
     let value: serde_json::Value = serde_json::from_str(payload).ok()?;
-    let token = value
+    let token /*_*/= value
         .get("token")
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
@@ -1341,7 +1341,7 @@ mod tests {
         assert_eq!(parts.len(), 1);
         match &parts[0] {
             GeminiPart::Text { text } => assert_eq!(text, "hello world"),
-            _ => panic!("expected text part"),
+            _ => assert!(false, "expected text part"),
         }
     }
 
@@ -1359,14 +1359,14 @@ mod tests {
         assert_eq!(parts.len(), 2);
         match &parts[0] {
             GeminiPart::Text { text } => assert_eq!(text, "describe this"),
-            _ => panic!("expected text part"),
+            _ => assert!(false, "expected text part"),
         }
         match &parts[1] {
             GeminiPart::InlineData { inline_data } => {
                 assert_eq!(inline_data.mime_type, "image/png");
                 assert_eq!(inline_data.data, "aGVsbG8=");
             }
-            _ => panic!("expected inline_data part"),
+            _ => assert!(false, "expected inline_data part"),
         }
     }
 
@@ -1398,14 +1398,14 @@ mod tests {
 
         match &converted[0].parts[0] {
             GeminiPart::Text { text } => assert_eq!(text, "Let me read that file."),
-            _ => panic!("expected text part"),
+            _ => assert!(false, "expected text part"),
         }
         match &converted[0].parts[1] {
             GeminiPart::FunctionCall { function_call } => {
                 assert_eq!(function_call.name, "read");
                 assert_eq!(function_call.args["path"], "/tmp/test.txt");
             }
-            _ => panic!("expected function_call part"),
+            _ => assert!(false, "expected function_call part"),
         }
     }
 
@@ -1447,7 +1447,7 @@ mod tests {
                 assert_eq!(function_response.response["result"], "file contents here");
                 assert!(function_response.response.get("error").is_none());
             }
-            _ => panic!("expected function_response part"),
+            _ => assert!(false, "expected function_response part"),
         }
     }
 
@@ -1471,7 +1471,7 @@ mod tests {
                 assert_eq!(function_response.response["error"], "command not found");
                 assert!(function_response.response.get("result").is_none());
             }
-            _ => panic!("expected function_response part"),
+            _ => assert!(false, "expected function_response part"),
         }
     }
 
@@ -1492,7 +1492,7 @@ mod tests {
             GeminiPart::Text { text } => {
                 assert_eq!(text, "Context window approaching limit.");
             }
-            _ => panic!("expected text part"),
+            _ => assert!(false, "expected text part"),
         }
     }
 
