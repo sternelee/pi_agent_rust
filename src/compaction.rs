@@ -1705,7 +1705,7 @@ mod tests {
             assert_eq!(summary, "branch summary text");
             assert_eq!(from_id, "parent");
         } else {
-            assert!(false, "expected BranchSummary");
+            panic!();
         }
     }
 
@@ -1721,7 +1721,7 @@ mod tests {
             assert_eq!(summary, "compact summary");
             assert_eq!(tokens_before, 500);
         } else {
-            assert!(false, "expected CompactionSummary");
+            panic!();
         }
     }
 
@@ -2153,10 +2153,10 @@ mod tests {
                 if let UserContent::Text(t) = content {
                     assert_eq!(t, "user");
                 } else {
-                    assert!(false, "wrong content");
+                    panic!();
                 }
             }
-            _ => assert!(false, "expected user message in turn prefix"),
+            _ => panic!(),
         }
     }
 

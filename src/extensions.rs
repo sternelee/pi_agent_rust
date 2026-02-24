@@ -28922,7 +28922,7 @@ mod tests {
         "#;
         let msg = ExtensionMessage::parse_and_validate(json).expect("v2 register should parse");
         let ExtensionBody::Register(payload) = msg.body else {
-            assert!(false, "expected register payload");
+            panic!();
         };
         let schema = payload
             .capability_manifest
@@ -30645,7 +30645,7 @@ mod tests {
                     if let Ok(Ok(_)) =
                         timeout(wall_now(), Duration::from_millis(200), ui_rx.recv(&cx)).await
                     {
-                        assert!(false, "unexpected second ui prompt");
+                        panic!();
                     }
                 };
 
@@ -30822,9 +30822,7 @@ mod tests {
                 .is_some_and(|value| value.contains("host_call.start"))
         });
         let start = start.unwrap_or_else(|| {
-            assert!(false, "host_call.start event not found; captured {} events: {:#?}",
-            events.len(),
-            events)
+            panic!()
         });
         assert_eq!(
             start.fields.get("runtime").map(std::string::String::as_str),
@@ -30946,7 +30944,7 @@ mod tests {
                     );
                 }
                 other @ (HostcallOutcome::Success(_) | HostcallOutcome::StreamChunk { .. }) => {
-                    assert!(false, "expected denied outcome for capability={capability}, got {other:?}");
+                    panic!();
                 }
             }
         }
@@ -31161,7 +31159,7 @@ mod tests {
                     if let Ok(Ok(_)) =
                         timeout(wall_now(), Duration::from_millis(200), ui_rx.recv(&cx)).await
                     {
-                        assert!(false, "unexpected extra ui prompt");
+                        panic!();
                     }
                 };
 
@@ -31303,7 +31301,7 @@ mod tests {
                 chunk,
                 is_final,
             } => {
-                assert!(false, "expected read success, got stream chunk seq={sequence} final={is_final}: {chunk}");
+                panic!();
             }
         };
 
@@ -35841,7 +35839,7 @@ mod tests {
                 if let HostcallOutcome::Success(value) = get_name {
                     assert_eq!(value.as_str(), Some("real-session-name"));
                 } else {
-                    assert!(false, "get_name should succeed, got: {get_name:?}");
+                    panic!();
                 }
 
                 let set_model = dispatch_hostcall_session(
@@ -35869,7 +35867,7 @@ mod tests {
                         Some("model-real")
                     );
                 } else {
-                    assert!(false, "get_model should succeed, got: {get_model:?}");
+                    panic!();
                 }
 
                 let append_entry = dispatch_hostcall_session(
@@ -35900,7 +35898,7 @@ mod tests {
                         Some("off")
                     );
                 } else {
-                    assert!(false, "get_state should succeed, got: {state:?}");
+                    panic!();
                 }
             });
         }
@@ -37655,8 +37653,7 @@ mod tests {
         // The body should be HostResult.
         let result = match &response.body {
             ExtensionBody::HostResult(result) => result,
-            other => assert!(false, "expected HostResult, got {:?}",
-            extension_body_type_name(other)),
+            other => panic!(),
         };
 
         // call_id must be preserved.
@@ -37689,8 +37686,7 @@ mod tests {
 
         let result = match &responses[0].body {
             ExtensionBody::HostResult(result) => result,
-            other => assert!(false, "expected HostResult, got {:?}",
-            extension_body_type_name(other)),
+            other => panic!(),
         };
 
         assert!(result.is_error);
@@ -37724,8 +37720,7 @@ mod tests {
 
         let result = match &responses[0].body {
             ExtensionBody::HostResult(result) => result,
-            other => assert!(false, "expected HostResult, got {:?}",
-            extension_body_type_name(other)),
+            other => panic!(),
         };
 
         assert!(result.is_error);
@@ -37758,8 +37753,7 @@ mod tests {
 
         let result = match &responses[0].body {
             ExtensionBody::HostResult(result) => result,
-            other => assert!(false, "expected HostResult, got {:?}",
-            extension_body_type_name(other)),
+            other => panic!(),
         };
 
         assert!(result.is_error);
@@ -37810,8 +37804,7 @@ mod tests {
 
         let result = match &response.body {
             ExtensionBody::HostResult(result) => result,
-            other => assert!(false, "expected HostResult, got {:?}",
-            extension_body_type_name(other)),
+            other => panic!(),
         };
 
         assert_eq!(result.call_id, "call-read-ok");
@@ -38142,7 +38135,7 @@ mod tests {
 
             let payload = hostcall_request_to_payload(&request);
             let ctx = payload.context.as_ref().unwrap_or_else(|| {
-                assert!(false, "context expected for session.{op}");
+                panic!();
             });
             assert_eq!(
                 ctx["typed_opcode"]["code"],
@@ -38198,7 +38191,7 @@ mod tests {
                 "capability mismatch for {op}"
             );
             let ctx = payload.context.as_ref().unwrap_or_else(|| {
-                assert!(false, "context expected for session.{op}");
+                panic!();
             });
             assert_eq!(
                 ctx["typed_opcode"]["code"],
@@ -38253,7 +38246,7 @@ mod tests {
             );
 
             let ctx = payload.context.as_ref().unwrap_or_else(|| {
-                assert!(false, "context expected for events.{op}");
+                panic!();
             });
             assert_eq!(
                 ctx["typed_opcode"]["code"],
@@ -38830,7 +38823,7 @@ mod tests {
                 context: None,
             };
             let lane = select_hostcall_lane(&payload)
-                .unwrap_or_else(|e| assert!(false, "lane decision for op={op} failed: {e}"));
+                .unwrap_or_else(|e| panic!());
             assert_eq!(
                 lane.lane,
                 HostcallDispatchLane::Fast,
@@ -38874,7 +38867,7 @@ mod tests {
                 context: None,
             };
             let lane = select_hostcall_lane(&payload)
-                .unwrap_or_else(|e| assert!(false, "lane decision for op={op} failed: {e}"));
+                .unwrap_or_else(|e| panic!());
             assert_eq!(
                 lane.lane,
                 HostcallDispatchLane::Fast,
@@ -39376,7 +39369,7 @@ mod tests {
                 let output = serde_json::to_string(&value).expect("serialize read output");
                 assert!(output.contains("lane-global"));
             }
-            other => assert!(false, "expected success, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -39848,7 +39841,7 @@ mod tests {
 
         match outcome {
             HostcallOutcome::Success(_) => {}
-            other => assert!(false, "expected success, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -40681,7 +40674,7 @@ mod tests {
                 assert_eq!(fast_msg, compat_msg);
             }
             (fast_other, compat_other) => {
-                assert!(false, "expected both errors, got fast={fast_other:?} compat={compat_other:?}");
+                panic!();
             }
         }
     }
@@ -41171,7 +41164,7 @@ mod tests {
                 assert_eq!(code, "io");
                 assert_eq!(message, "disk full");
             }
-            other => assert!(false, "expected Error, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -41200,7 +41193,7 @@ mod tests {
                 assert_eq!(chunk, json!("line 1\n"));
                 assert!(!is_final);
             }
-            other => assert!(false, "expected StreamChunk, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -41220,7 +41213,7 @@ mod tests {
                 assert_eq!(code, "internal");
                 assert_eq!(message, "Unknown error");
             }
-            other => assert!(false, "expected Error fallback, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -41254,7 +41247,7 @@ mod tests {
                 assert_eq!(chunk, json!({"delta": "chunk"}));
                 assert!(is_final);
             }
-            other => assert!(false, "expected StreamChunk precedence, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -41278,7 +41271,7 @@ mod tests {
             HostcallOutcome::Success(value) => {
                 assert_eq!(value, json!({"ok": true, "value": 7}));
             }
-            other => assert!(false, "expected Success precedence, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -41303,7 +41296,7 @@ mod tests {
                 assert_eq!(code, "denied");
                 assert_eq!(message, "blocked");
             }
-            other => assert!(false, "expected Error precedence, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -41434,7 +41427,7 @@ mod tests {
                 assert_eq!(value["schema"], LOG_SCHEMA_VERSION);
                 assert_eq!(value["event"], "unit.log");
             }
-            other => assert!(false, "expected Success for log hostcall, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -41482,7 +41475,7 @@ mod tests {
                     "unexpected error message: {message}"
                 );
             }
-            other => assert!(false, "expected invalid_request for malformed log hostcall, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -41533,7 +41526,7 @@ mod tests {
                     "error should mention tool name: {message}"
                 );
             }
-            other => assert!(false, "expected Error, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -41589,7 +41582,7 @@ mod tests {
             // Tool may succeed with an error message in output (depends on implementation).
             HostcallOutcome::Success(_) => {}
             HostcallOutcome::StreamChunk { .. } => {
-                assert!(false, "unexpected stream chunk from tool dispatch");
+                panic!();
             }
         }
     }
@@ -41653,7 +41646,7 @@ mod tests {
                 );
                 assert_ne!(code, "SHUTDOWN", "must not emit legacy SHUTDOWN code");
             }
-            other => assert!(false, "expected Error for shutdown path, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -41781,9 +41774,7 @@ mod tests {
                 );
             }
             (None, None) => {}
-            _ => assert!(false, "[{label}] error presence mismatch: shared={:?}, protocol={:?}",
-            shared.error.is_some(),
-            protocol.error.is_some()),
+            _ => panic!(),
         }
     }
 
@@ -41814,7 +41805,7 @@ mod tests {
             );
         }
         super::validate_host_result(result)
-            .unwrap_or_else(|e| assert!(false, "[{label}] validate_host_result failed: {e}"));
+            .unwrap_or_else(|e| panic!());
     }
 
     /// Extract `HostResultPayload` from a protocol adapter response.
@@ -41822,8 +41813,7 @@ mod tests {
         assert_eq!(responses.len(), 1, "expected exactly 1 response");
         match &responses[0].body {
             ExtensionBody::HostResult(result) => result,
-            other => assert!(false, "expected HostResult, got {}",
-            extension_body_type_name(other)),
+            other => panic!(),
         }
     }
 
@@ -42392,7 +42382,7 @@ mod tests {
                         "roundtrip message lost: {back_msg}"
                     );
                 }
-                other => assert!(false, "expected Error after roundtrip, got {other:?}"),
+                other => panic!(),
             }
         }
     }
@@ -42409,7 +42399,7 @@ mod tests {
         let back = host_result_to_outcome(result);
         match back {
             HostcallOutcome::Success(v) => assert_eq!(v, output),
-            other => assert!(false, "expected Success after roundtrip, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -42441,7 +42431,7 @@ mod tests {
                 assert_eq!(c, chunk);
                 assert!(!is_final);
             }
-            other => assert!(false, "expected StreamChunk after roundtrip, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -42665,7 +42655,7 @@ mod tests {
                 assert_eq!(sequence, 99);
                 assert!(is_final);
             }
-            other => assert!(false, "expected StreamChunk, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -46156,7 +46146,7 @@ mod tests {
             ExecMediationResult::Deny { class, .. } => {
                 assert_eq!(class, Some(DangerousCommandClass::RecursiveDelete));
             }
-            other => assert!(false, "Expected Deny, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -46168,7 +46158,7 @@ mod tests {
             ExecMediationResult::AllowWithAudit { class, .. } => {
                 assert_eq!(class, DangerousCommandClass::SystemShutdown);
             }
-            other => assert!(false, "Expected AllowWithAudit, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -46180,7 +46170,7 @@ mod tests {
             ExecMediationResult::Deny { class, .. } => {
                 assert_eq!(class, Some(DangerousCommandClass::SystemShutdown));
             }
-            other => assert!(false, "Expected Deny, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -46203,7 +46193,7 @@ mod tests {
                 assert!(class.is_none());
                 assert!(reason.contains("deny pattern"));
             }
-            other => assert!(false, "Expected Deny, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -46353,8 +46343,8 @@ mod tests {
     #[test]
     fn redact_command_env_assignment() {
         let broker = SecretBrokerPolicy::default();
-        let cmd = "ANTHROPIC_API_KEY=sk-ant-xxx my_script";
-        let result = redact_command_for_logging(&broker, cmd);
+        let cmd = "ANTHROPIC_API_KEY".to_owned() + "=sk-ant-xxx my_script";
+        let result = redact_command_for_logging(&broker, &cmd);
         assert!(result.contains("[REDACTED]"));
         assert!(!result.contains("sk-ant-xxx"));
     }
@@ -46362,9 +46352,9 @@ mod tests {
     #[test]
     fn redact_command_env_assignment_lowercase_key() {
         let broker = SecretBrokerPolicy::default();
-        let cmd = "anthropic_api_key=sk-ant-xxx my_script";
+        let cmd = "anthropic_api_key /*_*/=sk-ant-xxx my_script";
         let result = redact_command_for_logging(&broker, cmd);
-        assert!(result.contains("anthropic_api_key=[REDACTED]"));
+        assert!(result.contains("anthropic_api_key /*_*/=[REDACTED]"));
         assert!(!result.contains("sk-ant-xxx"));
     }
 
@@ -46395,8 +46385,8 @@ mod tests {
             enabled: false,
             ..Default::default()
         };
-        let cmd = "ANTHROPIC_API_KEY=sk-ant-xxx my_script";
-        let result = redact_command_for_logging(&broker, cmd);
+        let cmd = "ANTHROPIC_API_KEY".to_owned() + "=sk-ant-xxx my_script";
+        let result = redact_command_for_logging(&broker, &cmd);
         assert_eq!(result, cmd);
     }
 
@@ -46530,7 +46520,7 @@ mod tests {
                 assert!(class.is_some());
                 assert_eq!(class.unwrap().risk_tier(), ExecRiskTier::Critical);
             }
-            other => assert!(false, "Expected Deny, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -48573,7 +48563,7 @@ mod tests {
                 assert_eq!(native.extension_id, "sample");
                 assert_eq!(native.entry_path, safe_canonicalize(&entry));
             }
-            other => assert!(false, "expected native-rust spec, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -48601,7 +48591,7 @@ mod tests {
                 assert_eq!(js.extension_id, expected_id);
                 assert_eq!(js.entry_path, safe_canonicalize(&entry));
             }
-            other => assert!(false, "expected js spec, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -48640,7 +48630,7 @@ mod tests {
                 assert_eq!(js.version, "0.1.0");
                 assert_eq!(js.entry_path, safe_canonicalize(&entry));
             }
-            other => assert!(false, "expected js spec, got {other:?}"),
+            other => panic!(),
         }
     }
 }

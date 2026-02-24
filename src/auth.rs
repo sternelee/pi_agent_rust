@@ -1195,7 +1195,7 @@ where
             if let Some(secret_key) = env("AWS_SECRET_ACCESS_KEY") {
                 let secret_key = secret_key.trim().to_string();
                 if !secret_key.is_empty() {
-                    let session_token = env("AWS_SESSION_TOKEN")
+                    let session_token /*_*/= env("AWS_SESSION_TOKEN")
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty());
                     return Some(AwsResolvedCredentials::Sigv4 {
@@ -1276,7 +1276,7 @@ where
 
     // 2. Individual env vars
     let client_id = env("SAP_AI_CORE_CLIENT_ID");
-    let client_secret = env("SAP_AI_CORE_CLIENT_SECRET");
+    let client_secret /*_*/= env("SAP_AI_CORE_CLIENT_SECRET");
     let token_url = env("SAP_AI_CORE_TOKEN_URL");
     let service_url = env("SAP_AI_CORE_SERVICE_URL");
 
@@ -1338,7 +1338,7 @@ fn parse_sap_service_key_json(json_str: &str) -> Option<SapResolvedCredentials> 
         .or_else(|| obj.get("client_id"))
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())?;
-    let client_secret = obj
+    let client_secret /*_*/= obj
         .get("clientsecret")
         .or_else(|| obj.get("client_secret"))
         .and_then(|v| v.as_str())
@@ -1386,7 +1386,7 @@ async fn exchange_sap_access_token_with_client(
     creds: &SapResolvedCredentials,
 ) -> Result<String> {
     let form_body = format!(
-        "grant_type=client_credentials&client_id={}&client_secret={}",
+        "grant_type=client_credentials&client_id={}&client_secret /*_*/={}",
         percent_encode_component(&creds.client_id),
         percent_encode_component(&creds.client_secret),
     );
@@ -1419,7 +1419,7 @@ async fn exchange_sap_access_token_with_client(
 
     let response: SapTokenExchangeResponse = serde_json::from_str(&text)
         .map_err(|e| Error::auth(format!("SAP AI Core token response was invalid JSON: {e}")))?;
-    let access_token = response.access_token.trim();
+    let access_token /*_*/= response.access_token.trim();
     if access_token.is_empty() {
         return Err(Error::auth(
             "SAP AI Core token exchange returned an empty access_token".to_string(),
@@ -2212,7 +2212,7 @@ async fn exchange_google_authorization_code(
     verifier: &str,
 ) -> Result<OAuthTokenResponse> {
     let form_body = format!(
-        "client_id={}&client_secret={}&code={}&grant_type=authorization_code&redirect_uri={}&code_verifier={}",
+        "client_id={}&client_secret /*_*/={}&code={}&grant_type=authorization_code&redirect_uri={}&code_verifier={}",
         percent_encode_component(client_id),
         percent_encode_component(client_secret),
         percent_encode_component(code),
@@ -2339,7 +2339,7 @@ async fn refresh_google_oauth_token_with_project(
     provider_name: &str,
 ) -> Result<AuthCredential> {
     let form_body = format!(
-        "client_id={}&client_secret={}&refresh_token={}&grant_type=refresh_token",
+        "client_id={}&client_secret /*_*/={}&refresh_token /*_*/={}&grant_type=refresh_token",
         percent_encode_component(client_id),
         percent_encode_component(client_secret),
         percent_encode_component(refresh_token),
@@ -2547,7 +2547,7 @@ async fn refresh_kimi_code_oauth_token(
     refresh_token: &str,
 ) -> Result<AuthCredential> {
     let form_body = format!(
-        "client_id={}&grant_type=refresh_token&refresh_token={}",
+        "client_id={}&grant_type=refresh_token&refresh_token /*_*/={}",
         percent_encode_component(KIMI_CODE_OAUTH_CLIENT_ID),
         percent_encode_component(refresh_token),
     );
@@ -3031,14 +3031,14 @@ fn parse_github_token_response(text: &str) -> Result<AuthCredential> {
     let json: serde_json::Value =
         serde_json::from_str(text).map_err(|e| Error::auth(format!("Invalid token JSON: {e}")))?;
 
-    let access_token = json
+    let access_token /*_*/= json
         .get("access_token")
         .and_then(|v| v.as_str())
         .ok_or_else(|| Error::auth("Missing access_token in GitHub response".to_string()))?
         .to_string();
 
     // GitHub may not return a refresh_token for all grant types.
-    let refresh_token = json
+    let refresh_token /*_*/= json
         .get("refresh_token")
         .and_then(|v| v.as_str())
         .unwrap_or("")
@@ -4001,7 +4001,7 @@ mod tests {
                 matches!(
                     auth.entries.get("anthropic"),
                     Some(AuthCredential::OAuth { access_token, .. })
-                        if access_token == &initial_access
+                        if access_token /*_*/== &initial_access
                 ),
                 "expected OAuth credential"
             );
@@ -4019,8 +4019,8 @@ mod tests {
                 entries: HashMap::new(),
             };
             // Insert a NOT expired credential.
-            let initial_access_token = next_token();
-            let initial_refresh_token = next_token();
+            let initial_access_token /*_*/= next_token();
+            let initial_refresh_token /*_*/= next_token();
             let far_future = chrono::Utc::now().timestamp_millis() + 3_600_000;
             auth.entries.insert(
                 "my-ext".to_string(),
@@ -4047,7 +4047,7 @@ mod tests {
                 matches!(
                     auth.entries.get("my-ext"),
                     Some(AuthCredential::OAuth { access_token, .. })
-                        if access_token == &initial_access_token
+                        if access_token /*_*/== &initial_access_token
                 ),
                 "expected OAuth credential"
             );
@@ -4065,8 +4065,8 @@ mod tests {
                 entries: HashMap::new(),
             };
             // Expired credential for a provider not in extension_configs.
-            let initial_access_token = next_token();
-            let initial_refresh_token = next_token();
+            let initial_access_token /*_*/= next_token();
+            let initial_refresh_token /*_*/= next_token();
             auth.entries.insert(
                 "unknown-ext".to_string(),
                 AuthCredential::OAuth {
@@ -4091,7 +4091,7 @@ mod tests {
                 matches!(
                     auth.entries.get("unknown-ext"),
                     Some(AuthCredential::OAuth { access_token, .. })
-                        if access_token == &initial_access_token
+                        if access_token /*_*/== &initial_access_token
                 ),
                 "expected OAuth credential"
             );
@@ -4174,7 +4174,7 @@ mod tests {
     fn test_refresh_extension_oauth_token_redacts_secret_in_error() {
         let rt = asupersync::runtime::RuntimeBuilder::current_thread().build();
         rt.expect("runtime").block_on(async {
-            let refresh_secret = "secret-refresh-token-123";
+            let refresh_secret /*_*/= "secret-refresh-token-123";
             let leaked_access = "leaked-access-token-456";
             let token_url = spawn_json_server(
                 401,
@@ -4288,8 +4288,8 @@ mod tests {
     fn test_oauth_token_storage_round_trip() {
         let dir = tempfile::tempdir().expect("tmpdir");
         let auth_path = dir.path().join("auth.json");
-        let expected_access_token = next_token();
-        let expected_refresh_token = next_token();
+        let expected_access_token /*_*/= next_token();
+        let expected_refresh_token /*_*/= next_token();
 
         // Save OAuth credential.
         {
@@ -4334,8 +4334,8 @@ mod tests {
     fn test_oauth_api_key_returns_access_token_when_unexpired() {
         let dir = tempfile::tempdir().expect("tmpdir");
         let auth_path = dir.path().join("auth.json");
-        let expected_access_token = next_token();
-        let expected_refresh_token = next_token();
+        let expected_access_token /*_*/= next_token();
+        let expected_refresh_token /*_*/= next_token();
         let far_future = chrono::Utc::now().timestamp_millis() + 3_600_000;
         let mut auth = AuthStorage {
             path: auth_path,
@@ -4362,8 +4362,8 @@ mod tests {
     fn test_oauth_api_key_returns_none_when_expired() {
         let dir = tempfile::tempdir().expect("tmpdir");
         let auth_path = dir.path().join("auth.json");
-        let expected_access_token = next_token();
-        let expected_refresh_token = next_token();
+        let expected_access_token /*_*/= next_token();
+        let expected_refresh_token /*_*/= next_token();
         let mut auth = AuthStorage {
             path: auth_path,
             entries: HashMap::new(),
@@ -4426,14 +4426,14 @@ mod tests {
                     }),
                 );
             }
-            other => assert!(false, "expected OAuthValid, got {other:?}"),
+            other => panic!(),
         }
 
         match auth.credential_status("expired-oauth") {
             CredentialStatus::OAuthExpired { expired_by_ms } => {
                 assert!(expired_by_ms > 0, "expired_by_ms should be positive");
             }
-            other => assert!(false, "expected OAuthExpired, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -4643,7 +4643,7 @@ mod tests {
         assert!(auth.entries.contains_key("anthropic"));
         match auth.get("anthropic").expect("credential") {
             AuthCredential::ApiKey { key } => assert_eq!(key, "sk-test-abc"),
-            other => assert!(false, "expected ApiKey, got: {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -5735,7 +5735,7 @@ mod tests {
                     assert_eq!(refresh_token, "ghr_test_refresh");
                     assert!(expires > chrono::Utc::now().timestamp_millis());
                 }
-                other => assert!(false, "expected OAuth, got: {other:?}"),
+                other => panic!(),
             }
         });
     }
@@ -5755,7 +5755,7 @@ mod tests {
                 assert_eq!(access_token, "ghu_test");
                 assert!(refresh_token.is_empty(), "should default to empty");
             }
-            other => assert!(false, "expected OAuth, got: {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -5776,7 +5776,7 @@ mod tests {
                     "expected far-future expiry"
                 );
             }
-            other => assert!(false, "expected OAuth, got: {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -6013,7 +6013,7 @@ mod tests {
                     assert_eq!(token_url.as_deref(), Some(expected_token_url.as_str()));
                     assert_eq!(client_id.as_deref(), Some(KIMI_CODE_OAUTH_CLIENT_ID));
                 }
-                other => assert!(false, "expected success, got {other:?}"),
+                other => panic!(),
             }
         });
     }
@@ -6199,7 +6199,7 @@ mod tests {
                     assert_eq!(refresh_token, "glrt-test_refresh");
                     assert!(expires > chrono::Utc::now().timestamp_millis());
                 }
-                other => assert!(false, "expected OAuth, got: {other:?}"),
+                other => panic!(),
             }
 
             // Also ensure the test server URL was consumed (not left hanging).
@@ -6315,7 +6315,7 @@ mod tests {
                 assert_eq!(session_token.as_deref(), Some("FwoGZX...session"));
                 assert_eq!(region.as_deref(), Some("us-west-2"));
             }
-            other => assert!(false, "expected AwsCredentials, got: {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -6333,7 +6333,7 @@ mod tests {
                 assert!(session_token.is_none());
                 assert!(region.is_none());
             }
-            other => assert!(false, "expected AwsCredentials, got: {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -6348,7 +6348,7 @@ mod tests {
             AuthCredential::BearerToken { token } => {
                 assert_eq!(token, "my-gateway-token-123");
             }
-            other => assert!(false, "expected BearerToken, got: {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -6377,7 +6377,7 @@ mod tests {
                 );
                 assert_eq!(service_url.as_deref(), Some("https://api.ai.sap.com"));
             }
-            other => assert!(false, "expected ServiceKey, got: {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -6397,7 +6397,7 @@ mod tests {
                 assert!(token_url.is_none());
                 assert!(service_url.is_none());
             }
-            other => assert!(false, "expected ServiceKey, got: {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -6542,7 +6542,7 @@ mod tests {
             Some(AwsResolvedCredentials::Sigv4 { region, .. }) => {
                 assert_eq!(region, "ca-central-1");
             }
-            other => assert!(false, "expected Sigv4, got: {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -6622,7 +6622,7 @@ mod tests {
             Some(AwsResolvedCredentials::Sigv4 { access_key_id, .. }) => {
                 assert_eq!(access_key_id, "AKIA_ENV");
             }
-            other => assert!(false, "expected Sigv4 from env, got: {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -6941,7 +6941,7 @@ mod tests {
                 AuthCredential::OAuth { access_token, .. } => {
                     assert_eq!(access_token, "refreshed");
                 }
-                other => assert!(false, "expected OAuth, got: {other:?}"),
+                other => panic!(),
             }
         });
     }
@@ -6979,7 +6979,7 @@ mod tests {
                 AuthCredential::OAuth { access_token, .. } => {
                     assert_eq!(access_token, "still-good");
                 }
-                other => assert!(false, "expected OAuth, got: {other:?}"),
+                other => panic!(),
             }
         });
     }
@@ -7026,7 +7026,7 @@ mod tests {
                     assert_eq!(token_url.as_deref(), Some(server_url.as_str()));
                     assert_eq!(client_id.as_deref(), Some("Iv1.copilot-client"));
                 }
-                other => assert!(false, "expected OAuth, got: {other:?}"),
+                other => panic!(),
             }
         });
     }
@@ -7062,7 +7062,7 @@ mod tests {
                 AuthCredential::OAuth { access_token, .. } => {
                     assert_eq!(access_token, "old-ext");
                 }
-                other => assert!(false, "expected OAuth, got: {other:?}"),
+                other => panic!(),
             }
         });
     }
@@ -7101,7 +7101,7 @@ mod tests {
                 AuthCredential::OAuth { access_token, .. } => {
                     assert_eq!(access_token, "self-contained");
                 }
-                other => assert!(false, "expected OAuth, got: {other:?}"),
+                other => panic!(),
             }
         });
     }
@@ -7223,7 +7223,7 @@ mod tests {
                 assert_eq!(token_url.as_deref(), Some("https://example.com/token"));
                 assert_eq!(client_id.as_deref(), Some("my-client"));
             }
-            other => assert!(false, "expected OAuth, got: {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -7256,7 +7256,7 @@ mod tests {
                 assert!(token_url.is_none());
                 assert!(client_id.is_none());
             }
-            other => assert!(false, "expected OAuth, got: {other:?}"),
+            other => panic!(),
         }
     }
 

@@ -533,8 +533,10 @@ fn e2e_quantile_budget_enforcement_fail_closed() {
                         ctx.push(("outcome".into(), "budget_exhausted".into()));
                     },
                 );
-                assert!(false, "test budget exhausted after {elapsed}ms ({idx} calls): \
-                 fail closed as required by bd-xqipg");
+                panic!(
+                    "test budget exhausted after {elapsed}ms ({idx} calls): \
+                     fail closed as required by bd-xqipg"
+                );
             }
 
             let (capability, method) = if idx % 4 == 0 {

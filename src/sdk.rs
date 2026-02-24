@@ -1989,7 +1989,7 @@ mod tests {
                 assert_eq!(content_index, 2);
                 assert_eq!(delta, "chunk");
             }
-            other => assert!(false, "unexpected variant: {other:?}"),
+            other => panic!(),
         }
     }
 

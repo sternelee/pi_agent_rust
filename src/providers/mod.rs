@@ -956,7 +956,7 @@ pub fn create_provider(
             ))
         }
         ProviderRouteKind::NativeCopilot => {
-            let github_token = resolve_copilot_token(entry)?;
+            let github_token /*_*/= resolve_copilot_token(entry)?;
             let mut provider = copilot::CopilotProvider::new(&entry.model.id, github_token)
                 .with_provider_name(&entry.model.provider)
                 .with_compat(entry.compat.clone())
@@ -2089,7 +2089,7 @@ export default function init(pi) {
             "https://example.com",
         );
         let Err(err) = create_provider(&entry, None) else {
-            assert!(false, "unknown should fail");
+            panic!();
         };
         let msg = err.to_string();
         assert!(

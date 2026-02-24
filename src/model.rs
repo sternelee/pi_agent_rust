@@ -690,7 +690,7 @@ mod tests {
                 assert!(matches!(u.content, UserContent::Text(ref s) if s == "hi"));
                 assert_eq!(u.timestamp, 1_700_000_000);
             }
-            _ => assert!(false, "expected User variant"),
+            _ => panic!(),
         }
     }
 
@@ -708,9 +708,9 @@ mod tests {
                     assert_eq!(blocks.len(), 1);
                     assert!(matches!(&blocks[0], ContentBlock::Text(t) if t.text == "hello"));
                 }
-                UserContent::Text(_) => assert!(false, "expected Blocks"),
+                UserContent::Text(_) => panic!(),
             },
-            _ => assert!(false, "expected User variant"),
+            _ => panic!(),
         }
     }
 
@@ -725,7 +725,7 @@ mod tests {
                 assert_eq!(a.stop_reason, StopReason::Stop);
                 assert_eq!(a.usage.input, 100);
             }
-            _ => assert!(false, "expected Assistant variant"),
+            _ => panic!(),
         }
     }
 
@@ -748,7 +748,7 @@ mod tests {
                 assert!(!tr.is_error);
                 assert!(tr.details.is_some());
             }
-            _ => assert!(false, "expected ToolResult variant"),
+            _ => panic!(),
         }
     }
 
@@ -769,7 +769,7 @@ mod tests {
                 assert!(c.display);
                 assert!(c.details.is_none());
             }
-            _ => assert!(false, "expected Custom variant"),
+            _ => panic!(),
         }
     }
 
@@ -803,7 +803,7 @@ mod tests {
             UserContent::Blocks(blocks) => {
                 assert_eq!(blocks.len(), 1);
             }
-            UserContent::Text(_) => assert!(false, "expected Blocks variant"),
+            UserContent::Text(_) => panic!(),
         }
     }
 
@@ -863,7 +863,7 @@ mod tests {
                 assert_eq!(t.text, "hello");
                 assert_eq!(t.text_signature.as_deref(), Some("sig123"));
             }
-            _ => assert!(false, "expected Text"),
+            _ => panic!(),
         }
     }
 
@@ -891,7 +891,7 @@ mod tests {
                 assert_eq!(img.data, "aGVsbG8=");
                 assert_eq!(img.mime_type, "image/png");
             }
-            _ => assert!(false, "expected Image"),
+            _ => panic!(),
         }
     }
 
@@ -911,7 +911,7 @@ mod tests {
                 assert_eq!(tc.name, "read");
                 assert_eq!(tc.arguments["path"], "/tmp/test.txt");
             }
-            _ => assert!(false, "expected ToolCall"),
+            _ => panic!(),
         }
     }
 
@@ -1185,7 +1185,7 @@ mod tests {
                 assert_eq!(content_index, 2);
                 assert_eq!(content, "final text");
             }
-            _ => assert!(false, "expected TextEnd"),
+            _ => panic!(),
         }
     }
 

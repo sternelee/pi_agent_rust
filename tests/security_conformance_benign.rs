@@ -499,9 +499,11 @@ fn full_compatibility_matrix_passes() {
                 f.detail.as_deref().unwrap_or("")
             );
         }
-        assert!(false, "{} compatibility checks failed out of {}",
-        failed.len(),
-        checks.len());
+        panic!(
+            "{} compatibility checks failed out of {}",
+            failed.len(),
+            checks.len()
+        );
     }
 }
 

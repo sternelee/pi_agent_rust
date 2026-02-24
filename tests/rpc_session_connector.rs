@@ -198,7 +198,7 @@ fn large_fork_session() -> (Session, String, String) {
                 .last()
                 .expect("user message entry should exist")
             else {
-                assert!(false, "last entry should be a message");
+                panic!("last entry should be a message");
             };
             target_id.clone_from(&message.base.id);
             target_text = Some(user_text);

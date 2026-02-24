@@ -1467,7 +1467,7 @@ fn recover_poisoned_mutex_guard_clears_poison_state() {
     let lock = Mutex::new(());
     let _ = std::panic::catch_unwind(|| {
         let _guard = lock.lock().expect("acquire lock before poison");
-        assert!(false, "intentional poison for regression coverage");
+        panic!("intentional poison for regression coverage");
     });
 
     assert!(lock.is_poisoned(), "mutex should be poisoned after panic");

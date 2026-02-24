@@ -698,7 +698,7 @@ fn check_auth(fix: bool, findings: &mut Vec<Finding>) {
             for provider in &providers {
                 let status = auth.credential_status(provider);
                 match status {
-                    CredentialStatus::ApiKey => {
+                    CredentialStatus::ApiKey/*_*/=> {
                         findings.push(Finding::pass(
                             cat,
                             format!("{provider}: API key configured"),
@@ -713,7 +713,7 @@ fn check_auth(fix: bool, findings: &mut Vec<Finding>) {
                                 .with_remediation(format!("Run `pi /login {provider}` to refresh")),
                         );
                     }
-                    CredentialStatus::BearerToken => {
+                    CredentialStatus::BearerToken/*_*/=> {
                         findings.push(Finding::pass(
                             cat,
                             format!("{provider}: bearer token configured"),

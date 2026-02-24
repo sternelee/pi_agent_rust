@@ -5201,7 +5201,7 @@ mod tests {
             if let SessionMessage::ToolResult { is_error, .. } = &msg.message {
                 assert!(is_error);
             } else {
-                assert!(false, "expected ToolResult");
+                panic!();
             }
         }
     }
@@ -5229,7 +5229,7 @@ mod tests {
                 assert_eq!(command, "echo hello");
                 assert_eq!(*exit_code, 0);
             } else {
-                assert!(false, "expected BashExecution");
+                panic!();
             }
         }
 
@@ -5295,7 +5295,7 @@ mod tests {
                 assert_eq!(custom_type, "extension_state");
                 assert!(!display);
             } else {
-                assert!(false, "expected Custom");
+                panic!();
             }
         }
     }
@@ -5314,7 +5314,7 @@ mod tests {
             assert_eq!(custom.data, Some(serde_json::json!(42)));
             assert_eq!(custom.base.parent_id.as_deref(), Some(root_id.as_str()));
         } else {
-            assert!(false, "expected Custom entry");
+            panic!();
         }
     }
 
@@ -5359,7 +5359,7 @@ mod tests {
             assert_eq!(mc.provider, "openai");
             assert_eq!(mc.model_id, "gpt-4");
         } else {
-            assert!(false, "expected ModelChange");
+            panic!();
         }
     }
 
@@ -5375,7 +5375,7 @@ mod tests {
         if let SessionEntry::ThinkingLevelChange(tlc) = entry {
             assert_eq!(tlc.thinking_level, "high");
         } else {
-            assert!(false, "expected ThinkingLevelChange");
+            panic!();
         }
     }
 
@@ -5422,7 +5422,7 @@ mod tests {
             assert_eq!(label.target_id, msg_id);
             assert_eq!(label.label.as_deref(), Some("important"));
         } else {
-            assert!(false, "expected Label entry");
+            panic!();
         }
     }
 
@@ -6196,10 +6196,10 @@ mod tests {
             if let SessionMessage::User { content, .. } = &msg.message {
                 match content {
                     UserContent::Text(t) => assert_eq!(t, "Modified"),
-                    UserContent::Blocks(_) => assert!(false, "expected Text content"),
+                    UserContent::Blocks(_) => panic!(),
                 }
             } else {
-                assert!(false, "expected user message");
+                panic!();
             }
         }
     }
@@ -6421,7 +6421,7 @@ mod tests {
                 if let SessionMessage::User { content, .. } = &msg.message {
                     match content {
                         UserContent::Text(t) => assert_eq!(t, unicode_texts[i]),
-                        UserContent::Blocks(_) => assert!(false, "expected Text content at index {i}"),
+                        UserContent::Blocks(_) => panic!(),
                     }
                 }
             }

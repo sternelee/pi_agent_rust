@@ -1099,7 +1099,7 @@ mod tests {
             ReplayTraceCodecError::Validation(ReplayTraceValidationError::RetryWithoutCancel {
                 ..
             }) => {}
-            other => assert!(false, "unexpected error: {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -1140,7 +1140,7 @@ mod tests {
                 assert_eq!(expected, 2);
                 assert_eq!(observed, 3);
             }
-            other => assert!(false, "unexpected error: {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -1164,7 +1164,7 @@ mod tests {
             ReplayDivergenceReason::EventFieldMismatch { field, .. } => {
                 assert_eq!(field, "kind");
             }
-            other => assert!(false, "unexpected divergence reason: {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -1188,7 +1188,7 @@ mod tests {
                 assert_eq!(expected, 2);
                 assert_eq!(observed, 1);
             }
-            other => assert!(false, "unexpected divergence reason: {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -1618,7 +1618,7 @@ mod tests {
             ReplayDivergenceReason::EventFieldMismatch { field, .. } => {
                 assert_eq!(field, "attributes");
             }
-            other => assert!(false, "unexpected: {other:?}"),
+            other => panic!(),
         }
     }
 

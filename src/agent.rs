@@ -4229,7 +4229,7 @@ mod turn_event_tests {
             });
 
             let Some(first_turn_tool_results) = first_turn_tool_results else {
-                assert!(false, "missing first turn tool results");
+                panic!();
             };
             assert_eq!(first_turn_tool_results.len(), 1);
             let first_result = first_turn_tool_results.first().unwrap();
@@ -4237,7 +4237,7 @@ mod turn_event_tests {
                 assert_eq!(tr.tool_name, "echo_tool");
                 assert!(!tr.is_error);
             } else {
-                assert!(false, "expected ToolResult message");
+                panic!();
             }
             drop(events);
         });

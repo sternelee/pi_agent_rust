@@ -662,7 +662,7 @@ mod tests {
                 assert_eq!(source, "npm:@org/pkg");
                 assert!(!local);
             }
-            other => assert!(false, "expected Install, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -674,7 +674,7 @@ mod tests {
                 assert_eq!(source, "git:https://example.com");
                 assert!(local);
             }
-            other => assert!(false, "expected Install --local, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -683,7 +683,7 @@ mod tests {
         let cli = Cli::parse_from(["pi", "install", "-l", "./local-ext"]);
         match cli.command {
             Some(Commands::Install { local, .. }) => assert!(local),
-            other => assert!(false, "expected Install -l, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -695,7 +695,7 @@ mod tests {
                 assert_eq!(source, "npm:pkg");
                 assert!(!local);
             }
-            other => assert!(false, "expected Remove, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -704,7 +704,7 @@ mod tests {
         let cli = Cli::parse_from(["pi", "remove", "--local", "npm:pkg"]);
         match cli.command {
             Some(Commands::Remove { local, .. }) => assert!(local),
-            other => assert!(false, "expected Remove --local, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -715,7 +715,7 @@ mod tests {
             Some(Commands::Update { source }) => {
                 assert_eq!(source.as_deref(), Some("npm:pkg"));
             }
-            other => assert!(false, "expected Update with source, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -724,7 +724,7 @@ mod tests {
         let cli = Cli::parse_from(["pi", "update"]);
         match cli.command {
             Some(Commands::Update { source }) => assert!(source.is_none()),
-            other => assert!(false, "expected Update (all), got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -743,7 +743,7 @@ mod tests {
                 assert!(!paths);
                 assert!(!json);
             }
-            other => assert!(false, "expected Config, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -756,7 +756,7 @@ mod tests {
                 assert!(!paths);
                 assert!(!json);
             }
-            other => assert!(false, "expected Config --show, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -769,7 +769,7 @@ mod tests {
                 assert!(paths);
                 assert!(!json);
             }
-            other => assert!(false, "expected Config --paths, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -782,7 +782,7 @@ mod tests {
                 assert!(!paths);
                 assert!(json);
             }
-            other => assert!(false, "expected Config --json, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -799,7 +799,7 @@ mod tests {
             Some(Commands::Info { name }) => {
                 assert_eq!(name, "auto-commit-on-exit");
             }
-            other => assert!(false, "expected Info, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -829,7 +829,7 @@ mod tests {
         let cli = Cli::parse_from(["pi", "--list-models", "claude*"]);
         match cli.list_models {
             Some(Some(ref pat)) => assert_eq!(pat, "claude*"),
-            other => assert!(false, "expected Some(Some(\"claude*\")), got {other:?}"),
+            other => panic!(),
         }
     }
 

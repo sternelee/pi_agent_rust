@@ -97,9 +97,11 @@ fn regression_inputs_have_target_assertions() -> io::Result<()> {
                     );
                 }
                 "fuzz_sse_parser" => assert_sse_chunking_invariant(&data),
-                _ => assert!(false, "missing regression target handler for {} (file {})",
-                target,
-                candidate.display()),
+                _ => panic!(
+                    "missing regression target handler for {} (file {})",
+                    target,
+                    candidate.display()
+                ),
             }
             exercised += 1;
         }

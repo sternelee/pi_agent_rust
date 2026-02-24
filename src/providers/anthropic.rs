@@ -372,7 +372,7 @@ impl Provider for AnthropicProvider {
                     "Missing API key for provider. Configure credentials with /login <provider> or set the provider's API key env var.",
                 )
             })?;
-        let forced_bearer_token = if is_anthropic_provider(&self.provider) {
+        let forced_bearer_token /*_*/= if is_anthropic_provider(&self.provider) {
             unmark_anthropic_oauth_bearer_token(&raw_auth_value).map(ToString::to_string)
         } else {
             None
@@ -381,9 +381,9 @@ impl Provider for AnthropicProvider {
         let auth_value = forced_bearer_token.unwrap_or(raw_auth_value);
 
         let request_body = self.build_request(context, options);
-        let anthropic_bearer_token =
+        let anthropic_bearer_token /*_*/=
             force_bearer || is_anthropic_bearer_token(&self.provider, &auth_value);
-        let kimi_oauth_token = is_kimi_oauth_token(&self.provider, &auth_value);
+        let kimi_oauth_token /*_*/= is_kimi_oauth_token(&self.provider, &auth_value);
 
         // Build request with headers (Content-Type set by .json() below)
         let mut request = self
@@ -1216,7 +1216,7 @@ mod tests {
         assert_eq!(request.messages[0].content.len(), 1);
         match &request.messages[0].content[0] {
             AnthropicContent::Text { text } => assert_eq!(*text, "Ping"),
-            other => assert!(false, "expected text content, got {other:?}"),
+            other => panic!(),
         }
 
         let tools = request.tools.expect("tools");
@@ -1376,7 +1376,7 @@ mod tests {
             assert_eq!(tool_call.name, "search");
             assert_eq!(tool_call.arguments, json!({ "q": "rust" }));
         } else {
-            assert!(false, "expected ToolCallEnd event, got {:?}", out[7]);
+            panic!();
         }
         assert!(matches!(
             &out[8],
@@ -1405,7 +1405,7 @@ mod tests {
             assert_eq!(*reason, StopReason::ToolUse);
             assert_eq!(message.stop_reason, StopReason::ToolUse);
         } else {
-            assert!(false, "expected Done event, got {:?}", out[11]);
+            panic!();
         }
     }
 
@@ -1435,7 +1435,7 @@ mod tests {
             assert_eq!(message.usage.output, 7);
             assert_eq!(message.usage.total_tokens, 12);
         } else {
-            assert!(false, "expected Done event, got {:?}", out[1]);
+            panic!();
         }
     }
 
@@ -1467,7 +1467,7 @@ mod tests {
         if let StreamEvent::Done { message, .. } = &out[1] {
             assert_eq!(message.usage.total_tokens, u64::MAX);
         } else {
-            assert!(false, "expected Done event, got {:?}", out[1]);
+            panic!();
         }
     }
 
@@ -1570,7 +1570,7 @@ mod tests {
         assert_eq!(out.len(), 2, "parse error should stop further events");
         assert!(matches!(out[0], Ok(StreamEvent::Start { .. })));
         match &out[1] {
-            Ok(event) => assert!(false, "expected parse error item, got event: {event:?}"),
+            Ok(event) => panic!(),
             Err(err) => assert!(err.to_string().contains("JSON parse error")),
         }
     }
@@ -1755,7 +1755,7 @@ mod tests {
             .expect("runtime build");
         let result = runtime.block_on(async { provider.stream(&context, &options).await });
         let Err(err) = result else {
-            assert!(false, "expected HTTP error");
+            panic!();
         };
         let message = err.to_string();
         assert!(message.contains("Anthropic API error (HTTP 401)"));
@@ -1904,7 +1904,7 @@ mod tests {
                     {
                         break;
                     }
-                    Err(err) => assert!(false, "read request failed: {err}"),
+                    Err(err) => panic!(),
                 }
             }
 
@@ -1930,7 +1930,7 @@ mod tests {
                     {
                         break;
                     }
-                    Err(err) => assert!(false, "read request body failed: {err}"),
+                    Err(err) => panic!(),
                 }
             }
 

@@ -725,7 +725,7 @@ impl PiApp {
             };
 
             let credential = match kind {
-                PendingLoginKind::ApiKey => normalize_api_key_input(&code_input)
+                PendingLoginKind::ApiKey/*_*/=> normalize_api_key_input(&code_input)
                     .map(|key| crate::auth::AuthCredential::ApiKey { key })
                     .map_err(crate::error::Error::auth),
                 PendingLoginKind::OAuth => {
@@ -859,7 +859,7 @@ impl PiApp {
             });
 
             let status = match kind {
-                PendingLoginKind::ApiKey => {
+                PendingLoginKind::ApiKey/*_*/=> {
                     format!("API key saved for {provider}. Credentials saved to auth.json.")
                 }
                 PendingLoginKind::OAuth | PendingLoginKind::DeviceFlow => {
@@ -2416,7 +2416,7 @@ mod tests {
         assert!(auth.get("gemini").is_none());
         match auth.get("google") {
             Some(AuthCredential::ApiKey { key }) => assert_eq!(key, "new-google-key"),
-            other => assert!(false, "expected google api key credential, got: {other:?}"),
+            other => panic!(),
         }
     }
 

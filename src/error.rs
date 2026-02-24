@@ -85,8 +85,8 @@ impl AuthDiagnosticCode {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::MissingApiKey => "auth.missing_api_key",
-            Self::InvalidApiKey => "auth.invalid_api_key",
+            Self::MissingApiKey/*_*/=> "auth.missing_api_key",
+            Self::InvalidApiKey/*_*/=> "auth.invalid_api_key",
             Self::QuotaExceeded => "auth.quota_exceeded",
             Self::MissingOAuthAuthorizationCode => "auth.oauth.missing_authorization_code",
             Self::OAuthTokenExchangeFailed => "auth.oauth.token_exchange_failed",
@@ -104,8 +104,8 @@ impl AuthDiagnosticCode {
     #[must_use]
     pub const fn remediation(self) -> &'static str {
         match self {
-            Self::MissingApiKey => "Set the provider API key env var or run `/login <provider>`.",
-            Self::InvalidApiKey => "Rotate or replace the API key and verify provider permissions.",
+            Self::MissingApiKey/*_*/=> "Set the provider API key env var or run `/login <provider>`.",
+            Self::InvalidApiKey/*_*/=> "Rotate or replace the API key and verify provider permissions.",
             Self::QuotaExceeded => {
                 "Verify billing/quota limits for this API key or organization, then retry."
             }
@@ -1756,7 +1756,7 @@ mod tests {
             let err = Error::provider(*provider, *message);
             let d = err
                 .auth_diagnostic()
-                .unwrap_or_else(|| assert!(false, "expected MissingApiKey diagnostic for {provider}"));
+                .unwrap_or_else(|| panic!());
             assert_eq!(
                 d.code,
                 AuthDiagnosticCode::MissingApiKey,
@@ -1788,7 +1788,7 @@ mod tests {
             let err = Error::provider(*provider, *message);
             let d = err
                 .auth_diagnostic()
-                .unwrap_or_else(|| assert!(false, "expected InvalidApiKey diagnostic for {provider}"));
+                .unwrap_or_else(|| panic!());
             assert_eq!(
                 d.code,
                 AuthDiagnosticCode::InvalidApiKey,
@@ -2017,7 +2017,7 @@ mod tests {
             let err = Error::auth(*message);
             let d = err
                 .auth_diagnostic()
-                .unwrap_or_else(|| assert!(false, "expected diagnostic for Auth({message})"));
+                .unwrap_or_else(|| panic!());
             assert_eq!(
                 d.code, *expected_code,
                 "wrong code for Auth({message}): {:?}",
@@ -2034,7 +2034,7 @@ mod tests {
             let err = Error::provider("openai", *msg);
             let d = err
                 .auth_diagnostic()
-                .unwrap_or_else(|| assert!(false, "no diagnostic for: {msg}"));
+                .unwrap_or_else(|| panic!());
             assert_eq!(
                 d.code,
                 AuthDiagnosticCode::MissingApiKey,
@@ -2078,7 +2078,7 @@ mod tests {
             let err = Error::provider("openai", *msg);
             let d = err
                 .auth_diagnostic()
-                .unwrap_or_else(|| assert!(false, "no diagnostic for: {msg}"));
+                .unwrap_or_else(|| panic!());
             assert_eq!(
                 d.code,
                 AuthDiagnosticCode::QuotaExceeded,

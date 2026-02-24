@@ -990,10 +990,10 @@ fn save_round_trips_tool_result_message() {
                 assert!(!is_error);
             } else {
                 let got = &msg_entry.message;
-                assert!(false, "Expected ToolResult message, got {got:?}");
+                panic!("Expected ToolResult message, got {got:?}");
             }
         } else {
-            assert!(false, "Expected Message entry, got {tool_result_entry:?}");
+            panic!("Expected Message entry, got {tool_result_entry:?}");
         }
     });
 }
@@ -1021,10 +1021,10 @@ fn save_round_trips_tool_error_result() {
             if let pi::session::SessionMessage::ToolResult { is_error, .. } = &msg_entry.message {
                 assert!(*is_error, "is_error flag should be preserved as true");
             } else {
-                assert!(false, "Expected ToolResult message");
+                panic!("Expected ToolResult message");
             }
         } else {
-            assert!(false, "Expected Message entry");
+            panic!("Expected Message entry");
         }
     });
 }
@@ -1050,17 +1050,17 @@ fn save_preserves_unicode_message_content() {
             if let pi::session::SessionMessage::User { content, .. } = &msg_entry.message {
                 let text = match content {
                     UserContent::Text(t) => t.as_str(),
-                    UserContent::Blocks(_) => assert!(false, "Expected Text content"),
+                    UserContent::Blocks(_) => panic!("Expected Text content"),
                 };
                 assert_eq!(
                     text, unicode_content,
                     "Unicode content should be preserved exactly"
                 );
             } else {
-                assert!(false, "Expected User message");
+                panic!("Expected User message");
             }
         } else {
-            assert!(false, "Expected Message entry");
+            panic!("Expected Message entry");
         }
     });
 }
@@ -1087,13 +1087,13 @@ fn save_preserves_emoji_in_assistant_response() {
                         "Emoji content should be preserved"
                     );
                 } else {
-                    assert!(false, "Expected Text content block");
+                    panic!("Expected Text content block");
                 }
             } else {
-                assert!(false, "Expected Assistant message");
+                panic!("Expected Assistant message");
             }
         } else {
-            assert!(false, "Expected Message entry");
+            panic!("Expected Message entry");
         }
     });
 }
@@ -1129,10 +1129,10 @@ fn save_preserves_message_timestamps() {
                     "Message timestamp should be preserved"
                 );
             } else {
-                assert!(false, "Expected User message");
+                panic!("Expected User message");
             }
         } else {
-            assert!(false, "Expected Message entry");
+            panic!("Expected Message entry");
         }
     });
 }

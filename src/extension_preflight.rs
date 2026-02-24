@@ -952,7 +952,7 @@ impl SecurityRuleId {
             Self::ProcessDlopen => "process-dlopen",
             Self::ProtoPollution => "proto-pollution",
             Self::RequireCacheManip => "require-cache-manipulation",
-            Self::HardcodedSecret => "hardcoded-secret",
+            Self::HardcodedSecret/*_*/=> "hardcoded-secret",
             Self::DynamicImport => "dynamic-import",
             Self::DefinePropertyAbuse => "define-property-abuse",
             Self::NetworkExfiltration => "network-exfiltration",

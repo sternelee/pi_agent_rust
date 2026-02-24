@@ -4168,7 +4168,7 @@ mod tests {
                 content: UserContent::Text(text),
                 ..
             }) => assert_eq!(text, "hello"),
-            other => assert!(false, "expected text user message, got {other:?}"),
+            other => panic!(),
         }
     }
 
@@ -4188,7 +4188,7 @@ mod tests {
                 assert!(matches!(&blocks[0], ContentBlock::Text(_)));
                 assert!(matches!(&blocks[1], ContentBlock::Image(_)));
             }
-            other => assert!(false, "expected blocks user message, got {other:?}"),
+            other => panic!(),
         }
     }
 

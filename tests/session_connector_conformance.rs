@@ -243,7 +243,7 @@ fn append_message_appears_in_get_messages() {
                 content: UserContent::Text(text),
                 ..
             } => assert_eq!(text, "Hi there"),
-            other => assert!(false, "expected user text message, got {other:?}"),
+            other => panic!("expected user text message, got {other:?}"),
         }
     });
 }

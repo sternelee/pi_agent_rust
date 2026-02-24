@@ -5185,7 +5185,7 @@ fn builtin_overlay_module_key(base: &str, canonical: &str) -> String {
 /// This prevents OOM vulnerabilities if a module path resolves to a massive file or /dev/zero.
 fn read_source_for_import_extraction(path: &str) -> Option<String> {
     use std::io::Read;
-    let mut file = std::fs::File::open(path).ok()?;
+    let file = std::fs::File::open(path).ok()?;
     let mut handle = file.take(1024 * 1024); // 1MB limit
     let mut buffer = String::new();
     handle.read_to_string(&mut buffer).ok()?;

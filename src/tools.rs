@@ -3535,11 +3535,11 @@ impl Tool for FindTool {
             .spawn()
             .map_err(|e| Error::tool("find", format!("Failed to run fd: {e}")))?;
 
-        let mut stdout_pipe = child
+        let stdout_pipe = child
             .stdout
             .take()
             .ok_or_else(|| Error::tool("find", "Missing stdout"))?;
-        let mut stderr_pipe = child
+        let stderr_pipe = child
             .stderr
             .take()
             .ok_or_else(|| Error::tool("find", "Missing stderr"))?;

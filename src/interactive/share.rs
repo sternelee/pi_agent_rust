@@ -9,7 +9,7 @@ use super::{AgentState, Cmd, PiApp, PiMsg};
 #[cfg(feature = "clipboard")]
 use arboard::Clipboard as ArboardClipboard;
 
-pub(super) fn run_command_output(
+pub(super) async fn run_command_output(
     program: &str,
     args: &[OsString],
     cwd: &Path,
@@ -18,6 +18,7 @@ pub(super) fn run_command_output(
     use std::process::{Command, Stdio};
     use std::sync::mpsc as std_mpsc;
     use std::time::Duration;
+    use asupersync::time::{sleep, wall_now};
 
     let child = Command::new(program)
         .args(args)
@@ -28,7 +29,7 @@ pub(super) fn run_command_output(
     let pid = child.id();
 
     let (tx, rx) = std_mpsc::channel();
-    std::thread::spawn(move || {
+    let _handle = std::thread::Builder::new().name("share".into()).spawn(move || {
         let result = child.wait_with_output();
         let _ = tx.send(result);
     });
@@ -43,10 +44,12 @@ pub(super) fn run_command_output(
             ));
         }
 
-        match rx.recv_timeout(tick) {
+        match rx.try_recv() {
             Ok(result) => return result,
-            Err(std_mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std_mpsc::RecvTimeoutError::Disconnected) => {
+            Err(std_mpsc::TryRecvError::Empty) => {
+                sleep(wall_now(), tick).await;
+            }
+            Err(std_mpsc::TryRecvError::Disconnected) => {
                 return Err(std::io::Error::other("command output channel disconnected"));
             }
         }
@@ -300,7 +303,7 @@ impl PiApp {
                 .unwrap_or_else(|| "gh".to_string());
 
             let auth_args = vec![OsString::from("auth"), OsString::from("status")];
-            match run_command_output(&gh, &auth_args, &cwd, &abort_signal) {
+            match run_command_output(&gh, &auth_args, &cwd, &abort_signal).await {
                 Ok(output) => {
                     if !output.status.success() {
                         let details = format_command_output(&output);
@@ -383,7 +386,7 @@ impl PiApp {
                 OsString::from(&gist_desc),
                 temp_path.as_os_str().to_os_string(),
             ];
-            let output = match run_command_output(&gh, &gist_args, &cwd, &abort_signal) {
+            let output = match run_command_output(&gh, &gist_args, &cwd, &abort_signal).await {
                 Ok(output) => output,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                     let message = "GitHub CLI `gh` not found.\n\
