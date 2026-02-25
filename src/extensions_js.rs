@@ -14598,8 +14598,12 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                                 "exec_sync"
                             );
 
-                            let args: Vec<String> =
-                                serde_json::from_str(&args_json).unwrap_or_default();
+                            let args: Vec<String> = serde_json::from_str(&args_json)
+                                .map_err(|err| rquickjs::Error::new_into_js_message(
+                                    "String",
+                                    "Array",
+                                    format!("invalid JSON args: {err}"),
+                                ))?;
 
                             let mut denied_reason = if allow_unsafe_sync_exec {
                                 None
@@ -14747,13 +14751,14 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                                     if let Some(st) = child.try_wait().map_err(|e| e.to_string())? {
                                         break st;
                                     }
-                                    if limit_exceeded.load(AtomicOrdering::Relaxed) {
+                                    if !killed && limit_exceeded.load(AtomicOrdering::Relaxed) {
                                         killed = true;
                                         crate::tools::kill_process_tree(Some(pid));
                                         let _ = child.kill();
+                                        break child.wait().map_err(|e| e.to_string())?;
                                     }
                                     if let Some(t) = timeout {
-                                        if start.elapsed() >= t {
+                                        if !killed && start.elapsed() >= t {
                                             killed = true;
                                             crate::tools::kill_process_tree(Some(pid));
                                             let _ = child.kill();
