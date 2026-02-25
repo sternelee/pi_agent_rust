@@ -2415,7 +2415,7 @@ fn split_diff_lines(value: &str) -> Vec<&str> {
 }
 
 #[inline]
-fn is_change_tag(tag: DiffTag) -> bool {
+const fn is_change_tag(tag: DiffTag) -> bool {
     matches!(tag, DiffTag::Added | DiffTag::Removed)
 }
 
@@ -2431,7 +2431,7 @@ struct DiffRenderState {
 }
 
 impl DiffRenderState {
-    fn new(line_num_width: usize, context_lines: usize) -> Self {
+    const fn new(line_num_width: usize, context_lines: usize) -> Self {
         Self {
             output: String::new(),
             old_line_num: 1,
@@ -2450,7 +2450,7 @@ impl DiffRenderState {
         }
     }
 
-    fn mark_first_change(&mut self) {
+    const fn mark_first_change(&mut self) {
         if self.first_changed_line.is_none() {
             self.first_changed_line = Some(self.new_line_num);
         }
