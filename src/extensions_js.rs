@@ -14771,6 +14771,7 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                                         loop {
                                             let n = match stdout_pipe.read(&mut chunk) {
                                                 Ok(n) => n,
+                                                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                                                 Err(e) => return (buf, Some(e.to_string())),
                                             };
                                             if n == 0 { break; }
@@ -14790,6 +14791,7 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                                         loop {
                                             let n = match stderr_pipe.read(&mut chunk) {
                                                 Ok(n) => n,
+                                                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                                                 Err(e) => return (buf, Some(e.to_string())),
                                             };
                                             if n == 0 { break; }

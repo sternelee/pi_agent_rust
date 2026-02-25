@@ -21959,7 +21959,12 @@ async fn dispatch_hostcall_exec_ref(
         let mut partial = Vec::new();
 
         loop {
-            let read = reader.read(&mut buf).map_err(|err| err.to_string())?;
+            let read = match reader.read(&mut buf) {
+                Ok(0) => 0,
+                Ok(n) => n,
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(err) => return Err(err.to_string()),
+            };
             if read == 0 {
                 // EOF. Flush partial if any (lossy).
                 if !partial.is_empty() {
