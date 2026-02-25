@@ -2398,143 +2398,194 @@ fn diff_parts(old_content: &str, new_content: &str) -> Vec<DiffPart> {
     parts
 }
 
-fn generate_diff_string(old_content: &str, new_content: &str) -> (String, Option<usize>) {
-    let parts = diff_parts(old_content, new_content);
-
+fn diff_line_num_width(old_content: &str, new_content: &str) -> usize {
     // Count newlines with memchr (avoids iterator-item overhead of split().count())
     let old_line_count = memchr::memchr_iter(b'\n', old_content.as_bytes()).count() + 1;
     let new_line_count = memchr::memchr_iter(b'\n', new_content.as_bytes()).count() + 1;
     let max_line_num = old_line_count.max(new_line_count).max(1);
-    let line_num_width = max_line_num.ilog10() as usize + 1;
+    max_line_num.ilog10() as usize + 1
+}
 
-    // Single String buffer instead of Vec<String> + join — eliminates per-line
-    // String allocations and the final join copy.
-    let mut output = String::new();
-    let mut old_line_num: usize = 1;
-    let mut new_line_num: usize = 1;
-    let mut last_was_change = false;
-    let mut first_changed_line: Option<usize> = None;
-    let context_lines: usize = 4;
+fn split_diff_lines(value: &str) -> Vec<&str> {
+    let mut lines: Vec<&str> = value.split('\n').collect();
+    if lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    lines
+}
 
-    for (i, part) in parts.iter().enumerate() {
-        let collected: Vec<&str> = part.value.split('\n').collect();
-        // Trim trailing empty element from split
-        let raw = if collected.last().is_some_and(|l| l.is_empty()) {
-            &collected[..collected.len() - 1]
-        } else {
-            &collected[..]
-        };
+#[inline]
+fn is_change_tag(tag: DiffTag) -> bool {
+    matches!(tag, DiffTag::Added | DiffTag::Removed)
+}
 
-        match part.tag {
-            DiffTag::Added | DiffTag::Removed => {
-                if first_changed_line.is_none() {
-                    first_changed_line = Some(new_line_num);
-                }
+#[derive(Debug)]
+struct DiffRenderState {
+    output: String,
+    old_line_num: usize,
+    new_line_num: usize,
+    last_was_change: bool,
+    first_changed_line: Option<usize>,
+    line_num_width: usize,
+    context_lines: usize,
+}
 
-                for line in raw {
-                    if !output.is_empty() {
-                        output.push('\n');
-                    }
-                    match part.tag {
-                        DiffTag::Added => {
-                            let _ = write!(output, "+{new_line_num:>line_num_width$} {line}");
-                            new_line_num = new_line_num.saturating_add(1);
-                        }
-                        DiffTag::Removed => {
-                            let _ = write!(output, "-{old_line_num:>line_num_width$} {line}");
-                            old_line_num = old_line_num.saturating_add(1);
-                        }
-                        DiffTag::Equal => {}
-                    }
-                }
-
-                last_was_change = true;
-            }
-            DiffTag::Equal => {
-                let next_part_is_change = i < parts.len().saturating_sub(1)
-                    && matches!(parts[i + 1].tag, DiffTag::Added | DiffTag::Removed);
-
-                if last_was_change || next_part_is_change {
-                    if last_was_change && next_part_is_change && raw.len() > context_lines * 2 {
-                        for line in &raw[..context_lines] {
-                            if !output.is_empty() {
-                                output.push('\n');
-                            }
-                            let _ = write!(output, " {old_line_num:>line_num_width$} {line}");
-                            old_line_num = old_line_num.saturating_add(1);
-                            new_line_num = new_line_num.saturating_add(1);
-                        }
-
-                        let skip = raw.len().saturating_sub(context_lines * 2);
-                        if !output.is_empty() {
-                            output.push('\n');
-                        }
-                        let _ = write!(output, " {:>line_num_width$} ...", " ");
-                        old_line_num = old_line_num.saturating_add(skip);
-                        new_line_num = new_line_num.saturating_add(skip);
-
-                        for line in &raw[raw.len() - context_lines..] {
-                            if !output.is_empty() {
-                                output.push('\n');
-                            }
-                            let _ = write!(output, " {old_line_num:>line_num_width$} {line}");
-                            old_line_num = old_line_num.saturating_add(1);
-                            new_line_num = new_line_num.saturating_add(1);
-                        }
-                    } else {
-                        // Compute slice bounds directly instead of cloning Vecs
-                        let start = if last_was_change {
-                            0
-                        } else {
-                            raw.len().saturating_sub(context_lines)
-                        };
-                        let lines_after_start = raw.len() - start;
-                        let (end, skip_end) =
-                            if !next_part_is_change && lines_after_start > context_lines {
-                                (start + context_lines, lines_after_start - context_lines)
-                            } else {
-                                (raw.len(), 0)
-                            };
-                        let skip_start = start;
-
-                        if skip_start > 0 {
-                            if !output.is_empty() {
-                                output.push('\n');
-                            }
-                            let _ = write!(output, " {:>line_num_width$} ...", " ");
-                            old_line_num = old_line_num.saturating_add(skip_start);
-                            new_line_num = new_line_num.saturating_add(skip_start);
-                        }
-
-                        for line in &raw[start..end] {
-                            if !output.is_empty() {
-                                output.push('\n');
-                            }
-                            let _ = write!(output, " {old_line_num:>line_num_width$} {line}");
-                            old_line_num = old_line_num.saturating_add(1);
-                            new_line_num = new_line_num.saturating_add(1);
-                        }
-
-                        if skip_end > 0 {
-                            if !output.is_empty() {
-                                output.push('\n');
-                            }
-                            let _ = write!(output, " {:>line_num_width$} ...", " ");
-                            old_line_num = old_line_num.saturating_add(skip_end);
-                            new_line_num = new_line_num.saturating_add(skip_end);
-                        }
-                    }
-                } else {
-                    old_line_num = old_line_num.saturating_add(raw.len());
-                    new_line_num = new_line_num.saturating_add(raw.len());
-                }
-
-                last_was_change = false;
-            }
+impl DiffRenderState {
+    fn new(line_num_width: usize, context_lines: usize) -> Self {
+        Self {
+            output: String::new(),
+            old_line_num: 1,
+            new_line_num: 1,
+            last_was_change: false,
+            first_changed_line: None,
+            line_num_width,
+            context_lines,
         }
     }
 
-    (output, first_changed_line)
+    #[inline]
+    fn ensure_line_break(&mut self) {
+        if !self.output.is_empty() {
+            self.output.push('\n');
+        }
+    }
+
+    fn mark_first_change(&mut self) {
+        if self.first_changed_line.is_none() {
+            self.first_changed_line = Some(self.new_line_num);
+        }
+    }
+
+    fn push_added_line(&mut self, line: &str) {
+        self.ensure_line_break();
+        let _ = write!(
+            self.output,
+            "+{line_num:>width$} {line}",
+            line_num = self.new_line_num,
+            width = self.line_num_width
+        );
+        self.new_line_num = self.new_line_num.saturating_add(1);
+    }
+
+    fn push_removed_line(&mut self, line: &str) {
+        self.ensure_line_break();
+        let _ = write!(
+            self.output,
+            "-{line_num:>width$} {line}",
+            line_num = self.old_line_num,
+            width = self.line_num_width
+        );
+        self.old_line_num = self.old_line_num.saturating_add(1);
+    }
+
+    fn push_context_line(&mut self, line: &str) {
+        self.ensure_line_break();
+        let _ = write!(
+            self.output,
+            " {line_num:>width$} {line}",
+            line_num = self.old_line_num,
+            width = self.line_num_width
+        );
+        self.old_line_num = self.old_line_num.saturating_add(1);
+        self.new_line_num = self.new_line_num.saturating_add(1);
+    }
+
+    fn push_skip_marker(&mut self, skip: usize) {
+        if skip == 0 {
+            return;
+        }
+        self.ensure_line_break();
+        let _ = write!(
+            self.output,
+            " {:>width$} ...",
+            " ",
+            width = self.line_num_width
+        );
+        self.old_line_num = self.old_line_num.saturating_add(skip);
+        self.new_line_num = self.new_line_num.saturating_add(skip);
+    }
+}
+
+fn render_changed_part(tag: DiffTag, raw: &[&str], state: &mut DiffRenderState) {
+    state.mark_first_change();
+    for line in raw {
+        match tag {
+            DiffTag::Added => state.push_added_line(line),
+            DiffTag::Removed => state.push_removed_line(line),
+            DiffTag::Equal => {}
+        }
+    }
+    state.last_was_change = true;
+}
+
+fn render_equal_part(raw: &[&str], next_part_is_change: bool, state: &mut DiffRenderState) {
+    if !(state.last_was_change || next_part_is_change) {
+        let raw_len = raw.len();
+        state.old_line_num = state.old_line_num.saturating_add(raw_len);
+        state.new_line_num = state.new_line_num.saturating_add(raw_len);
+        state.last_was_change = false;
+        return;
+    }
+
+    if state.last_was_change
+        && next_part_is_change
+        && raw.len() > state.context_lines.saturating_mul(2)
+    {
+        for line in raw.iter().take(state.context_lines) {
+            state.push_context_line(line);
+        }
+
+        let skip = raw.len().saturating_sub(state.context_lines * 2);
+        state.push_skip_marker(skip);
+
+        for line in raw
+            .iter()
+            .skip(raw.len().saturating_sub(state.context_lines))
+        {
+            state.push_context_line(line);
+        }
+    } else {
+        // Compute slice bounds directly instead of cloning Vecs
+        let start = if state.last_was_change {
+            0
+        } else {
+            raw.len().saturating_sub(state.context_lines)
+        };
+        let lines_after_start = raw.len().saturating_sub(start);
+        let (end, skip_end) = if !next_part_is_change && lines_after_start > state.context_lines {
+            (
+                start + state.context_lines,
+                lines_after_start - state.context_lines,
+            )
+        } else {
+            (raw.len(), 0)
+        };
+
+        state.push_skip_marker(start);
+        for line in &raw[start..end] {
+            state.push_context_line(line);
+        }
+        state.push_skip_marker(skip_end);
+    }
+
+    state.last_was_change = false;
+}
+
+fn generate_diff_string(old_content: &str, new_content: &str) -> (String, Option<usize>) {
+    let parts = diff_parts(old_content, new_content);
+    let mut state = DiffRenderState::new(diff_line_num_width(old_content, new_content), 4);
+
+    for (i, part) in parts.iter().enumerate() {
+        let raw = split_diff_lines(&part.value);
+        let next_part_is_change = parts.get(i + 1).is_some_and(|next| is_change_tag(next.tag));
+
+        match part.tag {
+            DiffTag::Added | DiffTag::Removed => render_changed_part(part.tag, &raw, &mut state),
+            DiffTag::Equal => render_equal_part(&raw, next_part_is_change, &mut state),
+        }
+    }
+
+    (state.output, state.first_changed_line)
 }
 
 #[async_trait]
