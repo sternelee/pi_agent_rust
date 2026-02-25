@@ -2158,12 +2158,14 @@ mod tests {
                 // Empty delta (initial or heartbeat)
                 2 => Just(r#"{"choices":[{"delta":{}}]}"#.to_string()),
                 // Finish-only delta
-                2 => finish_reason().prop_filter("some reason", Option::is_some).prop_map(|fr| {
-                    serde_json::json!({
-                        "choices": [{"delta": {}, "finish_reason": fr.unwrap()}]
-                    })
-                    .to_string()
-                }),
+                2 => finish_reason()
+                    .prop_filter_map("some reason", |fr| fr)
+                    .prop_map(|reason| {
+                        serde_json::json!({
+                            "choices": [{"delta": {}, "finish_reason": reason}]
+                        })
+                        .to_string()
+                    }),
                 // Tool call delta
                 3 => (tool_call_index(), optional_string(), optional_string(), optional_string())
                     .prop_map(|(idx, id, name, args)| {

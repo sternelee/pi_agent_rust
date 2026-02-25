@@ -6017,22 +6017,9 @@ fn detect_monorepo_escape(
     let base_dir = Path::new(base).parent()?;
     let resolved = base_dir.join(specifier);
 
-    // Canonicalize as much as possible — if the exact path doesn't exist,
-    // try the parent directory.
-    let effective = std::fs::canonicalize(&resolved)
-        .map(crate::extensions::strip_unc_prefix)
-        .or_else(|_| {
-            resolved
-                .parent()
-                .and_then(|p| {
-                    std::fs::canonicalize(p)
-                        .map(crate::extensions::strip_unc_prefix)
-                        .ok()
-                })
-                .map(|p| p.join(resolved.file_name().unwrap_or_default()))
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no parent"))
-        })
-        .unwrap_or_else(|_| resolved.clone());
+    // Safely canonicalize resolving all .. and . segments logically
+    // if the path doesn't exist on disk, avoiding path traversal bypasses.
+    let effective = crate::extensions::safe_canonicalize(&resolved);
 
     for root in extension_roots {
         let canonical_root = crate::extensions::safe_canonicalize(root);
@@ -6078,7 +6065,7 @@ pub fn extract_import_names(source: &str, specifier: &str) -> Vec<String> {
 /// Parse a comma-separated list of import names, skipping `type`-only imports.
 fn parse_import_list(raw: &str, out: &mut Vec<String>) {
     for token in raw.split(',') {
-        let token  = token.trim();
+        let token = token.trim();
         if token.is_empty() {
             continue;
         }

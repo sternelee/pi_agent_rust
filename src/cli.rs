@@ -98,7 +98,7 @@ fn is_known_short_flag(token: &str) -> bool {
 }
 
 fn is_negative_numeric_token(token: &str) -> bool {
-    if !token.starts_with('-') || token  == "-" || token.starts_with("--") {
+    if !token.starts_with('-') || token == "-" || token.starts_with("--") {
         return false;
     }
     token.parse::<i64>().is_ok() || token.parse::<f64>().is_ok_and(f64::is_finite)
@@ -117,8 +117,8 @@ fn preprocess_extension_flags(raw_args: &[String]) -> (Vec<String>, Vec<Extensio
     let mut in_message_args = false;
     let mut index = 1usize;
     while index < raw_args.len() {
-        let token  = &raw_args[index];
-        if token  == "--" {
+        let token = &raw_args[index];
+        if token == "--" {
             filtered.extend(raw_args[index..].iter().cloned());
             break;
         }
@@ -182,7 +182,7 @@ fn preprocess_extension_flags(raw_args: &[String]) -> (Vec<String>, Vec<Extensio
             index += 1;
             continue;
         }
-        if token  == "-e" {
+        if token == "-e" {
             filtered.push(token.clone());
             expecting_value = true;
             index += 1;
@@ -662,7 +662,7 @@ mod tests {
                 assert_eq!(source, "npm:@org/pkg");
                 assert!(!local);
             }
-            other => panic!(),
+            other => panic!("unexpected command: {:?}", other),
         }
     }
 
@@ -674,7 +674,7 @@ mod tests {
                 assert_eq!(source, "git:https://example.com");
                 assert!(local);
             }
-            other => panic!(),
+            other => panic!("unexpected command: {:?}", other),
         }
     }
 
@@ -683,7 +683,7 @@ mod tests {
         let cli = Cli::parse_from(["pi", "install", "-l", "./local-ext"]);
         match cli.command {
             Some(Commands::Install { local, .. }) => assert!(local),
-            other => panic!(),
+            other => panic!("unexpected command: {:?}", other),
         }
     }
 
@@ -695,7 +695,7 @@ mod tests {
                 assert_eq!(source, "npm:pkg");
                 assert!(!local);
             }
-            other => panic!(),
+            other => panic!("unexpected command: {:?}", other),
         }
     }
 
@@ -704,7 +704,7 @@ mod tests {
         let cli = Cli::parse_from(["pi", "remove", "--local", "npm:pkg"]);
         match cli.command {
             Some(Commands::Remove { local, .. }) => assert!(local),
-            other => panic!(),
+            other => panic!("unexpected command: {:?}", other),
         }
     }
 
@@ -715,7 +715,7 @@ mod tests {
             Some(Commands::Update { source }) => {
                 assert_eq!(source.as_deref(), Some("npm:pkg"));
             }
-            other => panic!(),
+            other => panic!("unexpected command: {:?}", other),
         }
     }
 
@@ -724,7 +724,7 @@ mod tests {
         let cli = Cli::parse_from(["pi", "update"]);
         match cli.command {
             Some(Commands::Update { source }) => assert!(source.is_none()),
-            other => panic!(),
+            other => panic!("unexpected command: {:?}", other),
         }
     }
 
@@ -743,7 +743,7 @@ mod tests {
                 assert!(!paths);
                 assert!(!json);
             }
-            other => panic!(),
+            other => panic!("unexpected command: {:?}", other),
         }
     }
 
@@ -756,7 +756,7 @@ mod tests {
                 assert!(!paths);
                 assert!(!json);
             }
-            other => panic!(),
+            other => panic!("unexpected command: {:?}", other),
         }
     }
 
@@ -769,7 +769,7 @@ mod tests {
                 assert!(paths);
                 assert!(!json);
             }
-            other => panic!(),
+            other => panic!("unexpected command: {:?}", other),
         }
     }
 
@@ -782,7 +782,7 @@ mod tests {
                 assert!(!paths);
                 assert!(json);
             }
-            other => panic!(),
+            other => panic!("unexpected command: {:?}", other),
         }
     }
 
@@ -799,7 +799,7 @@ mod tests {
             Some(Commands::Info { name }) => {
                 assert_eq!(name, "auto-commit-on-exit");
             }
-            other => panic!(),
+            other => panic!("unexpected command: {:?}", other),
         }
     }
 
@@ -829,7 +829,7 @@ mod tests {
         let cli = Cli::parse_from(["pi", "--list-models", "claude*"]);
         match cli.list_models {
             Some(Some(ref pat)) => assert_eq!(pat, "claude*"),
-            other => panic!(),
+            other => panic!("unexpected command: {:?}", other),
         }
     }
 

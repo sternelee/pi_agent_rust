@@ -225,7 +225,7 @@ fn build_google_cli_request(
 
 fn decode_project_scoped_access_payload(payload: &str) -> Option<(String, String)> {
     let value: serde_json::Value = serde_json::from_str(payload).ok()?;
-    let token  = value
+    let token = value
         .get("token")
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
@@ -1735,10 +1735,10 @@ mod tests {
                 1 => Just(r"{}".to_string()),
                 // Candidate with finish reason only (no content)
                 1 => finish_reason()
-                    .prop_filter("some reason", Option::is_some)
-                    .prop_map(|fr| {
+                    .prop_filter_map("some reason", |fr| fr)
+                    .prop_map(|reason| {
                         serde_json::json!({
-                            "candidates": [{"finishReason": fr.unwrap()}]
+                            "candidates": [{"finishReason": reason}]
                         })
                         .to_string()
                     }),
