@@ -2167,7 +2167,10 @@ fn map_normalized_range_to_original(
     for line in content.split_inclusive('\n') {
         let line_content = line.strip_suffix('\n').unwrap_or(line);
         let has_newline = line.ends_with('\n');
-        let trimmed_len = line_content.trim_end().len();
+        let trimmed_len = line_content
+            .strip_suffix('\r')
+            .unwrap_or(line_content)
+            .len();
 
         for (char_offset, c) in line_content.char_indices() {
             // match_end can be detected at any position including trailing
@@ -2248,7 +2251,7 @@ fn build_normalized_content(content: &str) -> String {
     let mut lines = content.split('\n').peekable();
 
     while let Some(line) = lines.next() {
-        let trimmed_len = line.trim_end().len();
+        let trimmed_len = line.strip_suffix('\r').unwrap_or(line).len();
         for (char_offset, c) in line.char_indices() {
             if char_offset >= trimmed_len {
                 continue;
@@ -2452,46 +2455,74 @@ fn generate_diff_string(old_content: &str, new_content: &str) -> (String, Option
                     && matches!(parts[i + 1].tag, DiffTag::Added | DiffTag::Removed);
 
                 if last_was_change || next_part_is_change {
-                    // Compute slice bounds directly instead of cloning Vecs
-                    let start = if last_was_change {
-                        0
+                    if last_was_change && next_part_is_change && raw.len() > context_lines * 2 {
+                        for line in &raw[..context_lines] {
+                            if !output.is_empty() {
+                                output.push('\n');
+                            }
+                            let _ = write!(output, " {old_line_num:>line_num_width$} {line}");
+                            old_line_num = old_line_num.saturating_add(1);
+                            new_line_num = new_line_num.saturating_add(1);
+                        }
+
+                        let skip = raw.len().saturating_sub(context_lines * 2);
+                        if !output.is_empty() {
+                            output.push('\n');
+                        }
+                        let _ = write!(output, " {:>line_num_width$} ...", " ");
+                        old_line_num = old_line_num.saturating_add(skip);
+                        new_line_num = new_line_num.saturating_add(skip);
+
+                        for line in &raw[raw.len() - context_lines..] {
+                            if !output.is_empty() {
+                                output.push('\n');
+                            }
+                            let _ = write!(output, " {old_line_num:>line_num_width$} {line}");
+                            old_line_num = old_line_num.saturating_add(1);
+                            new_line_num = new_line_num.saturating_add(1);
+                        }
                     } else {
-                        raw.len().saturating_sub(context_lines)
-                    };
-                    let lines_after_start = raw.len() - start;
-                    let (end, skip_end) =
-                        if !next_part_is_change && lines_after_start > context_lines {
-                            (start + context_lines, lines_after_start - context_lines)
+                        // Compute slice bounds directly instead of cloning Vecs
+                        let start = if last_was_change {
+                            0
                         } else {
-                            (raw.len(), 0)
+                            raw.len().saturating_sub(context_lines)
                         };
-                    let skip_start = start;
+                        let lines_after_start = raw.len() - start;
+                        let (end, skip_end) =
+                            if !next_part_is_change && lines_after_start > context_lines {
+                                (start + context_lines, lines_after_start - context_lines)
+                            } else {
+                                (raw.len(), 0)
+                            };
+                        let skip_start = start;
 
-                    if skip_start > 0 {
-                        if !output.is_empty() {
-                            output.push('\n');
+                        if skip_start > 0 {
+                            if !output.is_empty() {
+                                output.push('\n');
+                            }
+                            let _ = write!(output, " {:>line_num_width$} ...", " ");
+                            old_line_num = old_line_num.saturating_add(skip_start);
+                            new_line_num = new_line_num.saturating_add(skip_start);
                         }
-                        let _ = write!(output, " {:>line_num_width$} ...", " ");
-                        old_line_num = old_line_num.saturating_add(skip_start);
-                        new_line_num = new_line_num.saturating_add(skip_start);
-                    }
 
-                    for line in &raw[start..end] {
-                        if !output.is_empty() {
-                            output.push('\n');
+                        for line in &raw[start..end] {
+                            if !output.is_empty() {
+                                output.push('\n');
+                            }
+                            let _ = write!(output, " {old_line_num:>line_num_width$} {line}");
+                            old_line_num = old_line_num.saturating_add(1);
+                            new_line_num = new_line_num.saturating_add(1);
                         }
-                        let _ = write!(output, " {old_line_num:>line_num_width$} {line}");
-                        old_line_num = old_line_num.saturating_add(1);
-                        new_line_num = new_line_num.saturating_add(1);
-                    }
 
-                    if skip_end > 0 {
-                        if !output.is_empty() {
-                            output.push('\n');
+                        if skip_end > 0 {
+                            if !output.is_empty() {
+                                output.push('\n');
+                            }
+                            let _ = write!(output, " {:>line_num_width$} ...", " ");
+                            old_line_num = old_line_num.saturating_add(skip_end);
+                            new_line_num = new_line_num.saturating_add(skip_end);
                         }
-                        let _ = write!(output, " {:>line_num_width$} ...", " ");
-                        old_line_num = old_line_num.saturating_add(skip_end);
-                        new_line_num = new_line_num.saturating_add(skip_end);
                     }
                 } else {
                     old_line_num = old_line_num.saturating_add(raw.len());
@@ -3340,7 +3371,10 @@ impl Tool for GrepTool {
             if !matches_by_file.contains_key(file_path) {
                 file_order.push(file_path.clone());
             }
-            matches_by_file.entry(file_path.clone()).or_default().push(*line_number);
+            matches_by_file
+                .entry(file_path.clone())
+                .or_default()
+                .push(*line_number);
         }
 
         for file_path in file_order {
@@ -4756,7 +4790,7 @@ mod tests {
 
     #[test]
     fn test_map_normalized_with_trailing_whitespace() {
-        // "A   \nB" -> "A\nB" (normalized strips trailing spaces)
+        // "A   \nB" -> "A   \nB" (normalized preserves trailing spaces now)
         let content = "A   \nB";
 
         // Find "A" (norm idx 0)
@@ -4765,23 +4799,20 @@ mod tests {
         assert_eq!(len, 1);
         assert_eq!(&content[start..start + len], "A");
 
-        // Find "\n" (norm idx 1)
-        // Original: "A" (0) + "   " (1,2,3) + "\n" (4)
-        // map_normalized_range_to_original logic:
-        // Line 1: "A   ". trimmed len 1 ("A").
-        // "A" (0): norm 0 matches. match_start=0. norm 1.
-        // loop ends. orig_idx -> 4.
-        // has_newline: true.
-        // norm 1 matches? Yes. match_start = orig_idx(4).
-        // norm 2. orig_idx 5.
-        // The test above asserted start=4.
-        let (start, len) = map_normalized_range_to_original(content, 1, 1);
+        // Find "   " (norm idx 1..4)
+        let (start, len) = map_normalized_range_to_original(content, 1, 3);
+        assert_eq!(start, 1);
+        assert_eq!(len, 3);
+        assert_eq!(&content[start..start + len], "   ");
+
+        // Find "\n" (norm idx 4)
+        let (start, len) = map_normalized_range_to_original(content, 4, 1);
         assert_eq!(start, 4);
         assert_eq!(len, 1);
         assert_eq!(&content[start..start + len], "\n");
 
-        // Find "B" (norm idx 2)
-        let (start, len) = map_normalized_range_to_original(content, 2, 1);
+        // Find "B" (norm idx 5)
+        let (start, len) = map_normalized_range_to_original(content, 5, 1);
         assert_eq!(start, 5);
         assert_eq!(len, 1);
         assert_eq!(&content[start..start + len], "B");
