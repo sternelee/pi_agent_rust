@@ -14244,6 +14244,55 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                     ),
                 )?;
 
+                // __pi_host_check_write_access(path) -> void (throws on denied path)
+                // Enforces workspace/extension-root confinement for node:fs write APIs.
+                // This guard only applies while extension code is actively executing.
+                global.set(
+                    "__pi_host_check_write_access",
+                    Func::from({
+                        let process_cwd = process_cwd.clone();
+                        let allowed_read_roots = Arc::clone(&allowed_read_roots);
+                        move |ctx: Ctx<'_>, path: String| -> rquickjs::Result<()> {
+                            let extension_id: Option<String> = ctx
+                                .globals()
+                                .get::<_, Option<String>>("__pi_current_extension_id")
+                                .ok()
+                                .flatten()
+                                .map(|value| value.trim().to_string())
+                                .filter(|value| !value.is_empty());
+
+                            // Keep standalone PiJsRuntime unit harness behavior unchanged.
+                            if extension_id.is_none() {
+                                return Ok(());
+                            }
+
+                            let workspace_root =
+                                crate::extensions::safe_canonicalize(Path::new(&process_cwd));
+                            let requested = PathBuf::from(&path);
+                            let requested_abs = if requested.is_absolute() {
+                                requested
+                            } else {
+                                workspace_root.join(requested)
+                            };
+                            let checked_path = crate::extensions::safe_canonicalize(&requested_abs);
+
+                            let in_ext_root = allowed_read_roots.lock().is_ok_and(|roots| {
+                                roots.iter().any(|root| checked_path.starts_with(root))
+                            });
+                            let allowed = checked_path.starts_with(&workspace_root) || in_ext_root;
+
+                            if allowed {
+                                Ok(())
+                            } else {
+                                Err(rquickjs::Error::new_loading_message(
+                                    &path,
+                                    "host write denied: path outside extension root".to_string(),
+                                ))
+                            }
+                        }
+                    }),
+                )?;
+
                 // __pi_host_read_file_sync(path) -> string (throws on error)
                 // Synchronous real-filesystem read fallback for node:fs readFileSync.
                 // Reads are confined to the workspace root AND any registered
