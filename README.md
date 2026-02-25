@@ -2222,7 +2222,11 @@ A: Yes. Point any provider at a custom base URL via `models.json`. Pi normalizes
 rch exec -- cargo build           # Debug build (remote offload)
 rch exec -- cargo build --release # Release build (optimized, remote offload)
 rch exec -- cargo test            # Run tests (remote offload)
-rch exec -- cargo clippy          # Lint check (remote offload)
+# Lint checks (remote-safe split to avoid rch clippy timeout fail-open)
+rch exec -- cargo clippy --lib --bins -- -D warnings
+rch exec -- cargo clippy --tests -- -D warnings
+rch exec -- cargo clippy --benches -- -D warnings
+rch exec -- cargo clippy --examples -- -D warnings
 ```
 
 ### Testing
