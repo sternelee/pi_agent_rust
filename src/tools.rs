@@ -3333,40 +3333,72 @@ impl Tool for GrepTool {
         let mut output_lines: Vec<String> = Vec::new();
         let mut lines_truncated = false;
 
+        // Group matches by file to merge overlapping context windows
+        let mut file_order: Vec<PathBuf> = Vec::new();
+        let mut matches_by_file: HashMap<PathBuf, Vec<usize>> = HashMap::new();
         for (file_path, line_number) in &matches {
-            let relative_path = format_grep_path(file_path, &self.cwd);
-            let lines = get_file_lines_async(file_path, &mut file_cache).await;
+            if !matches_by_file.contains_key(file_path) {
+                file_order.push(file_path.clone());
+            }
+            matches_by_file.entry(file_path.clone()).or_default().push(*line_number);
+        }
+
+        for file_path in file_order {
+            let mut match_lines = matches_by_file.remove(&file_path).unwrap();
+            let relative_path = format_grep_path(&file_path, &self.cwd);
+            let lines = get_file_lines_async(&file_path, &mut file_cache).await;
 
             if lines.is_empty() {
-                output_lines.push(format!(
-                    "{relative_path}:{line_number}: (unable to read file or too large)"
-                ));
+                if let Some(first_match) = match_lines.first() {
+                    output_lines.push(format!(
+                        "{relative_path}:{first_match}: (unable to read file or too large)"
+                    ));
+                }
                 continue;
             }
 
-            let start = if context_value > 0 {
-                line_number.saturating_sub(context_value).max(1)
-            } else {
-                *line_number
-            };
-            let end = if context_value > 0 {
-                line_number.saturating_add(context_value).min(lines.len())
-            } else {
-                *line_number
-            };
+            match_lines.sort_unstable();
+            match_lines.dedup();
 
-            for current in start..=end {
-                let line_text = lines.get(current - 1).map_or("", String::as_str);
-                let sanitized = line_text.replace('\r', "");
-                let truncated = truncate_line(&sanitized, GREP_MAX_LINE_LENGTH);
-                if truncated.was_truncated {
-                    lines_truncated = true;
-                }
-
-                if current == *line_number {
-                    output_lines.push(format!("{relative_path}:{current}: {}", truncated.text));
+            let mut blocks: Vec<(usize, usize)> = Vec::new();
+            for &line_number in &match_lines {
+                let start = if context_value > 0 {
+                    line_number.saturating_sub(context_value).max(1)
                 } else {
-                    output_lines.push(format!("{relative_path}-{current}- {}", truncated.text));
+                    line_number
+                };
+                let end = if context_value > 0 {
+                    line_number.saturating_add(context_value).min(lines.len())
+                } else {
+                    line_number
+                };
+
+                if let Some(last_block) = blocks.last_mut() {
+                    if start <= last_block.1.saturating_add(1) {
+                        last_block.1 = last_block.1.max(end);
+                        continue;
+                    }
+                }
+                blocks.push((start, end));
+            }
+
+            for (i, (start, end)) in blocks.into_iter().enumerate() {
+                if i > 0 {
+                    output_lines.push("--".to_string());
+                }
+                for current in start..=end {
+                    let line_text = lines.get(current - 1).map_or("", String::as_str);
+                    let sanitized = line_text.replace('\r', "");
+                    let truncated = truncate_line(&sanitized, GREP_MAX_LINE_LENGTH);
+                    if truncated.was_truncated {
+                        lines_truncated = true;
+                    }
+
+                    if match_lines.binary_search(&current).is_ok() {
+                        output_lines.push(format!("{relative_path}:{current}: {}", truncated.text));
+                    } else {
+                        output_lines.push(format!("{relative_path}-{current}- {}", truncated.text));
+                    }
                 }
             }
         }
