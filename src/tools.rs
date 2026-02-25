@@ -869,6 +869,15 @@ pub fn process_file_arguments(
                 format!("Cannot access file {}: {e}", absolute_path.display()),
             )
         })?;
+        if meta.is_dir() {
+            append_file_notice_block(
+                &mut out.text,
+                &absolute_path,
+                "[Path is a directory, not a file. Use the list tool to view its contents.]",
+            );
+            continue;
+        }
+
         if meta.len() == 0 {
             continue;
         }
