@@ -397,7 +397,8 @@ pub const RUNTIME_HOSTCALL_FEATURE_SCHEMA_VERSION: &str = "pi.ext.hostcall_featu
 pub const RUNTIME_HOSTCALL_FEATURE_BUDGET_US: u64 = 250;
 pub const RUNTIME_RISK_EXPLANATION_SCHEMA_VERSION: &str = "pi.ext.runtime_risk_explanation.v1";
 pub const RUNTIME_RISK_EXPLANATION_TERM_BUDGET: usize = 12;
-pub const RUNTIME_RISK_EXPLANATION_TIME_BUDGET_MS: u64 = 2;
+// Keep runtime fallback deterministic under normal CI/workstation variance.
+pub const RUNTIME_RISK_EXPLANATION_TIME_BUDGET_MS: u64 = 25;
 pub const RUNTIME_RISK_BASELINE_SCHEMA_VERSION: &str = "pi.ext.runtime_risk_baseline.v1";
 pub const SECURITY_ALERT_SCHEMA_VERSION: &str = "pi.ext.security_alert.v1";
 pub const INCIDENT_EVIDENCE_BUNDLE_SCHEMA_VERSION: &str = "pi.ext.incident_evidence_bundle.v1";
