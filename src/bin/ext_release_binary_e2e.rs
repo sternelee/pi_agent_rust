@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![cfg_attr(test, allow(unused_variables, clippy::uninlined_format_args))]
 
 use std::fmt::Write as _;
 use std::fs::{self, File};
