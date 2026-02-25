@@ -252,14 +252,20 @@ pub fn truncate_head(
 
     let mut iter = content.split('\n').peekable();
     let mut i = 0;
+    let ends_with_newline = content.ends_with('\n');
     while let Some(line) = iter.next() {
+        let is_last = iter.peek().is_none();
+        if is_last && line.is_empty() && ends_with_newline {
+            break;
+        }
+
         if i >= max_lines {
             truncated_by = Some(TruncatedBy::Lines);
             break;
         }
 
         // If there is a next part, it means the current part was followed by a newline.
-        let has_newline = iter.peek().is_some();
+        let has_newline = !is_last;
         let line_len = line.len() + usize::from(has_newline);
 
         if byte_count + line_len > max_bytes {
