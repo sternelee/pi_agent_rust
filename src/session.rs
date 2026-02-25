@@ -2281,6 +2281,27 @@ impl Session {
         self.rebuild_all_caches();
     }
 
+    /// Revert the last user message on the current path, effectively abandoning it.
+    /// This is used during API retries to prevent duplicating the user prompt in the session history.
+    pub fn revert_last_user_message(&mut self) -> bool {
+        if let Some(leaf_id) = self.leaf_id.clone() {
+            if let Some(SessionEntry::Message(msg_entry)) = self.get_entry(&leaf_id) {
+                if matches!(msg_entry.message, SessionMessage::User { .. }) {
+                    if let Some(parent_id) = msg_entry.base.parent_id.clone() {
+                        self.leaf_id = Some(parent_id);
+                    } else {
+                        self.leaf_id = None;
+                    }
+                    self.is_linear = false;
+                    // We intentionally don't remove from self.entries so it remains an abandoned branch
+                    // which is safely ignored by `to_messages_for_current_path`.
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Reset the leaf pointer to root (before any entries).
     ///
     /// After calling this, the next appended entry will become a new root entry

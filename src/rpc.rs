@@ -1892,6 +1892,11 @@ async fn run_prompt_with_retry(
             final_error = Some("Retry aborted".to_string());
             break;
         }
+
+        // Revert the failed user message before retrying to prevent context duplication.
+        if let Ok(mut guard) = OwnedMutexGuard::lock(Arc::clone(&session), &cx).await {
+            let _ = guard.revert_last_user_message().await;
+        }
     }
 
     if retry_count > 0 {
@@ -3990,7 +3995,7 @@ mod tests {
         let mut entry = dummy_entry("gpt-4o-mini", true);
         entry.model.provider = "openai".to_string();
         entry.auth_header = true;
-        entry.api_key /*_*/= Some("inline-model-key".to_string());
+        entry.api_key  = Some("inline-model-key".to_string());
 
         let auth_path = tempfile::tempdir()
             .expect("tempdir")
@@ -4015,7 +4020,7 @@ mod tests {
         let mut entry = dummy_entry("gpt-4o-mini", true);
         entry.model.provider = "openai".to_string();
         entry.auth_header = true;
-        entry.api_key /*_*/= Some("   ".to_string());
+        entry.api_key  = Some("   ".to_string());
 
         let auth_path = tempfile::tempdir()
             .expect("tempdir")

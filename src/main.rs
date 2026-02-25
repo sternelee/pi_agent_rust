@@ -3316,7 +3316,7 @@ async fn run_first_time_setup(
             .is_some_and(|hint| hint.provider == provider.provider && hint.kind == provider.kind);
         let default_marker = if is_default { " [dim](default)[/]" } else { "" };
         let method = match provider.kind {
-            SetupCredentialKind::ApiKey/*_*/=> "API key",
+            SetupCredentialKind::ApiKey => "API key",
             SetupCredentialKind::OAuthPkce => "OAuth",
             SetupCredentialKind::OAuthDeviceFlow => "OAuth (device flow)",
         };
@@ -3388,7 +3388,7 @@ async fn run_first_time_setup(
     };
 
     let credential = match provider.kind {
-        SetupCredentialKind::ApiKey/*_*/=> {
+        SetupCredentialKind::ApiKey => {
             console.print_markup("Paste your API key (input will be visible):\n");
             let Some(raw_key) = prompt_line("API key: ")? else {
                 console.render_warning("Setup cancelled (no input).");
@@ -3543,7 +3543,7 @@ Code expires in {} seconds.\n",
     }
 
     let saved_label = match provider.kind {
-        SetupCredentialKind::ApiKey/*_*/=> "API key",
+        SetupCredentialKind::ApiKey => "API key",
         SetupCredentialKind::OAuthPkce | SetupCredentialKind::OAuthDeviceFlow => {
             "OAuth credentials"
         }
@@ -3990,6 +3990,9 @@ where
                     Duration::from_millis(u64::from(delay_ms)),
                 )
                 .await;
+
+                // Revert the failed user message before retrying to prevent context duplication.
+                let _ = session.revert_last_user_message().await;
 
                 // Re-send the same prompt (matches RPC retry behaviour).
                 current_result = match &input {

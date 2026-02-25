@@ -830,6 +830,12 @@ impl Agent {
                         let mut stop_message = (*assistant_arc).clone();
                         stop_message.stop_reason = StopReason::Error;
                         stop_message.error_message = Some(error_message.clone());
+                        
+                        // Strip dangling tool calls to prevent sequence mismatch on next user prompt.
+                        stop_message
+                            .content
+                            .retain(|b| !matches!(b, crate::model::ContentBlock::ToolCall(_)));
+                            
                         let stop_arc = Arc::new(stop_message.clone());
                         let stop_event_message = Message::Assistant(Arc::clone(&stop_arc));
 
@@ -4490,7 +4496,7 @@ impl AgentSession {
                 }
 
                 let stream_options = self.agent.stream_options_mut();
-                stream_options.api_key /*_*/= resolved_key;
+                stream_options.api_key  = resolved_key;
                 stream_options.headers.clone_from(&entry.headers);
             }
             Err(e) => {
@@ -4565,7 +4571,7 @@ impl AgentSession {
             });
 
             let provider = self.agent.provider();
-            let api_key /*_*/= self
+            let api_key  = self
                 .agent
                 .stream_options()
                 .api_key
@@ -4645,7 +4651,7 @@ impl AgentSession {
             });
 
             let provider = self.agent.provider();
-            let api_key /*_*/= self
+            let api_key  = self
                 .agent
                 .stream_options()
                 .api_key
@@ -5040,6 +5046,16 @@ impl AgentSession {
         let content_for_agent = Self::build_content_blocks_for_input(&text, &images);
         self.run_agent_with_content(content_for_agent, abort, on_event)
             .await
+    }
+
+    pub async fn revert_last_user_message(&mut self) -> Result<bool> {
+        let cx = crate::agent_cx::AgentCx::for_request();
+        let mut session = self
+            .session
+            .lock(cx.cx())
+            .await
+            .map_err(|e| Error::session(e.to_string()))?;
+        Ok(session.revert_last_user_message())
     }
 
     async fn dispatch_input_event(
