@@ -3314,22 +3314,16 @@ fn update_package_sources(path: &Path, source: &str, action: UpdateAction) -> Re
         root = serde_json::json!({});
     }
 
-    let packages_value = root.get_mut("packages");
-    let packages = match packages_value {
-        Some(Value::Array(arr)) => arr,
-        Some(_) => {
-            *packages_value.unwrap() = Value::Array(Vec::new());
-            root.get_mut("packages")
-                .and_then(Value::as_array_mut)
-                .unwrap()
-        }
-        None => {
-            root["packages"] = Value::Array(Vec::new());
-            root.get_mut("packages")
-                .and_then(Value::as_array_mut)
-                .unwrap()
-        }
-    };
+    if !matches!(root.get("packages"), Some(Value::Array(_))) {
+        root["packages"] = Value::Array(Vec::new());
+    }
+
+    let packages = root
+        .get_mut("packages")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| {
+            Error::Config("failed to initialize settings 'packages' as an array".to_string())
+        })?;
 
     match action {
         UpdateAction::Add => {
@@ -4497,6 +4491,37 @@ mod tests {
         let settings = read_settings_json(&path).expect("read");
         let packages = settings["packages"].as_array().expect("packages array");
         assert!(packages.is_empty());
+    }
+
+    #[test]
+    fn update_package_sources_normalizes_non_array_packages() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        let malformed = json!({
+            "packages": { "source": "npm:legacy" }
+        });
+        fs::write(
+            &path,
+            serde_json::to_string(&malformed).expect("serialize malformed settings"),
+        )
+        .expect("write malformed settings");
+
+        update_package_sources(&path, "npm:foo", UpdateAction::Add).expect("add");
+        let settings = read_settings_json(&path).expect("read");
+        let packages = settings["packages"].as_array().expect("packages array");
+        assert_eq!(packages, &vec![json!("npm:foo")]);
+    }
+
+    #[test]
+    fn update_package_sources_normalizes_non_object_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        fs::write(&path, "[]").expect("write malformed root");
+
+        update_package_sources(&path, "npm:foo", UpdateAction::Add).expect("add");
+        let settings = read_settings_json(&path).expect("read");
+        let packages = settings["packages"].as_array().expect("packages array");
+        assert_eq!(packages, &vec![json!("npm:foo")]);
     }
 
     // ======================================================================
