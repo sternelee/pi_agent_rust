@@ -1830,8 +1830,8 @@ mod tests {
             "fastrouter",
         ];
         for id in &ids {
-            let meta = provider_metadata(id)
-                .unwrap_or_else(|| panic!("expected metadata for '{id}'"));
+            let meta =
+                provider_metadata(id).unwrap_or_else(|| panic!("expected metadata for '{id}'"));
             assert_eq!(meta.canonical_id, *id);
             assert_eq!(
                 meta.onboarding,
@@ -1920,8 +1920,8 @@ mod tests {
             "inference",
         ];
         for id in &ids {
-            let meta = provider_metadata(id)
-                .unwrap_or_else(|| panic!("expected metadata for '{id}'"));
+            let meta =
+                provider_metadata(id).unwrap_or_else(|| panic!("expected metadata for '{id}'"));
             assert_eq!(meta.canonical_id, *id);
             assert_eq!(
                 meta.onboarding,
@@ -2009,8 +2009,8 @@ mod tests {
             "nvidia",
         ];
         for id in &ids {
-            let meta = provider_metadata(id)
-                .unwrap_or_else(|| panic!("expected metadata for '{id}'"));
+            let meta =
+                provider_metadata(id).unwrap_or_else(|| panic!("expected metadata for '{id}'"));
             assert_eq!(meta.canonical_id, *id);
             assert_eq!(
                 meta.onboarding,
@@ -2140,8 +2140,8 @@ mod tests {
             "xiaomi",
         ];
         for id in &ids {
-            let meta = provider_metadata(id)
-                .unwrap_or_else(|| panic!("expected metadata for '{id}'"));
+            let meta =
+                provider_metadata(id).unwrap_or_else(|| panic!("expected metadata for '{id}'"));
             assert_eq!(meta.canonical_id, *id);
             assert_eq!(
                 meta.onboarding,
@@ -2261,8 +2261,8 @@ mod tests {
             "minimax-cn-coding-plan",
         ];
         for id in &ids {
-            let meta = provider_metadata(id)
-                .unwrap_or_else(|| panic!("expected metadata for '{id}'"));
+            let meta =
+                provider_metadata(id).unwrap_or_else(|| panic!("expected metadata for '{id}'"));
             assert_eq!(meta.canonical_id, *id);
             assert_eq!(
                 meta.onboarding,
@@ -2369,8 +2369,8 @@ mod tests {
             "stackit",
         ];
         for id in &ids {
-            let meta = provider_metadata(id)
-                .unwrap_or_else(|| panic!("expected metadata for '{id}'"));
+            let meta =
+                provider_metadata(id).unwrap_or_else(|| panic!("expected metadata for '{id}'"));
             assert_eq!(meta.canonical_id, *id);
             assert_eq!(
                 meta.onboarding,
@@ -2467,8 +2467,8 @@ mod tests {
             "zhipuai-coding-plan",
         ];
         for id in &ids {
-            let meta = provider_metadata(id)
-                .unwrap_or_else(|| panic!("expected metadata for '{id}'"));
+            let meta =
+                provider_metadata(id).unwrap_or_else(|| panic!("expected metadata for '{id}'"));
             assert_eq!(meta.canonical_id, *id);
             assert_eq!(
                 meta.onboarding,
@@ -2559,8 +2559,8 @@ mod tests {
     fn batch_c1_metadata_resolves_all_five_providers() {
         let ids = ["baseten", "llama", "lmstudio", "ollama", "ollama-cloud"];
         for id in &ids {
-            let meta = provider_metadata(id)
-                .unwrap_or_else(|| panic!("expected metadata for '{id}'"));
+            let meta =
+                provider_metadata(id).unwrap_or_else(|| panic!("expected metadata for '{id}'"));
             assert_eq!(meta.canonical_id, *id);
             assert_eq!(
                 meta.onboarding,
@@ -2617,8 +2617,8 @@ mod tests {
     fn special_routing_metadata_resolves_all_three_providers() {
         let ids = ["opencode", "vercel", "zenmux"];
         for id in &ids {
-            let meta = provider_metadata(id)
-                .unwrap_or_else(|| panic!("expected metadata for '{id}'"));
+            let meta =
+                provider_metadata(id).unwrap_or_else(|| panic!("expected metadata for '{id}'"));
             assert_eq!(meta.canonical_id, *id);
             assert_eq!(
                 meta.onboarding,
@@ -2699,8 +2699,8 @@ mod tests {
             ("lmstudio", "LM Studio"),
         ];
         for &(id, expected_name) in cases {
-            let meta = provider_metadata(id)
-                .unwrap_or_else(|| panic!("expected metadata for '{id}'"));
+            let meta =
+                provider_metadata(id).unwrap_or_else(|| panic!("expected metadata for '{id}'"));
             assert_eq!(
                 meta.display_name,
                 Some(expected_name),

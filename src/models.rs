@@ -803,8 +803,7 @@ fn append_upstream_nonlegacy_models(
                 continue;
             }
 
-            let reasoning =
-                effective_reasoning(&normalized_model_id, defaults.reasoning);
+            let reasoning = effective_reasoning(&normalized_model_id, defaults.reasoning);
             models.push(ModelEntry {
                 model: Model {
                     id: normalized_model_id.clone(),
@@ -1292,9 +1291,9 @@ fn apply_custom_models(auth: &AuthStorage, models: &mut Vec<ModelEntry>, config:
                 api: model_api_parsed.to_string(),
                 provider: provider_id.clone(),
                 base_url: provider_base.clone(),
-                reasoning: model_cfg
-                    .reasoning
-                    .unwrap_or_else(|| effective_reasoning(&normalized_model_id, default_reasoning)),
+                reasoning: model_cfg.reasoning.unwrap_or_else(|| {
+                    effective_reasoning(&normalized_model_id, default_reasoning)
+                }),
                 input: input_types,
                 cost: model_cfg.cost.clone().unwrap_or(ModelCost {
                     input: 0.0,
@@ -1946,7 +1945,10 @@ mod tests {
             .expect("cohere model should be added");
         assert_eq!(cohere.model.api, "cohere-chat");
         assert_eq!(cohere.model.base_url, "https://api.cohere.com/v2");
-        assert!(!cohere.model.reasoning, "command-r-plus is non-reasoning; command-a is the reasoning line");
+        assert!(
+            !cohere.model.reasoning,
+            "command-r-plus is non-reasoning; command-a is the reasoning line"
+        );
         assert_eq!(cohere.model.input, vec![InputType::Text]);
         assert_eq!(cohere.model.context_window, 128_000);
         assert_eq!(cohere.model.max_tokens, 8192);
@@ -3335,7 +3337,10 @@ mod tests {
         // Google
         assert_eq!(model_is_reasoning("gemini-2.5-pro"), Some(true));
         assert_eq!(model_is_reasoning("gemini-2.5-flash"), Some(true));
-        assert_eq!(model_is_reasoning("gemini-2.0-flash-thinking-exp"), Some(true));
+        assert_eq!(
+            model_is_reasoning("gemini-2.0-flash-thinking-exp"),
+            Some(true)
+        );
         assert_eq!(model_is_reasoning("gemini-2.0-flash"), Some(false));
         assert_eq!(model_is_reasoning("gemini-2.0-flash-lite"), Some(false));
         assert_eq!(model_is_reasoning("gemini-1.5-pro"), Some(false));

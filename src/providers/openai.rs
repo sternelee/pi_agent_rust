@@ -531,8 +531,8 @@ where
     }
 
     fn process_event(&mut self, data: &str) -> Result<()> {
-        let chunk: OpenAIStreamChunk =
-            serde_json::from_str(data).map_err(|e| Error::api(format!("JSON parse error: {e}\nData: {data}")))?;
+        let chunk: OpenAIStreamChunk = serde_json::from_str(data)
+            .map_err(|e| Error::api(format!("JSON parse error: {e}\nData: {data}")))?;
 
         // Handle usage in final chunk
         if let Some(usage) = chunk.usage {
