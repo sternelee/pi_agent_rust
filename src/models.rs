@@ -708,8 +708,13 @@ fn model_is_reasoning(model_id: &str) -> Option<bool> {
         return Some(true);
     }
 
-    // Cohere: both command-r and command-a series support reasoning.
-    // Fall through to provider default (which is true for cohere).
+    // Cohere: command-a is reasoning; command-r is not.
+    if id.starts_with("command-a") {
+        return Some(true);
+    }
+    if id.starts_with("command-r") {
+        return Some(false);
+    }
 
     None
 }
