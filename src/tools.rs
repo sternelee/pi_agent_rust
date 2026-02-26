@@ -4363,16 +4363,6 @@ fn emit_bash_update(
     Ok(())
 }
 
-#[allow(dead_code)]
-async fn process_bash_chunk(
-    chunk: Vec<u8>,
-    state: &mut BashOutputState,
-    on_update: Option<&(dyn Fn(ToolUpdate) + Send + Sync)>,
-) -> Result<()> {
-    ingest_bash_chunk(chunk, state).await?;
-    emit_bash_update(state, on_update)
-}
-
 pub(crate) struct ProcessGuard {
     child: Option<std::process::Child>,
     kill_tree: bool,
