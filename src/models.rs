@@ -671,24 +671,25 @@ fn is_canonical_provider_for_model(model_id: &str, provider: &str) -> bool {
 fn model_is_reasoning(model_id: &str) -> Option<bool> {
     let id = model_id.to_ascii_lowercase();
 
-    // OpenAI: o1/o3/o4 series are reasoning; gpt-4o/gpt-4-turbo/gpt-3.5 are not.
+    // OpenAI: o1/o3/o4 series and gpt-5.x are reasoning.
+    // All gpt-4 variants (gpt-4o, gpt-4-turbo, gpt-4-0613, etc.) and gpt-3.5 are NOT.
     if id.starts_with("o1") || id.starts_with("o3") || id.starts_with("o4") {
         return Some(true);
     }
-    if id.starts_with("gpt-4o") || id.starts_with("gpt-4-turbo") || id.starts_with("gpt-3.5") {
-        return Some(false);
-    }
-    // gpt-5.x series: reasoning models.
     if id.starts_with("gpt-5") {
         return Some(true);
     }
-
-    // Anthropic: Claude 3.5 Sonnet, Claude 4+ Opus/Sonnet support extended thinking.
-    // Claude 3 Haiku, Claude 3.5 Haiku, and older Claude 3 models do NOT.
-    if id.starts_with("claude-3-5-haiku") || id.starts_with("claude-3-haiku") {
+    if id.starts_with("gpt-4") || id.starts_with("gpt-3.5") {
         return Some(false);
     }
-    if id.starts_with("claude-3-opus") {
+
+    // Anthropic: Claude 3.5 Sonnet and Claude 4+ support extended thinking.
+    // Claude 3 (Haiku/Sonnet/Opus) and Claude 3.5 Haiku do NOT.
+    if id.starts_with("claude-3-5-haiku")
+        || id.starts_with("claude-3-haiku")
+        || id.starts_with("claude-3-sonnet")
+        || id.starts_with("claude-3-opus")
+    {
         return Some(false);
     }
     if id.starts_with("claude") {
@@ -697,15 +698,15 @@ fn model_is_reasoning(model_id: &str) -> Option<bool> {
     }
 
     // Google: gemini-2.5+ and gemini-2.0-flash-thinking are reasoning.
-    // gemini-2.0-flash-lite and gemini-1.x are not.
-    if id.starts_with("gemini-2.0-flash-lite") || id.starts_with("gemini-1") {
-        return Some(false);
-    }
+    // All other gemini models (2.0-flash, 2.0-flash-lite, 1.x, etc.) are NOT.
     if id.starts_with("gemini-2.5")
         || id.starts_with("gemini-3")
         || id.starts_with("gemini-2.0-flash-thinking")
     {
         return Some(true);
+    }
+    if id.starts_with("gemini") {
+        return Some(false);
     }
 
     // Cohere: command-a is reasoning; command-r is not.
