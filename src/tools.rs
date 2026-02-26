@@ -5029,6 +5029,32 @@ impl Tool for HashlineEditTool {
                 .then_with(|| op_precedence(a.op).cmp(&op_precedence(b.op)))
         });
 
+        // Detect overlapping replace ranges (undefined behavior if applied bottom-up)
+        let replace_ranges: Vec<(usize, usize)> = resolved
+            .iter()
+            .filter(|e| e.op == "replace")
+            .map(|e| (e.start, e.end))
+            .collect();
+        for i in 0..replace_ranges.len() {
+            for j in (i + 1)..replace_ranges.len() {
+                let (a_start, a_end) = replace_ranges[i];
+                let (b_start, b_end) = replace_ranges[j];
+                if a_start <= b_end && b_start <= a_end {
+                    return Err(Error::tool(
+                        "hashline_edit",
+                        format!(
+                            "Overlapping replace ranges: lines {}-{} and lines {}-{}. \
+                             Split into non-overlapping edits.",
+                            a_start + 1,
+                            a_end + 1,
+                            b_start + 1,
+                            b_end + 1
+                        ),
+                    ));
+                }
+            }
+        }
+
         // Apply splices bottom-up on a mutable Vec of lines
         let mut lines: Vec<String> = file_lines.iter().map(|s| (*s).to_string()).collect();
         let mut any_change = false;
@@ -7936,6 +7962,207 @@ mod tests {
 
             let content = std::fs::read_to_string(&file).unwrap();
             assert_eq!(content, "line1\r\nchanged\r\nline3");
+        });
+    }
+
+    #[test]
+    fn test_hashline_edit_empty_file_append() {
+        asupersync::test_utils::run_test(|| async {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("empty.txt");
+            std::fs::write(&file, "").unwrap();
+
+            let tool = HashlineEditTool::new(dir.path());
+
+            // EOF append with no pos on empty file
+            let input = serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "edits": [{
+                    "op": "append",
+                    "lines": ["new_line"]
+                }]
+            });
+
+            let out = tool.execute("test", input, None).await.unwrap();
+            assert!(!out.is_error);
+
+            let content = std::fs::read_to_string(&file).unwrap();
+            assert!(content.contains("new_line"));
+        });
+    }
+
+    #[test]
+    fn test_hashline_edit_single_line_no_trailing_newline() {
+        asupersync::test_utils::run_test(|| async {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("single.txt");
+            std::fs::write(&file, "hello").unwrap();
+
+            let tool = HashlineEditTool::new(dir.path());
+            let tag = format_hashline_tag(0, "hello");
+
+            let input = serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "edits": [{
+                    "op": "replace",
+                    "pos": tag,
+                    "lines": ["world"]
+                }]
+            });
+
+            let out = tool.execute("test", input, None).await.unwrap();
+            assert!(!out.is_error);
+
+            let content = std::fs::read_to_string(&file).unwrap();
+            assert_eq!(content, "world");
+        });
+    }
+
+    #[test]
+    fn test_hashline_edit_bof_prepend_no_pos() {
+        asupersync::test_utils::run_test(|| async {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("test.txt");
+            std::fs::write(&file, "a\nb\nc\n").unwrap();
+
+            let tool = HashlineEditTool::new(dir.path());
+
+            // Prepend with no pos should insert at BOF (before line 0)
+            let input = serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "edits": [{
+                    "op": "prepend",
+                    "lines": ["header"]
+                }]
+            });
+
+            let out = tool.execute("test", input, None).await.unwrap();
+            assert!(!out.is_error);
+
+            let content = std::fs::read_to_string(&file).unwrap();
+            assert_eq!(content, "header\na\nb\nc\n");
+        });
+    }
+
+    #[test]
+    fn test_hashline_edit_eof_append_no_pos() {
+        asupersync::test_utils::run_test(|| async {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("test.txt");
+            std::fs::write(&file, "a\nb\nc\n").unwrap();
+
+            let tool = HashlineEditTool::new(dir.path());
+
+            // Append with no pos should insert at EOF (after last line)
+            let input = serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "edits": [{
+                    "op": "append",
+                    "lines": ["footer"]
+                }]
+            });
+
+            let out = tool.execute("test", input, None).await.unwrap();
+            assert!(!out.is_error);
+
+            let content = std::fs::read_to_string(&file).unwrap();
+            assert!(
+                content.contains("footer"),
+                "content should contain footer: {content:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_hashline_edit_overlapping_replace_ranges_rejected() {
+        asupersync::test_utils::run_test(|| async {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("test.txt");
+            std::fs::write(&file, "a\nb\nc\nd\ne\n").unwrap();
+
+            let tool = HashlineEditTool::new(dir.path());
+            let tag_b = format_hashline_tag(1, "b");
+            let tag_d = format_hashline_tag(3, "d");
+            let tag_c = format_hashline_tag(2, "c");
+            let tag_e = format_hashline_tag(4, "e");
+
+            // Two overlapping replace ranges: lines 2-4 and lines 3-5
+            let input = serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "edits": [
+                    { "op": "replace", "pos": &tag_b, "end": &tag_d, "lines": ["X"] },
+                    { "op": "replace", "pos": &tag_c, "end": &tag_e, "lines": ["Y"] }
+                ]
+            });
+
+            let result = tool.execute("test", input, None).await;
+            assert!(result.is_err());
+            let err_msg = result.unwrap_err().to_string();
+            assert!(
+                err_msg.contains("Overlapping"),
+                "error should mention overlapping: {err_msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_hashline_edit_reversed_range_rejected() {
+        asupersync::test_utils::run_test(|| async {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("test.txt");
+            std::fs::write(&file, "a\nb\nc\nd\n").unwrap();
+
+            let tool = HashlineEditTool::new(dir.path());
+            let tag_b = format_hashline_tag(1, "b");
+            let tag_d = format_hashline_tag(3, "d");
+
+            // End anchor before start anchor
+            let input = serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "edits": [{
+                    "op": "replace",
+                    "pos": &tag_d,
+                    "end": &tag_b,
+                    "lines": ["X"]
+                }]
+            });
+
+            let result = tool.execute("test", input, None).await;
+            assert!(result.is_err());
+            let err_msg = result.unwrap_err().to_string();
+            assert!(
+                err_msg.contains("before start"),
+                "error should mention before start: {err_msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_hashline_edit_trailing_newline_semantics() {
+        asupersync::test_utils::run_test(|| async {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("test.txt");
+            // File with trailing newline: split produces ["line1", "line2", ""]
+            std::fs::write(&file, "line1\nline2\n").unwrap();
+
+            let tool = HashlineEditTool::new(dir.path());
+            let tag2 = format_hashline_tag(1, "line2");
+
+            // Replace line2, trailing newline should be preserved
+            let input = serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "edits": [{
+                    "op": "replace",
+                    "pos": tag2,
+                    "lines": ["changed"]
+                }]
+            });
+
+            let out = tool.execute("test", input, None).await.unwrap();
+            assert!(!out.is_error);
+
+            let content = std::fs::read_to_string(&file).unwrap();
+            assert_eq!(content, "line1\nchanged\n");
         });
     }
 }
