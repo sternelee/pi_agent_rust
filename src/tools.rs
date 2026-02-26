@@ -251,7 +251,6 @@ pub fn truncate_head(
     let mut truncated_by = None;
 
     let mut iter = content.split('\n').peekable();
-    let mut i = 0;
     let ends_with_newline = content.ends_with('\n');
     while let Some(line) = iter.next() {
         let is_last = iter.peek().is_none();
@@ -259,7 +258,7 @@ pub fn truncate_head(
             break;
         }
 
-        if i >= max_lines {
+        if line_count >= max_lines {
             truncated_by = Some(TruncatedBy::Lines);
             break;
         }
@@ -275,7 +274,6 @@ pub fn truncate_head(
 
         line_count += 1;
         byte_count += line_len;
-        i += 1;
     }
 
     // Truncate in-place — no new allocation, just adjusts the String's length.
@@ -2184,10 +2182,7 @@ fn map_normalized_range_to_original(
     for line in content.split_inclusive('\n') {
         let line_content = line.strip_suffix('\n').unwrap_or(line);
         let has_newline = line.ends_with('\n');
-        let trimmed_len = line_content
-            .strip_suffix('\r')
-            .unwrap_or(line_content)
-            .len();
+        let trimmed_len = line_content.trim_end_matches('\r').len();
 
         for (char_offset, c) in line_content.char_indices() {
             // match_end can be detected at any position including trailing
@@ -2268,7 +2263,7 @@ fn build_normalized_content(content: &str) -> String {
     let mut lines = content.split('\n').peekable();
 
     while let Some(line) = lines.next() {
-        let trimmed_len = line.strip_suffix('\r').unwrap_or(line).len();
+        let trimmed_len = line.trim_end_matches('\r').len();
         for (char_offset, c) in line.char_indices() {
             if char_offset >= trimmed_len {
                 continue;
@@ -3368,7 +3363,7 @@ impl Tool for GrepTool {
         let code = if match_limit_reached {
             // Avoid buffering unbounded stdout/stderr once we've hit the match limit.
             // `kill()` also waits, ensuring the stdout reader threads can exit promptly.
-            let _ = guard
+            guard
                 .kill()
                 .map_err(|e| Error::tool("grep", format!("Failed to terminate ripgrep: {e}")))?;
             // Drop any buffered stdout/stderr lines that were queued before termination.
