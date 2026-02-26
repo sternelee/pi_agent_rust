@@ -449,7 +449,7 @@ impl Provider for BedrockProvider {
             serde_json::from_str(&response_text).map_err(|err| {
                 Error::provider(
                     "amazon-bedrock",
-                    format!("Failed to parse Bedrock response: {err}"),
+                    format!("Failed to parse Bedrock response: {err}\nData: {response_text}"),
                 )
             })?;
 
