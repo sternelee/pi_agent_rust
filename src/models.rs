@@ -1975,7 +1975,7 @@ mod tests {
             .expect("cohere model should be added");
         assert_eq!(cohere.model.api, "cohere-chat");
         assert_eq!(cohere.model.base_url, "https://api.cohere.com/v2");
-        assert!(cohere.model.reasoning);
+        assert!(!cohere.model.reasoning, "command-r-plus is non-reasoning; command-a is the reasoning line");
         assert_eq!(cohere.model.input, vec![InputType::Text]);
         assert_eq!(cohere.model.context_window, 128_000);
         assert_eq!(cohere.model.max_tokens, 8192);
