@@ -1576,7 +1576,7 @@ where
     Some(ModelEntry {
         model: Model {
             id: normalized_model_id.clone(),
-            name: normalized_model_id.clone(),
+            name: normalized_model_id,
             api: defaults.api.to_string(),
             provider: provider.to_string(),
             base_url: defaults.base_url.to_string(),
