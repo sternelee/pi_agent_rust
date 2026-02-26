@@ -628,7 +628,8 @@ fn truncate_head_first_line_exceeds_byte_limit() {
         "first_line_exceeds_limit should be true"
     );
     assert_eq!(
-        result.content, "x".repeat(400),
+        result.content,
+        "x".repeat(400),
         "content should be partial line when first line exceeds limit"
     );
     assert_eq!(result.output_lines, 1);

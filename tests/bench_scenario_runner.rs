@@ -291,6 +291,10 @@ async fn run_bench_js(
 }
 
 async fn load_extension(runtime: &PiJsRuntime, spec: &JsExtensionLoadSpec) -> Result<()> {
+    if let Some(parent) = spec.entry_path.parent() {
+        runtime.add_extension_root(parent.to_path_buf());
+    }
+
     let ext_id = js_literal(&spec.extension_id)?;
     let entry = js_literal(&spec.entry_path.display().to_string().replace('\\', "/"))?;
     let meta = js_literal(&json!({
