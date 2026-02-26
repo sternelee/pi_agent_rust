@@ -831,10 +831,14 @@ fn maybe_append_image_argument(
             resized.width,
             resized.height,
         ) {
-            let scale = f64::from(ow) / f64::from(w);
-            Some(format!(
-                "[Image: original {ow}x{oh}, displayed at {w}x{h}. Multiply coordinates by {scale:.2} to map to original image.]"
-            ))
+            if w > 0 {
+                let scale = f64::from(ow) / f64::from(w);
+                Some(format!(
+                    "[Image: original {ow}x{oh}, displayed at {w}x{h}. Multiply coordinates by {scale:.2} to map to original image.]"
+                ))
+            } else {
+                Some(format!("[Image: original {ow}x{oh}, displayed at {w}x{h}.]"))
+            }
         } else {
             None
         }
@@ -2688,19 +2692,16 @@ impl Tool for EditTool {
             .await
             .map_err(|e| Error::tool("edit", format!("Failed to open file: {e}")))?;
         let mut raw = Vec::new();
-        let mut limiter = file.take((READ_TOOL_MAX_BYTES as u64).saturating_add(1));
+        let mut limiter = file.take(READ_TOOL_MAX_BYTES.saturating_add(1));
         limiter
             .read_to_end(&mut raw)
             .await
             .map_err(|e| Error::tool("edit", format!("Failed to read file: {e}")))?;
 
-        if raw.len() > READ_TOOL_MAX_BYTES as usize {
+        if raw.len() > usize::try_from(READ_TOOL_MAX_BYTES).unwrap_or(usize::MAX) {
             return Err(Error::tool(
                 "edit",
-                format!(
-                    "File is too large (> {} bytes).",
-                    READ_TOOL_MAX_BYTES
-                ),
+                format!("File is too large (> {READ_TOOL_MAX_BYTES} bytes)."),
             ));
         }
 
