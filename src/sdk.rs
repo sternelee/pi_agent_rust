@@ -2002,7 +2002,7 @@ mod tests {
                 assert_eq!(content_index, 2);
                 assert_eq!(delta, "chunk");
             }
-            other => panic!(),
+            other => unreachable!("expected TextDelta, got {other:?}"),
         }
     }
 
