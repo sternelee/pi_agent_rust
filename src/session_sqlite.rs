@@ -399,7 +399,7 @@ mod tests {
             Error::Session(message) => {
                 assert!(message.contains("SQLite session error"));
             }
-            other => panic!(),
+            other => panic!("Unexpected error: {:?}", other),
         }
     }
 
@@ -422,7 +422,7 @@ mod tests {
             Error::Session(message) => {
                 assert!(message.contains("panicked"));
             }
-            other => panic!(),
+            other => panic!("Unexpected error: {:?}", other),
         }
     }
 

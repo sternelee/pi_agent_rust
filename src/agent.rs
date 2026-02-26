@@ -780,6 +780,18 @@ impl Agent {
                         };
                         let error_message = Message::Assistant(Arc::new(error_msg));
 
+                        let steering_to_add = self.drain_steering_messages().await;
+                        for message in steering_to_add {
+                            self.messages.push(message.clone());
+                            on_event(AgentEvent::MessageStart {
+                                message: message.clone(),
+                            });
+                            on_event(AgentEvent::MessageEnd {
+                                message: message.clone(),
+                            });
+                            new_messages.push(message);
+                        }
+
                         let turn_end_event = AgentEvent::TurnEnd {
                             session_id: session_id.clone(),
                             turn_index: current_turn_index,
@@ -813,6 +825,18 @@ impl Agent {
                     assistant_arc.stop_reason,
                     StopReason::Error | StopReason::Aborted
                 ) {
+                    let steering_to_add = self.drain_steering_messages().await;
+                    for message in steering_to_add {
+                        self.messages.push(message.clone());
+                        on_event(AgentEvent::MessageStart {
+                            message: message.clone(),
+                        });
+                        on_event(AgentEvent::MessageEnd {
+                            message: message.clone(),
+                        });
+                        new_messages.push(message);
+                    }
+
                     let turn_end_event = AgentEvent::TurnEnd {
                         session_id: session_id.clone(),
                         turn_index: current_turn_index,

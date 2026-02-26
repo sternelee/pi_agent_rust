@@ -3055,7 +3055,13 @@ fn process_rg_json_match_line(
         return Ok(());
     }
 
-    let line = line_res.map_err(|e| Error::tool("grep", e.to_string()))?;
+    let line = match line_res {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::debug!("Skipping ripgrep output line due to read error: {e}");
+            return Ok(());
+        }
+    };
     if line.trim().is_empty() {
         return Ok(());
     }
@@ -3959,7 +3965,7 @@ impl Tool for LsTool {
         }
 
         // Sort alphabetically (case-insensitive).
-        entries.sort_by_key(|(a, _)| a.to_lowercase());
+        entries.sort_by_cached_key(|(a, _)| a.to_lowercase());
 
         let mut results: Vec<String> = Vec::new();
         let mut entry_limit_reached = false;
