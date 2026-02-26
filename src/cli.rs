@@ -352,7 +352,7 @@ pub struct Cli {
     #[arg(long)]
     pub no_tools: bool,
 
-    /// Specific tools to enable (comma-separated: read,bash,edit,write,grep,find,ls)
+    /// Specific tools to enable (comma-separated: read,bash,edit,write,grep,find,ls,hashline_edit)
     #[arg(long, default_value = "read,bash,edit,write")]
     pub tools: String,
 

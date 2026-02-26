@@ -835,7 +835,9 @@ fn maybe_append_image_argument(
                     "[Image: original {ow}x{oh}, displayed at {w}x{h}. Multiply coordinates by {scale:.2} to map to original image.]"
                 ))
             } else {
-                Some(format!("[Image: original {ow}x{oh}, displayed at {w}x{h}.]"))
+                Some(format!(
+                    "[Image: original {ow}x{oh}, displayed at {w}x{h}.]"
+                ))
             }
         } else {
             None
@@ -1210,6 +1212,7 @@ impl ToolRegistry {
                 "grep" => tools.push(Box::new(GrepTool::new(cwd))),
                 "find" => tools.push(Box::new(FindTool::new(cwd))),
                 "ls" => tools.push(Box::new(LsTool::new(cwd))),
+                "hashline_edit" => tools.push(Box::new(HashlineEditTool::new(cwd))),
                 _ => {}
             }
         }
@@ -1265,6 +1268,8 @@ struct ReadInput {
     path: String,
     offset: Option<i64>,
     limit: Option<i64>,
+    #[serde(default)]
+    hashline: bool,
 }
 
 pub struct ReadTool {
@@ -1339,6 +1344,10 @@ impl Tool for ReadTool {
                 "limit": {
                     "type": "integer",
                     "description": "Maximum number of lines to read"
+                },
+                "hashline": {
+                    "type": "boolean",
+                    "description": "When true, output each line as N#AB:content where N is the line number and AB is a content hash. Use with hashline_edit tool for precise edits."
                 }
             },
             "required": ["path"]
@@ -1648,9 +1657,15 @@ impl Tool for ReadTool {
             if i > 0 {
                 selected_content.push('\n');
             }
-            let line_num = start_line + i + 1;
+            let line_idx = start_line + i; // 0-indexed
             let line = line.strip_suffix('\r').unwrap_or(line);
-            let _ = write!(selected_content, "{line_num:>line_num_width$}→{line}");
+            if input.hashline {
+                let tag = format_hashline_tag(line_idx, line);
+                let _ = write!(selected_content, "{tag}:{line}");
+            } else {
+                let line_num = line_idx + 1;
+                let _ = write!(selected_content, "{line_num:>line_num_width$}→{line}");
+            }
 
             if selected_content.len() > DEFAULT_MAX_BYTES * 2 {
                 break;
@@ -4535,6 +4550,595 @@ fn find_fd_binary() -> Option<&'static str> {
 }
 
 // ============================================================================
+// Hashline Edit Tool
+// ============================================================================
+
+/// Custom nibble-encoding alphabet used for hashline tags.
+const NIBBLE_STR: &[u8; 16] = b"ZPMQVRWSNKTXJBYH";
+
+/// Pre-computed 256-entry lookup table mapping each byte value to its
+/// 2-character NIBBLE_STR encoding.
+static HASHLINE_DICT: OnceLock<[[u8; 2]; 256]> = OnceLock::new();
+
+fn hashline_dict() -> &'static [[u8; 2]; 256] {
+    HASHLINE_DICT.get_or_init(|| {
+        let mut dict = [[0u8; 2]; 256];
+        for i in 0..256 {
+            dict[i] = [NIBBLE_STR[i & 0x0F], NIBBLE_STR[(i >> 4) & 0x0F]];
+        }
+        dict
+    })
+}
+
+/// Compute a 2-character hash tag for a line at the given 0-indexed position.
+///
+/// The algorithm:
+/// 1. Strip trailing `\r`
+/// 2. Remove all whitespace to get a "significant" string
+/// 3. If the significant string contains at least one letter or digit, seed = 0;
+///    otherwise seed = line index (to disambiguate punctuation-only or blank lines)
+/// 4. Compute `xxh32(significant_bytes, seed) & 0xFF`
+/// 5. Encode the low byte as 2 nibble chars from `NIBBLE_STR`
+fn compute_line_hash(line_idx: usize, line: &str) -> [u8; 2] {
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    // Remove all whitespace
+    let significant: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+    let has_alnum = significant.chars().any(char::is_alphanumeric);
+    let seed = if has_alnum {
+        0
+    } else {
+        #[allow(clippy::cast_possible_truncation)]
+        let s = line_idx as u32;
+        s
+    };
+    let hash = xxhash_rust::xxh32::xxh32(significant.as_bytes(), seed);
+    let byte = (hash & 0xFF) as usize;
+    hashline_dict()[byte]
+}
+
+/// Format a hashline tag as `"N#AB"` where N is the 1-indexed line number.
+fn format_hashline_tag(line_idx: usize, line: &str) -> String {
+    let h = compute_line_hash(line_idx, line);
+    format!(
+        "{}#{}{}",
+        line_idx + 1,
+        h[0] as char,
+        h[1] as char
+    )
+}
+
+/// Regex for parsing hashline references like `5#KJ` or ` > +  5 # KJ `.
+/// Tolerates leading whitespace, diff markers (`>`, `+`, `-`), and spaces around `#`.
+static HASHLINE_TAG_RE: OnceLock<regex::Regex> = OnceLock::new();
+
+fn hashline_tag_regex() -> &'static regex::Regex {
+    HASHLINE_TAG_RE.get_or_init(|| {
+        regex::Regex::new(r"^[\s>+\-]*(\d+)\s*#\s*([ZPMQVRWSNKTXJBYH]{2})").unwrap()
+    })
+}
+
+/// Parse a hashline tag reference string into (1-indexed line number, 2-byte hash).
+fn parse_hashline_tag(ref_str: &str) -> std::result::Result<(usize, [u8; 2]), String> {
+    let re = hashline_tag_regex();
+    let caps = re
+        .captures(ref_str)
+        .ok_or_else(|| format!("Invalid hashline reference: {ref_str:?}"))?;
+    let line_num: usize = caps[1]
+        .parse()
+        .map_err(|e| format!("Invalid line number in {ref_str:?}: {e}"))?;
+    if line_num == 0 {
+        return Err(format!("Line number must be >= 1, got 0 in {ref_str:?}"));
+    }
+    let hash_bytes = caps[2].as_bytes();
+    Ok((line_num, [hash_bytes[0], hash_bytes[1]]))
+}
+
+/// Strip hashline tag prefixes that models sometimes copy into replacement content.
+/// Matches patterns like `5#KJ:content` and returns just `content`.
+static HASHLINE_PREFIX_RE: OnceLock<regex::Regex> = OnceLock::new();
+
+fn strip_hashline_prefix(line: &str) -> &str {
+    let re = HASHLINE_PREFIX_RE.get_or_init(|| {
+        regex::Regex::new(r"^\d+#[ZPMQVRWSNKTXJBYH]{2}:").unwrap()
+    });
+    re.find(line).map_or(line, |m| &line[m.end()..])
+}
+
+/// Input parameters for the hashline edit tool.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HashlineEditInput {
+    path: String,
+    edits: Vec<HashlineOp>,
+}
+
+/// A single hashline edit operation.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HashlineOp {
+    /// Operation type: "replace", "prepend", or "append"
+    op: String,
+    /// Start anchor in "LINE#HASH" format (optional for BOF prepend / EOF append)
+    pos: Option<String>,
+    /// End anchor for range replace (inclusive)
+    end: Option<String>,
+    /// Replacement / insertion lines
+    lines: Option<serde_json::Value>,
+}
+
+impl HashlineOp {
+    /// Extract lines from the `lines` field, handling string, array, and null variants.
+    fn get_lines(&self) -> Vec<String> {
+        match &self.lines {
+            None | Some(serde_json::Value::Null) => vec![],
+            Some(serde_json::Value::String(s)) => s.split('\n').map(String::from).collect(),
+            Some(serde_json::Value::Array(arr)) => arr
+                .iter()
+                .map(|v| v.as_str().unwrap_or("").to_string())
+                .collect(),
+            Some(other) => vec![other.to_string()],
+        }
+    }
+}
+
+/// A resolved hashline edit operation ready for application.
+struct ResolvedEdit<'a> {
+    op: &'a str,
+    /// 0-indexed start line (or 0 for BOF, `file_lines.len()` for EOF)
+    start: usize,
+    /// 0-indexed end line (inclusive, same as start for single-line ops)
+    end: usize,
+    lines: Vec<String>,
+}
+
+pub struct HashlineEditTool {
+    cwd: PathBuf,
+}
+
+impl HashlineEditTool {
+    pub fn new(cwd: &Path) -> Self {
+        Self {
+            cwd: cwd.to_path_buf(),
+        }
+    }
+}
+
+/// Validate a hashline tag reference against actual file lines.
+/// Returns `Ok(0-indexed line)` or `Err(message)` with context.
+fn validate_line_ref(
+    ref_str: &str,
+    file_lines: &[&str],
+) -> std::result::Result<usize, String> {
+    let (line_num, expected_hash) = parse_hashline_tag(ref_str)?;
+    let line_idx = line_num - 1;
+    if line_idx >= file_lines.len() {
+        return Err(format!(
+            "Line {line_num} out of range (file has {} lines)",
+            file_lines.len()
+        ));
+    }
+    let actual_hash = compute_line_hash(line_idx, file_lines[line_idx]);
+    if actual_hash != expected_hash {
+        let tag = format_hashline_tag(line_idx, file_lines[line_idx]);
+        return Err(format!(
+            "Hash mismatch at line {line_num}: expected {}#{}{}, actual is {tag}",
+            line_num,
+            expected_hash[0] as char,
+            expected_hash[1] as char,
+        ));
+    }
+    Ok(line_idx)
+}
+
+/// Build a context snippet around a mismatched line for error reporting.
+fn mismatch_context(file_lines: &[&str], line_idx: usize, context: usize) -> String {
+    let start = line_idx.saturating_sub(context);
+    let end = (line_idx + context + 1).min(file_lines.len());
+    let mut out = String::new();
+    for (i, &file_line) in file_lines.iter().enumerate().take(end).skip(start) {
+        let tag = format_hashline_tag(i, file_line);
+        if i == line_idx {
+            let _ = writeln!(out, ">>> {tag}:{file_line}");
+        } else {
+            let _ = writeln!(out, "    {tag}:{file_line}");
+        }
+    }
+    out
+}
+
+/// Collect all hash mismatches from a set of edits, returning a combined error message.
+fn collect_mismatches(
+    edits: &[HashlineOp],
+    file_lines: &[&str],
+) -> std::result::Result<(), String> {
+    let mut errors = Vec::new();
+    for edit in edits {
+        if let Some(ref pos) = edit.pos {
+            if let Err(e) = validate_line_ref(pos, file_lines) {
+                // Find the line index for context
+                if let Ok((line_num, _)) = parse_hashline_tag(pos) {
+                    let idx = (line_num - 1).min(file_lines.len().saturating_sub(1));
+                    errors.push(format!("{e}\n{}", mismatch_context(file_lines, idx, 2)));
+                } else {
+                    errors.push(e);
+                }
+            }
+        }
+        if let Some(ref end) = edit.end {
+            if let Err(e) = validate_line_ref(end, file_lines) {
+                if let Ok((line_num, _)) = parse_hashline_tag(end) {
+                    let idx = (line_num - 1).min(file_lines.len().saturating_sub(1));
+                    errors.push(format!("{e}\n{}", mismatch_context(file_lines, idx, 2)));
+                } else {
+                    errors.push(e);
+                }
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("\n"))
+    }
+}
+
+/// Normalized representation of an edit for deduplication.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct NormalizedEdit {
+    op: String,
+    pos_line: Option<usize>,
+    end_line: Option<usize>,
+    lines: Vec<String>,
+}
+
+/// Sort precedence for overlapping edits at the same line.
+fn op_precedence(op: &str) -> u8 {
+    match op {
+        "replace" => 0,
+        "append" => 1,
+        "prepend" => 2,
+        _ => 3,
+    }
+}
+
+#[async_trait]
+#[allow(clippy::unnecessary_literal_bound)]
+impl Tool for HashlineEditTool {
+    fn name(&self) -> &str {
+        "hashline_edit"
+    }
+    fn label(&self) -> &str {
+        "hashline edit"
+    }
+    fn description(&self) -> &str {
+        "Apply precise file edits using LINE#HASH tags from a prior read with hashline=true. \
+         Each edit specifies an op (replace/prepend/append), a pos anchor (\"N#AB\"), an optional \
+         end anchor for range replace, and replacement lines. Edits are validated against current \
+         file hashes and applied bottom-up to avoid index invalidation."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file to edit (relative or absolute)"
+                },
+                "edits": {
+                    "type": "array",
+                    "description": "Array of edit operations to apply",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "op": {
+                                "type": "string",
+                                "enum": ["replace", "prepend", "append"],
+                                "description": "Operation type"
+                            },
+                            "pos": {
+                                "type": "string",
+                                "description": "Anchor line reference in LINE#HASH format (e.g. \"5#KJ\")"
+                            },
+                            "end": {
+                                "type": "string",
+                                "description": "End anchor for range replace (inclusive)"
+                            },
+                            "lines": {
+                                "description": "Replacement/insertion content as array of strings, single string, or null for deletion",
+                                "oneOf": [
+                                    { "type": "array", "items": { "type": "string" } },
+                                    { "type": "string" },
+                                    { "type": "null" }
+                                ]
+                            }
+                        },
+                        "required": ["op"]
+                    }
+                }
+            },
+            "required": ["path", "edits"]
+        })
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn execute(
+        &self,
+        _tool_call_id: &str,
+        input: serde_json::Value,
+        _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
+    ) -> Result<ToolOutput> {
+        let input: HashlineEditInput = serde_json::from_value(input).map_err(|e| {
+            Error::tool(
+                "hashline_edit",
+                format!("Invalid input: {e}"),
+            )
+        })?;
+
+        if input.edits.is_empty() {
+            return Err(Error::tool("hashline_edit", "No edits provided"));
+        }
+
+        // Resolve file path
+        let absolute_path = resolve_read_path(&input.path, &self.cwd);
+        if !file_exists(&absolute_path) {
+            return Err(Error::tool(
+                "hashline_edit",
+                format!("File not found: {}", input.path),
+            ));
+        }
+
+        // Check file size
+        let metadata = std::fs::metadata(&absolute_path)
+            .map_err(|e| Error::tool("hashline_edit", format!("Cannot read file metadata: {e}")))?;
+        if metadata.len() > READ_TOOL_MAX_BYTES {
+            return Err(Error::tool(
+                "hashline_edit",
+                format!(
+                    "File too large ({} bytes, max {} bytes)",
+                    metadata.len(),
+                    READ_TOOL_MAX_BYTES
+                ),
+            ));
+        }
+
+        // Read file content
+        let raw_content = std::fs::read_to_string(&absolute_path)
+            .map_err(|e| Error::tool("hashline_edit", format!("Cannot read file: {e}")))?;
+
+        let (content_no_bom, had_bom) = strip_bom(&raw_content);
+        let original_ending = detect_line_ending(content_no_bom);
+        let normalized = normalize_to_lf(content_no_bom);
+        let file_lines: Vec<&str> = normalized.split('\n').collect();
+
+        // Validate all hash references before making any changes
+        if let Err(e) = collect_mismatches(&input.edits, &file_lines) {
+            return Err(Error::tool(
+                "hashline_edit",
+                format!("Hash validation failed — re-read the file to get current tags.\n\n{e}"),
+            ));
+        }
+
+        // Deduplicate edits
+        let mut seen = std::collections::HashSet::new();
+        let mut deduped_edits: Vec<&HashlineOp> = Vec::new();
+        for edit in &input.edits {
+            let pos_line = edit
+                .pos
+                .as_ref()
+                .and_then(|p| parse_hashline_tag(p).ok())
+                .map(|(n, _)| n);
+            let end_line = edit
+                .end
+                .as_ref()
+                .and_then(|e| parse_hashline_tag(e).ok())
+                .map(|(n, _)| n);
+            let key = NormalizedEdit {
+                op: edit.op.clone(),
+                pos_line,
+                end_line,
+                lines: edit.get_lines(),
+            };
+            if seen.insert(key) {
+                deduped_edits.push(edit);
+            }
+        }
+
+        // Resolve line indices and sort bottom-up
+        let mut resolved: Vec<ResolvedEdit<'_>> = Vec::new();
+        for edit in &deduped_edits {
+            let replacement_lines: Vec<String> = edit
+                .get_lines()
+                .into_iter()
+                .map(|l| strip_hashline_prefix(&l).to_string())
+                .collect();
+
+            match edit.op.as_str() {
+                "replace" => {
+                    let start_idx = match &edit.pos {
+                        Some(pos) => validate_line_ref(pos, &file_lines)
+                            .map_err(|e| Error::tool("hashline_edit", e))?,
+                        None => {
+                            return Err(Error::tool(
+                                "hashline_edit",
+                                "replace operation requires a pos anchor",
+                            ));
+                        }
+                    };
+                    let end_idx = match &edit.end {
+                        Some(end) => validate_line_ref(end, &file_lines)
+                            .map_err(|e| Error::tool("hashline_edit", e))?,
+                        None => start_idx,
+                    };
+                    if end_idx < start_idx {
+                        return Err(Error::tool(
+                            "hashline_edit",
+                            format!(
+                                "End anchor (line {}) is before start anchor (line {})",
+                                end_idx + 1,
+                                start_idx + 1
+                            ),
+                        ));
+                    }
+                    resolved.push(ResolvedEdit {
+                        op: "replace",
+                        start: start_idx,
+                        end: end_idx,
+                        lines: replacement_lines,
+                    });
+                }
+                "prepend" => {
+                    let idx = match &edit.pos {
+                        Some(pos) => validate_line_ref(pos, &file_lines)
+                            .map_err(|e| Error::tool("hashline_edit", e))?,
+                        None => 0, // BOF
+                    };
+                    resolved.push(ResolvedEdit {
+                        op: "prepend",
+                        start: idx,
+                        end: idx,
+                        lines: replacement_lines,
+                    });
+                }
+                "append" => {
+                    let idx = match &edit.pos {
+                        Some(pos) => validate_line_ref(pos, &file_lines)
+                            .map_err(|e| Error::tool("hashline_edit", e))?,
+                        None => file_lines.len().saturating_sub(1), // EOF
+                    };
+                    resolved.push(ResolvedEdit {
+                        op: "append",
+                        start: idx,
+                        end: idx,
+                        lines: replacement_lines,
+                    });
+                }
+                other => {
+                    return Err(Error::tool(
+                        "hashline_edit",
+                        format!("Unknown op: {other:?}. Must be replace, prepend, or append."),
+                    ));
+                }
+            }
+        }
+
+        // Sort bottom-up: highest line first, then by precedence (replace < append < prepend)
+        resolved.sort_by(|a, b| {
+            b.start
+                .cmp(&a.start)
+                .then_with(|| op_precedence(a.op).cmp(&op_precedence(b.op)))
+        });
+
+        // Apply splices bottom-up on a mutable Vec of lines
+        let mut lines: Vec<String> = file_lines.iter().map(|s| (*s).to_string()).collect();
+        let mut any_change = false;
+
+        for edit in &resolved {
+            match edit.op {
+                "replace" => {
+                    // Check if it's a no-op
+                    let existing: Vec<&str> =
+                        lines[edit.start..=edit.end].iter().map(String::as_str).collect();
+                    if existing == edit.lines.iter().map(String::as_str).collect::<Vec<&str>>() {
+                        continue; // no-op
+                    }
+                    // Splice: remove old range, insert new lines
+                    lines.splice(edit.start..=edit.end, edit.lines.iter().cloned());
+                    any_change = true;
+                }
+                "prepend" => {
+                    // Insert before the target line
+                    for (i, line) in edit.lines.iter().enumerate() {
+                        lines.insert(edit.start + i, line.clone());
+                    }
+                    if !edit.lines.is_empty() {
+                        any_change = true;
+                    }
+                }
+                "append" => {
+                    // Insert after the target line
+                    let insert_at = edit.start + 1;
+                    for (i, line) in edit.lines.iter().enumerate() {
+                        lines.insert(insert_at + i, line.clone());
+                    }
+                    if !edit.lines.is_empty() {
+                        any_change = true;
+                    }
+                }
+                _ => {} // unreachable due to earlier validation
+            }
+        }
+
+        if !any_change {
+            return Err(Error::tool(
+                "hashline_edit",
+                format!(
+                    "No changes made to {}. All edits were no-ops (replacement identical to existing content).",
+                    input.path
+                ),
+            ));
+        }
+
+        // Reconstruct content
+        let new_normalized = lines.join("\n");
+        let new_content = restore_line_endings(&new_normalized, original_ending);
+        let mut final_content = new_content;
+        if had_bom {
+            final_content = format!("\u{FEFF}{final_content}");
+        }
+
+        // Atomic write (same pattern as EditTool)
+        let original_perms = std::fs::metadata(&absolute_path)
+            .ok()
+            .map(|m| m.permissions());
+        let parent = absolute_path.parent().unwrap_or_else(|| Path::new("."));
+        let mut temp_file = tempfile::NamedTempFile::new_in(parent)
+            .map_err(|e| Error::tool("hashline_edit", format!("Failed to create temp file: {e}")))?;
+        temp_file
+            .as_file_mut()
+            .write_all(final_content.as_bytes())
+            .map_err(|e| Error::tool("hashline_edit", format!("Failed to write temp file: {e}")))?;
+
+        if let Some(perms) = original_perms {
+            let _ = temp_file.as_file().set_permissions(perms);
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = temp_file
+                    .as_file()
+                    .set_permissions(std::fs::Permissions::from_mode(0o644));
+            }
+        }
+
+        temp_file
+            .persist(&absolute_path)
+            .map_err(|e| Error::tool("hashline_edit", format!("Failed to persist file: {e}")))?;
+
+        // Generate diff
+        let (diff, first_changed_line) =
+            generate_diff_string(&normalized, &new_normalized);
+        let mut details = serde_json::Map::new();
+        details.insert("diff".to_string(), serde_json::Value::String(diff));
+        if let Some(line) = first_changed_line {
+            details.insert(
+                "firstChangedLine".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(line)),
+            );
+        }
+
+        Ok(ToolOutput {
+            content: vec![ContentBlock::Text(TextContent::new(format!(
+                "Successfully applied hashline edits to {}.",
+                input.path
+            )))],
+            details: Some(serde_json::Value::Object(details)),
+            is_error: false,
+        })
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -6880,6 +7484,458 @@ mod tests {
 
             // Expect: "line1\r\nchanged\r\nline3"
             assert_eq!(new_content, "line1\r\nchanged\r\nline3");
+        });
+    }
+
+    // ========================================================================
+    // Hashline tests
+    // ========================================================================
+
+    #[test]
+    fn test_compute_line_hash_basic() {
+        // Same content at same index should produce same hash
+        let h1 = compute_line_hash(0, "fn main() {");
+        let h2 = compute_line_hash(0, "fn main() {");
+        assert_eq!(h1, h2);
+
+        // Different content should (usually) produce different hash
+        let h3 = compute_line_hash(0, "fn foo() {");
+        // Not guaranteed different for all inputs, but these specific ones should differ
+        assert_ne!(h1, h3);
+
+        // Hash is 2 bytes from NIBBLE_STR
+        for &b in &h1 {
+            assert!(
+                NIBBLE_STR.contains(&b),
+                "hash byte {b} not in NIBBLE_STR"
+            );
+        }
+    }
+
+    #[test]
+    fn test_compute_line_hash_punctuation_only() {
+        // Punctuation-only lines use line_idx as seed, so same content at
+        // different indices should produce different hashes.
+        let h1 = compute_line_hash(0, "}");
+        let h2 = compute_line_hash(1, "}");
+        assert_ne!(h1, h2, "punctuation-only lines at different indices should differ");
+
+        // Blank lines also use idx as seed
+        let h3 = compute_line_hash(0, "");
+        let h4 = compute_line_hash(1, "");
+        assert_ne!(h3, h4);
+    }
+
+    #[test]
+    fn test_compute_line_hash_whitespace_invariant() {
+        // Leading/trailing whitespace should not affect hash (whitespace stripped)
+        let h1 = compute_line_hash(0, "return 42;");
+        let h2 = compute_line_hash(0, "    return 42;");
+        let h3 = compute_line_hash(0, "\treturn 42;");
+        assert_eq!(h1, h2);
+        assert_eq!(h1, h3);
+    }
+
+    #[test]
+    fn test_format_hashline_tag() {
+        let tag = format_hashline_tag(0, "fn main() {");
+        // Should be "1#XX" format (1-indexed)
+        assert!(tag.starts_with("1#"), "tag should start with 1#, got: {tag}");
+        assert_eq!(tag.len(), 4, "tag should be 4 chars: N#AB");
+
+        let tag10 = format_hashline_tag(9, "line 10");
+        assert!(tag10.starts_with("10#"));
+        assert_eq!(tag10.len(), 5); // "10#AB"
+    }
+
+    #[test]
+    fn test_parse_hashline_tag_valid() {
+        // Simple valid tag
+        let (line, hash) = parse_hashline_tag("5#KJ").unwrap();
+        assert_eq!(line, 5);
+        assert_eq!(hash, [b'K', b'J']);
+
+        // With spaces around #
+        let (line, hash) = parse_hashline_tag("  10 # QR ").unwrap();
+        assert_eq!(line, 10);
+        assert_eq!(hash, [b'Q', b'R']);
+
+        // With diff markers
+        let (line, hash) = parse_hashline_tag("> + 3#ZZ").unwrap();
+        assert_eq!(line, 3);
+        assert_eq!(hash, [b'Z', b'Z']);
+    }
+
+    #[test]
+    fn test_parse_hashline_tag_invalid() {
+        // Line number 0
+        assert!(parse_hashline_tag("0#KJ").is_err());
+        // No hash
+        assert!(parse_hashline_tag("5#").is_err());
+        // Invalid chars in hash
+        assert!(parse_hashline_tag("5#AA").is_err()); // 'A' not in NIBBLE_STR
+        // No number
+        assert!(parse_hashline_tag("#KJ").is_err());
+        // Empty
+        assert!(parse_hashline_tag("").is_err());
+    }
+
+    #[test]
+    fn test_strip_hashline_prefix() {
+        assert_eq!(strip_hashline_prefix("5#KJ:hello world"), "hello world");
+        assert_eq!(strip_hashline_prefix("100#ZZ:fn main() {"), "fn main() {");
+        // No prefix → unchanged
+        assert_eq!(strip_hashline_prefix("hello world"), "hello world");
+        assert_eq!(strip_hashline_prefix(""), "");
+    }
+
+    #[test]
+    fn test_hashline_edit_single_replace() {
+        asupersync::test_utils::run_test(|| async {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("test.txt");
+            std::fs::write(&file, "line1\nline2\nline3\n").unwrap();
+
+            let tool = HashlineEditTool::new(dir.path());
+
+            // Get the hash for line 2 (idx=1)
+            let tag2 = format_hashline_tag(1, "line2");
+
+            let input = serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "edits": [{
+                    "op": "replace",
+                    "pos": tag2,
+                    "lines": ["changed"]
+                }]
+            });
+
+            let out = tool.execute("test", input, None).await.unwrap();
+            assert!(!out.is_error);
+
+            let content = std::fs::read_to_string(&file).unwrap();
+            assert_eq!(content, "line1\nchanged\nline3\n");
+        });
+    }
+
+    #[test]
+    fn test_hashline_edit_range_replace() {
+        asupersync::test_utils::run_test(|| async {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("test.txt");
+            std::fs::write(&file, "a\nb\nc\nd\ne\n").unwrap();
+
+            let tool = HashlineEditTool::new(dir.path());
+
+            let tag_b = format_hashline_tag(1, "b");
+            let tag_d = format_hashline_tag(3, "d");
+
+            let input = serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "edits": [{
+                    "op": "replace",
+                    "pos": tag_b,
+                    "end": tag_d,
+                    "lines": ["X", "Y"]
+                }]
+            });
+
+            let out = tool.execute("test", input, None).await.unwrap();
+            assert!(!out.is_error);
+
+            let content = std::fs::read_to_string(&file).unwrap();
+            assert_eq!(content, "a\nX\nY\ne\n");
+        });
+    }
+
+    #[test]
+    fn test_hashline_edit_prepend() {
+        asupersync::test_utils::run_test(|| async {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("test.txt");
+            std::fs::write(&file, "a\nb\nc\n").unwrap();
+
+            let tool = HashlineEditTool::new(dir.path());
+            let tag_b = format_hashline_tag(1, "b");
+
+            let input = serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "edits": [{
+                    "op": "prepend",
+                    "pos": tag_b,
+                    "lines": ["inserted"]
+                }]
+            });
+
+            let out = tool.execute("test", input, None).await.unwrap();
+            assert!(!out.is_error);
+
+            let content = std::fs::read_to_string(&file).unwrap();
+            assert_eq!(content, "a\ninserted\nb\nc\n");
+        });
+    }
+
+    #[test]
+    fn test_hashline_edit_append() {
+        asupersync::test_utils::run_test(|| async {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("test.txt");
+            std::fs::write(&file, "a\nb\nc\n").unwrap();
+
+            let tool = HashlineEditTool::new(dir.path());
+            let tag_b = format_hashline_tag(1, "b");
+
+            let input = serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "edits": [{
+                    "op": "append",
+                    "pos": tag_b,
+                    "lines": ["inserted"]
+                }]
+            });
+
+            let out = tool.execute("test", input, None).await.unwrap();
+            assert!(!out.is_error);
+
+            let content = std::fs::read_to_string(&file).unwrap();
+            assert_eq!(content, "a\nb\ninserted\nc\n");
+        });
+    }
+
+    #[test]
+    fn test_hashline_edit_bottom_up_ordering() {
+        asupersync::test_utils::run_test(|| async {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("test.txt");
+            std::fs::write(&file, "a\nb\nc\nd\n").unwrap();
+
+            let tool = HashlineEditTool::new(dir.path());
+            let tag_b = format_hashline_tag(1, "b");
+            let tag_d = format_hashline_tag(3, "d");
+
+            // Two edits at different positions — both should apply correctly
+            let input = serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "edits": [
+                    { "op": "replace", "pos": tag_b, "lines": ["B"] },
+                    { "op": "replace", "pos": tag_d, "lines": ["D"] }
+                ]
+            });
+
+            let out = tool.execute("test", input, None).await.unwrap();
+            assert!(!out.is_error);
+
+            let content = std::fs::read_to_string(&file).unwrap();
+            assert_eq!(content, "a\nB\nc\nD\n");
+        });
+    }
+
+    #[test]
+    fn test_hashline_edit_hash_mismatch() {
+        asupersync::test_utils::run_test(|| async {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("test.txt");
+            std::fs::write(&file, "hello\nworld\n").unwrap();
+
+            let tool = HashlineEditTool::new(dir.path());
+
+            // Use a deliberately wrong hash
+            let input = serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "edits": [{
+                    "op": "replace",
+                    "pos": "1#ZZ",
+                    "lines": ["changed"]
+                }]
+            });
+
+            let result = tool.execute("test", input, None).await;
+            assert!(result.is_err());
+            let err_msg = result.unwrap_err().to_string();
+            assert!(
+                err_msg.contains("Hash validation failed"),
+                "error should mention hash validation: {err_msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_hashline_edit_dedup() {
+        asupersync::test_utils::run_test(|| async {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("test.txt");
+            std::fs::write(&file, "a\nb\nc\n").unwrap();
+
+            let tool = HashlineEditTool::new(dir.path());
+            let tag_b = format_hashline_tag(1, "b");
+
+            // Duplicate edits should be deduplicated
+            let input = serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "edits": [
+                    { "op": "replace", "pos": &tag_b, "lines": ["B"] },
+                    { "op": "replace", "pos": &tag_b, "lines": ["B"] }
+                ]
+            });
+
+            let out = tool.execute("test", input, None).await.unwrap();
+            assert!(!out.is_error);
+
+            let content = std::fs::read_to_string(&file).unwrap();
+            assert_eq!(content, "a\nB\nc\n");
+        });
+    }
+
+    #[test]
+    fn test_hashline_edit_noop_detection() {
+        asupersync::test_utils::run_test(|| async {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("test.txt");
+            std::fs::write(&file, "a\nb\nc\n").unwrap();
+
+            let tool = HashlineEditTool::new(dir.path());
+            let tag_b = format_hashline_tag(1, "b");
+
+            // Replacing with identical content is a no-op
+            let input = serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "edits": [{
+                    "op": "replace",
+                    "pos": &tag_b,
+                    "lines": ["b"]
+                }]
+            });
+
+            let result = tool.execute("test", input, None).await;
+            assert!(result.is_err());
+            let err_msg = result.unwrap_err().to_string();
+            assert!(
+                err_msg.contains("no-ops"),
+                "error should mention no-ops: {err_msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_hashline_read_output_format() {
+        asupersync::test_utils::run_test(|| async {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("test.txt");
+            std::fs::write(&file, "fn main() {\n    println!(\"hello\");\n}\n").unwrap();
+
+            let tool = ReadTool::new(dir.path());
+            let input = serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "hashline": true
+            });
+
+            let out = tool.execute("test", input, None).await.unwrap();
+            assert!(!out.is_error);
+            let text = get_text(&out.content);
+
+            // Each line should be in N#AB:content format
+            for line in text.lines() {
+                if line.starts_with('[') || line.is_empty() {
+                    continue; // skip metadata lines
+                }
+                assert!(
+                    hashline_tag_regex().is_match(line),
+                    "line should match hashline format: {line:?}"
+                );
+                assert!(
+                    line.contains(':'),
+                    "line should contain ':' separator: {line:?}"
+                );
+            }
+
+            // First line should start with "1#"
+            let first_line = text.lines().next().unwrap();
+            assert!(first_line.starts_with("1#"), "first line: {first_line:?}");
+        });
+    }
+
+    #[test]
+    fn test_hashline_edit_prefix_stripping() {
+        asupersync::test_utils::run_test(|| async {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("test.txt");
+            std::fs::write(&file, "a\nb\nc\n").unwrap();
+
+            let tool = HashlineEditTool::new(dir.path());
+            let tag_b = format_hashline_tag(1, "b");
+
+            // Model copies hashline tags into replacement — they should be stripped
+            let input = serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "edits": [{
+                    "op": "replace",
+                    "pos": &tag_b,
+                    "lines": ["2#KJ:changed"]
+                }]
+            });
+
+            let out = tool.execute("test", input, None).await.unwrap();
+            assert!(!out.is_error);
+
+            let content = std::fs::read_to_string(&file).unwrap();
+            assert_eq!(content, "a\nchanged\nc\n");
+        });
+    }
+
+    #[test]
+    fn test_hashline_edit_delete_lines() {
+        asupersync::test_utils::run_test(|| async {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("test.txt");
+            std::fs::write(&file, "a\nb\nc\nd\n").unwrap();
+
+            let tool = HashlineEditTool::new(dir.path());
+            let tag_b = format_hashline_tag(1, "b");
+            let tag_c = format_hashline_tag(2, "c");
+
+            // Replace range with null (delete)
+            let input = serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "edits": [{
+                    "op": "replace",
+                    "pos": &tag_b,
+                    "end": &tag_c,
+                    "lines": null
+                }]
+            });
+
+            let out = tool.execute("test", input, None).await.unwrap();
+            assert!(!out.is_error);
+
+            let content = std::fs::read_to_string(&file).unwrap();
+            assert_eq!(content, "a\nd\n");
+        });
+    }
+
+    #[test]
+    fn test_hashline_edit_crlf_preservation() {
+        asupersync::test_utils::run_test(|| async {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("test.txt");
+            std::fs::write(&file, "line1\r\nline2\r\nline3").unwrap();
+
+            let tool = HashlineEditTool::new(dir.path());
+            let tag2 = format_hashline_tag(1, "line2");
+
+            let input = serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "edits": [{
+                    "op": "replace",
+                    "pos": tag2,
+                    "lines": ["changed"]
+                }]
+            });
+
+            let out = tool.execute("test", input, None).await.unwrap();
+            assert!(!out.is_error);
+
+            let content = std::fs::read_to_string(&file).unwrap();
+            assert_eq!(content, "line1\r\nchanged\r\nline3");
         });
     }
 }

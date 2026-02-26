@@ -108,6 +108,7 @@ ast-grep-language = { version = "0.40", default-features = false, features = [
     "tree-sitter-ruby",
 ] }
 unicode-normalization = "0.1"
+xxhash-rust = { version = "0.8", features = ["xxh32"] }
 similar = "2"
 sysinfo = "0.38.2"
 rquickjs = { version = "0.11", features = ["futures", "loader"] }

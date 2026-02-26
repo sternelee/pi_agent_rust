@@ -62,10 +62,13 @@ pub type ToolDefinition = ToolDef;
 // Tool Factory Functions
 // ============================================================================
 
-use crate::tools::{BashTool, EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool};
+use crate::tools::{
+    BashTool, EditTool, FindTool, GrepTool, HashlineEditTool, LsTool, ReadTool, WriteTool,
+};
 
 /// All built-in tool names.
-pub const BUILTIN_TOOL_NAMES: &[&str] = &["read", "bash", "edit", "write", "grep", "find", "ls"];
+pub const BUILTIN_TOOL_NAMES: &[&str] =
+    &["read", "bash", "edit", "write", "grep", "find", "ls", "hashline_edit"];
 
 /// Create a read tool configured for `cwd`.
 pub fn create_read_tool(cwd: &Path) -> Box<dyn Tool> {
@@ -102,6 +105,11 @@ pub fn create_ls_tool(cwd: &Path) -> Box<dyn Tool> {
     Box::new(LsTool::new(cwd))
 }
 
+/// Create a hashline edit tool configured for `cwd`.
+pub fn create_hashline_edit_tool(cwd: &Path) -> Box<dyn Tool> {
+    Box::new(HashlineEditTool::new(cwd))
+}
+
 /// Create all built-in tools configured for `cwd`.
 pub fn create_all_tools(cwd: &Path) -> Vec<Box<dyn Tool>> {
     vec![
@@ -112,6 +120,7 @@ pub fn create_all_tools(cwd: &Path) -> Vec<Box<dyn Tool>> {
         create_grep_tool(cwd),
         create_find_tool(cwd),
         create_ls_tool(cwd),
+        create_hashline_edit_tool(cwd),
     ]
 }
 
@@ -2103,10 +2112,10 @@ mod tests {
     }
 
     #[test]
-    fn create_all_tools_returns_seven() {
+    fn create_all_tools_returns_eight() {
         let tmp = tempdir().expect("tempdir");
         let tools = super::create_all_tools(tmp.path());
-        assert_eq!(tools.len(), 7, "should create all 7 built-in tools");
+        assert_eq!(tools.len(), 8, "should create all 8 built-in tools");
 
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         for expected in BUILTIN_TOOL_NAMES {
@@ -2129,10 +2138,10 @@ mod tests {
     }
 
     #[test]
-    fn all_tool_definitions_returns_seven_schemas() {
+    fn all_tool_definitions_returns_eight_schemas() {
         let tmp = tempdir().expect("tempdir");
         let defs = super::all_tool_definitions(tmp.path());
-        assert_eq!(defs.len(), 7);
+        assert_eq!(defs.len(), 8);
 
         for def in &defs {
             assert!(!def.name.is_empty());
