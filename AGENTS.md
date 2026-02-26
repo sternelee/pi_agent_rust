@@ -441,22 +441,31 @@ bv is a graph-aware triage engine for Beads projects (`.beads/beads.jsonl`). It 
 
 **Scope boundary:** bv handles *what to work on* (triage, priority, planning). For agent-to-agent coordination (messaging, work claiming, file reservations), use MCP Agent Mail.
 
-**CRITICAL: Use ONLY `--robot-*` flags. Bare `bv` launches an interactive TUI that blocks your session.**
+**CRITICAL: Use non-interactive flags (`--robot-*`, `--recipe`, `--as-of`, `--diff-since`, `--export-md`) only. Bare `bv` launches an interactive TUI that blocks your session.**
 
 ### The Workflow: Start With Triage
 
-**`bv --robot-triage` is your single entry point.** It returns:
-- `quick_ref`: at-a-glance counts + top 3 picks
-- `recommendations`: ranked actionable items with scores, reasons, unblock info
-- `quick_wins`: low-effort high-impact items
-- `blockers_to_clear`: items that unblock the most downstream work
-- `project_health`: status/type/priority distributions, graph metrics
-- `commands`: copy-paste shell commands for next steps
+Use this order of operations:
 
 ```bash
-bv --robot-triage        # THE MEGA-COMMAND: start here
-bv --robot-next          # Minimal: just the single top pick + claim command
+bv --robot-plan          # Primary triage surface (tracks + highest-impact summary)
+bv --robot-priority      # Priority sanity check and suggested re-ranking
+bv --robot-insights      # Deep graph metrics when needed
+br ready --json          # Ground-truth actionable issues from Beads
 ```
+
+If your local `bv` build supports `--robot-triage`, you can still use it. If not, `--robot-plan` + `br ready --json` is the required fallback.
+
+**CRITICAL Tombstone Guard:** `bv` output can include `status = tombstone` items in some versions. Tombstones are deleted/merged issues and are **never actionable**.
+
+Before claiming work from `bv`, always verify status with `br`:
+
+```bash
+br show <issue-id> --json | jq -r '.[0].status'
+# Only proceed if status is open/in_progress and the issue is not deleted/tombstoned.
+```
+
+If `br ready --json` is empty and `bv` only surfaces tombstones, do not claim tombstoned items. Create or refine a real bead and proceed.
 
 ### Command Reference
 
@@ -465,40 +474,32 @@ bv --robot-next          # Minimal: just the single top pick + claim command
 |---------|---------|
 | `--robot-plan` | Parallel execution tracks with `unblocks` lists |
 | `--robot-priority` | Priority misalignment detection with confidence |
+| `--robot-recipes` | Available recipe filters for scoped triage |
 
 **Graph Analysis:**
 | Command | Returns |
 |---------|---------|
 | `--robot-insights` | Full metrics: PageRank, betweenness, HITS, eigenvector, critical path, cycles, k-core, articulation points, slack |
-| `--robot-label-health` | Per-label health: `health_level`, `velocity_score`, `staleness`, `blocked_count` |
-| `--robot-label-flow` | Cross-label dependency: `flow_matrix`, `dependencies`, `bottleneck_labels` |
-| `--robot-label-attention [--attention-limit=N]` | Attention-ranked labels |
 
 **History & Change Tracking:**
 | Command | Returns |
 |---------|---------|
-| `--robot-history` | Bead-to-commit correlations |
 | `--robot-diff --diff-since <ref>` | Changes since ref: new/closed/modified issues, cycles |
 
 **Other:**
 | Command | Returns |
 |---------|---------|
-| `--robot-burndown <sprint>` | Sprint burndown, scope changes, at-risk items |
-| `--robot-forecast <id\|all>` | ETA predictions with dependency-aware scheduling |
-| `--robot-alerts` | Stale issues, blocking cascades, priority mismatches |
-| `--robot-suggest` | Hygiene: duplicates, missing deps, label suggestions |
-| `--robot-graph [--graph-format=json\|dot\|mermaid]` | Dependency graph export |
-| `--export-graph <file.html>` | Interactive HTML visualization |
+| `--recipe <name>` | Apply recipe filters (for example `actionable`, `high-impact`) |
+| `--export-md <file.md>` | Markdown status/export report |
 
 ### Scoping & Filtering
 
 ```bash
-bv --robot-plan --label backend              # Scope to label's subgraph
-bv --robot-insights --as-of HEAD~30          # Historical point-in-time
+bv --robot-plan --as-of HEAD~30              # Historical point-in-time
 bv --recipe actionable --robot-plan          # Pre-filter: ready to work
-bv --recipe high-impact --robot-triage       # Pre-filter: top PageRank
-bv --robot-triage --robot-triage-by-track    # Group by parallel work streams
-bv --robot-triage --robot-triage-by-label    # Group by domain
+bv --recipe high-impact --robot-plan         # Pre-filter: top-impact set
+bv --robot-priority                          # Cross-check priority drift
+bv --robot-recipes                           # Discover installed recipe names
 ```
 
 ### Understanding Robot Output
@@ -515,9 +516,9 @@ bv --robot-triage --robot-triage-by-label    # Group by domain
 ### jq Quick Reference
 
 ```bash
-bv --robot-triage | jq '.quick_ref'                        # At-a-glance summary
-bv --robot-triage | jq '.recommendations[0]'               # Top recommendation
 bv --robot-plan | jq '.plan.summary.highest_impact'        # Best unblock target
+bv --robot-plan | jq '.plan.tracks[0].items[0]'            # First candidate in first track
+bv --robot-priority | jq '.recommendations[0]'             # Top priority recommendation
 bv --robot-insights | jq '.status'                         # Check metric readiness
 bv --robot-insights | jq '.Cycles'                         # Circular deps (must fix!)
 ```
