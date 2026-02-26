@@ -633,26 +633,33 @@ fn model_is_reasoning(model_id: &str) -> Option<bool> {
         return Some(true);
     }
 
-    // Anthropic: all Claude models support extended thinking (reasoning).
+    // Anthropic: Claude 3.5 Sonnet, Claude 4+ Opus/Sonnet support extended thinking.
+    // Claude 3 Haiku, Claude 3.5 Haiku, and older Claude 3 models do NOT.
+    if id.starts_with("claude-3-5-haiku") || id.starts_with("claude-3-haiku") {
+        return Some(false);
+    }
+    if id.starts_with("claude-3-opus") {
+        return Some(false);
+    }
     if id.starts_with("claude") {
+        // Claude 3.5 Sonnet, Claude 4.x, Claude Opus 4+, Claude Sonnet 4+ etc.
         return Some(true);
     }
 
-    // Google: gemini-2.5+ models are reasoning-capable; earlier are not.
+    // Google: gemini-2.5+ and gemini-2.0-flash-thinking are reasoning.
+    // gemini-2.0-flash-lite and gemini-1.x are not.
     if id.starts_with("gemini-2.0-flash-lite") || id.starts_with("gemini-1") {
         return Some(false);
     }
-    if id.starts_with("gemini-2.5") || id.starts_with("gemini-3") {
+    if id.starts_with("gemini-2.5")
+        || id.starts_with("gemini-3")
+        || id.starts_with("gemini-2.0-flash-thinking")
+    {
         return Some(true);
     }
 
-    // Cohere: command-a is reasoning; command-r is not.
-    if id.starts_with("command-a") {
-        return Some(true);
-    }
-    if id.starts_with("command-r") {
-        return Some(false);
-    }
+    // Cohere: both command-r and command-a series support reasoning.
+    // Fall through to provider default (which is true for cohere).
 
     None
 }
