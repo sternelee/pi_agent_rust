@@ -2854,6 +2854,11 @@ impl Tool for EditTool {
             .write_all(final_content.as_bytes())
             .map_err(|e| Error::tool("edit", format!("Failed to write temp file: {e}")))?;
 
+        temp_file
+            .as_file_mut()
+            .sync_all()
+            .map_err(|e| Error::tool("edit", format!("Failed to sync temp file: {e}")))?;
+
         // Restore original file permissions (tempfile defaults to 0o600) before persisting.
         if let Some(perms) = original_perms {
             let _ = temp_file.as_file().set_permissions(perms);
@@ -2989,6 +2994,11 @@ impl Tool for WriteTool {
             .as_file_mut()
             .write_all(input.content.as_bytes())
             .map_err(|e| Error::tool("write", format!("Failed to write temp file: {e}")))?;
+
+        temp_file
+            .as_file_mut()
+            .sync_all()
+            .map_err(|e| Error::tool("write", format!("Failed to sync temp file: {e}")))?;
 
         // Restore original file permissions (tempfile defaults to 0o600) before persisting.
         if let Some(perms) = original_perms {
@@ -5124,6 +5134,11 @@ impl Tool for HashlineEditTool {
             .as_file_mut()
             .write_all(final_content.as_bytes())
             .map_err(|e| Error::tool("hashline_edit", format!("Failed to write temp file: {e}")))?;
+
+        temp_file
+            .as_file_mut()
+            .sync_all()
+            .map_err(|e| Error::tool("hashline_edit", format!("Failed to sync temp file: {e}")))?;
 
         if let Some(perms) = original_perms {
             let _ = temp_file.as_file().set_permissions(perms);

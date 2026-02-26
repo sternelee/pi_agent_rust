@@ -186,7 +186,14 @@ fn migrate_auth_to_auth_json(agent_dir: &Path, warnings: &mut Vec<String>) -> Ve
                         }
                         match serde_json::to_string_pretty(&settings_value) {
                             Ok(updated) => {
-                                if let Err(err) = fs::write(&settings_path, updated) {
+                                let tmp = settings_path.with_extension("json.tmp");
+                                let res = fs::File::create(&tmp).and_then(|mut f| {
+                                    use std::io::Write;
+                                    f.write_all(updated.as_bytes())?;
+                                    f.sync_all()
+                                }).and_then(|()| fs::rename(&tmp, &settings_path));
+                                
+                                if let Err(err) = res {
                                     warnings.push(format!(
                                         "could not persist settings.json after apiKeys migration: {err}"
                                     ));
@@ -219,7 +226,14 @@ fn migrate_auth_to_auth_json(agent_dir: &Path, warnings: &mut Vec<String>) -> Ve
 
         match serde_json::to_string_pretty(&Value::Object(migrated)) {
             Ok(contents) => {
-                if let Err(err) = fs::write(&auth_path, contents) {
+                let tmp = auth_path.with_extension("json.tmp");
+                let res = fs::File::create(&tmp).and_then(|mut f| {
+                    use std::io::Write;
+                    f.write_all(contents.as_bytes())?;
+                    f.sync_all()
+                }).and_then(|()| fs::rename(&tmp, &auth_path));
+
+                if let Err(err) = res {
                     warnings.push(format!("could not write auth.json during migration: {err}"));
                 } else if let Err(err) = set_owner_only_permissions(&auth_path) {
                     warnings.push(format!("could not set auth.json permissions to 600: {err}"));

@@ -585,7 +585,11 @@ impl SessionStoreV2 {
             .root
             .join("tmp")
             .join(format!("{checkpoint_seq:016}.json.tmp"));
-        fs::write(&tmp_path, serde_json::to_vec_pretty(&checkpoint)?)?;
+        {
+            let mut file = File::create(&tmp_path)?;
+            file.write_all(&serde_json::to_vec_pretty(&checkpoint)?)?;
+            file.sync_all()?;
+        }
         fs::rename(&tmp_path, self.checkpoint_path(checkpoint_seq))?;
         Ok(checkpoint)
     }
@@ -896,7 +900,11 @@ impl SessionStoreV2 {
         manifest.integrity.manifest_hash = manifest_hash_hex(&manifest)?;
 
         let tmp = self.root.join("tmp").join("manifest.json.tmp");
-        fs::write(&tmp, serde_json::to_vec_pretty(&manifest)?)?;
+        {
+            let mut file = File::create(&tmp)?;
+            file.write_all(&serde_json::to_vec_pretty(&manifest)?)?;
+            file.sync_all()?;
+        }
         fs::rename(&tmp, self.manifest_path())?;
         Ok(manifest)
     }
@@ -1117,7 +1125,9 @@ impl SessionStoreV2 {
         }
 
         index_writer.flush()?;
-        drop(index_writer); // Close the file handle before renaming (fixes Windows ERROR_SHARING_VIOLATION)
+        let file = index_writer.into_inner().map_err(std::io::IntoInnerError::into_error)?;
+        file.sync_all()?;
+        drop(file); // Close the file handle before renaming (fixes Windows ERROR_SHARING_VIOLATION)
 
         // Atomically replace the old index with the rebuilt one
         fs::rename(&index_tmp_path, &index_path)?;
@@ -1460,6 +1470,8 @@ fn write_jsonl_lines<T: Serialize>(path: &Path, rows: &[T]) -> Result<()> {
         writer.write_all(b"\n")?;
     }
     writer.flush()?;
+    let file = writer.into_inner().map_err(std::io::IntoInnerError::into_error)?;
+    file.sync_all()?;
     Ok(())
 }
 
