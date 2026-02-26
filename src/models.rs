@@ -667,6 +667,27 @@ fn model_is_reasoning(model_id: &str) -> Option<bool> {
         return Some(false);
     }
 
+    // DeepSeek: deepseek-reasoner (R1) is reasoning; deepseek-chat (V3) and others are not.
+    if id.starts_with("deepseek-reasoner") || id.starts_with("deepseek-r") {
+        return Some(true);
+    }
+    if id.starts_with("deepseek") {
+        return Some(false);
+    }
+
+    // Mistral/Codestral: no reasoning support currently.
+    if id.starts_with("mistral") || id.starts_with("codestral") || id.starts_with("pixtral") {
+        return Some(false);
+    }
+
+    // Meta Llama: no reasoning support.
+    if id.starts_with("llama") {
+        return Some(false);
+    }
+
+    // Groq-hosted models: groq model IDs typically include the upstream model name
+    // (e.g., "llama-3.3-70b-versatile"), so the upstream checks above should catch them.
+
     None
 }
 
@@ -3289,6 +3310,60 @@ mod tests {
         {
             assert!(m.model.reasoning, "{} should be reasoning", m.model.id);
         }
+    }
+
+    #[test]
+    fn model_is_reasoning_known_families() {
+        // OpenAI
+        assert_eq!(model_is_reasoning("o1-preview"), Some(true));
+        assert_eq!(model_is_reasoning("o3-mini"), Some(true));
+        assert_eq!(model_is_reasoning("o4-mini"), Some(true));
+        assert_eq!(model_is_reasoning("gpt-5"), Some(true));
+        assert_eq!(model_is_reasoning("gpt-4o"), Some(false));
+        assert_eq!(model_is_reasoning("gpt-4-turbo"), Some(false));
+        assert_eq!(model_is_reasoning("gpt-3.5-turbo"), Some(false));
+
+        // Anthropic
+        assert_eq!(model_is_reasoning("claude-sonnet-4-20250514"), Some(true));
+        assert_eq!(model_is_reasoning("claude-opus-4-20250514"), Some(true));
+        assert_eq!(model_is_reasoning("claude-3-5-sonnet-20241022"), Some(true));
+        assert_eq!(model_is_reasoning("claude-3-5-haiku-20241022"), Some(false));
+        assert_eq!(model_is_reasoning("claude-3-haiku-20240307"), Some(false));
+        assert_eq!(model_is_reasoning("claude-3-opus-20240229"), Some(false));
+        assert_eq!(model_is_reasoning("claude-3-sonnet-20240229"), Some(false));
+
+        // Google
+        assert_eq!(model_is_reasoning("gemini-2.5-pro"), Some(true));
+        assert_eq!(model_is_reasoning("gemini-2.5-flash"), Some(true));
+        assert_eq!(model_is_reasoning("gemini-2.0-flash-thinking-exp"), Some(true));
+        assert_eq!(model_is_reasoning("gemini-2.0-flash"), Some(false));
+        assert_eq!(model_is_reasoning("gemini-2.0-flash-lite"), Some(false));
+        assert_eq!(model_is_reasoning("gemini-1.5-pro"), Some(false));
+
+        // Cohere
+        assert_eq!(model_is_reasoning("command-a-03-2025"), Some(true));
+        assert_eq!(model_is_reasoning("command-r-plus"), Some(false));
+        assert_eq!(model_is_reasoning("command-r"), Some(false));
+
+        // DeepSeek
+        assert_eq!(model_is_reasoning("deepseek-reasoner"), Some(true));
+        assert_eq!(model_is_reasoning("deepseek-r1"), Some(true));
+        assert_eq!(model_is_reasoning("deepseek-chat"), Some(false));
+        assert_eq!(model_is_reasoning("deepseek-coder"), Some(false));
+
+        // Mistral
+        assert_eq!(model_is_reasoning("mistral-large-latest"), Some(false));
+        assert_eq!(model_is_reasoning("mistral-small-latest"), Some(false));
+        assert_eq!(model_is_reasoning("codestral-latest"), Some(false));
+        assert_eq!(model_is_reasoning("pixtral-large-latest"), Some(false));
+
+        // Meta Llama
+        assert_eq!(model_is_reasoning("llama-3.3-70b-versatile"), Some(false));
+        assert_eq!(model_is_reasoning("llama-4-scout"), Some(false));
+
+        // Unknown models return None (fall back to provider default)
+        assert_eq!(model_is_reasoning("some-custom-model"), None);
+        assert_eq!(model_is_reasoning("my-fine-tune"), None);
     }
 
     mod proptest_models {
