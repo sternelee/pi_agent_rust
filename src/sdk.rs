@@ -1555,6 +1555,7 @@ pub async fn create_agent_session(options: SessionOptions) -> Result<AgentSessio
         &global_dir,
         &package_dir,
         std::env::var_os("PI_TEST_MODE").is_some(),
+        !cli.hide_cwd_in_prompt,
     );
 
     let provider = providers::create_provider(&selection.model_entry, None)

@@ -210,6 +210,7 @@ async fn run_debug(mut cli: cli::Cli, _runtime_handle: RuntimeHandle) -> Result<
         &global_dir,
         &package_dir,
         test_mode,
+        !cli.hide_cwd_in_prompt,
     );
     let provider =
         providers::create_provider(&selection.model_entry, None).map_err(anyhow::Error::new)?;

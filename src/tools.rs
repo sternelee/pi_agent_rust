@@ -1463,10 +1463,8 @@ impl Tool for ReadTool {
                             "\n[Image: original {ow}x{oh}, displayed at {w}x{h}. Multiply coordinates by {scale:.2} to map to original image.]"
                         );
                     } else {
-                        let _ = write!(
-                            note,
-                            "\n[Image: original {ow}x{oh}, displayed at {w}x{h}.]"
-                        );
+                        let _ =
+                            write!(note, "\n[Image: original {ow}x{oh}, displayed at {w}x{h}.]");
                     }
                 }
             }
@@ -2653,7 +2651,8 @@ impl Tool for EditTool {
             )));
         }
 
-        let absolute_path = crate::extensions::safe_canonicalize(&resolve_read_path(&input.path, &self.cwd));
+        let absolute_path =
+            crate::extensions::safe_canonicalize(&resolve_read_path(&input.path, &self.cwd));
 
         // Match legacy behavior: any access failure is reported as "File not found".
         if asupersync::fs::OpenOptions::new()
@@ -3458,7 +3457,9 @@ impl Tool for GrepTool {
         }
 
         for file_path in file_order {
-            let Some(mut match_lines) = matches_by_file.remove(&file_path) else { continue; };
+            let Some(mut match_lines) = matches_by_file.remove(&file_path) else {
+                continue;
+            };
             let relative_path = format_grep_path(&file_path, &self.cwd);
             let lines = get_file_lines_async(&file_path, &mut file_cache).await;
 

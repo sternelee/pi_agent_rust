@@ -855,6 +855,7 @@ fn build_system_prompt_test_mode_uses_placeholders() {
         global_dir,
         package_dir,
         true, // test_mode
+        true, // include_cwd
     );
     assert!(prompt.contains("<TIMESTAMP>"));
     assert!(prompt.contains("<CWD>"));
@@ -867,8 +868,16 @@ fn build_system_prompt_non_test_mode_uses_real_values() {
     let cwd = Path::new("/tmp/test_cwd");
     let global_dir = Path::new("/tmp/nonexistent_global");
     let package_dir = Path::new("/tmp/nonexistent_package");
-    let prompt =
-        app::build_system_prompt(&cli, cwd, &["read"], None, global_dir, package_dir, false);
+    let prompt = app::build_system_prompt(
+        &cli,
+        cwd,
+        &["read"],
+        None,
+        global_dir,
+        package_dir,
+        false,
+        true,
+    );
     assert!(!prompt.contains("<TIMESTAMP>"));
     assert!(prompt.contains("/tmp/test_cwd"));
 }
@@ -886,6 +895,7 @@ fn build_system_prompt_with_skills_prompt() {
         Some("\n# Available Skills\n- /commit: Make git commits\n"),
         global_dir,
         package_dir,
+        true,
         true,
     );
     assert!(prompt.contains("Available Skills"));

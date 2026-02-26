@@ -133,6 +133,7 @@ pub fn build_initial_content(initial: &InitialMessage) -> Vec<ContentBlock> {
     content
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_system_prompt(
     cli: &cli::Cli,
     cwd: &Path,
@@ -141,6 +142,7 @@ pub fn build_system_prompt(
     global_dir: &Path,
     package_dir: &Path,
     test_mode: bool,
+    include_cwd: bool,
 ) -> String {
     use std::fmt::Write as _;
 
@@ -175,12 +177,14 @@ pub fn build_system_prompt(
         format_current_datetime()
     };
     let _ = write!(prompt, "\nCurrent date and time: {date_time}");
-    let cwd_display = if test_mode {
-        "<CWD>".to_string()
-    } else {
-        cwd.display().to_string()
-    };
-    let _ = write!(prompt, "\nCurrent working directory: {cwd_display}");
+    if include_cwd {
+        let cwd_display = if test_mode {
+            "<CWD>".to_string()
+        } else {
+            cwd.display().to_string()
+        };
+        let _ = write!(prompt, "\nCurrent working directory: {cwd_display}");
+    }
 
     prompt
 }

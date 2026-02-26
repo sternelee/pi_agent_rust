@@ -55,7 +55,8 @@ fn known_long_option(name: &str) -> Option<LongOptionSpec> {
         | "no-skills"
         | "no-prompt-templates"
         | "no-themes"
-        | "list-providers" => (false, false),
+        | "list-providers"
+        | "hide-cwd-in-prompt" => (false, false),
         "provider"
         | "model"
         | "api-key"
@@ -410,6 +411,11 @@ pub struct Cli {
     /// Disable theme discovery
     #[arg(long)]
     pub no_themes: bool,
+
+    // === System prompt modifiers ===
+    /// Hide the current working directory from the system prompt.
+    #[arg(long, env = "PI_HIDE_CWD_IN_PROMPT")]
+    pub hide_cwd_in_prompt: bool,
 
     // === Export & Listing ===
     /// Export session file to HTML

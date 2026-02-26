@@ -182,6 +182,56 @@ static SATISFIES_RE: OnceLock<Regex> = OnceLock::new();
 const INPUT_TEXT_ONLY: [InputType; 1] = [InputType::Text];
 const INPUT_TEXT_AND_IMAGE: [InputType; 2] = [InputType::Text, InputType::Image];
 
+/// Determine if a specific model supports reasoning based on its ID.
+/// Provider-level `reasoning: true` is a fallback; we override for known
+/// non-reasoning model families.
+fn is_model_reasoning_capable(model_id: &str, provider_default: bool) -> bool {
+    let id = model_id.to_ascii_lowercase();
+    // Explicitly non-reasoning model families
+    let non_reasoning_prefixes = [
+        "gpt-4o",           // GPT-4o variants are NOT reasoning models
+        "gpt-4-",           // GPT-4 variants
+        "gpt-3.5",          // GPT-3.5 variants
+        "claude-3-5-haiku", // Haiku is not a reasoning model
+        "claude-3-haiku",
+        "claude-3-sonnet", // 3.x sonnet (non-thinking)
+        "claude-instant",
+        "command-r-plus", // Cohere non-reasoning
+        "command-r",      // Cohere base (non plus)
+        "command-light",
+        "embed-", // Embedding models
+        "text-embedding",
+        "dall-e",  // Image generation
+        "whisper", // Audio
+        "tts-",    // TTS
+    ];
+    // Explicitly reasoning model families
+    let reasoning_prefixes = [
+        "o1",    // OpenAI o1
+        "o3",    // OpenAI o3
+        "o4",    // OpenAI o4
+        "gpt-5", // GPT-5.x family
+        "claude-opus",
+        "claude-sonnet-4",
+        "claude-4",
+        "gemini-2.5", // Gemini 2.5 has thinking
+        "gemini-3",
+        "deepseek-r1",
+        "qwq-", // Qwen reasoning
+    ];
+    for prefix in &reasoning_prefixes {
+        if id.starts_with(prefix) {
+            return true;
+        }
+    }
+    for prefix in &non_reasoning_prefixes {
+        if id.starts_with(prefix) {
+            return false;
+        }
+    }
+    provider_default
+}
+
 fn canonicalize_openrouter_model_id(model_id: &str) -> String {
     let trimmed = model_id.trim();
     match trimmed.to_ascii_lowercase().as_str() {
@@ -781,7 +831,7 @@ fn append_upstream_nonlegacy_models(
             models.push(ModelEntry {
                 model: Model {
                     id: normalized_model_id.clone(),
-                    name: normalized_model_id,
+                    name: normalized_model_id.clone(),
                     api: defaults.api.to_string(),
                     provider: canonical_provider.to_string(),
                     base_url: defaults.base_url.to_string(),
@@ -1088,6 +1138,27 @@ fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<Model
             oauth_config: None,
         });
     }
+
+    // Sort for deterministic find_by_id: canonical providers first, then alphabetical.
+    models.sort_by(|a, b| {
+        let priority = |e: &ModelEntry| -> u8 {
+            let p = e.model.provider.as_str();
+            let id = e.model.id.as_str();
+            // Canonical provider gets priority 0
+            let is_canonical = (id.starts_with("claude") && p == "anthropic")
+                || (id.starts_with("gpt-") && p == "openai")
+                || (id.starts_with("o1") && p == "openai")
+                || (id.starts_with("o3") && p == "openai")
+                || (id.starts_with("o4") && p == "openai")
+                || (id.starts_with("gemini") && p == "google")
+                || (id.starts_with("command") && p == "cohere");
+            u8::from(!is_canonical)
+        };
+        priority(a)
+            .cmp(&priority(b))
+            .then_with(|| a.model.provider.cmp(&b.model.provider))
+            .then_with(|| a.model.id.cmp(&b.model.id))
+    });
 
     models
 }
@@ -1505,7 +1576,7 @@ where
     Some(ModelEntry {
         model: Model {
             id: normalized_model_id.clone(),
-            name: normalized_model_id,
+            name: normalized_model_id.clone(),
             api: defaults.api.to_string(),
             provider: provider.to_string(),
             base_url: defaults.base_url.to_string(),
