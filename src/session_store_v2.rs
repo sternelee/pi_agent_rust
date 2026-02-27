@@ -1543,22 +1543,6 @@ fn crc32c_upper(data: &[u8]) -> String {
     format!("{crc:08X}")
 }
 
-fn remove_orphaned_segments(segments: &[(u64, PathBuf)]) -> Result<()> {
-    for (_, orphan_path) in segments {
-        if orphan_path.exists() {
-            tracing::warn!(
-                path = %orphan_path.display(),
-                "removing orphaned segment file after index rebuild truncation"
-            );
-            if let Err(e) = fs::remove_file(orphan_path) {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    return Err(Error::Io(Box::new(e)));
-                }
-            }
-        }
-    }
-    Ok(())
-}
 
 fn read_line_with_limit<R: BufRead>(
     reader: &mut R,
