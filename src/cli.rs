@@ -353,7 +353,7 @@ pub struct Cli {
     pub no_tools: bool,
 
     /// Specific tools to enable (comma-separated: read,bash,edit,write,grep,find,ls,hashline_edit)
-    #[arg(long, default_value = "read,bash,edit,write")]
+    #[arg(long, default_value = "read,bash,edit,write,hashline_edit")]
     pub tools: String,
 
     // === Extensions ===
@@ -858,7 +858,7 @@ mod tests {
     #[test]
     fn default_tools() {
         let cli = Cli::parse_from(["pi"]);
-        assert_eq!(cli.enabled_tools(), vec!["read", "bash", "edit", "write"]);
+        assert_eq!(cli.enabled_tools(), vec!["read", "bash", "edit", "write", "hashline_edit"]);
     }
 
     #[test]
@@ -1101,7 +1101,7 @@ mod tests {
         assert!(cli.list_models.is_none());
         assert!(cli.command.is_none());
         assert!(cli.args.is_empty());
-        assert_eq!(cli.tools, "read,bash,edit,write");
+        assert_eq!(cli.tools, "read,bash,edit,write,hashline_edit");
     }
 
     // ── 11. Combined flags ───────────────────────────────────────────
