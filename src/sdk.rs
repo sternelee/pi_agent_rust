@@ -67,8 +67,16 @@ use crate::tools::{
 };
 
 /// All built-in tool names.
-pub const BUILTIN_TOOL_NAMES: &[&str] =
-    &["read", "bash", "edit", "write", "grep", "find", "ls", "hashline_edit"];
+pub const BUILTIN_TOOL_NAMES: &[&str] = &[
+    "read",
+    "bash",
+    "edit",
+    "write",
+    "grep",
+    "find",
+    "ls",
+    "hashline_edit",
+];
 
 /// Create a read tool configured for `cwd`.
 pub fn create_read_tool(cwd: &Path) -> Box<dyn Tool> {

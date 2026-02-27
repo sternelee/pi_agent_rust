@@ -1143,7 +1143,9 @@ impl SessionStoreV2 {
         }
 
         index_writer.flush()?;
-        let file = index_writer.into_inner().map_err(std::io::IntoInnerError::into_error)?;
+        let file = index_writer
+            .into_inner()
+            .map_err(std::io::IntoInnerError::into_error)?;
         file.sync_all()?;
         drop(file); // Close the file handle before renaming (fixes Windows ERROR_SHARING_VIOLATION)
 
@@ -1471,7 +1473,10 @@ fn append_jsonl_line<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 }
 
 fn truncate_file_to(path: &Path, len: u64) -> Result<()> {
-    let file = secure_open_options().write(true).truncate(false).open(path)?;
+    let file = secure_open_options()
+        .write(true)
+        .truncate(false)
+        .open(path)?;
     file.set_len(len)?;
     Ok(())
 }
@@ -1488,7 +1493,9 @@ fn write_jsonl_lines<T: Serialize>(path: &Path, rows: &[T]) -> Result<()> {
         writer.write_all(b"\n")?;
     }
     writer.flush()?;
-    let file = writer.into_inner().map_err(std::io::IntoInnerError::into_error)?;
+    let file = writer
+        .into_inner()
+        .map_err(std::io::IntoInnerError::into_error)?;
     file.sync_all()?;
     Ok(())
 }

@@ -858,7 +858,10 @@ mod tests {
     #[test]
     fn default_tools() {
         let cli = Cli::parse_from(["pi"]);
-        assert_eq!(cli.enabled_tools(), vec!["read", "bash", "edit", "write", "hashline_edit"]);
+        assert_eq!(
+            cli.enabled_tools(),
+            vec!["read", "bash", "edit", "write", "hashline_edit"]
+        );
     }
 
     #[test]
