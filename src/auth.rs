@@ -205,7 +205,7 @@ impl AuthStorage {
     pub fn load(path: PathBuf) -> Result<Self> {
         let entries = if path.exists() {
             let file = File::open(&path).map_err(|e| Error::auth(format!("auth.json: {e}")))?;
-            let mut locked = lock_file(file, Duration::from_secs(30))?;
+            let mut locked = lock_file_shared(file, Duration::from_secs(30))?;
             // Read from the locked file handle, not a new handle
             let mut content = String::new();
             locked.as_file_mut().read_to_string(&mut content)?;
@@ -3303,6 +3303,35 @@ fn lock_file(file: File, timeout: Duration) -> Result<LockedFile> {
             Ok(false) => {} // Lock held by another process, retry
             Err(e) => {
                 return Err(Error::auth(format!("Failed to lock auth file: {e}")));
+            }
+        }
+
+        if start.elapsed() >= timeout {
+            return Err(Error::auth("Timed out waiting for auth lock".to_string()));
+        }
+
+        let base_ms: u64 = 10;
+        let cap_ms: u64 = 500;
+        let sleep_ms = base_ms
+            .checked_shl(attempt.min(5))
+            .unwrap_or(cap_ms)
+            .min(cap_ms);
+        let jitter = u64::from(start.elapsed().subsec_nanos()) % (sleep_ms / 2 + 1);
+        let delay = sleep_ms / 2 + jitter;
+        std::thread::sleep(Duration::from_millis(delay));
+        attempt = attempt.saturating_add(1);
+    }
+}
+
+fn lock_file_shared(file: File, timeout: Duration) -> Result<LockedFile> {
+    let start = Instant::now();
+    let mut attempt: u32 = 0;
+    loop {
+        match FileExt::try_lock_shared(&file) {
+            Ok(true) => return Ok(LockedFile { file }),
+            Ok(false) => {} // Lock held by another process exclusively, retry
+            Err(e) => {
+                return Err(Error::auth(format!("Failed to shared-lock auth file: {e}")));
             }
         }
 
