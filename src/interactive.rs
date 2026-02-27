@@ -1771,9 +1771,7 @@ impl PiApp {
 
         // Handle our custom Pi messages (take ownership to avoid per-token clone).
         // NOTE: We check with `is()` first, then `downcast().unwrap()` to consume
-        // the message only when we know it will succeed. This avoids needing the
-        // `try_downcast` method that only exists in the unpublished local
-        // charmed-bubbletea (see Cargo.toml TODO for issue #5).
+        // the message only when we know it will succeed.
         if msg.is::<PiMsg>() {
             return self.handle_pi_message(msg.downcast::<PiMsg>().unwrap());
         }

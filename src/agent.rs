@@ -774,8 +774,12 @@ impl Agent {
                     Ok(msg) => msg,
                     Err(err) => {
                         let error_msg = AssistantMessage {
+                            api: self.provider.api().to_string(),
+                            provider: self.provider.name().to_string(),
+                            model: self.provider.model_id().to_string(),
                             stop_reason: StopReason::Error,
                             error_message: Some(err.to_string()),
+                            timestamp: Utc::now().timestamp_millis(),
                             ..AssistantMessage::default()
                         };
                         let error_message = Message::Assistant(Arc::new(error_msg));

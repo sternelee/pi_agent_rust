@@ -352,7 +352,7 @@ impl PiApp {
                 // Finalize the response: move streaming buffers into the
                 // permanent message list and clear them so they are not
                 // double-rendered by build_conversation_content().
-                let had_response = !self.current_response.is_empty();
+                let had_response = !self.current_response.is_empty() || !self.current_thinking.is_empty();
                 if had_response {
                     self.messages.push(ConversationMessage::new(
                         MessageRole::Assistant,
