@@ -1039,46 +1039,56 @@ fn convert_message_to_openai(message: &Message) -> Vec<OpenAIMessage<'_>> {
             messages
         }
         Message::ToolResult(result) => {
-            // OpenAI expects tool results as separate messages with role "tool"
-            let parts: Vec<OpenAIContentPart<'_>> = result
-                .content
-                .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::Text(t) => Some(OpenAIContentPart::Text {
-                        text: Cow::Borrowed(&t.text),
-                    }),
+            let mut text_parts = Vec::new();
+            let mut image_parts = Vec::new();
+
+            for block in &result.content {
+                match block {
+                    ContentBlock::Text(t) => text_parts.push(t.text.as_str()),
                     ContentBlock::Image(img) => {
                         let url = format!("data:{};base64,{}", img.mime_type, img.data);
-                        Some(OpenAIContentPart::ImageUrl {
+                        image_parts.push(OpenAIContentPart::ImageUrl {
                             image_url: OpenAIImageUrl {
                                 url,
                                 _phantom: std::marker::PhantomData,
                             },
-                        })
+                        });
                     }
-                    _ => None,
-                })
-                .collect();
+                    _ => {}
+                }
+            }
 
-            let content = if parts.is_empty() {
-                None
-            } else if parts.len() == 1 && matches!(parts[0], OpenAIContentPart::Text { .. }) {
-                // Optimization: use simple text content if possible
-                if let OpenAIContentPart::Text { text } = &parts[0] {
-                    Some(OpenAIContent::Text(text.clone()))
+            let text_content = if text_parts.is_empty() {
+                if image_parts.is_empty() {
+                    None
                 } else {
-                    Some(OpenAIContent::Parts(parts))
+                    Some(OpenAIContent::Text(Cow::Borrowed("(see attached image)")))
                 }
             } else {
-                Some(OpenAIContent::Parts(parts))
+                Some(OpenAIContent::Text(Cow::Owned(text_parts.join("\n"))))
             };
 
-            vec![OpenAIMessage {
+            let mut messages = vec![OpenAIMessage {
                 role: Cow::Borrowed("tool"),
-                content,
+                content: text_content,
                 tool_calls: None,
                 tool_call_id: Some(&result.tool_call_id),
-            }]
+            }];
+
+            if !image_parts.is_empty() {
+                let mut parts = vec![OpenAIContentPart::Text {
+                    text: Cow::Borrowed("Attached image(s) from tool result:"),
+                }];
+                parts.extend(image_parts);
+                messages.push(OpenAIMessage {
+                    role: Cow::Borrowed("user"),
+                    content: Some(OpenAIContent::Parts(parts)),
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+            }
+
+            messages
         }
     }
 }
