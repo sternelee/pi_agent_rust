@@ -400,7 +400,8 @@ fn split_markdown_fenced_code_blocks(markdown: &str) -> Vec<MarkdownChunk> {
                 }
 
                 if !text_buf.is_empty() {
-                    chunks.push(MarkdownChunk::Text(std::mem::take(&mut text_buf)));
+                    chunks.push(MarkdownChunk::Text(text_buf.clone()));
+                    text_buf.clear();
                 }
 
                 code_language = parse_fenced_code_language(info);
@@ -419,8 +420,9 @@ fn split_markdown_fenced_code_blocks(markdown: &str) -> Vec<MarkdownChunk> {
         {
             chunks.push(MarkdownChunk::CodeBlock {
                 language: code_language.take(),
-                code: std::mem::take(&mut code_buf),
+                code: code_buf.clone(),
             });
+            code_buf.clear();
             in_code_block = false;
             fence_len = 0;
             continue;

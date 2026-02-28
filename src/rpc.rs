@@ -268,7 +268,7 @@ pub async fn run_stdio(mut session: AgentSession, options: RpcOptions) -> Result
             match reader.read_line(&mut line) {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {
-                    let line_to_send = std::mem::take(&mut line);
+                    let line_to_send = line.clone();
                     // Retry loop to handle backpressure (channel full) without dropping input.
                     // Stop when the receiver side has closed so this thread does not spin forever.
                     if !try_send_line_with_backpressure(&in_tx, line_to_send) {
