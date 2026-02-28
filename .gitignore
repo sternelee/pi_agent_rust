@@ -120,5 +120,5 @@ panic_grep*.txt
 rust-bug-scan.txt
 parse_*.py
 tests.log
-test_diff.rs
-test_edit_tool.rs
+# Root-level scratch test files (agent-generated debug/repro harnesses)
+/test_*.rs
