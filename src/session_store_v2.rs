@@ -1543,7 +1543,6 @@ fn crc32c_upper(data: &[u8]) -> String {
     format!("{crc:08X}")
 }
 
-
 fn read_line_with_limit<R: BufRead>(
     reader: &mut R,
     buf: &mut String,

@@ -4329,11 +4329,7 @@ fn tui_state_status_message_clears_on_any_keypress() {
     press_enter(&harness, &mut app);
 
     let step = type_text(&harness, &mut app, "x");
-    assert_after_not_contains(
-        &harness,
-        &step,
-        "No matching models.",
-    );
+    assert_after_not_contains(&harness, &step, "No matching models.");
 }
 
 #[test]
