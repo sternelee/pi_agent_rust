@@ -288,10 +288,7 @@ class Buffer extends Uint8Array {
   }
 
   slice(start, end) {
-    const sliced = super.slice(start, end);
-    const buf = new Buffer(sliced.length);
-    buf.set(sliced);
-    return buf;
+    return this.subarray(start, end);
   }
 
   subarray(start, end) {

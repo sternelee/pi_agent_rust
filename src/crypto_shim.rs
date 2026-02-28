@@ -219,11 +219,9 @@ fn hex_decode(hex: &str) -> Vec<u8> {
 
 /// Generate random bytes using UUID v4 as entropy source.
 fn random_bytes(len: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(len);
-    while out.len() < len {
-        let bytes = Uuid::new_v4().into_bytes();
-        let remaining = len - out.len();
-        out.extend_from_slice(&bytes[..remaining.min(bytes.len())]);
+    let mut out = vec![0u8; len];
+    if len > 0 {
+        let _ = getrandom::fill(&mut out);
     }
     out
 }
