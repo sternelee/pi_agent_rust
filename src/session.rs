@@ -4232,6 +4232,7 @@ fn finalize_loaded_entries(entries: &mut [SessionEntry]) -> LoadFinalization {
     // Track parent_ids seen as children's parent to detect branching.
     let mut parent_id_child_count: HashMap<Option<&str>, u32> = HashMap::new();
     let mut has_branching = false;
+    let mut root_count = 0u32;
 
     for (idx, entry) in entries.iter().enumerate() {
         let Some(id) = entry.base_id() else {
@@ -4245,6 +4246,8 @@ fn finalize_loaded_entries(entries: &mut [SessionEntry]) -> LoadFinalization {
             if !entry_ids.contains(parent_id) {
                 orphans.push((id.clone(), parent_id.clone()));
             }
+        } else {
+            root_count += 1;
         }
 
         // Branch detection: if any parent_id has >1 child, it's branched.
@@ -4269,10 +4272,10 @@ fn finalize_loaded_entries(entries: &mut [SessionEntry]) -> LoadFinalization {
         }
     }
 
-    // is_linear: no branching detected in the entry set.
+    // is_linear: no branching detected in the entry set, exactly one root, and no orphans.
     // Note: callers (e.g. rebuild_all_caches) add the additional check that
     // self.leaf_id == finalized.leaf_id to confirm we're at the tip.
-    let is_linear = !has_branching;
+    let is_linear = !has_branching && root_count <= 1 && orphans.is_empty();
 
     LoadFinalization {
         leaf_id,
