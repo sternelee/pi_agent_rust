@@ -6268,7 +6268,7 @@ fn tui_state_model_selector_opens_on_ctrll() {
 
     let step = press_ctrll(&harness, &mut app);
     assert_after_contains(&harness, &step, "Select a model");
-    assert_after_contains(&harness, &step, "(type to filter)");
+    assert_after_contains(&harness, &step, "Only showing models that are ready to use");
     assert_after_contains(&harness, &step, "anthropic/claude-a");
     assert_after_contains(&harness, &step, "openai/gpt-a");
 }

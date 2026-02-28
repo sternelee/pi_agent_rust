@@ -221,7 +221,7 @@ fn hex_decode(hex: &str) -> Vec<u8> {
 fn random_bytes(len: usize) -> Vec<u8> {
     let mut out = vec![0u8; len];
     if len > 0 {
-        let _ = getrandom::fill(&mut out);
+        getrandom::fill(&mut out).expect("failed to generate random bytes");
     }
     out
 }
