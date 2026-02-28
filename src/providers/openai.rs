@@ -1061,7 +1061,7 @@ fn convert_message_to_openai(message: &Message) -> Vec<OpenAIMessage<'_>> {
 
             let text_content = if text_parts.is_empty() {
                 if image_parts.is_empty() {
-                    None
+                    Some(OpenAIContent::Text(Cow::Borrowed("")))
                 } else {
                     Some(OpenAIContent::Text(Cow::Borrowed("(see attached image)")))
                 }

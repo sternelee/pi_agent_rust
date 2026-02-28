@@ -784,6 +784,15 @@ impl Agent {
                         };
                         let error_message = Message::Assistant(Arc::new(error_msg));
 
+                        self.messages.push(error_message.clone());
+                        new_messages.push(error_message.clone());
+                        on_event(AgentEvent::MessageStart {
+                            message: error_message.clone(),
+                        });
+                        on_event(AgentEvent::MessageEnd {
+                            message: error_message.clone(),
+                        });
+
                         let steering_to_add = self.drain_steering_messages().await;
                         for message in steering_to_add {
                             self.messages.push(message.clone());
