@@ -3293,8 +3293,13 @@ impl Tool for GrepTool {
         // search path logic might otherwise miss it (e.g. searching a subdir).
         // We do NOT perform a blocking `glob("**/.gitignore")` here, as that stalls
         // the async runtime on large repos.
+        let workspace_gitignore = self.cwd.join(".gitignore");
+        if workspace_gitignore.exists() {
+            args.push("--ignore-file".to_string());
+            args.push(workspace_gitignore.display().to_string());
+        }
         let root_gitignore = ignore_root.join(".gitignore");
-        if root_gitignore.exists() {
+        if root_gitignore != workspace_gitignore && root_gitignore.exists() {
             args.push("--ignore-file".to_string());
             args.push(root_gitignore.display().to_string());
         }
@@ -3303,7 +3308,14 @@ impl Tool for GrepTool {
         args.push(input.pattern.clone());
         args.push(search_path.display().to_string());
 
-        let mut child = Command::new("rg")
+        let rg_cmd = find_rg_binary().ok_or_else(|| {
+            Error::tool(
+                "grep",
+                "rg is not available (please install ripgrep or rg)".to_string(),
+            )
+        })?;
+
+        let mut child = Command::new(rg_cmd)
             .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -3708,8 +3720,13 @@ impl Tool for FindTool {
         // the root .gitignore if it exists, to ensure it's respected even if the
         // search path logic might otherwise miss it.
         // We do NOT perform a blocking `glob("**/.gitignore")` here.
+        let workspace_gitignore = self.cwd.join(".gitignore");
+        if workspace_gitignore.exists() {
+            args.push("--ignore-file".to_string());
+            args.push(workspace_gitignore.display().to_string());
+        }
         let root_gitignore = search_path.join(".gitignore");
-        if root_gitignore.exists() {
+        if root_gitignore != workspace_gitignore && root_gitignore.exists() {
             args.push("--ignore-file".to_string());
             args.push(root_gitignore.display().to_string());
         }
@@ -4156,15 +4173,7 @@ pub fn cleanup_temp_files() {
 // ============================================================================
 
 fn rg_available() -> bool {
-    static AVAILABLE: OnceLock<bool> = OnceLock::new();
-    *AVAILABLE.get_or_init(|| {
-        std::process::Command::new("rg")
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok()
-    })
+    find_rg_binary().is_some()
 }
 
 fn pump_stream<R: Read + Send + 'static>(mut reader: R, tx: &mpsc::SyncSender<Vec<u8>>) {
@@ -4566,6 +4575,31 @@ fn find_fd_binary() -> Option<&'static str> {
             .is_ok()
         {
             return Some("fdfind");
+        }
+        None
+    })
+}
+
+fn find_rg_binary() -> Option<&'static str> {
+    static BINARY: OnceLock<Option<&'static str>> = OnceLock::new();
+    *BINARY.get_or_init(|| {
+        if std::process::Command::new("rg")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok()
+        {
+            return Some("rg");
+        }
+        if std::process::Command::new("ripgrep")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok()
+        {
+            return Some("ripgrep");
         }
         None
     })
