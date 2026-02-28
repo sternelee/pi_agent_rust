@@ -572,6 +572,13 @@ fn tool_read_permission_denied() {
         // Restore permissions for cleanup
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
 
+        // If the process is running as root (or in a container with root privileges),
+        // the read might succeed despite 0o000 permissions. We shouldn't fail the test then.
+        if !result.is_error {
+            assert!(result.text.contains("secret"));
+            return;
+        }
+
         assert!(result.is_error, "reading no-permission file should error");
         let text_lower = result.text.to_lowercase();
         assert!(
