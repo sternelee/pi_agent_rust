@@ -129,6 +129,7 @@ fn make_model_entry(provider: &str, id: &str, base_url: &str) -> ModelEntry {
     entry.model.provider = provider.to_string();
     entry.model.id = id.to_string();
     entry.model.base_url = base_url.to_string();
+    entry.api_key = Some("test-key".to_string());
     entry
 }
 
@@ -1748,7 +1749,14 @@ fn tui_state_tool_update_with_large_diff_shows_truncation_indicator() {
     press_ctrlo(&harness, &mut app);
     let mut step = press_ctrlo(&harness, &mut app);
 
+    for _ in 0..5 {
+        if step.after.contains("@@ foo.txt @@") {
+            break;
+        }
+        step = press_pgup(&harness, &mut app);
+    }
     assert_after_contains(&harness, &step, "@@ foo.txt @@");
+
     if !step.after.contains("diff truncated") {
         for _ in 0..10 {
             let next = press_pgdown(&harness, &mut app);
@@ -2796,19 +2804,21 @@ fn tui_state_slash_model_no_args_shows_configured_only_message_when_none_availab
     assert_after_contains(
         &harness,
         &step,
-        "No models with configured API keys. Use /login <provider> to configure credentials.",
+        "Only showing models that are ready to use (see README for details)",
     );
+    assert_after_contains(&harness, &step, "No matching models.");
 }
 
 #[test]
 fn tui_state_slash_model_no_args_opens_configured_only_selector() {
     let harness = TestHarness::new("tui_state_slash_model_no_args_opens_configured_only_selector");
 
-    let anthropic = make_model_entry(
+    let mut anthropic = make_model_entry(
         "anthropic",
         "claude-a",
         "https://api.anthropic.com/v1/messages",
     );
+    anthropic.api_key = None;
     let mut openai = make_model_entry("openai", "gpt-a", "https://api.openai.com/v1");
     openai.api_key = Some("test-openai-key".to_string());
 
@@ -2831,7 +2841,7 @@ fn tui_state_slash_model_no_args_opens_configured_only_selector() {
     assert_after_contains(
         &harness,
         &step,
-        "Only showing models with configured API keys (see README for details)",
+        "Only showing models that are ready to use (see README for details)",
     );
     assert_after_contains(&harness, &step, "openai/gpt-a");
     assert_after_not_contains(&harness, &step, "  anthropic/claude-a");
@@ -4322,7 +4332,7 @@ fn tui_state_status_message_clears_on_any_keypress() {
     assert_after_not_contains(
         &harness,
         &step,
-        "No models with configured API keys. Use /login <provider> to configure credentials.",
+        "No matching models.",
     );
 }
 
