@@ -2503,7 +2503,7 @@ mod tests {
     fn ad_hoc_alibaba_aliases() {
         for alias in ["alibaba", "dashscope", "qwen"] {
             let defaults = ad_hoc_provider_defaults(alias)
-                .unwrap_or_else(|| panic!("expected defaults for '{alias}'"));
+                .unwrap_or_else(|| unreachable!("expected defaults for '{alias}'"));
             assert!(defaults.base_url.contains("dashscope"));
         }
     }
@@ -2512,7 +2512,7 @@ mod tests {
     fn ad_hoc_moonshot_aliases() {
         for alias in ["moonshotai", "moonshot", "kimi"] {
             let defaults = ad_hoc_provider_defaults(alias)
-                .unwrap_or_else(|| panic!("expected defaults for '{alias}'"));
+                .unwrap_or_else(|| unreachable!("expected defaults for '{alias}'"));
             assert!(defaults.base_url.contains("moonshot"));
         }
     }
@@ -2538,7 +2538,7 @@ mod tests {
             "minimax-cn-coding-plan",
         ] {
             let defaults = ad_hoc_provider_defaults(provider)
-                .unwrap_or_else(|| panic!("expected defaults for '{provider}'"));
+                .unwrap_or_else(|| unreachable!("expected defaults for '{provider}'"));
             assert_eq!(defaults.api, "anthropic-messages");
             assert!(!defaults.auth_header);
             assert!(defaults.base_url.contains("api.minimax"));
@@ -2559,7 +2559,7 @@ mod tests {
         ];
         for (provider, expected_base_url) in &cases {
             let defaults = ad_hoc_provider_defaults(provider)
-                .unwrap_or_else(|| panic!("expected defaults for '{provider}'"));
+                .unwrap_or_else(|| unreachable!("expected defaults for '{provider}'"));
             assert_eq!(defaults.api, "openai-completions");
             assert!(defaults.auth_header);
             assert_eq!(defaults.base_url, *expected_base_url);
@@ -2583,7 +2583,7 @@ mod tests {
         ];
         for (provider, expected_base_url) in &cases {
             let defaults = ad_hoc_provider_defaults(provider)
-                .unwrap_or_else(|| panic!("expected defaults for '{provider}'"));
+                .unwrap_or_else(|| unreachable!("expected defaults for '{provider}'"));
             assert_eq!(defaults.api, "openai-completions");
             assert!(defaults.auth_header);
             assert_eq!(defaults.base_url, *expected_base_url);
@@ -2636,7 +2636,7 @@ mod tests {
         ];
         for (provider, expected_base_url) in &cases {
             let defaults = ad_hoc_provider_defaults(provider)
-                .unwrap_or_else(|| panic!("expected defaults for '{provider}'"));
+                .unwrap_or_else(|| unreachable!("expected defaults for '{provider}'"));
             assert_eq!(defaults.api, "openai-completions");
             assert!(defaults.auth_header);
             assert_eq!(defaults.base_url, *expected_base_url);
