@@ -214,18 +214,30 @@ pub(super) fn split_diff_prefix(line: &str) -> (&str, &str) {
     // Format: [+-] then line number with spaces, then a space, then content.
     // E.g., "+  3 let x = 1;" => prefix "+  3 ", content "let x = 1;"
     // Or "- 12 old text"    => prefix "- 12 ", content "old text"
-    if line.len() < 2 {
+    let bytes = line.as_bytes();
+    if bytes.len() < 3 || bytes[1] != b' ' {
         return (line, "");
     }
-    let rest = &line[1..]; // skip +/-
-    // Find the first non-whitespace-non-digit character after the prefix.
-    // The prefix is: sign + digits/spaces + one space separator.
-    rest.find(|c: char| !c.is_ascii_digit() && c != ' ')
-        .map_or((line, ""), |content_start| {
-            // Include the sign character in the prefix.
-            let prefix_end = 1 + content_start;
-            (&line[..prefix_end], &line[prefix_end..])
-        })
+
+    let mut i = 2;
+    // Skip padding spaces before line number
+    while i < bytes.len() && bytes[i] == b' ' {
+        i += 1;
+    }
+
+    let digits_start = i;
+    // Skip digits of the line number
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+
+    // Must have found digits, and the next character must be a single space separator
+    if i > digits_start && i < bytes.len() && bytes[i] == b' ' {
+        let prefix_end = i + 1;
+        return line.split_at(prefix_end);
+    }
+
+    (line, "")
 }
 
 pub(super) fn pretty_json(value: &Value) -> String {
