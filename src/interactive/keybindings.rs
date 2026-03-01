@@ -251,6 +251,10 @@ impl PiApp {
 
         let temp_path = temp_file.path().to_path_buf();
 
+        // Pause terminal UI so the external editor can use the terminal correctly
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
+
         // Spawn editor via shell to handle EDITOR with arguments (e.g., "code --wait")
         // The shell properly handles quoting, arguments, and PATH lookup
         #[cfg(unix)]
@@ -258,12 +262,19 @@ impl PiApp {
             .args(["-c", &format!("{editor} \"$1\"")])
             .arg("--") // separator for positional args
             .arg(&temp_path)
-            .status()?;
+            .status();
 
         #[cfg(not(unix))]
         let status = std::process::Command::new("cmd")
             .args(["/c", &format!("{} \"{}\"", editor, temp_path.display())])
-            .status()?;
+            .status();
+
+        // Resume terminal UI
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen);
+        let _ = crossterm::terminal::enable_raw_mode();
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::Clear(crossterm::terminal::ClearType::All));
+
+        let status = status?;
 
         if !status.success() {
             return Err(std::io::Error::other(format!(
