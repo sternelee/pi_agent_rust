@@ -187,6 +187,9 @@ impl SseParser {
                     emit(std::mem::take(current));
                     *current = SseEvent::default();
                     *has_data = false;
+                } else {
+                    current.event = Cow::Borrowed("message");
+                    current.data.clear();
                 }
             } else {
                 Self::process_line(line, current, has_data);
