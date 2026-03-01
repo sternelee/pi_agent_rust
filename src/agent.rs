@@ -773,26 +773,6 @@ impl Agent {
                 {
                     Ok(msg) => msg,
                     Err(err) => {
-                        let error_msg = AssistantMessage {
-                            api: self.provider.api().to_string(),
-                            provider: self.provider.name().to_string(),
-                            model: self.provider.model_id().to_string(),
-                            stop_reason: StopReason::Error,
-                            error_message: Some(err.to_string()),
-                            timestamp: Utc::now().timestamp_millis(),
-                            ..AssistantMessage::default()
-                        };
-                        let error_message = Message::Assistant(Arc::new(error_msg));
-
-                        self.messages.push(error_message.clone());
-                        new_messages.push(error_message.clone());
-                        on_event(AgentEvent::MessageStart {
-                            message: error_message.clone(),
-                        });
-                        on_event(AgentEvent::MessageEnd {
-                            message: error_message.clone(),
-                        });
-
                         let steering_to_add = self.drain_steering_messages().await;
                         for message in steering_to_add {
                             self.messages.push(message.clone());
@@ -804,16 +784,6 @@ impl Agent {
                             });
                             new_messages.push(message);
                         }
-
-                        let turn_end_event = AgentEvent::TurnEnd {
-                            session_id: session_id.clone(),
-                            turn_index: current_turn_index,
-                            message: error_message,
-                            tool_results: Vec::new(),
-                        };
-                        self.dispatch_extension_lifecycle_event(&turn_end_event)
-                            .await;
-                        on_event(turn_end_event);
 
                         let agent_end_event = AgentEvent::AgentEnd {
                             session_id: session_id.clone(),
@@ -5282,9 +5252,13 @@ impl AgentSession {
             })
             .await;
         self.extensions_is_streaming.store(false, Ordering::SeqCst);
+        
+        // Persist any NEW messages (assistant/tools) generated before the agent stopped,
+        // even if it stopped due to an error, skipping the user message we already saved.
+        let persist_result = self.persist_new_messages(start_len + 1).await;
+        
         let result = result?;
-        // Persist only NEW messages (assistant/tools), skipping the user message we already saved.
-        self.persist_new_messages(start_len + 1).await?;
+        persist_result?;
         Ok(result)
     }
 
@@ -5354,9 +5328,13 @@ impl AgentSession {
             })
             .await;
         self.extensions_is_streaming.store(false, Ordering::SeqCst);
+        
+        // Persist any NEW messages (assistant/tools) generated before the agent stopped,
+        // even if it stopped due to an error, skipping the user message we already saved.
+        let persist_result = self.persist_new_messages(start_len + 1).await;
+        
         let result = result?;
-        // Persist only NEW messages (assistant/tools), skipping the user message we already saved.
-        self.persist_new_messages(start_len + 1).await?;
+        persist_result?;
         Ok(result)
     }
 
